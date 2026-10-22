@@ -12,8 +12,7 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.minds.config.data_types import InstallationPaths
-from imbue.minds.desktop_client.app import _derive_ui_notifications_message
-from imbue.minds.desktop_client.app import _derive_ui_requests_message
+from imbue.minds.desktop_client.app import _derive_ui_requests_and_notifications_messages
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
@@ -525,18 +524,54 @@ def test_pending_workspace_badge_survives_notification_dismissal_until_request_i
         pending_requests=pending,
         request_event_handlers=(_StubDetailHandler(),),
     )
-    (entry,) = _derive_ui_notifications_message(app, resolver).entries
-    assert _derive_ui_requests_message(app, resolver).workspace_agent_ids == (str(workspace_id),)
+    requests_message, notifications_message = _derive_ui_requests_and_notifications_messages(app, resolver)
+    (entry,) = notifications_message.entries
+    assert requests_message.workspace_agent_ids == (str(workspace_id),)
 
     assert client.post(f"/ui/api/notifications/{entry.id}/clear").status_code == 200
 
-    assert _derive_ui_notifications_message(app, resolver).entries == ()
-    after_dismissal = _derive_ui_requests_message(app, resolver)
+    after_dismissal, notifications_after_dismissal = _derive_ui_requests_and_notifications_messages(app, resolver)
+    assert notifications_after_dismissal.entries == ()
     assert after_dismissal.request_ids == (request.request_id,)
     assert after_dismissal.workspace_agent_ids == (str(workspace_id),)
 
     pending.pending = ()
-    assert _derive_ui_requests_message(app, resolver).workspace_agent_ids == ()
+    after_answer, _ = _derive_ui_requests_and_notifications_messages(app, resolver)
+    assert after_answer.workspace_agent_ids == ()
+
+
+class _ListCountingPendingRequests(StaticPendingRequests):
+    """Counts reads of the pending set, each of which is a gateway round-trip in production."""
+
+    list_pending_call_count: int = Field(default=0, description="How many times list_pending ran")
+
+    def list_pending(self) -> tuple[StreamedPermissionRequest, ...]:
+        self.list_pending_call_count += 1
+        return super().list_pending()
+
+
+def test_one_publish_pass_reads_the_pending_requests_once(tmp_path: Path) -> None:
+    """The inbox badge and the notification feed share one read of the pending set per pass."""
+    workspace_id, sibling_id = AgentId(), AgentId()
+    pending = _ListCountingPendingRequests(pending=(_make_stub_request(str(sibling_id)),))
+    resolver = _SiblingAgentResolver(
+        url_by_agent_and_service={}, workspace_agent_id=workspace_id, sibling_agent_id=sibling_id
+    )
+    _client, app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=resolver,
+        pending_requests=pending,
+        request_event_handlers=(_StubDetailHandler(),),
+    )
+    with app.app_context():
+        publisher = get_state().ui_publisher
+    assert publisher is not None
+    count_before_pass = pending.list_pending_call_count
+
+    publisher.publish_now()
+
+    assert pending.list_pending_call_count - count_before_pass == 1
 
 
 def test_a_relaunch_neither_rebanners_pending_requests_nor_brings_back_cleared_ones(tmp_path: Path) -> None:
@@ -565,12 +600,12 @@ def test_a_relaunch_neither_rebanners_pending_requests_nor_brings_back_cleared_o
     cleared = _make_stub_request(str(sibling_id), created_at=datetime.now(timezone.utc))
     kept = _make_stub_request(str(sibling_id), created_at=datetime.now(timezone.utc))
     inbox.pending = (cleared, kept)
-    _derive_ui_notifications_message(app, resolver)
+    _derive_ui_requests_and_notifications_messages(app, resolver)
     assert len(dispatcher.dispatched) == 2
     assert client.post(f"/ui/api/notifications/{cleared.request_id}/clear").status_code == 200
 
     _client, relaunched_app, relaunched_dispatcher = launch()
-    message = _derive_ui_notifications_message(relaunched_app, resolver)
+    _, message = _derive_ui_requests_and_notifications_messages(relaunched_app, resolver)
 
     assert [entry.id for entry in message.entries] == [kept.request_id]
     assert relaunched_dispatcher.dispatched == []
@@ -617,6 +652,6 @@ def test_a_discovery_flap_does_not_destroy_an_unread_agent_message(tmp_path: Pat
     held = feed.append_agent_message(_agent_message_card(flapping_workspace_id))
     feed.append_agent_message(_agent_message_card(gone_workspace_id))
 
-    message = _derive_ui_notifications_message(app, resolver)
+    _, message = _derive_ui_requests_and_notifications_messages(app, resolver)
 
     assert [entry.id for entry in message.entries] == [held.id]

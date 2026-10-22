@@ -95,6 +95,7 @@ from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
@@ -1626,7 +1627,7 @@ def _cloud_row_key_state(
 
 
 def _build_requests_payload(
-    pending_requests: PendingRequestsInterface | None,
+    displayable_requests: Sequence[StreamedPermissionRequest],
     backend_resolver: BackendResolverInterface,
 ) -> dict[str, Any]:
     """Build the pending requests summary pushed over the UI channel.
@@ -1642,16 +1643,15 @@ def _build_requests_payload(
     ``request_ids`` to decide whether to refresh the panel; the count remains
     for the badge.
 
-    Requests whose host can't be resolved are excluded (see
-    :func:`displayable_pending_requests`) so the badge count and the
+    Callers pass the :func:`displayable_pending_requests` set, which excludes
+    requests whose host can't be resolved, so the badge count and the
     rendered cards stay in agreement.
     """
-    pending = displayable_pending_requests(pending_requests, backend_resolver)
-    request_ids = [req.request_id for req in pending]
+    request_ids = [req.request_id for req in displayable_requests]
     primary_ids = primary_agent_ids_by_workspace_name(backend_resolver)
     workspace_ids = {
         primary_id
-        for req in pending
+        for req in displayable_requests
         if (primary_id := primary_ids.get(workspace_name_for_request(req, backend_resolver))) is not None
     }
     return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
@@ -2096,17 +2096,26 @@ def _derive_ui_providers_message(app: Flask, backend_resolver: BackendResolverIn
         )
 
 
-def _derive_ui_requests_message(
+def _derive_ui_requests_and_notifications_messages(
     app: Flask,
     backend_resolver: BackendResolverInterface,
-) -> UiRequestsMessage:
+) -> tuple[UiRequestsMessage, UiNotificationsMessage]:
+    """Derive the inbox summary and the notification feed from one read of the pending set.
+
+    Both frames show the same displayable-pending set, so the feed and the
+    badge always agree, and that read is a gateway round-trip, so a publish
+    pass makes it once.
+    """
     with app.app_context():
-        payload = _build_requests_payload(get_state().pending_requests, backend_resolver)
-        return UiRequestsMessage(
+        state = get_state()
+        displayable_requests = displayable_pending_requests(state.pending_requests, backend_resolver)
+        payload = _build_requests_payload(displayable_requests, backend_resolver)
+        requests_message = UiRequestsMessage(
             count=payload["count"],
             request_ids=tuple(payload["request_ids"]),
             workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
         )
+        return requests_message, _reconcile_notification_feed(state, displayable_requests, backend_resolver)
 
 
 # How a recorded response's status becomes a feed outcome. A status outside
@@ -2118,44 +2127,41 @@ _RESOLVED_OUTCOME_BY_RESPONSE_STATUS: Final[dict[str, NotificationOutcome]] = {
 }
 
 
-def _derive_ui_notifications_message(
-    app: Flask,
+def _reconcile_notification_feed(
+    state: DesktopClientState,
+    displayable_requests: Sequence[StreamedPermissionRequest],
     backend_resolver: BackendResolverInterface,
 ) -> UiNotificationsMessage:
-    """Reconcile the notification feed against the current pending-request view.
+    """Reconcile the notification feed against the displayable pending requests.
 
-    Uses the same displayable-pending set as the requests frame (so the feed
-    and the badge always agree on what exists) and the same card derivation
-    as the inbox list (so a feed entry renders exactly like its inbox row).
+    Uses the same card derivation as the inbox list, so a feed entry renders
+    exactly like its inbox row.
     """
-    with app.app_context():
-        state = get_state()
-        feed = state.notification_feed
-        if feed is None:
-            return UiNotificationsMessage(entries=(), unresolved_count=0)
-        pending_view = state.pending_requests
-        pending = displayable_pending_requests(pending_view, backend_resolver)
-        primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
-        pending_cards = tuple(
-            build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
-            for req in pending
-        )
-        responses_by_request_id: dict[str, NotificationOutcome] = {}
-        for response in pending_view.responses() if pending_view is not None else ():
-            outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
-            if outcome is not None:
-                responses_by_request_id[response.request_event_id] = outcome
-        return feed.reconcile(
-            pending_cards=pending_cards,
-            responses_by_request_id=responses_by_request_id,
-            # An agent message whose workspace is gone has nowhere to land, so
-            # it leaves the feed -- but dropping it is unrecoverable, so this is
-            # the restorable set (live plus the persisted last-good topology,
-            # both minus hosts observed DESTROYED) rather than the live one: a
-            # partial or failed listing is not evidence that a workspace is
-            # gone, and a flap must not destroy an unread message.
-            known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
-        )
+    feed = state.notification_feed
+    if feed is None:
+        return UiNotificationsMessage(entries=(), unresolved_count=0)
+    pending_view = state.pending_requests
+    primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
+    pending_cards = tuple(
+        build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
+        for req in displayable_requests
+    )
+    responses_by_request_id: dict[str, NotificationOutcome] = {}
+    for response in pending_view.responses() if pending_view is not None else ():
+        outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
+        if outcome is not None:
+            responses_by_request_id[response.request_event_id] = outcome
+    return feed.reconcile(
+        pending_cards=pending_cards,
+        responses_by_request_id=responses_by_request_id,
+        # An agent message whose workspace is gone has nowhere to land, so
+        # it leaves the feed -- but dropping it is unrecoverable, so this is
+        # the restorable set (live plus the persisted last-good topology,
+        # both minus hosts observed DESTROYED) rather than the live one: a
+        # partial or failed listing is not evidence that a workspace is
+        # gone, and a flap must not destroy an unread message.
+        known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
+    )
 
 
 def _derive_ui_discovery_health_message(
@@ -2239,11 +2245,8 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_providers(self) -> UiProvidersMessage:
         return _derive_ui_providers_message(self.flask_app, self.backend_resolver)
 
-    def derive_requests(self) -> UiRequestsMessage:
-        return _derive_ui_requests_message(self.flask_app, self.backend_resolver)
-
-    def derive_notifications(self) -> UiNotificationsMessage:
-        return _derive_ui_notifications_message(self.flask_app, self.backend_resolver)
+    def derive_requests_and_notifications(self) -> tuple[UiRequestsMessage, UiNotificationsMessage]:
+        return _derive_ui_requests_and_notifications_messages(self.flask_app, self.backend_resolver)
 
     def derive_discovery_health(self) -> UiDiscoveryHealthMessage:
         return _derive_ui_discovery_health_message(self.discovery_health_watchdog)
@@ -2514,8 +2517,7 @@ def _create_ui_state_publisher(
         derive_workspaces=deriver.derive_workspaces,
         derive_accounts=deriver.derive_accounts,
         derive_providers=deriver.derive_providers,
-        derive_requests=deriver.derive_requests,
-        derive_notifications=deriver.derive_notifications,
+        derive_requests_and_notifications=deriver.derive_requests_and_notifications,
         derive_discovery_health=deriver.derive_discovery_health,
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,

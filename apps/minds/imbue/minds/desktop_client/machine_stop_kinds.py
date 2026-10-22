@@ -193,7 +193,7 @@ class MachineStopKindTracker(MutableModel):
 
     def _run_loop(self) -> None:
         # The full pass runs on a deadline a wake does not move: the resolver
-        # fires on every discovery snapshot, at the poll's own cadence, so a
+        # fires on every provider snapshot, at the poll's own cadence, so a
         # wait restarted by each wake could keep a full pass (the one that
         # carries a kind changed server-side under an unchanged state) from
         # ever coming due.

@@ -2996,7 +2996,6 @@ class AgentCreator(MutableModel):
                 # the workspace row and the "Creating..." row show side by side.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
-                self._notify_create_attempts_changed()
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -3036,6 +3035,11 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
+                # Notified after the link, not before: the latchkey auto-register
+                # retries an agent it deferred for a missing host permissions
+                # file only on a resolver change, and this is the one that
+                # follows the file landing.
+                self._notify_create_attempts_changed()
 
                 log_sink.put("[Imbue Studio] Agent created successfully.")
 

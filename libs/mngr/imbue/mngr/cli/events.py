@@ -34,6 +34,7 @@ class EventsCliOptions(CommonCliOptions):
     follow: bool
     tail: int | None
     head: int | None
+    latest_by: tuple[str, ...] = ()
     daemonize: bool = False
 
 
@@ -81,6 +82,13 @@ def _write_and_flush_stdout(content: str) -> None:
     multiple=True,
     help="CEL expression; events matching any exclude filter are dropped (repeatable).",
 )
+@optgroup.option(
+    "--latest-by",
+    multiple=True,
+    metavar="SOURCE:FIELD",
+    help="Of SOURCE's past events, show only the newest per value of FIELD (repeatable, one per source). "
+    "In --follow mode a new event is printed unless it is older than the newest one already printed for its value.",
+)
 @click.option(
     "--daemonize/--no-daemonize",
     default=False,
@@ -109,6 +117,10 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
     if opts.follow and opts.head is not None:
         raise UserInputError("Cannot use --head with --follow")
 
+    latest_by_field_by_source = _parse_latest_by_rules(opts.latest_by)
+    if latest_by_field_by_source and (opts.head is not None or opts.tail is not None):
+        raise UserInputError("Cannot combine --latest-by with --head or --tail")
+
     # Resolve the target (agent or host)
     target = resolve_events_target(
         address=opts.target,
@@ -127,7 +139,22 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
             exclude_filters=opts.exclude,
         )
 
-    _stream_all_events_cli(target, opts, cel_include_filters, cel_exclude_filters, all_sources)
+    _stream_all_events_cli(
+        target, opts, cel_include_filters, cel_exclude_filters, all_sources, latest_by_field_by_source
+    )
+
+
+def _parse_latest_by_rules(rules: tuple[str, ...]) -> dict[str, str]:
+    """Parse ``--latest-by SOURCE:FIELD`` values into a field per source."""
+    field_by_source: dict[str, str] = {}
+    for rule in rules:
+        source, separator, field = rule.rpartition(":")
+        if not separator or not source or not field:
+            raise UserInputError(f"--latest-by takes SOURCE:FIELD, got {rule!r}")
+        if source in field_by_source:
+            raise UserInputError(f"--latest-by names source {source!r} more than once")
+        field_by_source[source] = field
+    return field_by_source
 
 
 def _emit_event_record(event: EventRecord) -> None:
@@ -143,6 +170,7 @@ def _stream_all_events_cli(
     cel_include_filters: list[Any],
     cel_exclude_filters: list[Any],
     source_filters: tuple[str, ...],
+    latest_by_field_by_source: dict[str, str],
 ) -> None:
     """Stream all events from all sources as JSONL lines."""
     try:
@@ -155,6 +183,7 @@ def _stream_all_events_cli(
             head_count=opts.head,
             is_follow=opts.follow,
             source_filters=source_filters,
+            latest_by_field_by_source=latest_by_field_by_source,
         )
     except KeyboardInterrupt:
         sys.stdout.write("\n")
@@ -165,7 +194,7 @@ def _stream_all_events_cli(
 CommandHelpMetadata(
     key="event",
     one_line_description="View events from an agent or host",
-    synopsis="mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]",
+    synopsis="mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--latest-by SOURCE:FIELD] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host whose events to view. Agents are `NAME` or "
         "`NAME@HOST[.PROVIDER]`. Hosts are `@HOST[.PROVIDER]` (the `@` prefix "
@@ -189,6 +218,13 @@ All --include filters must match for an event to be included, and events
 matching any --exclude filter are dropped. Use --follow to continuously
 stream new events.
 
+The history is read a piece at a time and merged across sources as it is read,
+so a large history does not have to fit in memory. Use --latest-by SOURCE:FIELD
+for a source whose history only matters as its latest state (e.g.
+`services:service`, where each event re-announces a service): of that source's
+past events, only the newest per value of FIELD is printed, after the rest of
+the history.
+
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
 the volume. The command handles online/offline transitions automatically.
@@ -205,6 +241,7 @@ rather than keep running without that source's events. Press Ctrl+C to stop.""",
         ),
         ("Exclude log events", "mngr event my-agent --exclude 'source.startsWith(\"logs/\")'"),
         ("View last 100 events", "mngr event my-agent --tail 100"),
+        ("Show each service's latest registration", "mngr event my-agent services --latest-by services:service"),
         ("Follow all events in real-time", "mngr event my-agent --follow"),
     ),
     see_also=(

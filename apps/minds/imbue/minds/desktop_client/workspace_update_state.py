@@ -660,8 +660,9 @@ class WorkspaceUpdateDetector(MutableModel):
     def notify_topology_changed(self) -> None:
         """Wake a sweep only if the workspace set or a host's readability moved.
 
-        The resolver's callback fires on every snapshot, and waking on each turned
-        the backstop into a continuous ``mngr exec`` loop. Runs on the discovery thread.
+        Most resolver changes leave the workspace set alone, and waking a sweep on
+        each turned the backstop into a continuous ``mngr exec`` loop. Runs on the
+        discovery thread.
         """
         signature = topology_signature(self.backend_resolver.list_active_workspace_host_states())
         with self._signature_lock:

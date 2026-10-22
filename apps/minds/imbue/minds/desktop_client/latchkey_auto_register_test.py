@@ -190,20 +190,22 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
     # The host file appears, as a regular file -- the shape production lands too:
     # ``link_opaque_permissions_to_host`` promotes the opaque file *to* this path
     # and leaves the symlink on the opaque handle pointing back at it. Either way
-    # the retry turns on nothing but ``is_file()`` starting to answer.
+    # the retry turns on nothing but ``is_file()`` starting to answer. Agent
+    # creation fires a resolver change right after linking it; an unchanged
+    # discovery push would not.
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    resolver.notify_change()
 
     patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_id)}
     assert any(str(agent_id) in p for p in patterns)
 
 
-def test_idempotent_across_repeated_discovery_ticks(
+def test_idempotent_across_repeated_resolver_changes(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Re-firing the same discovery snapshot does not duplicate ``anyOf`` entries.
+    """Resolver changes that leave the discovered agents alone do not duplicate ``anyOf`` entries.
 
     ``register_agent_for_host`` is itself idempotent, but this also
     exercises the in-memory dedup set so we know the steady-state
@@ -218,9 +220,9 @@ def test_idempotent_across_repeated_discovery_ticks(
 
     auto = _build_auto_register(resolver, latchkey, root_concurrency_group)
     auto.start()
-    # Fire two more identical discovery ticks.
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    # Two more resolver changes that leave the discovered agents as they are.
+    resolver.notify_change()
+    resolver.notify_change()
 
     any_of = _read_allowed_anyof(latchkey.plugin_data_dir, host_id)
     patterns = [entry["pattern"] for entry in any_of]
@@ -293,7 +295,7 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
     # Fire another change: the pair is in the dedup set, so no new
     # write attempt happens. We assert via reading the file -- it
     # should be unchanged from the corrupted state.
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    resolver.notify_change()
     assert json.loads(perms_path.read_text()) == config
 
 
@@ -351,7 +353,7 @@ def test_does_not_push_when_the_registration_changed_nothing(
         concurrency_group=root_concurrency_group,
     )
     auto.start()
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    resolver.notify_change()
 
     # The registration is a synchronous no-op, so no push thread was ever
     # started: nothing to wait for, and the recorder must still be empty.
