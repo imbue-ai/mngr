@@ -26,4 +26,4 @@ It is *refused* when it ran as it should and chose not to apply; nothing is brok
 It is *waiting for a decision* when the update cannot keep something the user built; the run did its work and kept it for the user's answer, so it is not a failure.
 A stuck or refused update, like one that needs recreation, is reported as a failure.
 An update waiting for a decision is reported as a decision pending instead, and the user's answer in the update chat decides whether the work it kept lands.
-A condition the agent recovers from on its own never makes an update stuck: e.g. (wlog) an app it cannot reach once it holds the version it was sent, or a worker that comes back when restarted.
+A condition that is not a fault for the run, or one its agent recovers from, never makes an update stuck: e.g. (wlog) an app it cannot reach once it holds the version it was sent, or a worker that comes back when restarted.
