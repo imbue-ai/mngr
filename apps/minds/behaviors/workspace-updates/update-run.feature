@@ -114,7 +114,7 @@ Feature: Running an update
     Nothing about a workspace's update can be read from it or done in it while it is stopped, and what the user has not dismissed comes back on the first read after it starts.
     Given a workspace that is stopped or stopping
     Then the app says nothing about whether that workspace is behind, scheduled, or skipped, or about how its last update ended
-    And its Updates settings say to start the workspace to see its updates
+    And its Updates settings, and an update window open over it, say to start the workspace to see its updates
     But the app still reports an update of it that is landing, an update of it that never went out, and that it is too old to update in place
     When that workspace is running again
     Then the app reports its update state again, without what the user dismissed
