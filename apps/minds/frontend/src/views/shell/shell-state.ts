@@ -24,7 +24,10 @@ import type { PopoutRoute } from "./classify";
 import type { PopoutFrame, PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
-import { setPendingHelpLaunch } from "../../models/help";
+import {
+  setPendingHelpLaunch,
+  stagedHelpLaunchWorkspace,
+} from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
@@ -667,7 +670,10 @@ export class ShellState {
    * the workspace, or its options panel) is restored exactly; falls back to
    * routing to the base when there is no history (a cold-start deep link).
    *
-   * The request popup (/inbox) is the one exception: routed there directly
+   * Get help naming a machine is one exception: it routes straight to that
+   * machine, for the reasons on `dismissHelpToItsMachine`.
+   *
+   * The request popup (/inbox) is the other exception: routed there directly
    * (from the workspace already on screen), history.back()'s "undo exactly
    * one push" assumption holds. But a notification click for a DIFFERENT
    * workspace hops there first and THEN opens the popup over it -- two
@@ -695,6 +701,7 @@ export class ShellState {
     // even so: the key belongs to the overlay that is still on its way out.
     if (this.isAppOverlayClosing) return true;
     this.isAppOverlayClosing = true;
+    if (this.dismissHelpToItsMachine()) return true;
     if (path === "/inbox") {
       // Replace, not push: this collapses the popup's own entry into the
       // workspace view rather than adding a further forward step, so the
@@ -1259,7 +1266,6 @@ export class ShellState {
    */
   switchToNotifications(): void {
     this.isNotificationsArmed =
-      this.dismissHelpToItsMachine() ||
       this.dismissAppOverlay() ||
       this.closeWorkspaceOverlay({ replace: true });
     this.openNotifications();
@@ -1269,13 +1275,12 @@ export class ShellState {
    * Put Get help away by routing straight to the machine it names, rather than
    * back through history, reporting whether that applied.
    *
-   * Get help is one click from the docked options panel, so the entry
-   * `history.back()` returns to is often that panel -- which the armed feed
-   * would then be sitting on top of, two of the five surfaces up at once, each
-   * drawing its own raised strip and its own backdrop. Same reasoning
-   * `dismissAppOverlay` applies to the request popup, and `replace` for the
-   * same reason: the surface landed on is not left one Back away from the modal
-   * again.
+   * The entry `history.back()` returns to is not reliably the machine: it can
+   * be the docked options panel (which the feed would then sit on top of), a
+   * request popup that has since been answered, or another /help entry. Back
+   * onto another /help is a dismissal that never visibly lands, so the close X
+   * and Escape stay inert behind `isAppOverlayClosing`. `replace` so the
+   * machine is not left one Back away from the modal again.
    *
    * Only with a machine named and no remembered page: the recovery page's Get
    * help forwards the very machine nobody could load (see
@@ -1334,6 +1339,10 @@ export class ShellState {
    * the only mode this launch can land in.
    */
   openHelpForAgentAsk(workspaceAgentId: string, description: string): void {
+    // A report still staged means the previous ask's /help has been pushed but
+    // has not landed (m.route.get() trails route.set), so the route read below
+    // is stale. This ask takes that entry rather than stacking a second /help.
+    const isHelpPending = stagedHelpLaunchWorkspace() !== null;
     setPendingHelpLaunch({
       workspaceAgentId,
       description,
@@ -1344,7 +1353,8 @@ export class ShellState {
     // Same switch-not-stack rule as `openHelp`: raised over the options panel
     // or the request popup, this takes that surface's entry rather than
     // leaving it one Back away underneath.
-    const isSwitching = isTitlebarPopupRoutePath(this.currentRoutePath());
+    const isSwitching =
+      isHelpPending || isTitlebarPopupRoutePath(this.currentRoutePath());
     m.route.set(
       "/help",
       workspaceAgentId ? { workspace: workspaceAgentId } : undefined,

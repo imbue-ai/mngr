@@ -64,6 +64,9 @@ afterEach(() => {
   // restoreAllMocks does NOT undo vi.stubGlobal; only unstubAllGlobals does.
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  // Module-level, and openHelpForAgentAsk reads it: a launch left staged would
+  // turn the next test's push into a replace.
+  takePendingHelpLaunch();
 });
 
 function makeShell(): ShellState {
@@ -283,6 +286,27 @@ describe("ShellState.closeAppOverlay", () => {
     expect(shell.closeAppOverlay()).toBe(true);
 
     expect(routeSet).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes Get help directly to the machine it names, never through history.back()", () => {
+    // history.back() can land on another /help entry, a dismissal that never
+    // visibly lands.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
   });
 
   it("still prefers history.back() for an app overlay with no workspace to name (e.g. Get help)", () => {
@@ -928,6 +952,37 @@ describe("ShellState.openHelpForAgentAsk", () => {
       { workspace: WORKSPACE_ID },
       { replace: true },
     );
+  });
+});
+
+describe("ShellState.openHelpForAgentAsk arriving twice", () => {
+  it("replaces the first ask's /help when the second arrives before it lands", () => {
+    // The route still reads as the machine (m.route.get() trails route.set),
+    // so only the launch still staged says /help is already on its way.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForAgentAsk(WORKSPACE_ID, "first diagnosis");
+    shell.openHelpForAgentAsk(WORKSPACE_ID, "second diagnosis");
+
+    expect(routeSet).toHaveBeenNthCalledWith(
+      1,
+      "/help",
+      { workspace: WORKSPACE_ID },
+      undefined,
+    );
+    expect(routeSet).toHaveBeenNthCalledWith(
+      2,
+      "/help",
+      { workspace: WORKSPACE_ID },
+      { replace: true },
+    );
+    expect(takePendingHelpLaunch()).toMatchObject({
+      description: "second diagnosis",
+    });
   });
 });
 
