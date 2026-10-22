@@ -1,1 +1,0 @@
-Test-only: the local fake outer host in the host-store tests implements the new `HostFileReadInterface.read_file_tail_from_offset` primitive (added in libs/mngr for ranged remote event reads), so the fake can still be instantiated.

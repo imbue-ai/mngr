@@ -1,1 +1,0 @@
-Regenerated the `mngr imbue_cloud` CLI reference docs for the new sharing options: `shares relays` (list the relay fleet) and `shares create --preferred-region` (steer a first-time local share to the closest relay).

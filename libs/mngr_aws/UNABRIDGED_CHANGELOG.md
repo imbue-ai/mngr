@@ -4,6 +4,103 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20
+
+Fixed a flaky unit test, `backend_test.py::test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call`. It made a real `sts:GetCallerIdentity` call over the network, so it passed on a fast network and hit the 10-second `pytest-timeout` on a slow one.
+
+The cause was the `_build_stubbed_provider` test helper. It left the provider's S3 state bucket unresolved, and resolving it derives the bucket name from the AWS account id, which takes a live STS call. The helper now starts the provider with no state bucket. Its boto3 session also fails the test on any AWS request that would leave the process, so a stubbed test that reaches the network now fails the same way on every network.
+
+Tests only; the provider behaves as before.
+
+Marked `test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call` `@pytest.mark.flaky`, so offload retries it instead of turning CI red. The unit test resolves the state bucket through a real `sts:GetCallerIdentity` call, which can outlast the 10s timeout on a slow network. It timed out on two branches that do not touch that path, recovering on a retry once. The marker is triage while MIND-534 makes the test hermetic.
+
+## 2026-10-18
+
+An AWS provider instance can now authenticate through a named profile of this machine's `~/.aws/config` instead of pasted keys: set `aws_profile = "<name>"` on the `[providers.<instance>]` block (mutually exclusive with `aws_access_key_id` / `aws_secret_access_key`). The block then carries no key material, and several instances can point at different AWS accounts from one process, which an `AWS_PROFILE` environment variable cannot do.
+
+The profile's credentials are resolved when the provider is built, so failures are reported up front and typed: a profile missing on this machine raises `ProviderCredentialSourceMissingError` with `aws configure --profile <name>` as the fix, and so does a profile whose single-sign-on login is missing or expired, with `aws sso login --profile <name>` as the fix (discovery keeps re-checking either until the login exists, since both are fixed outside mngr), and a profile with an `mfa_serial` is refused because it would prompt on stdin. The connection's `default_region` applies, not the profile's own region.
+
+`mngr aws prepare --format jsonl` now announces its two steps (`aws.security_group`, `aws.state_bucket`) as a plan and reports each one starting and completing, so a caller driving it from a UI can show real progress while the security group and state bucket are set up.
+
+Testing integration branch combining three in-flight changes (each branch's own entry sits beside this one in the projects it touches): Imbue Cloud machine resizing from the workspace settings page (`mngr-allow-imbue-resizing`), shared-workspace cleanup (`mngr-cleanup-shares`), and cloud connections backed by a local login instead of pasted keys (`mngr-allow-provider-profile-vars`).
+
+For this project: an AWS provider instance can name a profile of this machine's `~/.aws/config` (`aws_profile`) instead of pasted keys, with missing or expired profile logins reported as `ProviderCredentialSourceMissingError` naming the fix.
+
+## 2026-10-17
+
+Hosts are now opened with a per-host VM-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`; discovery reads the host id from the instance's `mngr-host-id` tag to pick that key. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them. Destroying a stopped instance now also removes the host's local key material and pin records.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved 5 tests that sat under `Project-level checks` to the groups the source gives them; created the `Hardcoded paths` group; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-10
+
+- `mngr list` reports an AWS host's real size (the instance type's vCPUs and RAM from `ec2:DescribeInstanceTypes`, and the root volume size), recorded on the host record at create, instead of the 1 CPU / 1 GB placeholder. Hosts created before this release answer from a table of the instance types the Imbue Studio create form offers.
+
+- The root volume size knob is now `root_disk_size_gb` (shared with GCP and Azure). `root_volume_size_gb` keeps working as a deprecated alias; setting both to different values is a config error.
+
+- The AWS release trip asserts the size `mngr list` reports matches what EC2 says the instance type is.
+
+## 2026-10-08
+
+Comment and docstring prose that referred to the desktop app as "Minds" now
+says "Imbue Studio". No behavior change: every identifier (`MINDS_*` env vars,
+`minds-*` service and scope names, paths) keeps its spelling, per
+`apps/minds/style_guide.md`.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 3 comment lines that had accumulated inside `libs/mngr_aws/imbue/mngr_aws/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-29
+
+The default EC2 image is now Debian 13 "trixie", resolved at create time instead of read from a pinned per-region table. When neither `default_ami_id` nor `--aws-ami=` is set, `mngr create` asks EC2 for the newest `debian-13-amd64-*` or `debian-13-arm64-*` image Debian publishes in the target region (owner `136693071363`), picking the architecture from the instance type (`ec2:DescribeInstanceTypes`), so new hosts pick up Debian's point releases, a deprecated AMI can no longer break creates, and a Graviton instance type (`--aws-instance-type=t4g.small` and friends) boots an arm64 image instead of failing on an amd64 one. `ec2:DescribeImages` was already in the documented IAM set; `ec2:DescribeInstanceTypes` is new to it. An empty or failed lookup raises `AwsAmiResolutionError` before any instance is launched.
+
+- `DEFAULT_AMI_BY_REGION` and `AwsProviderConfig.get_ami_id_for_region` are gone. The `test_default_amis_describe_successfully` release test is replaced by `test_default_ami_resolves_in_every_default_region`, which runs the resolver in each formerly pinned region.
+
+- The `--aws-ami=` build-arg help text names the new fallback (the newest Debian 13 AMI in the region for the instance type's architecture, resolved from EC2 at create time) instead of the pinned per-region default.
+
+The AWS provider's config reference -- shown by `mngr config` and in the package README's option table -- now calls the credential paste flow "the Imbue Studio bring-your-own-account paste flow".
+
+Merges the Debian 13 default (issue #975): the default EC2 image is the newest Debian 13 AMI for the instance type's architecture, resolved from EC2 at create time instead of a pinned per-region table (`ec2:DescribeInstanceTypes` joins the IAM set; `AwsAmiResolutionError` on a failed lookup). See the `mngr-host-sizing-debian-13` entry for the details.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-08-19
+
+Migrated the AWS provider plugin to lazy backend registration to cut `mngr` CLI cold-start latency. The `aws` entry point now points at a new thin `imbue.mngr_aws.plugin` module that registers the backend via `LazyProviderBackend` and the `mngr aws ...` operator commands via `LazyProviderCliGroup`, so a plain `mngr` invocation no longer eagerly imports the AWS backend implementation or the `mngr aws` CLI. No user-facing behavior changes.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-07-29
+
+mngr_aws: the session-end leak detector (`pytest_sessionfinish`) now *fails* the test session instead of skipping silently when `MNGR_AWS_RELEASE_TESTS=1` is set but AWS credentials cannot be resolved (or the EC2 client cannot be built). It still no-ops on ordinary unit-only runs (opt-in unset). A release run that cannot authenticate cannot have scanned for leaked EC2 instances, so skipping would silently green a run that did no cleanup; failing surfaces the misconfiguration.
+
+Add an out-of-band, age-based reaper for leaked test EC2 instances tagged `mngr-pytest-launched=true` (which production instances never carry). A new CI job (`cleanup-aws-instances`, via `scripts/cleanup_old_aws_test_instances.py`) runs it on every push to main and pull request, so orphans from sessions killed before `pytest_sessionfinish` could run are still cleaned up.
+
+The reaper logic is the shared `imbue.mngr_vps.leak_cleanup`; `imbue.mngr_aws.cleanup` now supplies only AWS's `CreatedAtExtractor` (require the `mngr-pytest-launched` tag, read the ISO `mngr-created-at` tag), and the session-end hook + standalone script are thin wrappers that build an `AwsVpsClient` and call the shared scan/destroy through it. Creation time is read from the `mngr-created-at` tag via `list_instances()` rather than EC2 `LaunchTime`, and failures are surfaced: the session-end hook fails the session on a scan error instead of silently passing.
+
+## 2026-07-24
+
+- `AwsProviderConfig` gained optional pasted-credential fields (`aws_access_key_id` / `aws_secret_access_key` / `aws_session_token`, `SecretStr`, mirroring the OVH/Vultr pattern). When set they are passed directly to `boto3.Session`, taking precedence over the ambient credential chain (which remains the unchanged default). Used by the Minds bring-your-own-account paste flow.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

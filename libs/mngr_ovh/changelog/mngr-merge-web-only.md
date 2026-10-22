@@ -1,1 +1,0 @@
-Merge the web-only work (`mngr/hopefully-last-web-details`) into main. Updated the `_load_private_key` docstring (and the corresponding `bootstrap_test.py` test docstrings) to reflect that the base VPS provider now generates OpenSSH-format Ed25519 client keys (older installs still hold RSA PEM keys). No behavior change: the loader already tried each key type in turn.

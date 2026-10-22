@@ -1,1 +1,0 @@
-Modal host SSH info in live listings (`mngr list --format json`) now carries the explicit `known_hosts_path` that `SSHInfo` gained in this release, and the human-facing `ssh` command includes `-o UserKnownHostsFile=<path> -o StrictHostKeyChecking=yes` when the pin file is known, matching the shared construction paths.

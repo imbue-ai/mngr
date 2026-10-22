@@ -1,5 +1,0 @@
-MIND-189: Fixed a CI flake in the master-password lifecycle sync test (`test_master_password_lifecycle_rewraps_scrubs_and_restores`).
-
-The test asserted that changing the master password is rewrap-only by reading the workspace record's revision just after the rewrap and comparing it to a baseline captured moments earlier. But a freshly-created row's metadata is enriched once by the background reconcile loop as discovery catches up, which legitimately advances the revision; when that push landed inside the compare window, the assertion tripped even though the rewrap changed nothing.
-
-The assertion no longer reads the revision at all. A rewrap re-wraps only the account key bundle and never writes the workspace record, so the test now asserts exactly what a rewrap must preserve: the secrets blob and the record's identity and lifecycle are byte-identical across the change. The metadata (and revision) the background enrichment may still be filling in are simply not read, so however the enrichment interleaves with the rewrap the check holds -- no waiting, no ordering, no count.

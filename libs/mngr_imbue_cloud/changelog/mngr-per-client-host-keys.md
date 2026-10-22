@@ -1,1 +1,0 @@
-The operator-side slice provider (pool bake) keeps its provider-wide pool-management key by design and adapts to `mngr_vps`'s per-host outer-connection signature. The user-facing imbue_cloud provider and its slow-path rebuild are unchanged; `record_outer_host_key` now requires the host id so the rebuild's outer pin is always attributed to the host.

@@ -1,1 +1,0 @@
-Dropped the per-agent `requests` event source from the forward stream defaults: nothing has written agent-side request events since latchkey 2.9.0's gateway extension took over the pending-permission queue, so the stream only ever carried silence. The `services` source is unchanged.

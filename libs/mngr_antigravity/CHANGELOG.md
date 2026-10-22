@@ -6,14 +6,25 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `update_policy` field on the antigravity agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governing agy's background self-updater via `AGY_CLI_DISABLE_AUTO_UPDATE`. agy has no version-pin capability, so there is no `version` field.
+- Added: `output_style` and `append_system_prompt` fields on the antigravity agent type, written to the per-agent `~/.gemini/GEMINI.md` that agy auto-loads, so workspace role templates (e.g. `mngr create --type antigravity --template chat`) are accepted.
+- Added: The statusline mirrors the model agy reports into `model_state.json`, and every launch and resume stamps an `antigravity_process_started` marker in the agent's state directory.
 
 ### Changed
 
 - Changed: `settings_overrides` now folds onto the base with a principled merge (matching mngr_claude): a bare key assigns with a recursive narrowing guard, and a top-level `__mngr_merge` map declares per-key `extend` (merge onto the base) or `assign` (replace without the guard). Raw `__extend` / `__assign` suffix keys are rejected — `__mngr_merge` is ignored by vanilla antigravity so the generated `settings.json` stays clean. Previously `settings_overrides` replaced top-level keys wholesale with no guard.
 - Changed: `mngr message` to an antigravity agent now confirms submission by polling the `active` marker (maintained by mngr's statusLine command on every busy sample) advancing past its pre-Enter state, instead of the tmux `wait-for` signal — which latched a stale signal fired with no waiter and could instantly false-confirm a later send (and kill its pending Enter keystroke). The marker exists on agents created by older mngr versions, so no reprovisioning is needed.
+- Changed: The common-transcript emitter writes ATIF-shaped records (`header` / `step` / `observation`, pinned to `ATIF-v1.7`) instead of `user_message` / `assistant_message` / `tool_result`; the envelope's `source` field is renamed `emitter`. Tool arguments and outputs are no longer truncated, planner thinking is kept as `reasoning_content`, and records keep agy's write order.
+- Changed: Renamed the `auto_dismiss_dialogs` config field to `auto_dismiss_dialogs_at_startup`.
+- Changed: The common-transcript watcher skips a conversion pass when the raw transcript is unchanged, cutting idle CPU.
+
+### Fixed
+
+- Fixed: An agent's transcript streamer and converter stopped after the agent was renamed; the supervisor now tracks the tmux session by id, and `mngr start` rewrites the session name out of older agents' launch commands.
 
 ## [v0.1.8] - 2026-06-18
 

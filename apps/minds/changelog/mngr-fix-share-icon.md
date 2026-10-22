@@ -1,1 +1,0 @@
-The "Share machine" surfaces (the titlebar button, the workspace options overlay's nav, and the share pane's heading) now use a person-with-plus icon instead of the paper-airplane "send" glyph, better matching what sharing does (granting people access by email).

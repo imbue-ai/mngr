@@ -1,1 +1,0 @@
-- The next-deploy checklist's analytics backfill item now sizes production's backfill from the ingest's nine-minute per-run budget (about thirty-five runs for the 1366 hour folders of 2026-10-14) rather than from a fixed hour count.

@@ -1,1 +1,0 @@
-The rationale of the `find_per_file_host_uploads_in_loops` ratchet no longer describes a per-file `write_file` call as an SFTP channel open: `write_file` now runs on a single SSH exec channel, so the docstring names the SSH channel open each call still costs. No behavior change.

@@ -1,1 +1,0 @@
-The generated CLI reference for `mngr imbue_cloud auth login` (`docs/commands/secondary/imbue_cloud.md`) follows the `--success-redirect-url` help text: its example scheme is now `imbue-studio://`, the desktop app's new deep link scheme (phase 3 of the Imbue Studio rename, which lands together with the phase 4 cutover).

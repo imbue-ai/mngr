@@ -1,3 +1,0 @@
-Added `imbue.mngr.hosts.mutate_id`: internal, convergent primitives that rewrite identity in a host's on-disk state -- `mutate_agent_id` (renames the agent state dir and rewrites data.json's id, and re-keys any externally persisted agent-data copy via the new `OnlineHostInterface.remove_agent_data` counterpart to `save_agent_data`; refuses running agents and collisions) and `mutate_host_id` (re-stamps the host-level data.json). No CLI; callers are future restore/clone/adopt flows.
-
-Terminology sweep: mngr-level prose speaks host/agent (the minds-level machine/workspace vocabulary and minds references were removed from core comments), and the release-testing helpers' `workspace` parameter is now `project_dir`.

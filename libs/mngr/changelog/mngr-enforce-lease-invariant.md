@@ -1,1 +1,0 @@
-- `test_send_message_one_agent_failure_does_not_prevent_other_agents` is marked flaky and given the same 30s timeout as its sibling tmux tests; its two-agent setup/teardown occasionally exceeded the 10s default in CI.

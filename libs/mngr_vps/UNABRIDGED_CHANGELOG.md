@@ -4,6 +4,334 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
+
+## 2026-10-20
+
+The discovery test's canned outer now recognizes the outer listing script by its label lookup rather than by its first line, which the script no longer opens with (it first inspects the container a previous listing found).
+
+Configuring a host's sshd now logs, at info, the fingerprints of the keys that are about to replace the host's `authorized_keys` (the client key and any appended entries), along with the host id, provider and profile. A later key rejection can then be matched against the keys the host was last configured with.
+
+## 2026-10-18
+
+The VPS-backed providers (AWS, GCP, Azure, Vultr, and the Imbue Cloud slow path, which all share this machinery) report their create steps through mngr's structured progress stream (`--format jsonl`): `vps.create_instance`, `vps.wait_active`, `vps.wait_ssh`, `vps.wait_bootstrap`, then `vps.build_image` or `vps.pull_image`, `vps.start_container`, and `vps.wait_agent_ssh`, all under the create's `creating_host` phase. A remote image build advances through its Dockerfile stages by parsing the BuildKit stage markers streamed back from the machine.
+
+## 2026-10-17
+
+The VPS-root client key (`vps_ssh_key`) is now minted per host under `keys/host_keys/<host-uuid-hex>/` instead of once per provider instance, so a host's per-host key directory is the complete set of material that opens it (VPS-root key, container key, both sshd host keys) and no provider-wide key ever needs to leave the machine that created a host. Discovery reads each instance's host id from the cloud listing (`mngr-host-id`) and opens the VPS with that host's own key; an instance without a parseable host id is skipped with a warning.
+
+Read paths never create keys any more: an operation on a host whose per-host key is absent fails with `VpsHostKeyMissingError` before any SSH attempt. Hosts created by earlier releases only authorize the old provider-wide `keys/vps_ssh_key`; that file is no longer created but is still read as a fallback, so such hosts stay reachable from the machine that created them.
+
+Bare placement no longer mints a separate agent client key: the host's VPS-root key (authorized on root at first boot) is the agent key. Every host-key pin `mngr_vps` writes is attributed to the host's record in the pin store, and both the online and the offline (stopped-instance) destroy paths remove the host's per-host key directory and its pin records once the VPS is gone (when the cloud destroy fails, the material is kept, with a warning, so the surviving instance stays reachable and destroyable from this machine). A host this machine already knows (its record cached here, or the instance stopped) but holds no key for is still destroyed through the cloud API: the placement teardown on the VPS is skipped with a warning rather than aborting the destroy. A running VPS whose key is absent here is not listed here; destroy it from the device that holds its key. A failed create removes that material too once its VPS is destroyed, but keeps it (with a warning) when the cleanup destroy fails, so the leaked instance stays reachable and destroyable from this machine. The shared provisioning flow now also destroys the VPS it created when a later boot or bootstrap wait fails (previously that instance leaked, since the create-time cleanup never learned its id), unless `MNGR_KEEP_FAILED_HOSTS=1` is set; when that destroy fails too, the create raises `VpsInstanceLeakedError` (naming the instance, with the original failure chained as its context) and keeps the host's key material. The `README` documents the per-host layout contract.
+
+Part of the account-owned remote providers program (`specs/account-owned-providers/spec.md`); the entry `mngr-per-client-host-keys.md` in this directory belongs to the same PR.
+
+- `create_host` combines main's instance-shape recording with the branch's leak-aware provisioning cleanup (`VpsInstanceLeakedError`).
+
+- A VPS whose host key is not on this machine yet (a host created on another device) is logged at info during discovery rather than as a read failure on every poll.
+
+- A per-host key dir that cannot be removed when its host is destroyed is logged at trace, as documented, instead of being silently ignored.
+
+- When a VPS create fails after the instance exists and the rollback destroy fails too, the reported `VpsInstanceLeakedError` now names the provisioning failure (cloud-init timeout, host-key mismatch, sshd never up) and chains it as its cause, instead of replacing it with only the leak message.
+
+- The per-host key layout is published as `VPS_HOST_ACCESS_MANIFEST` (`primitives.py`), which the provider's own key dir resolves through (its per-host `known_hosts` link target is the container placement's store; bare placement links `vps_known_hosts` itself); the container key-file names (`CONTAINER_SSH_KEY_NAME`, `CONTAINER_HOST_KEY_NAME`, `CONTAINER_KNOWN_HOSTS_NAME`) moved from `docker_realizer.py` to `primitives.py` beside the VPS ones.
+
+- `resolve_vps_root_keypair` returns a `VpsRootKeypair` (the key path, its public half, and whether the retired provider-wide key was used) instead of a tuple, and a provider instance reports opening a host with that legacy key once per process at info, naming the instance (`is_legacy_key_fallback_logged`), instead of a debug line on every call. `VpsHostKeyMissingError` carries help text saying the host was created on another device or before per-host keys existed, so it must be reached from the device that created it or have its record synced here.
+
+- The README's manifest paragraph says the published layout is the container-placement one and that minds materializes container placement only; the `mngr-per-client-host-keys` entry's destroy claim is corrected: a host this machine already knows but holds no key for is still destroyed through the cloud API, while a running VPS whose key is absent here is not listed here and is destroyed from the device that holds its key.
+
+## 2026-10-16
+
+The vps provider (and the providers built on it) reports that it cannot re-read one host on its own (`supports_incremental_host_discovery` is false), since it reads every host in one batched pass, so the streaming discovery poller's new between-poll host re-reads skip it.
+
+## 2026-10-13
+
+The rsync upload to a VPS outer host now also retries the two shapes a peer that hung up mid-handshake prints, not just the shapes a fresh VPS's networking flap prints.
+
+Deciding whether an rsync failure is connection-class was being done in two places with two different lists of messages: this project's own, and mngr's (which had none for its rsync/git transfers at all, the bug fixed under MIND-478). The shapes that mean the peer closed the connection outright now live once, in mngr's shared `is_closed_ssh_connection_stderr`, and this project's list keeps only what a fresh VPS adds on top of them. No previously retried failure stops being retried; `Connection closed by <address> port <port>` and rsync's own "connection unexpectedly closed (0 bytes received so far)" start being retried here too.
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved 4 tests that sat under `Project-level checks` to the groups the source gives them; created the `Hardcoded paths` group; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-12
+
+The cloud VPS providers' discovery (aws, gcp, azure, vultr, ovh) now reports each host's recorded size (`DiscoveredHost.size`: the instance shape's vCPUs, RAM, and root disk, as `mngr list` reports `host.resource`) from the host records it already reads, so the `mngr observe` stream carries it. A record that holds no shape and whose plan is not in the provider's legacy plan table carries none, as does a stopped instance that discovery knows only from its cloud tags.
+
+## 2026-10-10
+
+`mngr list` now reports the real size of every `mngr_vps` cloud host instead of the hardcoded 1 CPU / 1 GB placeholder:
+
+- `create` asks the cloud for the created instance's shape (a new `VpsClientInterface.get_instance_shape`: vCPUs, RAM, and the root disk) right after the instance exists and records it on the host record (`VpsHostConfig.shape`), so `get_host_resources` answers from the record alone, for stopped hosts too. A describe that fails is logged and the host lists with an unknown size rather than failing the create.
+
+- A host record written before shapes were recorded answers from a small per-provider table of the plans in use at the time (the provider default plus the sizes the Imbue Studio create form offers); a plan outside it lists the size as unknown (`VpsHostSizeUnknownError`, which the listing turns into an absent `host.resource`) rather than a made-up number.
+
+- The three cloud providers with a configurable root disk share one knob, `root_disk_size_gb` on `OfflineCapableVpsProviderConfig` (default 30 GB). The former per-cloud names (`root_volume_size_gb` on AWS, `boot_disk_size_gb` on GCP, `os_disk_size_gb` on Azure) still work as deprecated aliases that fold into the unified field; a settings block that sets both to different values is rejected with `VpsConfigError`.
+
+- The shared cloud release profile asserts that the size `mngr list` reports for the created host matches what the cloud itself says the shape is.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-10-02
+
+- Comment-only: a reference to the docker provider's source path now points at its new home in `libs/mngr_docker`.
+
+## 2026-09-30
+
+Removed the 9 comment lines that had accumulated inside `libs/mngr_vps/imbue/mngr_vps/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+Test-only: the local fake outer host in the host-store tests implements the new `HostFileReadInterface.read_file_tail_from_offset` primitive (added in libs/mngr for ranged remote event reads), so the fake can still be instantiated.
+
+## 2026-09-29
+
+- `runsc_tmpfs_start_args`'s docstring no longer names the gen-2 slice bake as a caller that brings its own `/tmp`: the bake now carries only `--tmpfs /run` and gets its capped `/tmp` from mngr_vps like every other runsc container.
+
+`VpsProvider._compute_extra_start_args` now receives the VM's MemTotal (in KiB), the value the create already reads to size the container's /tmp tmpfs. That lets a provider derive `docker run` args from the VM's RAM without a second read; the imbue_cloud slice provider derives its container memory cap from it.
+
+Every cloud VM the `mngr_vps` family provisions (AWS, GCP, Azure, Vultr, OVH) now gets the container-host hardening the gen-2 slice fleet learned (issue #976; spec `specs/vps-container-parity.md`):
+
+- The agent container's memory is capped at the VM's RAM minus a 1 GiB reserve for the VM's own daemons, so a workspace at capacity can no longer starve the VM's sshd and dockerd and wedge the host. Host setup installs an every-boot `mngr-vps-container-memory.service` that re-applies the cap from `MemTotal` (a resized VM re-caps on its next boot); the create runs it once right after the container starts and fails if the cap did not apply. A VM too small to leave any room after the reserve is left uncapped.
+
+- A container running under gVisor (`docker_runtime = "runsc"`) gets `/run` and `/tmp` mounted as tmpfs automatically. runsc with `--overlay2=none` leaves the container rootfs on a filesystem that refuses to hard-link a unix socket, which is how supervisord installs its control socket, so without the mounts a workspace never comes up. Mounts a caller already configured are not repeated.
+
+- The VM sshd is configured through a `/etc/ssh/sshd_config.d/60-mngr.conf` drop-in (`MaxSessions 100`, `MaxStartups 100:30:200`, `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, and `PerSourcePenalties no` where sshd supports it) instead of two lines appended to `sshd_config`. The file is compared whole, so a re-run restarts sshd only when its content changed.
+
+- The Docker daemon rotates container logs (`50m` x 3), bounds its build cache (`1GB`), and the journal is capped at 512 MiB. The daemon.json is merged with jq so `runsc install`'s runtime entry survives, and docker is restarted only when it is already running and the canonical content changed, so a re-run on a live host never bounces the workspace container for nothing.
+
+The imbue_cloud slice path is unchanged: the shared host setup never ran on slices, and the tmpfs and memory changes leave a slice container's `docker run` line byte-identical. An externally provisioned VPS (`MinimalVpsProvider`) is not capped or verified by the create itself; if its caller runs the shared host setup, as the imbue_cloud delegated gen-1 rebuild does, the VPS still receives the sshd drop-in, the Docker and journal bounds, and the reconciler unit, which caps the container on the VPS's next boot; and since that rebuild runs the container under runsc, it now gets the `/run` and `/tmp` tmpfs mounts too.
+
+The shared sshd tuning applied to every VPS now also writes `PerSourcePenalties no` when the VM's sshd advertises the option (OpenSSH >= 9.8, so every Debian 13 default image). Left on, the penalties lock a source address out for minutes after a few unauthenticated connections, which mngr's own discovery and readiness probes, the imbue_cloud connector's shared egress addresses, and a reconnect burst from the user's laptop all produce. The opt-out is guarded separately from the session-cap block, so a host re-provisioned after the caps were written still receives it, and it is skipped on older sshds that would reject the keyword.
+
+- The Docker Engine and containerd pins carry over to Debian 13 unchanged: the install script derives the apt suffix from the VM's `/etc/os-release`, and the Docker repository serves `5:29.6.2-1~debian.13~trixie` and `2.2.6-1~debian.13~trixie` for amd64 and arm64.
+
+- First-boot host setup retries `apt-get update` (six attempts, ten seconds apart) before installing the base packages. On Azure's Debian 13 image cloud-init reached the host-setup commands before the image's apt mirror resolved, the single `apt-get update` failed, and the whole first boot failed with it (no root key copy, no sshd tuning, no ready marker), so `mngr create` timed out waiting for the host.
+
+- A VPS whose first boot never becomes ready (the instance never turns active, never answers SSH, or never writes the ready marker) is now destroyed by the failed `mngr create` instead of being left running. The instance id was previously only known to the create path once every boot wait had succeeded, so a wait that gave up leaked the VM; `MNGR_KEEP_FAILED_HOSTS=1` still keeps it for debugging.
+
+The host-setup step that bounds the docker daemon and caps the journal now renders the journald cap through the shared `build_cap_journald_command` snippet in mngr core (`providers/ssh_host_setup.py`), which the lima provider uses too; the resulting drop-in (`/etc/systemd/journald.conf.d/60-mngr.conf`, `SystemMaxUse=512M`) is unchanged.
+
+Merges the gen-2 learnings series (issues #975, #976 and the stopped-container recovery follow-up) into one branch; see the `mngr-host-sizing-debian-13`, `mngr-cloud-provider-updates`, and `mngr-vps-stopped-container-recovery` entries for the details. In short: every cloud VM gets the container memory cap (VM RAM minus 1 GiB, re-applied at every boot), `/run` and `/tmp` on tmpfs under runsc, the `/etc/ssh/sshd_config.d/60-mngr.conf` drop-in (with `PerSourcePenalties no` on Debian 13's sshd), bounded Docker logs, build cache and journal, `--restart=unless-stopped` on every container, `apt-get update` retries on first boot, and a failed boot wait destroys the VM instead of leaking it. A container that died behind mngr's back lists its agents, shows `STOPPED`, and revives through `mngr start`.
+
+- Merging onto current `main` added three things the series did not have. The container's `/tmp` tmpfs under runsc is now executable and capped at one eighth of the VM's RAM (512 MiB on a 4 GB VM, about 1 GiB on 8 GB, never below 256 MiB), so a runaway write there fails with "No space left on device" instead of OOM-killing the whole sandbox (issue #1402); the provider reads `MemTotal` before `docker run` to size it. The VM's own `/tmp` stays on its disk: host setup overrides Debian 13's RAM-backed `tmp.mount` with a bind of `/var/lib/mngr-tmp`, and build contexts and rsync partials are staged under docker's data root instead of `/tmp` on every outer. And an explicit `--memory` in `default_start_args` or `-s` is honored: only containers mngr sized from the VM carry the `com.imbue.mngr.memory-cap=vm` label the every-boot reconciler now filters on, so it no longer silently raises a caller's smaller cap.
+
+A `mngr_vps` cloud host whose container died behind mngr's back (the memory cap's OOM kill, a `docker stop` on the VM, a VM reboot) is now recoverable, and usually recovers by itself:
+
+- Every container runs with `--restart=unless-stopped` unless the configured or caller start args already set a restart policy (the default-workspace-template's cloud create templates already pass it, so their `docker run` lines are unchanged), so an OOM kill, a Docker daemon restart, or a VM reboot brings a previously running container back on its own, with sshd relaunched by the container entrypoint. An explicit `docker stop`, which is what `mngr stop --stop-host` and the idle stop issue, still leaves the container stopped until `mngr start`.
+
+- `mngr list` shows a reachable VPS whose container is merely stopped as `STOPPED` on the agent row as well as the host row (it said `CRASHED` on the agent row, since the host record carries no stop reason for an out-of-band exit), and `mngr start <agent>@<host>` finds and revives the agent instead of failing with "0 agent(s)"; the listing fix itself is in `mngr` (`docker cp -L`).
+
+- The provider release trip stops the container out of band and asserts the host lists as `STOPPED` with its agent and `mngr start` revives it, then SIGKILLs the container's init the way the OOM killer does and asserts the host is back to `RUNNING` and reachable with no mngr command.
+
+## 2026-09-26
+
+Outer-box docker builds now forward env-sourced BuildKit secrets: for every `--secret ...,env=NAME` build arg, NAME's value in the creating process's environment reaches the `docker build` on the outer through its environment, so such a secret works on a vultr, OVH, or slice build exactly as it does on a local one.
+
+## 2026-09-25
+
+The container-setup and host-setup notes that still described the retired lima slice path (the slice guest's lima `additionalDisk`, the `lima_slice` provisioning module as the consumer of the pinned docker stack, and the lima-2.2.0 framing of the docker-ce pin rationale) now describe the qemu slice VM and its baked guest image.
+
+The pinned docker install script is private to `host_setup.py` again (`_PINNED_DOCKER_INSTALL_SCRIPT`): the guest-image bake that consumed the exported `PINNED_DOCKER_INSTALL_SCRIPT` was the deleted lima slice provisioning.
+
+The fully rendered bookworm apt versions (`PINNED_DOCKER_APT_VERSION`, `PINNED_CONTAINERD_APT_VERSION`) are removed: their only consumer was the deleted gen-1 box prep. The `*_CORE` pins stay and every install renders the distro suffix from the target's own os-release.
+
+## 2026-09-24
+
+The VPS discovery tests now use the shared listing script's new output format, where activity times and tmux panes are listed for all agents at once. VPS listings behave as before.
+
+## 2026-09-23
+
+A command that addresses an agent as `AGENT@host-....PROVIDER` on a VPS provider (aws, gcp, azure, ovh, vultr) now finds the host exactly as discovery would, so a pinned `mngr start` of a stopped instance works as it does with a bare agent id. The lookup still reads every VPS, so it is no faster than discovery on these providers.
+
+## 2026-09-22
+
+# Containers resolve their outer host as `host.docker.internal`
+
+`run_container` now creates every container with
+`--add-host host.docker.internal:host-gateway` (`OUTER_HOST_ADD_HOST_ARGS`, built
+from `imbue.mngr.primitives.OUTER_HOST_HOSTNAME_IN_CONTAINER`), so a service the
+VPS binds on its docker bridge address is reachable from inside the container by
+that name without an address known at create time. `mngr_latchkey` uses it to
+point a VPS workspace at the VPS-resident gateway directly, replacing the
+VPS->container reverse SSH tunnel. Containers created before this change are
+unaffected (the mapping cannot be added to an existing container);
+`mngr_latchkey` keeps the tunnel for those.
+
+A comment in `container_setup.py` no longer names a locally-rsynced `system/vendor/mngr/` as the
+example of an uncommitted edit the docker build context carries.
+
+## 2026-09-21
+
+Agent listings from this provider now report the branch an agent's work_dir is
+actually on.
+
+mngr broadened `AgentDetails.initial_branch`: it used to name only a branch mngr
+created, and is now the branch the work_dir was placed on either way, including
+one that already existed and was merely checked out. This provider builds
+`AgentDetails` by hand from the agent's `data.json` in its bulk-listing path
+rather than going through the shared builders, so without this change its online
+listing would have kept reporting the old narrower value while its offline path
+reported the new one -- the answer would have changed with host state.
+
+It reads through the shared `read_checked_out_branch` helper, so the fallback for
+records written before the underlying field existed is applied identically
+everywhere rather than restated per provider.
+
+VPS discovery, snapshot-helper provisioning, and offline host_dir uploads now run on `mngr_executor` instead of a raw `ConcurrencyGroupExecutor`, so each worker thread's gevent Hub is destroyed when its task finishes. Before, VPS discovery leaked one Hub (a pipe pair plus the poll's objects) per VPS on every poll of a long-running `mngr observe`, the same leak fixed for imbue_cloud. A new `test_prevent_raw_concurrency_group_executor` ratchet keeps new raw executors out.
+
+## 2026-09-17
+
+Test doubles that implement `OuterHostInterface.write_file` now default `is_atomic` to `True`, matching the interface: `write_file` is atomic by default on every host (the bytes are staged in a sibling temp file and renamed over the destination once complete). No behavior change in this project's own code.
+
+## 2026-09-12
+
+Integration branch for the imbue_cloud slice-fleet generation 2 program (raw qemu slices with routed-tap networking on Debian 13 boxes, replacing lima), merged together with `main` and the three pre-cutover fix PRs: imbue-ai/mngr-internal#857 (SSH certificates from Vault, #850), #855 (DHCP placement, #849) and #856 (the upstream artifact mirror, #851). The per-change details live in this directory's constituent entries, listed below.
+
+Container setup under gVisor (`runsc`) for gen-2 slices, the parameterized gVisor install script renderer, and extra SSH config files for the container sshd (the CA trust).
+
+Constituent entries: `new-fleet-base.md`, `new-fleet-runsc-prototype.md`, `new-fleet-phase-4-impl.md`, `mngr-variable-sizing.md`, `mngr-slice-fleet-gen2-phase-3.md`, `mngr-new-fleet-testing.md`, `mngr-ssh-authority-in-vault.md`, `mngr-mirror-upstream-artifacts.md`
+
+Security fix (gen-2 small follow-ups): the outer-side btrfs snapshot helper (`snapshot_helper.sh`, a root systemd service on every VPS and slice VM) no longer follows symlinks the workspace container can plant in the shared read-write trigger directory (`/var/lib/mngr-snapshot`, a plain bind mount with no user namespace, so container root is VM root there). Previously `cat request.json`, the `result.json` idempotency re-read, the `[ -f ]` startup probe, and the `> result.json.tmp` staging write all followed symlinks, giving the container a VM-root arbitrary-file read and, through the fixed temp name, a VM-root file truncate-and-overwrite. The helper now opens both protocol files with `O_NOFOLLOW` and checks the open descriptor is a regular file (perl one-liners, since bash cannot express either), treats anything else like an absent request, and stages each result in a random-named `O_CREAT|O_EXCL` temp file in the same directory that is `rename(2)`d over `result.json` (which replaces a planted symlink instead of writing through it). Hosts pick the new script up on their next realize (create, start, restore); no protocol change.
+
+Gen-2 small follow-ups: the snapshot helper symlink tests share one helper that plants the outside-the-trigger-directory sentinel their symlinks point at.
+
+- The pinned gVisor install script is now rendered by `render_gvisor_binary_install_script(release_url)`, parameterized on the directory holding the release's per-arch binaries and `.sha512` files. `PINNED_GVISOR_BINARY_INSTALL_SCRIPT` is unchanged in behavior (it renders against gVisor's upstream release bucket, `PINNED_GVISOR_UPSTREAM_RELEASE_URL`); the imbue slice fleet renders the same script against its artifact mirror.
+
+This branch carries the earlier slice-fleet gen-2 phase 1-4 and variable-sizing spec work as its base; the substantive changes to this project are described by the `mngr-slice-fleet-gen2-phase-*` and `mngr-variable-sizing` entries in this same PR. The variable-machine-sizing implementation itself (specs/slice-fleet, phase 1) does not change this project.
+
+The pinned docker/containerd apt version cores (`PINNED_DOCKER_APT_VERSION_CORE`, `PINNED_CONTAINERD_APT_VERSION_CORE`) are now public, so the gen-2 box prep's image customize can derive the distro suffix from the guest's own os-release (landing the identical pinned engine on trixie guests) instead of hardcoding the bookworm string.
+
+Container SSH setup accepts extra SSH config files (`RealizePlacementContext.extra_ssh_config_files`, threaded through `setup_container_ssh`), used by Imbue Cloud gen-2 slices to install the tier's SSH certificate-authority trust into the workspace container's sshd (imbue-ai/mngr-internal#850).
+
+This branch carries the slice-fleet gen2 phase 1-4 work by merging `mngr/slice-fleet-gen2-phase-4` as the base for the upcoming variable-workspace-sizing spec; the substantive changes are described by that branch's own `mngr-slice-fleet-gen2-phase-*` entries in this same PR. No additional changes to this project yet.
+
+`new-fleet-base` is the integration base for the in-progress slice-fleet generation-2 program (specs/slice-fleet-gen2 and specs/slice-fleet): the squash of the formerly stacked PRs #571, #573, #574, #581, #609, and #614. It is deployed only to dev canaries and must not be deployed or merged as-is; follow-up PRs stack on it and the whole program lands on `main` as one change.
+
+For this project it carries only the now-public pinned docker / containerd apt version cores (`PINNED_DOCKER_APT_VERSION_CORE`, `PINNED_CONTAINERD_APT_VERSION_CORE`), which the gen-2 box prep's image customize combines with the guest's own os-release to pin the identical engine on trixie guests. See this directory's `mngr-slice-fleet-gen2-phase-3` entry.
+
+`build_home_volume_symlink_command` is the pure builder of the in-container command `setup_container_ssh` runs to point the container home at the host volume's `home/` subdirectory, so other container-recreation paths (the gen-1 -> gen-2 slice-fleet cutover) can replay the same link; `HOST_VOLUME_HOME_PATH` names the link's in-container target (`/mngr-vol/home`).
+
+The pinned gVisor download + sha512 verification is now the public `PINNED_GVISOR_BINARY_INSTALL_SCRIPT` (with `GVISOR_RUNSC_RUNTIME_ARGS` / `GVISOR_RUNSC_BINARY_PATH`), so the gen-2 slice guest image customization in `minds_admin` bakes the identical pinned binaries into the image; the live-host `runsc install` step is composed from it and is unchanged in behavior.
+
+- `ensure_btrfs_subvolume_on_outer` joins the new subvolume to the host quota group (`HOST_QUOTA_QGROUP`, `1/0`) when the data filesystem has one (gen-2 slices); filesystems without quotas are unchanged.
+
+## 2026-09-03
+
+The rsync-over-SSH transport used to copy directories to and from a container outer (`build_ssh_transport_for_outer`) quoted the `known_hosts` path for the shell only. rsync preserves that quoting when it splits the `-e` string, but ssh then splits `UserKnownHostsFile` on whitespace itself -- it is documented as "one or more files ... separated by whitespace" -- so a host directory containing a space became several nonexistent paths and every upload or download failed with `Host key verification failed`. The path is now quoted for ssh's parser as well, via the same `quote_ssh_known_hosts_option_value` helper that `build_ssh_transport_command` in mngr uses.
+
+## 2026-08-25
+
+Comment-only terminology sweep: mngr-level prose speaks host/agent instead of the minds-level workspace vocabulary.
+
+Host-record and persisted-agent-data writes on the VPS unified volume are now atomic (temp file + rename via the outer host's atomic write path), so a concurrent reader -- e.g. a discovery pass on another mngr client -- can never observe a torn (empty / partial) record. Host-record reads also distinguish "unreadable" from "absent": parse failures are retried, and after retries either warn-and-treat-as-missing (default) or raise `HostRecordUnreadableError` when the new off-by-default `strict_host_record_parsing` mngr config flag is enabled. Part of the robustness fixes from the 2026-07-14 partial workspace-destroy incident.
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-16
+
+VPS host SSH info in live listings (`mngr list --format json`) now carries the explicit `known_hosts_path` that `SSHInfo` gained in this release, and the human-facing `ssh` command includes `-o UserKnownHostsFile=<path> -o StrictHostKeyChecking=yes` when the pin file is known, matching the shared construction paths.
+
+## 2026-08-15
+
+Phase 2 of the user-controlled-keys plan: per-host agent client keys and store-routed pinning.
+
+The agent connection's client keys become per-host for new hosts: the container realizer mints a per-host `container_ssh_key` and authorizes only it in the new container, and the bare realizer mints a per-host `vps_ssh_key` and appends it to root's authorized_keys. `agent_endpoint` now takes the host_id it resolves keys for, falling back to the legacy provider-wide pair for hosts created before per-host keys existed.
+
+The provider-wide `vps_ssh_key` deliberately remains the VM-root management key (discovery must reach a VPS before knowing which host lives on it, and OVH's rebuild bootstrap installs it), but it never serves the agent connection for new hosts.
+
+`vps_known_hosts` and `container_known_hosts` are now rendered from mngr core's new host-key pin store: every pin (create, resume rebind, realizers) carries the host_id, `remove_host_from_known_hosts` is store-aware, and destroying a host forgets its pin records alongside its per-host keypairs. The per-host key-dir helpers moved to mngr core, with `mngr_vps.primitives` re-exporting them.
+
+## 2026-08-13
+
+No behavior change. This provider and the aws, azure, gcp, ovh and vultr providers built on it still report an agent blocked on a tool-approval dialog (or a question put to the user) as `RUNNING` rather than `WAITING`, where local, docker, ssh and lima agents now report `WAITING`.
+
+Its listing builds agent state from a batched script that stats marker files by fixed name and has no agent object to ask, so it cannot see a per-agent-type block signal. It now says so explicitly at the call site rather than by omission.
+
+## 2026-08-11
+
+Improved remote docker build failure diagnostics: the error now reports the command's exit code (or "exit code unknown" when the output stream died) and tails stdout and stderr separately, so one stream's noise (e.g. buildkit progress on stderr) can no longer push the other stream's error text out of the reported window.
+
+- The outer-VM btrfs snapshot helper no longer touches the data volume before
+  it is actually mounted: `handle_request` now defers (polls `mountpoint`
+  every 5s with a periodic journal warning, never fails) until
+  `MNGR_BTRFS_MOUNT_PATH` resolves to a mounted volume. Previously, on slice
+  VMs -- where lima mounts the data disk at a highly variable point late in
+  boot, well after the helper's `local-fs.target` ordering -- the helper's
+  startup replay of a `request.json` left over from before a reboot ran
+  pre-mount: its `mkdir -p` wrote a shadow `snapshots/` directory onto the
+  root fs beneath the unmounted mountpoint (debris that defeated the
+  workspace autostart trigger during the mngr-internal#266 follow-up testing,
+  see default-workspace-template#381), and the request was failed -- then
+  permanently retired by the result-id idempotency guard -- when it only
+  needed to wait a few seconds for the mount. A deferred request is now
+  serviced normally once the volume appears, within the inner requester's own
+  result timeout.
+
+- `prepare_btrfs_on_outer` now refuses (raises `VpsProvisioningError`) when
+  the btrfs mount path is a symlink -- the pre-mounted slice layout -- but
+  nothing is mounted at its target yet. Previously the slice detection was a
+  pure presence gate, so running before the VM's data-disk provisioning
+  finished would silently fall through to building a btrfs loop file on the
+  VM's root disk: a wrong-but-working state that masks the real volume (and
+  its content) from then on.
+
+## 2026-08-10
+
+A Docker image build whose working directory has been deleted now fails with an error that says so, instead of a bare `FileNotFoundError` raised from inside `posixpath`.
+
+A relative build context (every `[create_templates.*]` block passes `"."`) resolves against the building process's working directory. When that directory has been deleted, `Path(".").exists()` still returns `True` -- the process holds an open file descriptor on the unlinked directory -- so the context survives the is-it-a-path filter and then dies inside `Path.resolve()`'s `os.getcwd()`, naming nothing the operator can act on. `build_image_on_outer_from_build_args` now checks for this up front and raises `MngrError` explaining what happened. The build is not salvageable at that point, since the context directory is genuinely gone; the change is to the diagnosis, not the outcome.
+
+Reverted the absolute-path branch added in #217, which was inert. It was guarded on `os.path.isabs(raw_context)`, but no configuration in either repo has ever used an absolute build context, and its stated premise -- that `Path.resolve()` calls `os.getcwd()` even for an already-absolute path -- is false, so it changed nothing for any input. Its `os.path.normpath` was also strictly less correct than the `resolve()` it replaced: `normpath` collapses `..` lexically, which walks through a symlink to the wrong directory.
+
+The check is scoped to relative contexts on purpose. An absolute context needs no working directory and builds fine without one.
+
+## 2026-08-05
+
+Fixed `mngr create` crashing with `FileNotFoundError: [Errno 2] No such file or directory` during the image-build step when the create process's own working directory had been deleted (for example, a temporary build/clone directory cleaned up while it was still the CWD). `build_image_on_outer_from_build_args` normalized the build-context path with `Path.resolve()`, which calls `os.getcwd()` even for an already-absolute path -- so a deleted CWD took down the whole create even though the build context itself was fine. An absolute context path is now normalized without touching the CWD.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-07-30
+
+Bumped the pinned Docker Engine version from 29.5.1 to 29.6.2. Under lima 2.2.0-carved slice VMs, docker-ce 29.5.1 with current containerd.io fails every `docker run` with a corrupted shim bootstrap (`failed to create TTRPC connection: unsupported protocol: Yunix`) -- this failed all 36 production slice bakes on 2026-07-30 -- while 29.6.2 with the same containerd.io 2.2.6 is verified working on the dev and staging slice fleets. Slice guest images pre-baked with the old pin must be re-staged: delete the box's `~limahost/.cache/mngr-slice-base/debian-base.qcow2` and re-run `just prep-server <id>`.
+
+Also pinned `containerd.io` (2.2.6) alongside the docker-ce pin in the shared host-setup install script -- the docker/containerd daemon-shim pairing is exactly the axis the lima-2.2.0 shim-bootstrap failure lived on, so containerd floating with the repo while docker-ce is pinned reintroduces silent drift between hosts staged at different times. The install script is now exported as `PINNED_DOCKER_INSTALL_SCRIPT` so the slice VM provisioning installs the identical pinned stack.
+
+## 2026-07-29
+
+mngr_vps: add `imbue.mngr_vps.leak_cleanup`, the shared, age-based reaper for leaked VPS test instances used by every VPS-family provider (AWS, GCP, Azure, Vultr). It scans a provider's `list_instances()` output, keeps the instances a per-provider `CreatedAtExtractor` reports as test-created and older than a max age, and destroys them through the narrow `VpsReaperClient` protocol (`list_instances` + `destroy_instance`). Production instances, which carry no test marker, are never matched.
+
+Failures are surfaced rather than swallowed: a `list_instances` scan error propagates (a reaper that cannot scan must not report "nothing leaked"), and a non-404 destroy failure raises `VpsLeakCleanupError` after every instance has been attempted (one stuck instance does not block reaping the rest, but the run still fails). A 404 on destroy is treated as already-cleaned (a race with a test's own teardown). The same `find_old_test_instances` / `destroy_leaked_instances` primitives back both each provider's session-end leak detector and its standalone CI reaper, so the two paths can never drift.
+
+No behavior change. The bare realizer's listing test now asserts through the host_dir the script resolves rather than an interpolated literal, following the listing scripts gaining fallback host_dir candidates -- bare passes none, so it settles on the single host_dir it was handed.
+
+`VpsProvider.create_host_on_existing_vps` now composes an overridable `_compute_extra_start_args()` seam into the container's effective `docker run` args (after `default_start_args`, before caller-supplied `start_args`, so explicit caller flags still win under docker's last-one-wins semantics). The base provider adds nothing; the imbue_cloud slice provider uses it to inject its per-slice container memory cap.
+
+## 2026-07-26
+
+Comment-only sweep for the default-workspace-template root declutter: the clone-overlay comment in `container_setup.py` now points its example at `system/vendor/mngr/` (the vendored tree's decluttered location). No behavior change.
+
+Integration branch combining the user-data-layout trains (`mngr/fix-data-layout`, `mngr/declutter-template`) with `mngr/fix-apt-mirror`; the full per-train details live in this project's sibling entries for those branches.
+
+For this project: the new optional `volume_home_path` config gives the unified host volume a `home/` subdirectory backing a configurable container home path (e.g. `/home/user`) with `host_dir` inside it, plain-text service logs honor the new `host_log_dir` config, and the clone-overlay comment follows the template declutter. Defaults unchanged.
+
+New optional `volume_home_path` config: the unified host volume gains a `home/` subdirectory that a configurable container path (e.g. `/home/user`) symlinks onto, with `host_dir` living inside it -- so the whole home tree persists on the btrfs-backed volume. `host_dir` must sit strictly inside the configured path (validated). Plain-text service logs honor the new `host_log_dir` config. Defaults preserve today's host_dir-symlink layout.
+
+## 2026-07-24
+
+Updated the `_LocalFakeOuter` test double to match the `HostInterface.execute_stateful_command` signature, which gained an optional `on_output` streaming callback. No runtime behavior change.
+
 ## 2026-07-14
 
 Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.

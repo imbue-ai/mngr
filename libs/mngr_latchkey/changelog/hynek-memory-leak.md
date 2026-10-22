@@ -1,3 +1,0 @@
-Fixed unbounded memory growth in `mngr latchkey forward`. It supervises a `mngr observe --discovery-only` child that emits a discovery snapshot per provider every 30 seconds for as long as the forward runs, and the forward retained every one of those lines for its entire lifetime. On a machine left running for a week or two this accumulated well over a gigabyte (visible on macOS as a large "Memory" / "VM Compressed" figure in Activity Monitor, with a small resident size, because the leaked pages are never touched again and so get compressed).
-
-The discovery stream is now started with `is_output_accumulated=False`, so lines are dispatched to the discovery handlers as they arrive and then dropped. The child's stderr continues to be logged.

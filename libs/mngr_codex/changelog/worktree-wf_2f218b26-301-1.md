@@ -1,1 +1,0 @@
-`CodexAppServerClient` now captures the `ThreadInfo` seed from the most recent `thread/start` / `thread/resume` on `last_thread_info`, so a caller that binds through the opener can seed the model bar to the settings the daemon resumed with (model / effort / service tier) without a second RPC.

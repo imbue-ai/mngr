@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-17
+
+Hosts are now opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`: the rebuild installs that per-host key, and the TOFU host-key pin is attributed to the host's record so it is removed with the host. Discovery reads the host id from the `mngr-host-id` IAM tag; recycle-candidate orphans (placeholder ids) are skipped quietly, without a warning. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them.
+
+Part of the account-owned remote providers program (`specs/account-owned-providers/spec.md`); the entry `mngr-per-client-host-keys.md` in this directory belongs to the same PR.
+
+- The OVH release trip runs its `mngr` commands from a temporary git repository (the `temp_git_repo` fixture), as the other cloud trips do, so the create no longer fails "Not inside a git repository" under the test isolation that moves the process cwd.
+
+- The rebuild-time TOFU pin reads the VPS-root key path from the `VpsRootKeypair` that `mngr_vps` now resolves (no behavior change).
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved 4 tests that sat under `Project-level checks` to the groups the source gives them; created the `Hardcoded paths` group; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-10
+
+- `mngr list` reports an OVH host's real size (the vCores, RAM, and disk of the VPS model OVH reports), recorded on the host record at create, instead of the 1 CPU / 1 GB placeholder. Hosts created before this release on the default `vps-2025-model1` plan answer from a table; any other pre-existing plan lists the size as unknown.
+
+- The OVH create release test asserts the size `mngr list` reports matches what OVH says the VPS model has.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 12 comment lines that had accumulated inside `libs/mngr_ovh/imbue/mngr_ovh/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-29
+
+The default OVH image is now plain `Debian 13` instead of `Debian 12 - Docker`. OVH offers no Docker-preinstalled trixie image; the shared mngr_vps host setup installs the pinned Docker Engine on every VPS regardless, so nothing else changes. Override with `default_image_name` as before. The `Debian 13` default has not yet been exercised end to end: the OVH release trip was blocked at order checkout for the available credentials, so the `debian` default-user assumption is verified only on `Debian 12 - Docker`.
+
+Merges the Debian 13 default (issue #975): the default OVH image is plain `Debian 13` (no Docker-preinstalled trixie image exists; the shared host setup installs the pinned Docker anyway). Not yet exercised end to end, since the OVH release trip is blocked at order checkout for the available credentials. See the `mngr-host-sizing-debian-13` entry.
+
+## 2026-09-21
+
+Parallel fan-outs in this plugin now run on `mngr_executor` instead of a raw `ConcurrencyGroupExecutor`, so each worker thread's gevent Hub is destroyed when its task finishes. Before, a worker that ran a host command (pyinfra reads command output with gevent) left its Hub behind, holding a pipe pair and the task's objects for the rest of the process's life. A new `test_prevent_raw_concurrency_group_executor` ratchet keeps new raw executors out.
+
+## 2026-08-12
+
+Updated the `_load_private_key` docstring (and the corresponding test docstrings in `bootstrap_test.py`) to reflect that the base VPS provider now generates OpenSSH-format Ed25519 client keys (older installs still hold RSA PEM keys). No behavior change: the loader already tried each key type in turn.
+
+Merge the web-only work (`mngr/hopefully-last-web-details`) into main. Updated the `_load_private_key` docstring (and the corresponding `bootstrap_test.py` test docstrings) to reflect that the base VPS provider now generates OpenSSH-format Ed25519 client keys (older installs still hold RSA PEM keys). No behavior change: the loader already tried each key type in turn.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

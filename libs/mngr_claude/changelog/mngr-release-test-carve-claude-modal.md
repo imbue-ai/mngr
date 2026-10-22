@@ -1,3 +1,0 @@
-Fixed the modal claude-provisioning release test, which looked for "Claude installed successfully" in the create output. The message interpolates the binary name, so it reads "claude" -- the capitalised form the test asserted on is never emitted, and the check could only fail.
-
-Fixed the modal clone release test, which failed with "No agent type provided". `mngr clone` forwards its arguments to `create`, which resolves the agent type from an explicit flag, a positional, or a config default -- it never reads the type off the source agent. The test sandbox sets no default, so the type is now passed explicitly, matching the create helpers alongside it.

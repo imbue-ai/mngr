@@ -1,3 +1,0 @@
-`minds env deploy` now runs an image-requirements freshness preflight before deploying the connector or the LiteLLM proxy: it replays the offline `uv export` that generates each app's committed hash-locked `image_requirements.txt` and refuses to deploy when the committed export no longer matches `uv.lock` (run `just export-image-requirements` and commit the result). This prevents a stale checkout or a skipped-CI branch from shipping unreviewed package versions.
-
-The preflight's helpers come from `imbue.imbue_common.modal_image_requirements` (not `modal_app_kit`, which is absent from the public mirror). minds also picked up the new repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (count 0).

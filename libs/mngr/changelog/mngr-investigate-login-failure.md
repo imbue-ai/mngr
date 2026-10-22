@@ -1,1 +1,0 @@
-Regenerate the `mngr imbue_cloud` CLI reference doc (`docs/commands/secondary/imbue_cloud.md`) for the plugin's new `auth login --accounts-url` flag, which opens the hosted login page on the tier's browser accounts origin (see the `mngr_imbue_cloud` changelog for the underlying Google sign-in fix).

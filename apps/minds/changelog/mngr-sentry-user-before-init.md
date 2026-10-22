@@ -1,5 +1,0 @@
-A crash in the first 60 seconds of a launch now reaches Sentry with the install's anonymous id attached, so it counts towards crash-free *users* for its release rather than only towards crash-free sessions.
-
-The id was set just after `Sentry.init`. The session integration opens the release-health session during `init` and writes its first snapshot to disk there; a crash is reported on the next run from the last snapshot written, and that snapshot is only rewritten every 60 seconds. So a crash before the first rewrite went out without an id — which is precisely a startup crash, the failure a release most needs attributed.
-
-The id is now passed as `initialScope` on `Sentry.init` instead, which is what Sentry's Electron docs prescribe for exactly this: *"To receive data on user adoption, such as users crash free rate percentage ... set the user on the `initialScope` when initializing the SDK."* Events pick the id up from there just as they did from `Sentry.setUser`, so that call is gone rather than duplicated.

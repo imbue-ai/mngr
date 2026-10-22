@@ -1,1 +1,0 @@
-Implement context compaction support for Claude Code agents, including `ContextCompactionConfig` settings, idle time tracking via stop hooks and assistant transcript timestamps, token usage extraction, filtering synthetic compaction summaries from common transcripts, and passing optional instructions to `/compact <instructions>`.

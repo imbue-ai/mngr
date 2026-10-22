@@ -1,5 +1,0 @@
-The attach-time discovery replay (`mngr forward --observe-via-file`, used by the minds app on startup) now skips provider snapshots that are superseded by that provider's latest one(s), instead of re-emitting and re-folding one interleaved world-state per discovery cycle of the backlog.
-
-The replay window reaches back to each provider's last healthy snapshot, so a provider that stopped writing (removed from config, or erroring for days) used to force every attach to replay days of stale snapshots -- tens of thousands of events and minutes of startup delay during which minds showed a stale workspace listing. Only each provider's latest non-errored snapshot, latest snapshot, and latest snapshot carrying a provider config can still affect the reconstructed state, so only those (plus every non-snapshot event) are emitted; the final state is identical.
-
-The skipped snapshots are summarized in one counted log line per provider (count, errored count, and time span), plus one counted line per distinct error the skipped snapshots carried, so the record of the gap -- including which failures occurred during it -- still surfaces in the log without the per-cycle flood.

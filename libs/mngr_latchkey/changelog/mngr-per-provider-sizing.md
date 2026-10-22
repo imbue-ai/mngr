@@ -1,1 +1,0 @@
-The `minds-workspaces-recover` verb of the cross-workspace API now also admits `POST /api/v1/workspaces/<id>/machine-size`, the route that resizes a workspace's machine and restarts it, so an agent granted recovery on a workspace can resize it; before, the gateway refused that route whatever the agent was granted.

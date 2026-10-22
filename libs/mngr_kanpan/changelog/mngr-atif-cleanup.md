@@ -1,1 +1,0 @@
-The peek panel no longer asks for `--role assistant`: streams from before the ATIF cutover now report an unsupported-format error instead of rendering, so the retired role spelling could never match anything. It asks for `--role user --role agent`.

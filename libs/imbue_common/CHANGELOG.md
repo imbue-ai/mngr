@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.21] - 2026-10-22
+
 ### Added
 
 - Added: `secret_wrapping` module — pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.
@@ -15,16 +17,31 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `setup_sentry` accepts an `ignored_loggers` argument — glob patterns for stdlib logger names whose records must never become Sentry events or breadcrumbs. Sentry's default logging integration patches `logging.Logger.callHandlers` at the class level and captures a logger's ERROR records as events even when the logger has `propagate=False`, so callers that already route a noisy third-party logger's output elsewhere (e.g. into loguru) can now drop the raw records instead of flooding on already-handled noise.
 - Added: Shared `PREVENT_ASYNC_AWAIT` ratchet rule (`common_ratchets.py`) and `check_async_await` wrapper (`standard_ratchet_checks.py`) that power a per-project `test_prevent_async_await` ratchet freezing `async def` / `await` usage across the monorepo.
 - Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` — lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible already-lowercase wire format.
+- Added: JSONL log records include a logged exception's formatted traceback (`exception.traceback_text`, capped at 8,000 characters), via `imbue.imbue_common.tracebacks.format_exception_traceback` (moved from mngr).
+- Added: `imbue.imbue_common.suspension`, which tells whether the machine was suspended since an earlier moment (the wall clock outran the monotonic clock).
+- Added: `owner_exec_client`, a signed client for the owner-exec service: Ed25519 request signing per RFC 9421/9530, with every response verified against the endpoint's pinned SSH host key, failing closed.
+- Added: `modal_image_requirements` module (the canonical offline `uv export` command, the `IMAGE_PINNED_PACKAGE_NAMES` registry and export paths) for hash-locked Modal image exports.
+- Added: `UnitFloat` primitive, a float validated to the closed interval `[0.0, 1.0]`.
+- Added: `parse_iso_timestamp` in `imbue_common.event_envelope`, reading an `IsoTimestamp` into an aware UTC `datetime` (or `None`).
+- Added: `testing` extra (`import-linter`, `inline-snapshot`, `pytest`) for downstream suites using the shipped test library; `imbue.imbue_common.pytest_utils` now ships in the wheel.
+- Added: Common ratchets `PREVENT_RAW_START_NEW_THREAD`, `PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR` and `PREVENT_UNPINNED_MODAL_PIP_INSTALL` (`check_raw_start_new_thread`, `check_raw_concurrency_group_executor`, `check_unpinned_modal_pip_install`).
+- Added: Optional `excluded_patterns` on `assert_ratchet` and more standard checks (`check_builtin_exception_raises`, `check_getattr`, `check_args_in_docstrings`, `check_returns_in_docstrings`, `check_literal_with_multiple_options`, `check_if_elif_without_else`, `check_async_await`, `check_asyncio_import`), so projects can exclude vendored code.
+- Added: Sentry manual bug reports upload the description verbatim to S3 alongside the inline copy, get their own Sentry issue each, and support one-shot attachments by exact path and attachment URIs reserved before upload (archives such as `.zip` are stored as-is).
 
 ### Changed
 
 - Changed: `find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates sourced by the deploy tooling, not runnable scripts, so `set -euo pipefail` is meaningless for them.
+- Changed: `EventEnvelope` ignores unknown fields instead of forbidding them, so older readers tolerate additive fields; subclasses may not re-tighten `extra`.
+- Changed: Sentry API: `setup_sentry` gates automatic sends and their attachments on the one `is_error_reporting_enabled` callable (`is_log_inclusion_enabled` removed) and raises the SDK's databag breadth cap so event extras are not trimmed; `submit_manual_bug_report` takes `description` explicitly and drops `include_logs`. The `sentry-sdk` floor is 2.63.0.
+- Changed: `check_no_type_errors` runs `ty check --output-format concise` and reports the exact error count, errors before warnings (`TypeCheckOutcome`), instead of dumping raw output.
 
 ### Fixed
 
 - Fixed: `PREVENT_TRAILING_COMMENTS` ratchet no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment; a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
 - Fixed: Inline-function ratchet (`find_inline_functions`) double-counted a function nested two or more levels deep — it walked every `FunctionDef` and descended into all descendants, emitting a doubly-nested function once per ancestor. Nested defs are now keyed by source position and counted once (across the monorepo only `apps/minds` sees a change, from 9 to 7).
 - Fixed: `PREVENT_TRAILING_COMMENTS` ratchet no longer misfires on `#{...}` interpolation/format tokens (e.g. tmux format strings like `"#{client_width} #{client_height}"`). The `#` in these tokens is interpolation syntax inside a string, not a comment; real trailing comments, hex colors, and `PR #NNNN` references are unaffected.
+- Fixed: Shared ratchet rules no longer flag non-violations: inline imports (docstring prose starting with "import"), trailing comments (bare `#NNNN` references, a hex colour closing a string), `Args:` in docstrings (names like `FooArgs:`), direct subprocess (`subprocess.Popen[bytes]` annotations), async/await (`await-delivery` prose), if/elif without else (an `else:` block starting with `if`), `PREVENT_EXEC` (hyphenated `owner-exec`), and bare tmux targets (tmux ids `$N`/`@N`/`%N`, `$TMUX_PANE`, `*_ID` variables).
+- Fixed: Ratchet scans skip binary files (`BINARY_FILE_EXCLUSION`, now including fonts, applied to every scan, plus a NUL-byte sniff) and read undecodable bytes as replacement characters instead of failing with `UnicodeDecodeError`.
 
 ## [v0.1.20] - 2026-06-13
 

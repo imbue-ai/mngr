@@ -1,1 +1,0 @@
-The embed contract's `minds:focus-chat` message no longer prescribes which window a chat notification lands in: that choice now belongs to the workspace, which hands it to the app that holds the chat.

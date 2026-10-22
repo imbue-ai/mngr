@@ -6,21 +6,40 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `LimaProviderInstance.rename_host` — updates the logical host name on the (offline-writable) host record, so it works whether or not the VM is running.
+- Added: `mngr lima resize HOST [--cpus N] [--memory GIB] [--disk GIB]` changes a host's recorded size. A stopped VM is reconfigured at once; a running one gets the new size at its next `mngr start`, which always brings the VM up to the recorded size. Data disks never shrink.
+- Added: Lima hosts report their real size (the VM's CPUs and memory, and the btrfs data disk, or the boot disk on the exposed layout) in `mngr list` (`host.resource`) and discovery (`DiscoveredHost.size`, carried by `mngr observe`), instead of a 4 CPU / 4 GiB / 100 GiB placeholder.
+- Added: Create steps `lima.start_vm`, `lima.wait_cloud_init` and `lima.wait_ssh` are reported on mngr's structured progress stream (`--format jsonl`).
+- Added: Optional `volume_home_path` config lets the btrfs data disk back a whole home tree (e.g. `/home/user`) with `host_dir` inside it; plain-text service logs honor the new `host_log_dir` config.
+- Added: `LIMA_HOST_ACCESS_MANIFEST` (with `LIMA_HOST_KEY_NAME`, `LIMA_ROOT_SSH_KEY_NAME`, `LIMA_KNOWN_HOSTS_NAME`) in `constants.py` publishes the per-VM key layout under `keys/hosts/<host id>/`.
+- Added: Discovery heals Lima's persisted agent store (persists missing live-agent records, removes orphaned ones). Host-record reads retry parse failures, then treat the record as missing, or raise `HostRecordUnreadableError` when `strict_host_record_parsing` is enabled.
 
 ### Changed
 
 - Changed: New Lima VMs derive their `limactl` instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (`limactl` has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working; discovery reads the host name and instance name from the persisted record rather than parsing the instance name.
 - Changed: Lima VM provisioning script's required-package check now includes `flock` (the `util-linux` package), used by mngr's unified cross-actor host lock and the in-host idle-shutdown watcher. Already present on standard Debian images; only installs on minimal/custom images that lack it.
 - Changed: When `limactl` is installed and new enough but an invocation fails at runtime, Lima discovery now reports the provider as unavailable (matching how other providers report an unreachable backend, with the same retry/backoff), instead of silently marking every Lima host offline. A genuinely absent or too-old `limactl` still degrades gracefully to a local, all-offline host view.
+- Changed: The default guest image is Debian 13 "trixie" genericcloud `20260722-2547` from imbue's artifact mirror (`apt.imbuepackages.com/artifacts/debian-cloud-image/`), replacing Debian 12 from `cloud.debian.org`; `default_image_url_aarch64` / `default_image_url_x86_64` still override it.
+- Changed: New run-as-root VMs authorize a per-host root client key minted under the host's keys dir instead of the provider-wide `root_ssh_key` (older VMs fall back to the shared pair); the per-host `known_hosts` is rendered through mngr core's host-key pin store.
+- Changed: Provisioning caps the systemd journal at 512 MiB and, in the btrfs layout, grows the data filesystem to fill its disk on every boot.
+- Changed: A transient network failure while downloading the base image retries `limactl start` once; 404/403 are not retried.
 
 ### Fixed
 
 - Fixed: Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when the home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name (`<prefix>host-<32-char id>`) and rejects names that push the socket path over the OS limit, which could fire for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits; if the prefix plus `LIMA_HOME` leaves no room at all, creation fails early with a clear message instead of a cryptic limactl fatal error.
 - Fixed: Lima workspace-creation failing with `SSH host key error (Host key for 127.0.0.1 does not match.)` after a transient Debian mirror hiccup during `apt-get install`. The VM provisioning script now installs the pre-trusted SSH host key (and applies sshd tuning) before any package fetch — host-key trust no longer depends on the network — and the package install is wrapped in a retry loop; if it still fails, the error surfaces clearly on an SSH-reachable host.
 - Fixed: A `limactl` invocation that fails at runtime (e.g. crashes at startup) is now surfaced as `LimaCommandError` instead of leaking an opaque error. Every wrapper helper (`list`, `stop`, `delete`, `disk create`, `disk delete`, `show-ssh`, `shell`, `start`, `--version`) funnels through a single runner that translates the raw process error, so callers catching `LimaCommandError` no longer miss it. `limactl shell` now raises rather than silently returning a non-zero exit code, so a broken VM fails host creation with a clear error instead of proceeding.
+- Fixed: Lima hosts record the `host_dir` they were created with, and reads, the in-VM activity watcher and the service log dir use it. A host created under a project-level `[providers.lima].host_dir` was unreadable from other contexts, and restarting it from one silently stopped idle shutdown.
+- Fixed: Creating a host under a name already in use fails with `HostNameConflictError` instead of building a second VM; the name is reserved before `limactl start`, so concurrent creates conflict too.
+- Fixed: `delete_host` deletes the Lima VM definition, so `mngr gc` no longer strands VMs in `limactl list`.
+- Fixed: The btrfs data disk gets the `lima-<disk_name>` label Lima probes for (existing disks are relabeled), so VMs no longer re-run first-time disk setup on every boot and come up systemd-`degraded`.
+- Fixed: Provisioning appends to root's `authorized_keys` instead of truncating it, which dropped keys added after creation (e.g. the imbue_cloud owner key) on every VM start.
+- Fixed: Guests with OpenSSH >= 9.8 disable sshd `PerSourcePenalties`, which under qemu user-mode networking could leave a VM permanently unreachable after one auth timeout during a slow boot.
+- Fixed: limactl's `"Unknown"` (and any unrecognized) status maps to `HostState.UNKNOWN` instead of `CRASHED`, which triggered unattended auto-restarts and GC eligibility.
 
 ## [v0.1.10] - 2026-06-18
 

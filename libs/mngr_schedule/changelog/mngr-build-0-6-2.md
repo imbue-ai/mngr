@@ -1,1 +1,0 @@
-- `mngr schedule add --provider modal` creates the per-user Modal environment when it does not exist yet, the way `mngr create @.modal` does, instead of failing with "Provider 'modal' has no state yet" on a fresh install (the Modal provider stopped auto-creating its environment on read-only commands, which also caught the schedule deploy).

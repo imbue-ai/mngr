@@ -1,1 +1,0 @@
-The Agent SDK driver's mid-session agent restart now launches the agent through mngr's shared locked start helper (under the host lock, with a bounded lock wait) instead of an unlocked `start_agents` call, so it can no longer race another start of the same agent. The best-effort stop before the relaunch is unchanged.

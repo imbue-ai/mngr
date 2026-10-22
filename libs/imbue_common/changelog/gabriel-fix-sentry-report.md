@@ -1,9 +1,0 @@
-A user-submitted bug report's description is no longer lost when Sentry's data scrubber redacts it.
-
-Sentry's default data scrubber replaces an entire string value with `[Filtered]` whenever the value matches its built-in password pattern anywhere -- and that pattern is a list of plain substrings (`auth`, `secret`, `password`, `credentials`, ...), so ordinary prose trips it. Roughly one in nine reports was arriving with no body at all; in one case the word "authored" destroyed a 9,705-character report.
-
-`submit_manual_bug_report` now takes the description as an explicit argument (rather than reading it back out of the caller's report mapping, where a rename in the caller would silently disable the fix) and uploads it verbatim to the same S3 bucket already used for log attachments, recording its `s3://` URI on the event under `uploaded_files_bug_report_description`. The inline copy is still sent -- it survives for most reports and is the convenient one to read -- but it is no longer the only copy. Reports with no log attachments get the out-of-band copy too.
-
-The description travels the same way every other bug report attachment does, so there is one carrier to reason about rather than two. It inherits that carrier's properties: no copy is made in environments with no bucket configured (minds' `development`), and the URI is recorded whether or not the upload itself succeeds.
-
-Each manually-submitted bug report now also gets its own Sentry issue, via an explicit random fingerprint. Sentry's default grouping is driven by the stack trace, which is the submitting code path and therefore identical for every report, so all reports were collapsing into a single catch-all issue whose title only ever showed the newest one -- and assigning, resolving or commenting on one report meant doing it to all of them.

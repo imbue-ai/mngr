@@ -1,1 +1,0 @@
-Test doubles that implement `OuterHostInterface.write_file` now default `is_atomic` to `True`, matching the interface: `write_file` is atomic by default on every host (the bytes are staged in a sibling temp file and renamed over the destination once complete). No behavior change in this project's own code.

@@ -1,1 +1,0 @@
-`mngr imbue_cloud shares create` accepts a new `--entry-label` option (and the connector client's `create_share` a matching parameter): the workspace's shell-service origin label, recorded server-side so the hosted minds web chrome knows the routable origin to enter and health-probe the workspace at (the bare share domain is deliberately unrouted on the relay).

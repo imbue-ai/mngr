@@ -1,1 +1,0 @@
-- `runsc_tmpfs_start_args`'s docstring no longer names the gen-2 slice bake as a caller that brings its own `/tmp`: the bake now carries only `--tmpfs /run` and gets its capped `/tmp` from mngr_vps like every other runsc container.

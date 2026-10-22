@@ -4,6 +4,60 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-17
+
+Hosts are now opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`; discovery reads the host id from the instance's `mngr-host-id` tag to pick that key, skipping (with a warning) instances that carry none. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them.
+
+The Vultr release tests now run `mngr` from the `temp_git_repo` fixture's checkout instead of the process cwd, which the test isolation moves out of any git repository (every `mngr create` failed with "Not inside a git repository").
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved 4 tests that sat under `Project-level checks` to the groups the source gives them; created the `Hardcoded paths` group; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-10
+
+- `mngr list` reports a Vultr host's real size (the vCPUs, RAM, and disk Vultr reports on the instance), recorded on the host record at create, instead of the 1 CPU / 1 GB placeholder. Hosts created before this release on the default `vc2-2c-4gb` plan answer from a table; any other pre-existing plan lists the size as unknown.
+
+- The Vultr create release test asserts the size `mngr list` reports matches what Vultr says the instance has.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-29
+
+The default Vultr OS is now id `2625`, "Debian 13 x64 (trixie)", instead of `2136` (Debian 12). Override with `default_os_id` as before.
+
+Merges the Debian 13 default (issue #975): the default Vultr OS is id `2625`, "Debian 13 x64 (trixie)". See the `mngr-host-sizing-debian-13` entry.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-07-29
+
+mngr_vultr: add a session-end leak detector to test_release_vultr. Tags every test-created VPS with a per-session UUID and destroys any survivors at pytest session end, matching the Modal leak-detection pattern. Catches cost leaks from tests that crash between create and their finally-block destroy, or whose destroy itself fails silently.
+
+Also tags every test-created VPS with a UTC session-start timestamp (``mngr-vultr-test-created=<YYYY-MM-DD-HH-MM-SS>``, mirroring Modal's test-env timestamp format) so an out-of-band, age-based reaper can later clean up orphans from sessions that were killed before the in-process session-end check could run.
+
+Adds that reaper (``imbue.mngr_vultr.cleanup.cleanup_old_vultr_test_instances``): it lists the account's instances, keeps those whose ``mngr-vultr-test-created`` tag is older than a max age, and destroys them. Production VPSes never carry that tag, so they are never touched. Driven by ``scripts/cleanup_old_vultr_test_instances.py`` (run by a CI job on every push to main and pull request), analogous to Modal's ``cleanup_old_modal_test_environments``.
+
+Adds an explicit ``MNGR_VULTR_RELEASE_TESTS=1`` opt-in for the Vultr release tests (mirroring ``MNGR_AWS_RELEASE_TESTS`` / ``MNGR_GCP_RELEASE_TESTS`` / ``MNGR_AZURE_RELEASE_TESTS``). The release tests now require both the opt-in and ``VULTR_API_KEY``. The session-end leak detector no-ops on ordinary unit-only runs (opt-in unset), but now *fails* the session -- rather than skipping silently -- when the opt-in is set but ``VULTR_API_KEY`` is missing, since a release run that cannot authenticate is a misconfiguration, not a benign skip.
+
+The out-of-band age-based reaper logic now lives in the shared ``imbue.mngr_vps.leak_cleanup`` (used by every VPS provider); ``imbue.mngr_vultr.cleanup`` keeps only Vultr's ``build_test_created_tag`` and a ``CreatedAtExtractor`` for the ``mngr-vultr-test-created`` tag, and ``cleanup_old_vultr_test_instances`` is now a thin wrapper over the shared reaper. The shared reaper surfaces a non-404 destroy failure as ``VpsLeakCleanupError`` (so the CI job goes red rather than green-with-a-leak) instead of logging and continuing.
+
+The session-end leak detector's instance scan (`list_instances`) now fails the session on error instead of logging a warning and reporting "no leaks" -- the same fail-on-scan-error policy the AWS / GCP / Azure session-end hooks apply, since a scan that never ran must not silently green the session.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

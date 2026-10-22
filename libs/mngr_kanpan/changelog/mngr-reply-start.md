@@ -1,5 +1,0 @@
-A reply typed into the peek panel now starts the agent it is addressed to. Previously the send passed no `--start`, so replying to an agent that was not live failed with `Agent is not running (state: STOPPED)` and the typed reply was dropped.
-
-The reply now sends `mngr message --start`, which brings up an offline host and (re)launches a `STOPPED` or `DONE` agent before delivering. Note that reviving a `DONE` agent tears down its lingering tmux session and discards that pane's content, so attach first if you want to read it. The send's ceiling is now three minutes, which clears a live agent's own waits; a start slow enough to outrun it is reported as a failure whether or not the reply eventually lands.
-
-The board now re-probes local state after a failed reply as well as a delivered one. The (re)launch happens before delivery is attempted, so a send that fails afterwards -- typically on its delivery confirmation -- can still have left the agent running, and the failure does not say whether it got that far. The row would otherwise keep showing `STOPPED` until the periodic local refresh, or until a manual `r` where that timer is turned off.

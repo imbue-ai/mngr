@@ -1,1 +1,0 @@
-- `mngr_common_transcript_lib.sh`: documented that the shared per-agent convert lock now also serializes raw streamers that keep a read-offset/append/write-offset section (codex's `stream_transcript.sh`), closing the daemon-vs-single-pass duplicate-emit race on the raw rollout stream. No behavior change in the library itself.

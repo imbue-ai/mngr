@@ -1,1 +1,0 @@
-The `curl` POST that delivers a message to an OpenCode agent's server has a timeout (the agent's `send_command_timeout_seconds`, default 15s), so a hung server fails the send instead of holding the agent's message lock forever. A POST that fails with no output says it may have hit the timeout.

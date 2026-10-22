@@ -1,5 +1,0 @@
-The shared async/await ratchet no longer counts prose as async usage.
-
-The rule matched the bare keyword on a word boundary, so it also fired on `await-delivery` -- a real CLI subcommand (`mngr imbue_cloud admin server await-delivery`) that naturally appears in comments, docstrings, and user-facing strings. Most recorded matches across the repo were such false positives, which meant every comment naming that command silently cost a ratchet slot and could fail CI for a project that had no async code at all.
-
-The rule now matches what actually follows the keyword in Python -- whitespace before the awaited expression, or an opening paren -- so both real spellings are still caught while a trailing hyphen is not. Recorded counts were re-snapshotted accordingly: `mngr_imbue_cloud` 7 to 0 and `mngr_pi_coding` 8 to 7, which is exactly the prose that stopped being counted; `mngr_gcp` 1 to 0, a slot that was unused under either pattern; and `imbue_common` 3 to 2, whose remaining matches are this rule naming itself in its own source. No project's count dropped because real async code stopped being counted.

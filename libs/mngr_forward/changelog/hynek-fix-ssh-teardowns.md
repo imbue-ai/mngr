@@ -1,3 +1,0 @@
-`SSHTunnelManager` gained `remove_reverse_tunnel(ssh_info, local_port)`, the exact inverse of `setup_reverse_tunnel`: it tears down the single reverse tunnel identified by the same `(host:port, local_port)` key, leaving other tunnels -- including ones tagged with the same agent -- untouched.
-
-This gives the latchkey discovery handler a way to clear a stale desktop-to-container tunnel without also dropping the same agent's desktop-to-VPS tunnel, which the agent-keyed `remove_reverse_tunnels_for_agent` (still used for stop/destroy teardown) was tearing down and re-dialing on every 30s discovery cycle.

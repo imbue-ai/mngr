@@ -1,5 +1,0 @@
-Added the ATIF-shaped common-transcript stream-record schema (`header` / `step` / `observation` record types in `common_transcript_records.py`), composing the vendored ATIF sub-models (`ToolCall`, `Metrics`, `ObservationResult`) so the payload shapes are stated exactly once. Step records reuse the vendored ATIF `Step` validators at emit time, so emit-time conformance implies build-time document validity, and both step and observation records validate their ISO 8601 timestamps.
-
-A step's originator is the `StepSource` enum (`system` / `user` / `agent`), observation results are typed as `StreamObservationResult` (which requires the `source_call_id` that lets the doc-builder attach a result to its step), and `parse_common_transcript_record` raises `InvalidCommonTranscriptRecordError` at the parse boundary rather than surfacing pydantic's `ValidationError`.
-
-The legacy `user_message` / `assistant_message` / `tool_result` record types remain in the schema (CLEANUP-marked) until all five emitters are migrated to the new records later in this stack.
