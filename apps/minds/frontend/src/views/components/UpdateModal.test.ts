@@ -6,9 +6,11 @@ import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
+  byId,
   collectVnodes,
   jsonResponse,
   OUT_OF_DATE_UPDATE,
+  publishWorkspaceLiveness,
   recordingFetch,
   settle,
   updatesShell,
@@ -642,5 +644,22 @@ describe("the update modal over a run in flight", () => {
     void getAppContext().stores.updates.updateNow(AGENT);
 
     expect(pressableWithLabel(draw(), "Open chat")).toBeUndefined();
+  });
+});
+
+describe("the update modal over a workspace that stops", () => {
+  it("offers nothing and claims no version until the workspace runs again", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})));
+    publishWorkspaceLiveness(AGENT, "RUNNING");
+    expect(buttonLabels(draw())).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
+
+    publishWorkspaceLiveness(AGENT, "STOPPED");
+    const stopped = draw();
+    expect(buttonLabels(stopped)).toEqual([]);
+    expect(byId(stopped, "update-modal-stopped")).toBeDefined();
+    expect(allText(stopped)).not.toContain("can't detect");
+
+    publishWorkspaceLiveness(AGENT, "RUNNING");
+    expect(buttonLabels(draw())).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
   });
 });

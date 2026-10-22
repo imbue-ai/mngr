@@ -259,7 +259,8 @@ export type UpdateModalSituation =
   | "offered"
   | "updated"
   | "unknown"
-  | "up-to-date";
+  | "up-to-date"
+  | "stopped";
 
 export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateModalSituation {
   if (isUpdating) return "in-progress";
@@ -602,8 +603,12 @@ export class UpdatesStore {
     return updateShownWhileStopped(published);
   }
 
-  /** Whether this machine's update state is held back because it is stopped. */
-  isHiddenWhileStopped(agentId: string): boolean {
+  /** Whether this machine is stopped with nothing of its update state shown. */
+  isQuietWhileStopped(agentId: string): boolean {
+    return this.publishedFor(agentId) === null && this.isHiddenWhileStopped(agentId);
+  }
+
+  private isHiddenWhileStopped(agentId: string): boolean {
     return !this.pendingAgentIds.has(agentId) && isStoppedLiveness(this.livenessOf(agentId));
   }
 

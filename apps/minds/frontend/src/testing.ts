@@ -2,7 +2,7 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
-import { registerAppContext } from "./app-context";
+import { getAppContext, registerAppContext } from "./app-context";
 import type {
   UiAccountEntry,
   UiAccountsMessage,
@@ -330,6 +330,16 @@ export function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** Publish a workspace list holding only `agentId`, at `liveness`, to the registered app context. */
+export function publishWorkspaceLiveness(
+  agentId: string,
+  liveness: UiWorkspacesMessage["workspaces"][number]["liveness"],
+): void {
+  getAppContext().stores.workspaces.applyWorkspacesMessage(
+    workspacesMessage({ workspaces: [{ ...workspacesMessage().workspaces[0], id: agentId, liveness }] }),
+  );
 }
 
 /** A workspace read as a minor release behind and idle, with backups to fall back on. */

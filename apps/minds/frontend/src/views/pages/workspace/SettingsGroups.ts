@@ -52,6 +52,7 @@ import { SettingsModel } from "../../../models/settings";
 import {
   noBackupConfirmPrompt,
   skipConfirmPrompt,
+  STOPPED_UPDATES_LINE,
   updateVersionRow,
 } from "../../components/UpdateModal";
 import { workspaceUpdateSettings } from "../settings/WorkspaceUpdateSettings";
@@ -299,10 +300,10 @@ function renderUpdatesGroup(
   ) {
     local.skipConfirmAgentId = null;
   }
-  if (updates.publishedFor(agentId) === null && updates.isHiddenWhileStopped(agentId)) {
+  if (updates.isQuietWhileStopped(agentId)) {
     return m("div", { class: "max-w-md" }, [
       m(SectionHeader, "Update"),
-      m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, "Start this workspace to see its updates."),
+      m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, STOPPED_UPDATES_LINE),
       appUpdateSettingsSection(local),
     ]);
   }

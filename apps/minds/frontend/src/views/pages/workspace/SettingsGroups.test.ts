@@ -21,10 +21,10 @@ import {
   byId,
   collectVnodes,
   jsonResponse,
+  publishWorkspaceLiveness,
   renderDeep,
   settingsOverview,
   settle,
-  workspacesMessage,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
 import { SettingsGroups } from "./SettingsGroups";
@@ -1234,19 +1234,13 @@ describe("the Updates settings group's skip question", () => {
   it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
     const { draw } = harness();
     armBacked(true);
-    const withLiveness = (liveness: "RUNNING" | "STOPPED") =>
-      getAppContext().stores.workspaces.applyWorkspacesMessage(
-        workspacesMessage({
-          workspaces: [{ ...workspacesMessage().workspaces[0], id: BACKED, liveness }],
-        }),
-      );
-    withLiveness("RUNNING");
+    publishWorkspaceLiveness(BACKED, "RUNNING");
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
     expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
 
-    withLiveness("STOPPED");
+    publishWorkspaceLiveness(BACKED, "STOPPED");
     draw(BACKED);
-    withLiveness("RUNNING");
+    publishWorkspaceLiveness(BACKED, "RUNNING");
 
     expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
   });
@@ -1280,11 +1274,7 @@ describe("the Updates settings group of a stopped workspace", () => {
     );
     init();
     await settleDispatch();
-    getAppContext().stores.workspaces.applyWorkspacesMessage(
-      workspacesMessage({
-        workspaces: [{ ...workspacesMessage().workspaces[0], id: BACKED, liveness: "STOPPED" }],
-      }),
-    );
+    publishWorkspaceLiveness(BACKED, "STOPPED");
 
     const pane = renderDeep(draw(BACKED)) as m.Children;
     expect(byId(pane, "ws-updates-stopped")).toBeDefined();

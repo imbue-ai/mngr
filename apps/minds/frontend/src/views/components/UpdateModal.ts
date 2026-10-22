@@ -130,6 +130,9 @@ export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCance
   ]);
 }
 
+/** What a stopped machine's update surfaces say, its update state being held back until it starts. */
+export const STOPPED_UPDATES_LINE = "Start this workspace to see its updates.";
+
 /** The skip confirmation, drawn in place of the controls it was asked from.
  * Shared with the machine's Updates settings group. */
 export function skipConfirmPrompt(
@@ -294,7 +297,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       const isUpdating = updates.isUpdating(agentId);
       const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
       const chatAgentId = updateChatAgentIdFor(update, isUpdating);
-      const situation = updateModalSituation(update, isUpdating);
+      const situation = updates.isQuietWhileStopped(agentId) ? "stopped" : updateModalSituation(update, isUpdating);
 
       const body: m.Children[] = [];
       const actions: m.Children[] = [];
@@ -557,6 +560,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           break;
         case "up-to-date":
           body.push(versionRows());
+          break;
+        case "stopped":
+          body.push(m("p", { id: "update-modal-stopped", class: "type-body text-secondary" }, STOPPED_UPDATES_LINE));
           break;
       }
 
