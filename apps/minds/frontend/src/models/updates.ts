@@ -456,10 +456,10 @@ export function updateBadgeFor(
   }
   if (isUpdateOffered(update)) {
     if (update.is_scheduled ?? false) {
-      // Under auto-update an armed row asks nothing of the reader.
+      // A schedule auto-update armed asks nothing of the reader.
       return {
         state: "scheduled",
-        tone: isAutoUpdateEnabled ? "neutral" : "warn",
+        tone: isArmedByAutoUpdate(update, isAutoUpdateEnabled) ? "neutral" : "warn",
         label: "Update scheduled",
         tooltip: "See the update scheduled for this workspace",
         isSpinnerShown: false,

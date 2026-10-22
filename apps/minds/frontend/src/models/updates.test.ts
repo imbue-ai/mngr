@@ -538,9 +538,12 @@ describe("auto-update's quiet surfaces", () => {
     expect(standingUpdateNotice(OUT_OF_DATE_UPDATE, false, false)).toBe("out-of-date");
   });
 
-  it("shows an armed machine as scheduled, asking nothing of the reader", () => {
-    const badge = updateBadgeFor({ ...OUT_OF_DATE_UPDATE, is_scheduled: true }, false, true);
+  it("shows a machine it armed as scheduled, asking nothing of the reader, and one the user armed as without it", () => {
+    const armed = { ...OUT_OF_DATE_UPDATE, is_scheduled: true };
+    const badge = updateBadgeFor({ ...armed, is_schedule_auto_armed: true }, false, true);
     expect(badge).toMatchObject({ state: "scheduled", tone: "neutral", label: "Update scheduled" });
+    expect(updateBadgeFor(armed, false, true)).toEqual(updateBadgeFor(armed, false, false));
+    expect(updateBadgeFor(armed, false, true)?.tone).toBe("warn");
   });
 
   it.each([true, false])(
