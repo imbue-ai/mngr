@@ -623,6 +623,7 @@ function renderUpdatesGroup(
                           onclick: () => requestSchedule(overrideValue.trim()),
                         },
                         pendingSchedule?.action === "schedule" &&
+                          pendingSchedule.targetRef !== "" &&
                           pendingSchedule.targetRef === overrideValue.trim()
                           ? m(Spinner, { size: "sm" })
                           : "Schedule",

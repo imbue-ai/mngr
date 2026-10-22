@@ -435,6 +435,19 @@ describe("the Updates settings group's specific-version field", () => {
       expect(attrsOf(button as AnyVnode).disabled).toBe(true);
     }
   });
+
+  it("leaves its Schedule alone while the plain schedule is out, though both name no version", () => {
+    const { draw } = harness(() => new Promise<Response>(() => undefined));
+
+    press(updatesGroupDeep(draw(BACKED)), "Update to a specific version");
+    press(updatesGroupDeep(draw(BACKED)), "Schedule update");
+
+    const pane = updatesGroupDeep(draw(BACKED));
+    expect(allText(byId(pane, "ws-update-schedule-btn")?.children)).toBe("");
+    expect(allText(byId(pane, "update-override-schedule-btn")?.children)).toBe(
+      "Schedule",
+    );
+  });
 });
 
 describe("the Updates settings group's sign-in", () => {
