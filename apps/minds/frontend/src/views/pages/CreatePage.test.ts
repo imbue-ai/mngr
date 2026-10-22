@@ -21,7 +21,13 @@ import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 
+/** Every page `loadedPage` built, torn down as the router would after each
+ * test: a host-name check the page debounced would otherwise fire after the
+ * real `m.redraw` is restored, which throws with nothing mounted. */
+const loadedPages: m.Component<CreatePageAttrs>[] = [];
+
 afterEach(() => {
+  for (const page of loadedPages.splice(0)) (page.onremove as () => void).call(page);
   clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -55,6 +61,7 @@ async function loadedPage(
   const vnode = m(CreatePage, attrs) as m.Vnode<CreatePageAttrs>;
   const page = CreatePage(vnode);
   page.oninit?.call(page, vnode);
+  loadedPages.push(page);
   await settle();
   return { page, vnode };
 }
