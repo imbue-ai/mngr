@@ -994,6 +994,7 @@ def test_a_machine_with_an_update_running_is_not_scheduled_another(
     response = _post(client, f"/ui/api/updates/{agent_id}/schedule")
 
     assert response.status_code == 409
+    assert response.get_json() == {"error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING]}
     assert caller.calls == []
     assert _published(app, agent_id).is_scheduled is False
 
