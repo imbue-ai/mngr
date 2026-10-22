@@ -327,19 +327,40 @@ esac
 """
 
 
-def _write_container_cgroup(cgroup_parent: Path, container_id: str, *, limit: str, usage: int, stat: str) -> None:
-    cgroup_dir = cgroup_parent / f"docker-{container_id}.scope"
+_MIB = 1024 * 1024
+_CONTAINER_ID = "d0d0" * 16
+
+
+def _limited_container(tmp_path: Path, *, stat: str = "") -> tuple[Path, Path]:
+    """Write the container's cgroup (6415 MiB limit, 6000 MiB used) and make its empty volume directory; return both."""
+    cgroup_parent = tmp_path / "cgroup"
+    volume_dir = tmp_path / "volume"
+    volume_dir.mkdir()
+    _write_container_cgroup(cgroup_parent, limit=str(6415 * _MIB), usage=6000 * _MIB, stat=stat)
+    return cgroup_parent, volume_dir
+
+
+def _slot_files(volume_dir: Path) -> list[Path]:
+    return [volume_dir / ".host-meminfo.slot0", volume_dir / ".host-meminfo.slot1"]
+
+
+def _write_container_cgroup(cgroup_parent: Path, *, limit: str, usage: int, stat: str) -> None:
+    cgroup_dir = cgroup_parent / f"docker-{_CONTAINER_ID}.scope"
     cgroup_dir.mkdir(parents=True, exist_ok=True)
     (cgroup_dir / "memory.max").write_text(f"{limit}\n")
     (cgroup_dir / "memory.current").write_text(f"{usage}\n")
     (cgroup_dir / "memory.stat").write_text(stat)
 
 
+def _parse_published_meminfo(text: str) -> dict[str, int] | None:
+    fields = {line.split()[0].rstrip(":"): int(line.split()[1]) for line in text.splitlines()}
+    return fields if {"MemTotal", "MemAvailable", "Timestamp"} <= fields.keys() else None
+
+
 def _published_meminfo_or_none(target: Path) -> dict[str, int] | None:
     if not target.is_file() or target.is_symlink():
         return None
-    fields = {line.split()[0].rstrip(":"): int(line.split()[1]) for line in target.read_text().splitlines()}
-    return fields if {"MemTotal", "MemAvailable", "Timestamp"} <= fields.keys() else None
+    return _parse_published_meminfo(target.read_text())
 
 
 def _read_published_meminfo(target: Path, timeout_seconds: float) -> dict[str, int]:
@@ -348,8 +369,26 @@ def _read_published_meminfo(target: Path, timeout_seconds: float) -> dict[str, i
     return fields
 
 
+def _volume_holds_only_the_published_files(volume_dir: Path) -> bool:
+    # Polled while the publisher runs: each round briefly adds a link it then
+    # removes, so only one it leaves behind keeps this false.
+    return sorted(path.name for path in volume_dir.iterdir()) == [
+        ".host-meminfo",
+        ".host-meminfo.slot0",
+        ".host-meminfo.slot1",
+    ]
+
+
+def _has_left_the_unchanged_file(target: Path, file_descriptor: int, content: bytes) -> bool:
+    """Whether ``target`` names another file than the one open as ``file_descriptor``, failing if that one changed first."""
+    if target.stat().st_ino != os.fstat(file_descriptor).st_ino:
+        return True
+    assert os.pread(file_descriptor, 4096, 0) == content, f"{target} was rewritten in place"
+    return False
+
+
 @contextmanager
-def _running_publisher(tmp_path: Path, container_id: str, cgroup_parent: Path, volume_dir: Path) -> Iterator[Path]:
+def _running_publisher(tmp_path: Path, cgroup_parent: Path, volume_dir: Path) -> Iterator[Path]:
     """Run the rendered publisher against one fake container until the block exits, yielding its docker call log.
 
     Its PATH holds only the fake docker, so any other program it tried to start would fail.
@@ -365,7 +404,7 @@ def _running_publisher(tmp_path: Path, container_id: str, cgroup_parent: Path, v
     script.chmod(0o755)
     env = {
         "PATH": str(bin_dir),
-        "FAKE_CONTAINER_ID": container_id,
+        "FAKE_CONTAINER_ID": _CONTAINER_ID,
         "FAKE_VOLUME_DIR": str(volume_dir),
         "FAKE_DOCKER_LOG": str(docker_log),
     }
@@ -379,75 +418,183 @@ def _running_publisher(tmp_path: Path, container_id: str, cgroup_parent: Path, v
     assert exit_code is None, f"the publisher exited with {exit_code}: {stderr}"
 
 
-_MIB = 1024 * 1024
-
-
-def test_meminfo_publisher_reports_the_cgroup_limit_and_reclaimable_headroom(tmp_path: Path) -> None:
-    container_id = "d0d0" * 16
-    cgroup_parent = tmp_path / "cgroup"
-    volume_dir = tmp_path / "volume"
-    volume_dir.mkdir()
-    # 6415 MiB limit, 6000 MiB used, of which 300 MiB is file cache and 50 MiB
-    # reclaimable slab; the shmem gVisor keeps the sandbox's memory in is not
-    # counted as reclaimable.
-    _write_container_cgroup(
-        cgroup_parent,
-        container_id,
-        limit=str(6415 * _MIB),
-        usage=6000 * _MIB,
+def test_meminfo_publisher_reports_the_cgroup_limit_and_inactive_file_headroom(tmp_path: Path) -> None:
+    # 6415 MiB limit, 6000 MiB used, of which 200 MiB is inactive file cache.
+    # Active file cache, reclaimable slab and the shmem gVisor keeps the
+    # sandbox's memory in are not counted as available.
+    cgroup_parent, volume_dir = _limited_container(
+        tmp_path,
         stat=(
             f"anon {400 * _MIB}\nfile {5000 * _MIB}\nshmem {4700 * _MIB}\n"
             f"active_file {100 * _MIB}\ninactive_file {200 * _MIB}\nslab_reclaimable {50 * _MIB}\n"
         ),
     )
-    with _running_publisher(tmp_path, container_id, cgroup_parent, volume_dir):
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
         before = int(time.time())
         published = _read_published_meminfo(volume_dir / ".host-meminfo", timeout_seconds=10)
         assert published["MemTotal"] == 6415 * 1024
-        assert published["MemAvailable"] == (6415 - 6000 + 100 + 200 + 50) * 1024
+        assert published["MemAvailable"] == (6415 - 6000 + 200) * 1024
         assert before - 1 <= published["Timestamp"] <= int(time.time()) + 1
 
         # Removing the limit withdraws the file rather than reporting a made-up one.
-        (cgroup_parent / f"docker-{container_id}.scope" / "memory.max").write_text("max\n")
-        assert poll_until(lambda: not (volume_dir / ".host-meminfo").exists(), timeout=10, poll_interval=0.05)
+        (cgroup_parent / f"docker-{_CONTAINER_ID}.scope" / "memory.max").write_text("max\n")
+        assert poll_until(lambda: not any(volume_dir.iterdir()), timeout=10, poll_interval=0.05)
 
 
 def test_meminfo_publisher_never_writes_through_a_symlink_the_container_planted(tmp_path: Path) -> None:
     # The publisher is VM root and the volume is the container's: a planted
     # symlink must not steer its write onto a VM file or into a VM directory.
-    container_id = "d0d0" * 16
-    cgroup_parent = tmp_path / "cgroup"
-    volume_dir = tmp_path / "volume"
-    volume_dir.mkdir()
-    _write_container_cgroup(cgroup_parent, container_id, limit=str(6415 * _MIB), usage=6000 * _MIB, stat="")
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
     vm_file = tmp_path / "vm-file"
     vm_file.write_text("owned by VM root\n")
     vm_dir = tmp_path / "vm-dir"
     vm_dir.mkdir()
     (volume_dir / ".host-meminfo.tmp").symlink_to(vm_file)
-    (volume_dir / ".host-meminfo").symlink_to(vm_dir)
+    target = volume_dir / ".host-meminfo"
+    target.symlink_to(vm_dir)
 
-    with _running_publisher(tmp_path, container_id, cgroup_parent, volume_dir):
-        published = _read_published_meminfo(volume_dir / ".host-meminfo", timeout_seconds=10)
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+        published = _read_published_meminfo(target, timeout_seconds=10)
+        # Once its slot files exist the publisher writes them in place, which a
+        # file of exactly the published length would accept if the open followed links.
+        vm_file_of_published_length = tmp_path / "vm-file-of-published-length"
+        vm_content_of_published_length = "v" * len(target.read_bytes())
+        vm_file_of_published_length.write_text(vm_content_of_published_length)
+        slots = _slot_files(volume_dir)
+        for slot in slots:
+            planted = volume_dir / f"planted-{slot.name}"
+            planted.symlink_to(vm_file_of_published_length)
+            os.replace(planted, slot)
+        assert poll_until(
+            lambda: all(not slot.is_symlink() and slot.is_file() for slot in slots), timeout=10, poll_interval=0.05
+        )
 
     assert published["MemTotal"] == 6415 * 1024
     assert vm_file.read_text() == "owned by VM root\n"
     assert list(vm_dir.iterdir()) == []
+    assert vm_file_of_published_length.read_text() == vm_content_of_published_length
+
+
+def test_meminfo_publisher_replaces_a_fifo_the_container_planted(tmp_path: Path) -> None:
+    # Opening a FIFO nobody reads would block, and one publisher loop serves
+    # every container on the VM.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    target = volume_dir / ".host-meminfo"
+
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+        _read_published_meminfo(target, timeout_seconds=10)
+        slots = _slot_files(volume_dir)
+        for slot in slots:
+            planted = volume_dir / f"planted-fifo-{slot.name}"
+            os.mkfifo(planted)
+            os.replace(planted, slot)
+        assert poll_until(lambda: all(slot.is_file() for slot in slots), timeout=10, poll_interval=0.05)
+        assert _published_meminfo_or_none(target) is not None
+
+
+def test_meminfo_publisher_alternates_between_two_slot_files_it_rewrites_in_place(tmp_path: Path) -> None:
+    # gVisor keeps an entry for every distinct inode the sandbox sees, for its
+    # whole lifetime, so rewrites must reuse the same two files.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    target = volume_dir / ".host-meminfo"
+    slots = _slot_files(volume_dir)
+
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+        _read_published_meminfo(target, timeout_seconds=10)
+        assert poll_until(lambda: all(slot.is_file() for slot in slots), timeout=10, poll_interval=0.05)
+        # Holding both slots open keeps their inodes from being freed and their
+        # numbers handed to a replacement, so only an in-place rewrite of each
+        # can show the new figure through these descriptors.
+        slot_files = [os.open(slot, os.O_RDONLY) for slot in slots]
+        try:
+            _write_container_cgroup(cgroup_parent, limit=str(6415 * _MIB), usage=5000 * _MIB, stat="")
+            assert poll_until(
+                lambda: all(
+                    (_parse_published_meminfo(os.pread(slot_file, 4096, 0).decode()) or {}).get("MemAvailable")
+                    == (6415 - 5000) * 1024
+                    for slot_file in slot_files
+                ),
+                timeout=10,
+                poll_interval=0.05,
+            )
+            slot_inodes = {os.fstat(slot_file).st_ino for slot_file in slot_files}
+            assert len(slot_inodes) == 2
+            assert {slot.stat().st_ino for slot in slots} == slot_inodes
+            # A reader never opens a file mid-rewrite: the published name moves
+            # between the slots rather than being written itself.
+            seen_target_inodes: set[int] = set()
+            assert poll_until(
+                lambda: seen_target_inodes.add(target.stat().st_ino) or seen_target_inodes == slot_inodes,
+                timeout=10,
+                poll_interval=0.05,
+            )
+        finally:
+            for slot_file in slot_files:
+                os.close(slot_file)
+        assert poll_until(lambda: _volume_holds_only_the_published_files(volume_dir), timeout=10, poll_interval=0.05)
+
+
+def test_meminfo_publisher_starting_over_never_rewrites_the_slot_the_published_name_points_at(
+    tmp_path: Path,
+) -> None:
+    # A previous run left the published name on slot0. Rewriting slot0 in place
+    # would let a reader catch it half-written, and renaming a link to it onto
+    # the name, already that file, would do nothing and leave the link behind.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    target = volume_dir / ".host-meminfo"
+    slot0 = _slot_files(volume_dir)[0]
+    slot0.write_text(f"MemTotal: {1:15d} kB\nMemAvailable: {1:15d} kB\nTimestamp: {1:15d}\n")
+    os.link(slot0, target)
+    # Held open, so its inode number cannot be handed to another file.
+    previous_slot = os.open(slot0, os.O_RDONLY)
+    try:
+        previous_content = os.pread(previous_slot, 4096, 0)
+        with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+            assert poll_until(
+                lambda: _has_left_the_unchanged_file(target, previous_slot, previous_content),
+                timeout=10,
+                poll_interval=0.01,
+            )
+            assert poll_until(
+                lambda: (_published_meminfo_or_none(target) or {}).get("MemTotal") == 6415 * 1024,
+                timeout=10,
+                poll_interval=0.05,
+            )
+            assert poll_until(
+                lambda: _volume_holds_only_the_published_files(volume_dir), timeout=10, poll_interval=0.05
+            )
+    finally:
+        os.close(previous_slot)
+
+
+def test_meminfo_publisher_replaces_a_leftover_file_of_another_length_whole(tmp_path: Path) -> None:
+    # A slot in an older, longer format must not keep its tail under an in-place write.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    target = volume_dir / ".host-meminfo"
+    slots = _slot_files(volume_dir)
+    for path in [target, *slots]:
+        path.write_text("MemTotal: 1 kB\nMemAvailable: 1 kB\nTimestamp: 1\n" + "leftover tail 48213\n" * 20)
+
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+        assert poll_until(
+            lambda: all(len(path.read_text().splitlines()) == 3 for path in [target, *slots]),
+            timeout=10,
+            poll_interval=0.05,
+        )
+        published = _read_published_meminfo(target, timeout_seconds=10)
+
+    assert published["MemTotal"] == 6415 * 1024
 
 
 def test_meminfo_publisher_starts_no_process_between_container_lookups(tmp_path: Path) -> None:
     # It rewrites the file four times a second on every VM, so each rewrite
     # must cost no process start; only a lookup (every 10 s) runs docker.
-    container_id = "d0d0" * 16
-    cgroup_parent = tmp_path / "cgroup"
-    volume_dir = tmp_path / "volume"
-    volume_dir.mkdir()
-    _write_container_cgroup(cgroup_parent, container_id, limit=str(6415 * _MIB), usage=6000 * _MIB, stat="")
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
     target = volume_dir / ".host-meminfo"
 
     # Each file that reappears after a removal is a fresh rewrite. (Distinct
     # inodes would not show it: ext4 hands the replaced file's inode to the next.)
-    with _running_publisher(tmp_path, container_id, cgroup_parent, volume_dir) as docker_log:
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir) as docker_log:
         for _ in range(4):
             _read_published_meminfo(target, timeout_seconds=5)
             target.unlink()

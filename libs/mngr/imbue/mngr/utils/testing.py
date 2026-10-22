@@ -45,8 +45,10 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import resources as _mngr_resources
+from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
@@ -64,6 +66,7 @@ from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -1645,14 +1648,21 @@ class ExecOnlyParamikoServer(paramiko.ServerInterface):
     in a login session. Every command it is asked to run is recorded. Like the
     ``authorized_keys`` of ``local_sshd``, only ``authorized_key`` may log in:
     the port is open to every local process for as long as the server runs.
+    With ``is_auth_held`` it answers no public-key auth request until
+    ``auth_released`` is set, standing in for an sshd that never answers
+    authentication before the client gives up.
     """
 
-    def __init__(self, authorized_key: paramiko.PKey) -> None:
+    def __init__(self, authorized_key: paramiko.PKey, is_auth_held: bool) -> None:
         super().__init__()
         self.authorized_key = authorized_key
+        self.auth_released = threading.Event()
+        if not is_auth_held:
+            self.auth_released.set()
         self.exec_commands: list[str] = []
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        self.auth_released.wait()
         if key == self.authorized_key:
             return AUTH_SUCCESSFUL
         return AUTH_FAILED
@@ -1707,17 +1717,18 @@ def _accept_ssh_connections_until_stopped(
 
 @contextmanager
 def in_process_paramiko_sshd(
-    host_key_path: Path, authorized_key_path: Path
+    host_key_path: Path, authorized_key_path: Path, is_auth_held: bool
 ) -> Generator[tuple[int, ExecOnlyParamikoServer], None, None]:
     """Serve SSH on a free localhost port from this process, running exec requests through the local shell.
 
     Yields (port, server). Unlike ``local_sshd`` this needs no sshd binary, and
     the server records every command it was asked to run. Only the key at
     ``authorized_key_path`` (a private key file; its public half is what is
-    compared) can log in.
+    compared) can log in. With ``is_auth_held`` the server answers no auth
+    request until the context exits (see ``ExecOnlyParamikoServer``).
     """
     host_key = paramiko.PKey.from_path(host_key_path)
-    server = ExecOnlyParamikoServer(paramiko.PKey.from_path(authorized_key_path))
+    server = ExecOnlyParamikoServer(paramiko.PKey.from_path(authorized_key_path), is_auth_held=is_auth_held)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -1735,6 +1746,7 @@ def in_process_paramiko_sshd(
         yield port, server
     finally:
         is_stopping.set()
+        server.auth_released.set()
         accept_thread.join(timeout=5.0)
         for transport in transports:
             transport.close()
@@ -1860,6 +1872,29 @@ def poll_until_file_contains(path: Path, text: str, timeout: float = 5.0) -> boo
     does not wait for the substitution, so the file can trail the command's exit.
     """
     return poll_until(lambda: path.exists() and text in path.read_text(), timeout=timeout)
+
+
+def make_command_agent(local_provider: LocalProviderInstance, work_dir: Path) -> tuple[CommandAgent, Host]:
+    """A command agent on a real local host, for tests that need an agent of a type other than their own.
+
+    Built without validation, like the agent-type plugins' own test factories, so no
+    process is started and nothing is written to the host.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    agent = CommandAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-command-agent"),
+        agent_type=AgentTypeName("command"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        host=host,
+    )
+    return agent, host
 
 
 # Takes an exclusive flock on argv[1], signals that it holds it by creating argv[2], then waits to be killed.

@@ -20,7 +20,6 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
-  is_version_from_label: false,
   activity: "IDLE",
   is_backup_configured: true,
 };

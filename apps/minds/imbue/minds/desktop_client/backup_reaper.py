@@ -71,9 +71,12 @@ _RETENTION_CACHE_TTL_SECONDS: Final[float] = 60.0 * 60.0
 # Events land under events/<source>/events.jsonl in the Imbue Studio data dir.
 _EVENT_SOURCE: Final[str] = "backup_reaper"
 
-# The CLI writes the raising exception's class name into its stderr JSON;
-# a missing bucket during a reap just means someone else got there first.
-_BUCKET_NOT_FOUND_SIGNAL: Final[str] = "R2BucketNotFoundError"
+# The plugin CLI writes the raising exception's class name into its stderr JSON
+# (``error_class``), and the class it raises for a bucket the connector no
+# longer has is its own ``ImbueCloudBucketNotFoundError``, never the connector's
+# ``R2BucketNotFoundError``. A missing bucket during a reap just means someone
+# else got there first.
+_BUCKET_NOT_FOUND_SIGNAL: Final[str] = "ImbueCloudBucketNotFoundError"
 
 
 class ReapCandidate(FrozenModel):

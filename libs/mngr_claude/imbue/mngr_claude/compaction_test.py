@@ -48,11 +48,13 @@ class _RecordingHost(FakeHost):
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         return self.files[Path(path)]
 
-    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
         if Path(path) not in self.files:
             raise FileNotFoundError(f"File not found: {path}")
         content = self.files[Path(path)].encode("utf-8")
-        tail = content[start_byte:]
+        tail = content[start_byte : None if max_byte_count is None else start_byte + max_byte_count]
         self.tail_content_bytes_read += len(tail)
         return FileTailRead(file_size=len(content), content=tail)
 
@@ -99,13 +101,15 @@ class _RecordingClaudeAgent(ClaudeAgent):
     def _get_agent_dir(self) -> Path:
         return self.override_agent_dir
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        return None
+
+    def _clear_or_warn_about_preexisting_input_text(
+        self, tmux_target: TmuxWindowTarget | str, input_box_pane_content: str | None
+    ) -> None:
         pass
 
-    def _clear_or_warn_about_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
-        pass
-
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
         self.sent_messages.append(message)
         return ""
 

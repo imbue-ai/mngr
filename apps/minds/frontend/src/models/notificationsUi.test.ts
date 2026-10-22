@@ -58,6 +58,12 @@ function systemEvent(
   });
 }
 
+/** A destination as the wire carries it: the message type beside its fields. */
+const ROUTINE_DESTINATION = {
+  type: "minds:show-routine",
+  routine_id: "inbox-digest",
+};
+
 function message(
   entries: UiNotificationEntry[],
   overrides: Partial<UiNotificationsMessage> = {},
@@ -364,6 +370,14 @@ describe("first notification choice", () => {
 describe("notification clicks across desktop windows", () => {
   it.each([
     [agentMessage("msg"), "/workspace/agent-aa11?chat=agent-cc33"],
+    // A destination is delivered by the entry action once the window is on
+    // the workspace; a chat param would focus the chat on top of it.
+    [
+      agentMessage("msg", { destination: ROUTINE_DESTINATION }),
+      "/workspace/agent-aa11",
+    ],
+    // A sender that is not a chat has no chat to focus.
+    [agentMessage("msg", { chat_agent_id: "" }), "/workspace/agent-aa11"],
     [entry("req"), "/workspace/agent-aa11?review=req-req"],
     [systemEvent("sys"), "/workspace/agent-aa11/backups"],
   ])(
@@ -533,18 +547,101 @@ describe("NotificationsUiController feed actions", () => {
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
-    const focusChat = vi.fn();
+    const sendWorkspaceMessage = vi.fn();
     const { controller } = seeded({
       gestures: new NotificationGestures(
         gestureContext({
           displayedWorkspaceAgentId: () => "agent-aa11",
-          focusChat,
+          sendWorkspaceMessage,
         }),
       ),
     });
     controller.openEntry(agentMessage("m1"));
     expect(routeSet).not.toHaveBeenCalled();
-    expect(focusChat).toHaveBeenCalledWith("agent-aa11", "agent-cc33");
+    expect(sendWorkspaceMessage).toHaveBeenCalledWith("agent-aa11", {
+      kind: "focus-chat",
+      chatAgentId: "agent-cc33",
+    });
+  });
+
+  it("delivers an agent message's destination into the displayed workspace as an app message, with no route change", () => {
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const sendWorkspaceMessage = vi.fn();
+    const { controller, posted } = seeded({
+      gestures: new NotificationGestures(
+        gestureContext({
+          displayedWorkspaceAgentId: () => "agent-aa11",
+          sendWorkspaceMessage,
+        }),
+      ),
+    });
+    controller.openEntry(
+      agentMessage("m1", { destination: ROUTINE_DESTINATION }),
+    );
+    expect(posted).toEqual(["/ui/api/notifications/m1/clear"]);
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(sendWorkspaceMessage).toHaveBeenCalledWith("agent-aa11", {
+      kind: "app-message",
+      type: "minds:show-routine",
+      fields: { routine_id: "inbox-digest" },
+    });
+  });
+
+  it("lands in the destination's workspace from elsewhere with no chat param, and hands the shell the app message to hold", () => {
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const sendWorkspaceMessage = vi.fn();
+    const { controller } = seeded({
+      gestures: new NotificationGestures(
+        gestureContext({ sendWorkspaceMessage }),
+      ),
+    });
+    controller.openEntry(
+      agentMessage("m1", { destination: ROUTINE_DESTINATION }),
+    );
+    expect(routeSet).toHaveBeenCalledWith("/workspace/agent-aa11");
+    expect(sendWorkspaceMessage).toHaveBeenCalledWith("agent-aa11", {
+      kind: "app-message",
+      type: "minds:show-routine",
+      fields: { routine_id: "inbox-digest" },
+    });
+  });
+
+  it("only raises the workspace for a message from a sender that is not a chat", () => {
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const sendWorkspaceMessage = vi.fn();
+    const { controller, posted } = seeded({
+      gestures: new NotificationGestures(
+        gestureContext({ sendWorkspaceMessage }),
+      ),
+    });
+    controller.openEntry(agentMessage("m1", { chat_agent_id: "" }));
+    expect(posted).toEqual(["/ui/api/notifications/m1/clear"]);
+    expect(routeSet).toHaveBeenCalledWith("/workspace/agent-aa11");
+    expect(sendWorkspaceMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not move for a non-chat sender's message when its workspace is already displayed", () => {
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const sendWorkspaceMessage = vi.fn();
+    const { controller } = seeded({
+      gestures: new NotificationGestures(
+        gestureContext({
+          displayedWorkspaceAgentId: () => "agent-aa11",
+          sendWorkspaceMessage,
+        }),
+      ),
+    });
+    controller.openEntry(agentMessage("m1", { chat_agent_id: "" }));
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(sendWorkspaceMessage).not.toHaveBeenCalled();
   });
 
   it("reads a system event and lands on the backups page, or the accounts page for an account-level one", () => {
@@ -672,7 +769,7 @@ function gestureContext(
     displayedWorkspaceAgentId: () => null,
     openInPlace: vi.fn(),
     currentRoutePath: () => "/",
-    focusChat: vi.fn(),
+    sendWorkspaceMessage: vi.fn(),
     ...overrides,
   } as NotificationGestureContext & { openInPlace: ReturnType<typeof vi.fn> };
 }

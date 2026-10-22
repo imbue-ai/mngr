@@ -82,6 +82,15 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:` or `tel:` URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`. |
 | `minds:immersive-changed` | `{ on, keyboardLocked, error? }` | Immersive mode is now on or off. `keyboardLocked` says whether the keyboard lock was obtained (a plain browser may refuse it, or ask the user once, while fullscreen stands: immersive mode is then on without the lock). `error` is a short string (at most 256 characters) when a `minds:immersive-request` could not be honoured, most often because fullscreen was refused after the gesture's activation had expired. Sent after every change, including one the chrome made on its own: the user held Escape, the OS or the browser left fullscreen, the frame navigated to another workspace. Immersive mode is never persisted or restored. |
 
+The chrome also posts, with the same `{ type, ...fields }` envelope, a
+notification's `destination`: a message whose type an app's manifest
+registers (`minds:show-routine`, say) rather than one of the types above. The
+module's own validators never see it -- the workspace shell's page relays
+such a message from `window.parent` to the registered app by the manifest
+(default-workspace-template's desktop contracts, section 5.6) -- and the chrome
+sends it only after `minds:workspace-ready`, fire-and-forget like
+`minds:focus-chat`. A workspace with no app registered for the type ignores it.
+
 `minds:open-ai-keys-ack`'s semantic is "an Imbue Studio chrome is present" --
 NOT "the desktop app is present". Plain-browser chrome acks too.
 

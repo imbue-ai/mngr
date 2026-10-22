@@ -19,8 +19,7 @@ That is the one thing the read writes into the workspace.
 The hub reads them on demand by running ``git`` inside the (online) workspace
 via ``mngr exec``. This is best-effort: an offline workspace, a workspace that
 has neither marker nor tag, or any exec failure yields a ``None`` current
-version and an empty history -- callers fall back to the
-``original_minds_version`` label, the one version fact knowable offline.
+version and an empty history.
 """
 
 import json
@@ -53,6 +52,10 @@ _GIT_EXEC_TIMEOUT_SECONDS: float = 30.0
 # sweep's 300s interval so a read can never overlap its own next pass, which
 # would have two fetches writing one workspace's refs.
 _GIT_VERSION_EXEC_TIMEOUT_SECONDS: float = 150.0
+
+# A failed read is logged every sweep, so only the end of mngr's stderr, where
+# its error lands, is kept.
+_MAX_LOGGED_STDERR_CHARACTERS: Final[int] = 2000
 
 # The subject ``update-self`` writes when a run lands, verbatim from the skill
 # (``.agents/skills/update-self/references/update-self-worker.md``). Matched in
@@ -303,11 +306,12 @@ def _exec_git_in_workspace(
     )
     if result.is_timed_out or result.returncode != 0:
         logger.debug(
-            "{} in machine {} failed (timed_out={}, rc={})",
+            "{} in machine {} failed (timed_out={}, rc={}): {}",
             git_command,
             agent_address,
             result.is_timed_out,
             result.returncode,
+            result.stderr.strip()[-_MAX_LOGGED_STDERR_CHARACTERS:],
         )
         return None
     try:

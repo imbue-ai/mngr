@@ -9,8 +9,8 @@ Two callers consume this module:
 
 - ``apps/minds/test_snapshot_resume.py`` -- the pytest test
   (``test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``)
-  wraps :func:`create_workspace_via_electron` and always cleans up the
-  resulting mngr agent in its ``finally``.
+  wraps :func:`create_workspace_via_electron` under a minds root of its own
+  and removes that root's containers in its ``finally``.
 - ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
   calls the same function but deliberately *does not* destroy the agent,
   because the whole point of the snapshot is to capture a sandbox in
@@ -623,32 +623,21 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
-def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | None = None) -> None:
+def destroy_agent_best_effort(workspace_name: str) -> None:
     """Tear down the mngr agent created during a run. Always survives.
 
     ``mngr destroy`` may legitimately fail (e.g. the run crashed before
     create succeeded, the docker daemon stopped). We log and swallow.
 
-    The pytest test calls this in its ``finally`` so the test never leaks
-    an agent into the host. The snapshot script does NOT call it -- the
-    whole point of the snapshot is to capture the sandbox with the agent
-    alive.
-
-    ``config_project_dir`` is exported as ``MNGR_PROJECT_CONFIG_DIR`` so
-    this subprocess loads the same isolated, opted-in config the pytest
-    wrapper built, rather than the repo's ``.mngr/`` (which would fail the
-    pytest config guard). Leave unset outside pytest.
+    The snapshot script does NOT call it -- the whole point of the snapshot
+    is to capture the sandbox with the agent alive.
     """
     cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
     logger.info("Cleanup: {}", " ".join(cmd))
-    env = dict(os.environ)
-    if config_project_dir is not None:
-        env["MNGR_PROJECT_CONFIG_DIR"] = str(config_project_dir)
     try:
         completed = subprocess.run(
             cmd,
             cwd=str(_REPO_ROOT),
-            env=env,
             capture_output=True,
             text=True,
             timeout=120,

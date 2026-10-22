@@ -242,6 +242,13 @@ def test_benign_dialog_presses_escape() -> None:
     assert pane.keys == ["Escape"]
 
 
+def test_deal_with_dialogs_returns_the_screen_left_once_the_dialog_is_gone() -> None:
+    """The send reuses this capture for its readiness check, so it must be the cleared screen, not the dialog."""
+    pane = FakePane([_THEME_PANE, _IDLE_PANE])
+    assert deal_with_dialogs(pane) == _IDLE_PANE
+    assert pane.keys == ["Escape"]
+
+
 _UNKNOWN_SELECTOR_PANE = " Choose a theme\n\n ❯ 1. Dark mode\n   2. Light mode\n"
 _UNKNOWN_SELECTOR_MOVED = " Choose a theme\n\n   1. Dark mode\n ❯ 2. Light mode\n"
 

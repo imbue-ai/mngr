@@ -1,0 +1,7 @@
+Added: `ImbueCloudConnectorClient.admin_delete_account(admin_api_key, email)` and `admin_finalize_account(admin_api_key, email)`, the client's forms of the connector's two operator account-deletion routes (`POST /admin/accounts/{email}/delete` and `/finalize`, `specs/account-deletion.md`), shaped like `admin_unsuspend_account`: each returns the route's JSON answer. `scripts/delete_accounts.py` is their caller.
+
+Added: `ImbueCloudWorkspacesPresentError`, an `ImbueCloudAccountError` carrying `workspace_count`, raised when either route refuses with 403 `workspaces_present` because the account still holds Imbue Cloud workspaces, running or stopped. Without it the 403 read as an authentication failure.
+
+Changed: the email-addressed admin account calls (`admin_get_account` and the two new ones) raise `ImbueCloudUserNotFoundError` when the connector answers 404 for an email with no account (a finalized account answers this too, its identity being gone), instead of a generic `ImbueCloudAccountError`; `minds-admin account show` on an unknown email therefore reports `code: user_not_found`. FastAPI's bare 404 for a route an older connector does not serve stays a connector error, so an old connector never reads as "no such account".
+
+Added: `AdminAccountInfo` carries the deletion marks `GET /admin/accounts/{email}` now reports: `deleted_at`, `deleted_by`, and `finalized_at`, each `None` when the account is not deleted or against an older connector.

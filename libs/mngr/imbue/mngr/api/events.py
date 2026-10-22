@@ -1,10 +1,13 @@
 import hashlib
+import heapq
 import json
 import queue
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -23,6 +26,7 @@ from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -74,6 +78,8 @@ _TAIL_READ_FAILURES_BEFORE_WARNING: Final[int] = 30
 _ONLINE_CHECK_FAILURES_BEFORE_WARNING: Final[int] = 10
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
 _STREAM_HEADER_RECORD_TYPE: Final[str] = "header"
+# How much of an event file one read pulls into memory at a time.
+_EVENT_FILE_READ_CHUNK_BYTES: Final[int] = 8 * 1024 * 1024
 
 
 class EventsTarget(FrozenModel):
@@ -140,6 +146,25 @@ class _TailSourceFailure(FrozenModel):
     error: BaseException = Field(description="The exception that ended the thread")
 
 
+class _FoldedNewest(FrozenModel):
+    """The newest timestamp a ``--latest-by`` value has had, and the events seen at exactly that time."""
+
+    timestamp: str = Field(description="The newest timestamp emitted or folded away for the value")
+    seen_event_ids: frozenset[str] = Field(description="Ids of the events at that timestamp already accounted for")
+
+
+@pure
+def _with_event_seen(newest: _FoldedNewest | None, timestamp: str, event_ids: frozenset[str]) -> _FoldedNewest:
+    """``newest`` updated with events seen at ``timestamp``, which a newer timestamp replaces and an older one leaves."""
+    if newest is None or timestamp > newest.timestamp:
+        return _FoldedNewest(timestamp=timestamp, seen_event_ids=event_ids)
+    if timestamp == newest.timestamp:
+        return newest.model_copy_update(
+            to_update(newest.field_ref().seen_event_ids, newest.seen_event_ids | event_ids)
+        )
+    return newest
+
+
 class _AllEventsStreamState(MutableModel):
     """Mutable state for the all-events streaming loop."""
 
@@ -161,6 +186,60 @@ class _AllEventsStreamState(MutableModel):
     consecutive_online_check_failure_count: int = Field(
         default=0, description="Host probes in a row that failed to answer online/offline"
     )
+    latest_by_field_by_source: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per source, the field whose newest event per value is all that is emitted (--latest-by)",
+    )
+    newest_by_fold_key: dict[tuple[str, str], _FoldedNewest] = Field(
+        default_factory=dict,
+        description="Per folded (source, field value), the newest timestamp seen and the events seen at it",
+    )
+
+
+class _LatestByFold(MutableModel):
+    """A history replay's ``--latest-by`` fold: the newest event offered per folded (source, field value)."""
+
+    field_by_source: dict[str, str] = Field(description="Per source, the field whose newest event per value is kept")
+    kept_by_fold_key: dict[tuple[str, str], EventRecord] = Field(
+        default_factory=dict, description="Per folded (source, field value), the newest event offered so far"
+    )
+    dropped_ids_at_kept_timestamp_by_fold_key: dict[tuple[str, str], frozenset[str]] = Field(
+        default_factory=dict,
+        description="Per folded value, the events dropped that share the kept event's timestamp",
+    )
+
+    def offer(self, event: EventRecord) -> bool:
+        """Hold ``event`` if a rule folds it and it is the newest for its value; return whether a rule folds it."""
+        fold_key = _latest_by_fold_key(event, self.field_by_source)
+        if fold_key is None:
+            return False
+        kept = self.kept_by_fold_key.get(fold_key)
+        if kept is None or event.timestamp > kept.timestamp:
+            self.kept_by_fold_key[fold_key] = event
+            self.dropped_ids_at_kept_timestamp_by_fold_key[fold_key] = frozenset()
+        elif event.timestamp == kept.timestamp:
+            dropped_ids = self.dropped_ids_at_kept_timestamp_by_fold_key[fold_key]
+            # An id already offered at this time is a re-read (the rotation guard reads a
+            # rotated file again), not a later event, so it must not displace anything.
+            if event.event_id != kept.event_id and event.event_id not in dropped_ids:
+                # The later of two events at one time wins, as in the file it was read from.
+                self.dropped_ids_at_kept_timestamp_by_fold_key[fold_key] = dropped_ids | {kept.event_id}
+                self.kept_by_fold_key[fold_key] = event
+        else:
+            pass
+        return True
+
+    def record_dropped_into(self, state: _AllEventsStreamState) -> None:
+        """Record the dropped events that tie with a kept one, so a re-read of them is not emitted as new."""
+        for fold_key, dropped_ids in self.dropped_ids_at_kept_timestamp_by_fold_key.items():
+            if dropped_ids:
+                state.newest_by_fold_key[fold_key] = _with_event_seen(
+                    state.newest_by_fold_key.get(fold_key), self.kept_by_fold_key[fold_key].timestamp, dropped_ids
+                )
+
+    def kept_events(self) -> list[EventRecord]:
+        """The newest event held per folded value, in timestamp order."""
+        return sort_events_by_timestamp(tuple(self.kept_by_fold_key.values()))
 
 
 def try_build_events_target_for_agent(
@@ -336,14 +415,16 @@ def read_event_content(target: EventsTarget, event_file_name: str) -> str:
         return content_bytes.decode("utf-8", errors="replace")
 
 
-def read_event_tail_from_offset(target: EventsTarget, event_file_name: str, start_byte: int) -> FileTailRead:
-    """Read an event file's bytes from ``start_byte`` to EOF, with the size the same call saw."""
+def read_event_tail_from_offset(
+    target: EventsTarget, event_file_name: str, start_byte: int, max_byte_count: int | None = None
+) -> FileTailRead:
+    """Read an event file's bytes from ``start_byte`` to EOF (at most ``max_byte_count``), with the size the same call saw."""
     if target.host is None or target.events_path is None:
         raise MngrError(f"Cannot read event file for {target.display_name}: no readable host available")
 
     file_path = target.events_path / event_file_name
     try:
-        return target.host.read_file_tail_from_offset(file_path, start_byte)
+        return target.host.read_file_tail_from_offset(file_path, start_byte, max_byte_count)
     except (FileNotFoundError, OSError) as e:
         raise MngrError(f"Failed to read event file '{event_file_name}': {e}") from e
 
@@ -673,107 +754,201 @@ def _build_event_sources_from_listing(
     return _build_event_sources_from_grouped_files(files_by_dir)
 
 
-def _read_events_from_file(
+def _probe_event_file_size(target: EventsTarget, relative_file_path: str) -> int | None:
+    """The current size of an event file, or None when it cannot be read."""
+    try:
+        return read_event_tail_from_offset(target, relative_file_path, 0, max_byte_count=0).file_size
+    except (MngrError, OSError) as e:
+        logger.trace("Failed to read event file '{}': {}", relative_file_path, e)
+        return None
+
+
+def _iter_events_from_file(
     target: EventsTarget,
     # Path to the file relative to the events directory (e.g. "messages/events.jsonl")
     relative_file_path: str,
     source_hint: str,
-) -> tuple[list[EventRecord], int]:
-    """Read and parse all events from a single JSONL file.
+    # Where to stop: the file's size when the caller sized it, so lines appended
+    # since are left for the follow tail that starts there. None stops at the size
+    # the first read reports, so a file nothing tails needs no separate sizing read.
+    end_byte: int | None,
+) -> Iterator[EventRecord]:
+    """Parse the events in a file's first ``end_byte`` bytes, reading it a bounded chunk at a time.
 
-    Returns (events, byte_length), where byte_length counts the raw bytes read rather than
-    the decoded text, since it seeds the follow tail's byte offset.
-
-    Note: this function intentionally does NOT hold back a trailing partial line via
-    split_complete_lines_from_bytes. It is used for whole-file historical reads (rotated files
-    and the current events.jsonl), where the final line is expected to be complete;
-    holding one back would misclassify a complete final line as partial and silently
-    drop it. The read is byte-exact, so a file's true trailing-newline state is
-    preserved either way. Partial-write robustness during *streaming* is handled
-    separately by the follow-tail loop in _read_remote_source_once, which has its own
-    partial-line guard.
+    Only one chunk and the parsed lines of that chunk are held at once, however large
+    the file. A host without a ranged read returns the rest of the file in one piece,
+    which is held whole, but is still parsed a chunk at a time. The final line is
+    parsed even without its newline: these are whole-file historical reads, where the
+    last line is expected to be complete (partial writes during *streaming* are
+    guarded by the follow tail instead). A read that fails part way, or before any of
+    a file the caller sized, ends the history at the last complete line read, with a
+    warning.
     """
-    with log_span("Reading event file '{}' for {}", relative_file_path, target.display_name):
-        try:
-            tail = read_event_tail_from_offset(target, relative_file_path, 0)
-        except (MngrError, OSError) as e:
-            logger.trace("Failed to read event file '{}': {}", relative_file_path, e)
-            return [], 0
-    content = tail.content.decode("utf-8", errors="replace")
-
-    events: list[EventRecord] = []
     warner = MalformedJsonLineWarner(source_description=f"event file '{relative_file_path}'")
-    for line in content.split("\n"):
-        record = _parse_stream_line(warner, line, source_hint)
-        if record is not None:
-            events.append(record)
-
-    return events, len(tail.content)
-
-
-def read_all_historical_events(
-    target: EventsTarget,
-    sources: Sequence[EventSourceInfo],
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
-) -> tuple[list[EventRecord], dict[str, int]]:
-    """Read all events from all sources (rotated files and current files).
-
-    Returns (sorted_events, byte_offsets) where byte_offsets maps source_path to the
-    byte length of the current events.jsonl (for subsequent tailing).
-    """
-    all_events: list[EventRecord] = []
-    byte_offsets: dict[str, int] = {}
-
-    for source in sources:
-        source_hint = source.source_path
-
-        # Read rotated files (oldest first)
-        for rotated_file in source.rotated_files:
-            relative_path = f"{source.source_path}/{rotated_file}" if source.source_path else rotated_file
-            events, _ = _read_events_from_file(target, relative_path, source_hint)
-            all_events.extend(events)
-
-        # Read current file
-        if source.is_current_file_present:
-            relative_path = (
-                f"{source.source_path}/{_EVENTS_JSONL_FILENAME}" if source.source_path else _EVENTS_JSONL_FILENAME
+    is_sized_by_caller = end_byte is not None
+    offset = 0
+    pending = b""
+    with log_span("Reading event file '{}' for {}", relative_file_path, target.display_name):
+        while end_byte is None or offset < end_byte:
+            max_byte_count = (
+                _EVENT_FILE_READ_CHUNK_BYTES
+                if end_byte is None
+                else min(_EVENT_FILE_READ_CHUNK_BYTES, end_byte - offset)
             )
-            events, byte_length = _read_events_from_file(target, relative_path, source_hint)
-            all_events.extend(events)
-            byte_offsets[source.source_path] = byte_length
-        else:
-            byte_offsets[source.source_path] = 0
+            try:
+                chunk = read_event_tail_from_offset(target, relative_file_path, offset, max_byte_count)
+            except (MngrError, OSError) as e:
+                if offset == 0 and not is_sized_by_caller:
+                    logger.trace("Failed to read event file '{}': {}", relative_file_path, e)
+                else:
+                    # The follow tail starts where the read was meant to stop, so the
+                    # events in between are not shown at all.
+                    logger.warning(
+                        "Stopped reading event file '{}' at byte {} of {}; its later history is not shown: {}",
+                        relative_file_path,
+                        offset,
+                        end_byte,
+                        e,
+                    )
+                return
+            if end_byte is None:
+                end_byte = chunk.file_size
+            # A host without a ranged read hands back the rest of the file at once,
+            # which may run past where this read stops.
+            content = chunk.content[: end_byte - offset]
+            # A file that shrank under the read was rotated or truncated.
+            if not content:
+                break
+            offset += len(content)
+            for piece_start in range(0, len(content), _EVENT_FILE_READ_CHUNK_BYTES):
+                unparsed = pending + content[piece_start : piece_start + _EVENT_FILE_READ_CHUNK_BYTES]
+                lines, consumed = split_complete_lines_from_bytes(unparsed)
+                pending = unparsed[consumed:]
+                for line in lines:
+                    record = _parse_stream_line(warner, line, source_hint)
+                    if record is not None:
+                        yield record
+        if pending:
+            record = _parse_stream_line(warner, pending.decode("utf-8", errors="replace"), source_hint)
+            if record is not None:
+                yield record
 
-    # Sort by timestamp
-    sorted_events = sort_events_by_timestamp(all_events)
 
-    # Apply CEL filters
-    sorted_events = [
-        e for e in sorted_events if _event_passes_cel_filters(e, cel_include_filters, cel_exclude_filters)
-    ]
-
-    return sorted_events, byte_offsets
-
-
-def _collect_historical_events(
+def _discover_and_register_sources(
     target: EventsTarget,
     state: _AllEventsStreamState,
+    source_filters: Sequence[str],
+) -> list[EventSourceInfo]:
+    """Discover the target's event sources, keeping the requested ones, and record them as known."""
+    sources = filter_sources_by_name(discover_event_sources(target), source_filters)
+    for source in sources:
+        state.known_source_paths.add(source.source_path)
+        state.known_rotated_files[source.source_path] = set(source.rotated_files)
+    return sources
+
+
+def _size_current_event_files(target: EventsTarget, sources: Sequence[EventSourceInfo]) -> dict[str, int]:
+    """Each source's current events.jsonl size: where its history read stops and its follow tail starts."""
+    end_byte_by_source: dict[str, int] = {}
+    for source in sources:
+        size = (
+            _probe_event_file_size(target, _relative_event_file_path(source.source_path, _EVENTS_JSONL_FILENAME))
+            if source.is_current_file_present
+            else None
+        )
+        end_byte_by_source[source.source_path] = 0 if size is None else size
+    return end_byte_by_source
+
+
+@pure
+def _relative_event_file_path(source_path: str, file_name: str) -> str:
+    return f"{source_path}/{file_name}" if source_path else file_name
+
+
+def _iter_source_history(
+    target: EventsTarget, source: EventSourceInfo, current_end_byte: int
+) -> Iterator[EventRecord]:
+    """One source's historical events in file order: its rotated files oldest first, then its current file."""
+    for rotated_file in source.rotated_files:
+        yield from _iter_events_from_file(
+            target, _relative_event_file_path(source.source_path, rotated_file), source.source_path, None
+        )
+    if source.is_current_file_present:
+        yield from _iter_events_from_file(
+            target,
+            _relative_event_file_path(source.source_path, _EVENTS_JSONL_FILENAME),
+            source.source_path,
+            current_end_byte,
+        )
+
+
+def _iter_streamed_history(
+    target: EventsTarget,
+    state: _AllEventsStreamState,
+    sources: Sequence[EventSourceInfo],
+    current_end_byte_by_source: Mapping[str, int],
+    source_filters: Sequence[str],
+) -> Iterator[EventRecord]:
+    """Every historical event, merged across sources by timestamp, then any file rotated while they were read.
+
+    Each source is read in file order, which for an append-only log is time order,
+    so merging the sources holds one pending event per source rather than the history.
+    """
+    yield from heapq.merge(
+        *(
+            _iter_source_history(target, source, current_end_byte_by_source.get(source.source_path, 0))
+            for source in sources
+        ),
+        key=lambda event: event.timestamp,
+    )
+    with log_span("Checking for newly rotated files"):
+        yield from _check_for_new_archived_events(target, state, source_filters)
+
+
+@pure
+def _latest_by_fold_key(event: EventRecord, latest_by_field_by_source: Mapping[str, str]) -> tuple[str, str] | None:
+    """The key an event is folded under, or None when it is not folded (its source has no rule, or it lacks the field)."""
+    field = latest_by_field_by_source.get(event.source)
+    if field is None or field not in event.data:
+        return None
+    return event.source, json.dumps(event.data[field], sort_keys=True)
+
+
+def _emit_history(
+    history: Iterator[EventRecord],
+    state: _AllEventsStreamState,
+    on_event: Callable[[EventRecord], None],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
-    source_filters: Sequence[str],
-) -> tuple[list[EventRecord], list[EventSourceInfo], dict[str, int]]:
-    """Discover sources and read all historical/archived events (Phases 1 and 3)."""
-    with log_span("Reading historical events for {}", target.display_name):
-        sources = filter_sources_by_name(discover_event_sources(target), source_filters)
-        all_events, initial_byte_offsets = read_all_historical_events(
-            target, sources, cel_include_filters, cel_exclude_filters
-        )
-        for source in sources:
-            state.known_source_paths.add(source.source_path)
-            state.known_rotated_files[source.source_path] = set(source.rotated_files)
+    head_count: int | None,
+    tail_count: int | None,
+) -> None:
+    """Emit the history as it is read, holding only the folded events and a ``--tail`` window.
 
-    return all_events, sources, initial_byte_offsets
+    Events a ``--latest-by`` rule folds are emitted last, in timestamp order, one per
+    value of the rule's field: the newest, so a re-read of an older file cannot bring
+    back a superseded event. Every other event is emitted as it is read.
+    """
+    fold = _LatestByFold(field_by_source=state.latest_by_field_by_source)
+    tail_window: deque[EventRecord] = deque(maxlen=tail_count)
+    offered_count = 0
+    for event in history:
+        if not _event_passes_cel_filters(event, cel_include_filters, cel_exclude_filters):
+            continue
+        if fold.offer(event):
+            pass
+        elif tail_count is not None:
+            tail_window.append(event)
+        elif head_count is not None and offered_count >= head_count:
+            break
+        else:
+            offered_count += 1
+            _emit_event_once(event, state, on_event)
+    for event in tail_window:
+        _emit_event_once(event, state, on_event)
+    fold.record_dropped_into(state)
+    for event in fold.kept_events():
+        _emit_event_once(event, state, on_event)
 
 
 def _start_tail_threads_for_sources(
@@ -815,27 +990,34 @@ def _start_tail_threads_for_sources(
     return threads
 
 
-def _emit_historical_events(
-    all_events: list[EventRecord],
-    state: _AllEventsStreamState,
-    on_event: Callable[[EventRecord], None],
-    head_count: int | None,
-    tail_count: int | None,
+def _emit_event_once(
+    event: EventRecord, state: _AllEventsStreamState, on_event: Callable[[EventRecord], None]
 ) -> None:
-    """Apply head/tail truncation and emit historical events, deduplicating by event_id."""
-    if head_count is not None:
-        all_events = all_events[:head_count]
-    elif tail_count is not None:
-        all_events = all_events[-tail_count:]
-    else:
-        pass
+    """Emit an event unless one with its id already went out, or a ``--latest-by`` rule has already passed it by.
 
-    for event in all_events:
+    A folded event is checked against its value's newest event alone, which keeps a
+    follow tail that re-reads a folded source from its start (after a rotation or a
+    switch of reader) from replaying the history the fold dropped: an event older than
+    the newest one seen for its value is superseded, and one at the same time is only
+    new if it was not among the events seen at that time. That check also drops a
+    re-read of an emitted event, so a folded event's id is not kept, and a long follow
+    of a folded source holds one entry per value rather than one per event.
+    """
+    fold_key = _latest_by_fold_key(event, state.latest_by_field_by_source)
+    if fold_key is None:
         if event.event_id in state.emitted_event_ids:
-            continue
+            return
         state.emitted_event_ids.add(event.event_id)
-        _maybe_emit_source_mismatch_warning(event, state.warned_incorrect_sources, on_event)
-        on_event(event)
+    else:
+        newest = state.newest_by_fold_key.get(fold_key)
+        if newest is not None and (
+            event.timestamp < newest.timestamp
+            or (event.timestamp == newest.timestamp and event.event_id in newest.seen_event_ids)
+        ):
+            return
+        state.newest_by_fold_key[fold_key] = _with_event_seen(newest, event.timestamp, frozenset({event.event_id}))
+    _maybe_emit_source_mismatch_warning(event, state.warned_incorrect_sources, on_event)
+    on_event(event)
 
 
 def stream_all_events(
@@ -847,11 +1029,23 @@ def stream_all_events(
     head_count: int | None,
     is_follow: bool,
     source_filters: Sequence[str] = (),
+    # Per source, the field whose latest value is all the history needs to show:
+    # only the newest historical event per value of that field is emitted.
+    latest_by_field_by_source: Mapping[str, str] | None = None,
 ) -> None:
-    """Stream all events from all sources."""
+    """Stream all events from all sources.
+
+    The history is emitted as it is read, merged across sources by timestamp, so
+    memory does not grow with its size (beyond the ids of the emitted events that no
+    ``--latest-by`` rule folds, kept to drop duplicates).
+    """
+    latest_by_rules = dict(latest_by_field_by_source or {})
+    if latest_by_rules and (head_count is not None or tail_count is not None):
+        raise MngrError("Folding history to the latest event per field cannot be combined with --head or --tail")
     state = _AllEventsStreamState(
         is_online=isinstance(target.host, OnlineHostInterface),
         last_source_scan_time=time.monotonic(),
+        latest_by_field_by_source=latest_by_rules,
     )
     stop_event = threading.Event()
     # Gates per-source tail I/O: set while online, cleared while offline. The
@@ -875,10 +1069,8 @@ def stream_all_events(
     watch_group = DirectoryWatchGroup()
 
     try:
-        # Discover sources and read all historical events
-        all_events, sources, initial_byte_offsets = _collect_historical_events(
-            target, state, cel_include_filters, cel_exclude_filters, source_filters
-        )
+        sources = _discover_and_register_sources(target, state, source_filters)
+        initial_byte_offsets = _size_current_event_files(target, sources)
 
         # Start one persistent tail thread per source for follow mode. They are
         # started even while offline -- each gates its own I/O on online_event,
@@ -900,16 +1092,15 @@ def stream_all_events(
                 watch_group,
             )
 
-        # Rotation guard: re-scan for newly rotated files that appeared during startup
-        with log_span("Checking for newly rotated files"):
-            rotation_guard_events = _check_for_new_archived_events(
-                target, state, cel_include_filters, cel_exclude_filters, source_filters
-            )
-            all_events.extend(rotation_guard_events)
-            all_events = sort_events_by_timestamp(all_events)
-
-        # Emit historical events
-        _emit_historical_events(all_events, state, on_event, head_count, tail_count)
+        _emit_history(
+            _iter_streamed_history(target, state, sources, initial_byte_offsets, source_filters),
+            state,
+            on_event,
+            cel_include_filters,
+            cel_exclude_filters,
+            head_count,
+            tail_count,
+        )
 
         if head_count is not None or not is_follow:
             return
@@ -948,40 +1139,36 @@ def stream_all_events(
 def _check_for_new_archived_events(
     target: EventsTarget,
     state: _AllEventsStreamState,
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
     source_filters: Sequence[str] = (),
-) -> list[EventRecord]:
+) -> Iterator[EventRecord]:
     """Re-scan for rotated files that appeared since the initial scan.
 
     This handles the case where rotation happens while we are reading
     directories and starting tail threads. Any newly rotated files
-    are read and their events returned.
+    are read a chunk at a time and their events yielded, unfiltered:
+    the caller applies the CEL filters.
     """
     try:
         current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
     except (MngrError, OSError) as e:
         logger.trace("Failed to re-scan for rotated files: {}", e)
-        return []
+        return
 
-    new_events: list[EventRecord] = []
     for source in current_sources:
         known_rotated = state.known_rotated_files.get(source.source_path, set())
         for rotated_file in source.rotated_files:
             if rotated_file not in known_rotated:
                 logger.debug("Found new rotated file during rotation guard: {}/{}", source.source_path, rotated_file)
-                relative_path = f"{source.source_path}/{rotated_file}" if source.source_path else rotated_file
-                events, _ = _read_events_from_file(target, relative_path, source.source_path)
-                new_events.extend(events)
+                yield from _iter_events_from_file(
+                    target,
+                    _relative_event_file_path(source.source_path, rotated_file),
+                    source.source_path,
+                    None,
+                )
                 # Record that we've now read this rotated file
                 if source.source_path not in state.known_rotated_files:
                     state.known_rotated_files[source.source_path] = set()
                 state.known_rotated_files[source.source_path].add(rotated_file)
-
-    # Apply CEL filters
-    new_events = [e for e in new_events if _event_passes_cel_filters(e, cel_include_filters, cel_exclude_filters)]
-
-    return new_events
 
 
 def _resolve_read_plan(target: EventsTarget, source_path: str) -> tuple[bool, Path] | None:
@@ -1128,17 +1315,18 @@ def _read_remote_source_once(
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
 ) -> int:
-    """Poll a source by offset read (stat + ranged read in one host call), enqueue new lines, and return the new byte offset.
+    """Poll a source by offset reads, enqueue new lines, and return the new byte offset.
 
-    Used for any non-local target (SSH-remote online host, or a volume-backed
-    offline host). Only the bytes past ``byte_offset`` are transferred; the
-    size seen by the same call detects rotation (size below the offset), which
-    re-reads from the start with event-id dedup as the backstop. May raise
-    ``MngrError``/``OSError`` from the read; the caller handles that and
-    retries on the next poll without advancing the offset.
+    Each read is a stat + capped ranged read in one host call. Used for any non-local
+    target (SSH-remote online host, or a volume-backed offline host). Only the bytes
+    past ``byte_offset`` are transferred; the size seen by the same call detects
+    rotation (size below the offset), which re-reads from the start with event-id
+    dedup as the backstop. May raise ``MngrError``/``OSError`` from a read; the
+    caller handles that and retries on the next poll from the offset it passed in,
+    with event-id dedup dropping anything the failed poll already enqueued.
     """
-    relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
-    tail = read_event_tail_from_offset(target, relative_file_path, byte_offset)
+    relative_file_path = _relative_event_file_path(source_path, _EVENTS_JSONL_FILENAME)
+    tail = read_event_tail_from_offset(target, relative_file_path, byte_offset, _EVENT_FILE_READ_CHUNK_BYTES)
 
     if tail.file_size < byte_offset:
         # File was rotated -- re-read from beginning, dedup via event_ids.
@@ -1148,9 +1336,12 @@ def _read_remote_source_once(
         logger.debug("Remote event file for source '{}' was rotated", source_path)
         byte_offset = 0
         warner.reset()
-        tail = read_event_tail_from_offset(target, relative_file_path, byte_offset)
+        tail = read_event_tail_from_offset(target, relative_file_path, byte_offset, _EVENT_FILE_READ_CHUNK_BYTES)
 
-    if tail.content:
+    # Reads are capped so a large backlog (a re-read from the start) is held a piece at
+    # a time; the poll keeps reading until a read reaches the size it saw.
+    read_start_byte = byte_offset
+    while tail.content:
         # Split on the raw bytes, since ``byte_offset`` counts them. Any trailing partial
         # line stays in the file for the next poll, so a mid-flush write is not split.
         lines, bytes_consumed = split_complete_lines_from_bytes(tail.content)
@@ -1160,6 +1351,13 @@ def _read_remote_source_once(
                 continue
             event_queue.put(record)
         byte_offset += bytes_consumed
+        if read_start_byte + len(tail.content) >= tail.file_size:
+            break
+        # A piece holding no complete line is part of one longer line, so the next read
+        # asks for more rather than stalling on it.
+        max_byte_count = _EVENT_FILE_READ_CHUNK_BYTES if bytes_consumed else 2 * len(tail.content)
+        read_start_byte = byte_offset
+        tail = read_event_tail_from_offset(target, relative_file_path, byte_offset, max_byte_count)
 
     return byte_offset
 
@@ -1184,9 +1382,9 @@ def _tail_source_thread(
     each for the Docker provider). On each online poll it reads from the current
     target (``target_holder[0]``), which the consume loop swaps on a transition.
     When the target's read mechanism or path changes, the thread re-initializes
-    its reader and re-reads from the start; ``emitted_event_ids`` dedup in the
-    consume loop suppresses anything already emitted, so the re-read never
-    double-emits.
+    its reader and re-reads from the start; the consume loop's dedup
+    (``_emit_event_once``) suppresses anything already emitted or passed by, so
+    the re-read never double-emits.
 
     Pacing: a local source directory is watched via ``watch_group``, so the
     thread sleeps until something in the directory changes and its fallback
@@ -1380,10 +1578,8 @@ def _consume_event_queue(
         if isinstance(event, _TailSourceFailure):
             raise EventsFollowReaderDiedError(event.source_path, event.error) from event.error
 
-        if event is not None and event.event_id not in state.emitted_event_ids:
-            state.emitted_event_ids.add(event.event_id)
-            _maybe_emit_source_mismatch_warning(event, state.warned_incorrect_sources, on_event)
-            on_event(event)
+        if event is not None:
+            _emit_event_once(event, state, on_event)
 
         now = time.monotonic()
 
@@ -1398,6 +1594,7 @@ def _consume_event_queue(
                 target_holder=target_holder,
                 state=state,
                 event_queue=event_queue,
+                on_event=on_event,
                 cel_include_filters=cel_include_filters,
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
@@ -1437,6 +1634,7 @@ def _rescan_and_start_new_tail_threads(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
     event_queue: queue.Queue[EventRecord | _TailSourceFailure],
+    on_event: Callable[[EventRecord], None],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1447,7 +1645,7 @@ def _rescan_and_start_new_tail_threads(
     watch_group: DirectoryWatchGroup,
     source_filters: Sequence[str] = (),
 ) -> None:
-    """Re-scan for new event source directories and start tail threads for them."""
+    """Re-scan for new event source directories, emit their history as it is read, and start tail threads for them."""
     target = target_holder[0]
     try:
         current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
@@ -1464,11 +1662,16 @@ def _rescan_and_start_new_tail_threads(
         state.known_source_paths.add(source.source_path)
         state.known_rotated_files[source.source_path] = set(source.rotated_files)
 
-        # Read historical events from this new source
-        events, byte_offsets = read_all_historical_events(target, [source], cel_include_filters, cel_exclude_filters)
-        for event in events:
-            if event.event_id not in state.emitted_event_ids:
-                event_queue.put(event)
+        end_byte = _size_current_event_files(target, [source])[source.source_path]
+        _emit_history(
+            _iter_source_history(target, source, end_byte),
+            state,
+            on_event,
+            cel_include_filters,
+            cel_exclude_filters,
+            head_count=None,
+            tail_count=None,
+        )
 
         # Start a persistent tail thread for the new source
         if source.is_current_file_present and offset_dir_path is not None:
@@ -1482,7 +1685,7 @@ def _rescan_and_start_new_tail_threads(
                 online_event=online_event,
                 read_failure_event=read_failure_event,
                 offset_dir_path=offset_dir_path,
-                initial_byte_offset=byte_offsets.get(source.source_path, 0),
+                initial_byte_offset=end_byte,
                 watch_group=watch_group,
             )
             tail_threads.append(thread)
@@ -1555,7 +1758,7 @@ def _handle_online_offline_transition(
     interval). The persistent tail threads read both on their next poll: they
     follow the new target and either resume reading (online) or park doing no
     I/O (offline). No threads are created or torn down here -- that churn, and
-    its teardown races, is gone. Event deduplication via ``emitted_event_ids``
+    its teardown races, is gone. The consume loop's dedup (``_emit_event_once``)
     ensures no events are emitted twice when tailing resumes (a thread re-reads
     its source from the start after the switch).
 

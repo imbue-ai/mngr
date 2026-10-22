@@ -215,9 +215,14 @@ class _LocalFakeOuter(OuterHostInterface):
     def read_file(self, path: Path) -> bytes:
         return path.read_bytes()
 
-    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
         content = path.read_bytes()
-        return FileTailRead(file_size=len(content), content=content[start_byte:])
+        return FileTailRead(
+            file_size=len(content),
+            content=content[start_byte : None if max_byte_count is None else start_byte + max_byte_count],
+        )
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

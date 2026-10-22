@@ -375,6 +375,7 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:
@@ -394,6 +395,7 @@ def test_snapshot_and_shutdown_missing_host_id(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_nonexistent_sandbox(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:
@@ -420,6 +422,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:

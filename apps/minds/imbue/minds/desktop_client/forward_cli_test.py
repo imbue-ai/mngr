@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+import click
 import pytest
 from loguru import logger
 
@@ -52,6 +53,7 @@ from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -60,8 +62,10 @@ from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -1595,7 +1599,7 @@ def test_unexpected_exit_report_carries_startup_context_and_stderr_tail() -> Non
     assert record["message"].startswith(
         "mngr forward exited unexpectedly with code 1; had_reported_listening=False seconds_since_spawn="
     )
-    assert record["message"].endswith("stderr_tail_lines=2")
+    assert record["message"].endswith("stderr_tail_lines=2 plugin_error_class=None backend_shutdown_signal=None")
     extra = record["extra"]
     assert extra["exit_code"] == 1
     assert extra["signal"] is None
@@ -1606,6 +1610,72 @@ def test_unexpected_exit_report_carries_startup_context_and_stderr_tail() -> Non
     assert extra["stderr_tail"] == (
         "Starting mngr forward\nTraceback (most recent call last): [2 lines folded, ending: OSError: bind]"
     )
+    assert extra["plugin_error_class"] is None
+    assert extra["plugin_error_message"] is None
+    assert extra["backend_shutdown_signal"] is None
+    assert extra["seconds_since_backend_shutdown_began"] is None
+
+
+def test_unexpected_exit_report_carries_the_error_the_plugin_command_reported(
+    consumer: EnvelopeStreamConsumer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The structured error line mngr's CLI writes to stdout for the failed command is quoted, scrubbed, in the report."""
+    emit_error_event(click.ClickException("cannot reach user@example.com"), OutputFormat.JSONL)
+    error_line = capsys.readouterr().out
+    fake = _FakeProcess()
+    fake.returncode = 1
+    _attach_fake(consumer, fake)
+    _dispatch(consumer, error_line)
+
+    records = _unexpected_exit_records(consumer)
+
+    assert len(records) == 1
+    assert "plugin_error_class=ClickException" in records[0]["message"]
+    assert records[0]["extra"]["plugin_error_class"] == "ClickException"
+    assert records[0]["extra"]["plugin_error_message"] == "cannot reach <email>"
+
+
+def test_unexpected_exit_report_says_the_backend_was_already_shutting_down(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A plugin that exits after the backend's own signal, but before teardown terminates it, is reported as such."""
+    fake = _FakeProcess()
+    fake.returncode = 1
+    _attach_fake(consumer, fake)
+    consumer.note_backend_shutdown_began("SIGTERM")
+    # Only the first signal is the start of the shutdown.
+    consumer.note_backend_shutdown_began("SIGINT")
+
+    records = _unexpected_exit_records(consumer)
+
+    assert len(records) == 1
+    assert records[0]["message"].endswith("backend_shutdown_signal=SIGTERM")
+    assert records[0]["extra"]["backend_shutdown_signal"] == "SIGTERM"
+    assert records[0]["extra"]["seconds_since_backend_shutdown_began"] >= 0.0
+
+
+def test_unexpected_exit_report_measures_the_backend_signal_against_the_plugin_exit(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A backend signal landing in the pipe-drain wait, after the plugin had already exited, does not read as earlier.
+
+    stdout is never read, so the report waits out the full drain timeout after
+    the exit; the signal arrives inside that wait.
+    """
+    fake = _FakeProcess()
+    fake.returncode = 1
+    fake.stdout = io.BytesIO(b"")
+    _attach_fake(consumer, fake)
+    with _captured_error_records() as records:
+        watcher = threading.Thread(target=consumer._wait_and_report_exit)
+        watcher.start()
+        wait_for(lambda: consumer._exit_code is not None, timeout=10.0, poll_interval=0.01)
+        consumer.note_backend_shutdown_began("SIGTERM")
+        watcher.join(timeout=10.0)
+
+    assert len(records) == 1
+    assert records[0]["extra"]["is_stdout_drained"] is False
+    assert records[0]["extra"]["seconds_since_backend_shutdown_began"] <= 0.0
 
 
 def test_unexpected_exit_report_names_the_signal_and_a_prior_listening_report(

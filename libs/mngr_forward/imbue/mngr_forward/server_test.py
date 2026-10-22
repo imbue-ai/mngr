@@ -1447,6 +1447,8 @@ def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
     assert response.status_code == 403
     # 403, not a redirect: the response carries no Location.
     assert "location" not in response.headers
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.text == "Not authenticated"
     # No backend is contacted -- the refusal precedes any resolution/forwarding.
     assert contacted == []
 

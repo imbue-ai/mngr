@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentsResponse
 from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.ui_api_options import WorkspaceOptionsAccount
 from imbue.minds.desktop_client.ui_api_options import WorkspaceOptionsData
@@ -140,6 +141,10 @@ ERIN_ROW: Final[str] = "email:erin@example.org"
 # Long enough for the disclosure marker to finish turning (duration-150); a
 # shot taken during the turn catches a chevron at an angle it never rests at.
 _MARKER_TURN_MS: Final[int] = 300
+
+# The pane's right column, the one thing in it that scrolls: the content side of
+# the split pane, beside the nav ShareTab labels "Share targets".
+_PANE_SCROLLER: Final[str] = 'nav[aria-label="Share targets"] + div'
 
 SAVING_TEXT: Final[str] = "Securely granting access"
 # A refused write is reported in the workspace's own words, so the words the stub
@@ -258,6 +263,10 @@ class ShareRouteStubs(MutableModel):
         if path == f"{share_base}/grants":
             self._handle_grants_write(route)
             return
+        if path == f"{share_base}/agents":
+            # No frame invites an agent, so the section under the list is empty.
+            _fulfill(route, VisitingAgentsResponse(agents=()).model_dump_json())
+            return
         if path == share_base:
             self._handle_share_state(route)
             return
@@ -315,7 +324,14 @@ def _fulfill(route: Route, body: str, *, status: int = 200) -> None:
 
 
 def _hover_for_tooltip(page: Page, selector: str) -> None:
-    """Hover a trigger and wait out the delegated bubble's hover delay and fade."""
+    """Hover a trigger and wait out the delegated bubble's hover delay and fade.
+
+    The trigger is scrolled into view, and two frames let the scroll event land,
+    before the pointer arrives: the bubble drops on any scroll, and a scroll
+    event landing after the hover would cancel it with nothing to re-arm it.
+    """
+    page.locator(selector).scroll_into_view_if_needed()
+    page.evaluate("() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
     page.hover(selector)
     page.wait_for_function(
         "() => { const bubble = document.querySelector('div.minds-tooltip');"
@@ -395,6 +411,13 @@ def _drive_published(page: Page) -> None:
     _wait_for_row(page, ERIN_ROW, FAILED_TEXT)
     page.click(f'[data-grant-row="{DAN_ROW}"] button:has-text("Retry")')
     _wait_for_row(page, DAN_ROW, SAVING_TEXT)
+    # The Retry click scrolled the column down to dan's row; the mock draws the
+    # frame from the top.
+    page.hover(_PANE_SCROLLER)
+    page.mouse.wheel(0, -2000)
+    page.wait_for_function(
+        "(scroller) => document.querySelector(scroller).scrollTop === 0", arg=_PANE_SCROLLER, timeout=5000
+    )
     _hover_for_tooltip(page, f'[data-grant-row="{ACME_ROW}"]')
 
 
@@ -414,11 +437,19 @@ def _open_inherited(page: Page) -> None:
     page.click("#ws-share-inherited-trigger")
     page.wait_for_selector("#ws-share-inherited-panel")
     page.wait_for_timeout(_MARKER_TURN_MS)
-    page.hover("#ws-share-grants")
-    page.mouse.wheel(0, 600)
+    page.hover(_PANE_SCROLLER)
+    # The column holds the visiting agents under the list too, so it is wheeled
+    # only as far as the list's foot rather than to its own end.
+    distance = page.evaluate(
+        "(scroller) => document.getElementById('ws-share-grants').getBoundingClientRect().bottom"
+        " - document.querySelector(scroller).getBoundingClientRect().bottom",
+        _PANE_SCROLLER,
+    )
+    page.mouse.wheel(0, max(0.0, float(distance)))
     page.wait_for_function(
-        "() => { const list = document.getElementById('ws-share-grants');"
-        " return list.scrollTop + list.clientHeight >= list.scrollHeight - 1; }",
+        "(scroller) => document.getElementById('ws-share-grants').getBoundingClientRect().bottom"
+        " <= document.querySelector(scroller).getBoundingClientRect().bottom + 1",
+        arg=_PANE_SCROLLER,
         timeout=5000,
     )
 
@@ -444,26 +475,31 @@ def _drive_off_with_grants(page: Page) -> None:
 
 
 def _drive_long_list(page: Page) -> None:
-    """Scroll the list and come back, since the mock's frame is drawn at the top.
+    """Scroll the pane and come back, since the mock's frame is drawn at the top.
 
-    The wheel proves the list is its own scroll region rather than the pane
-    growing; the capture is then taken where the mock draws it, thumb at the top.
+    The wheel proves the right column scrolls rather than the pane growing; the
+    capture is then taken where the mock draws it, thumb at the top.
     """
     page.wait_for_selector("#ws-share-grants")
-    page.hover("#ws-share-grants")
+    page.hover(_PANE_SCROLLER)
     page.mouse.wheel(0, 600)
-    page.wait_for_function("() => document.getElementById('ws-share-grants').scrollTop > 0", timeout=5000)
-    scrolled = page.evaluate("() => document.getElementById('ws-share-grants').scrollTop")
+    page.wait_for_function(
+        "(scroller) => document.querySelector(scroller).scrollTop > 0", arg=_PANE_SCROLLER, timeout=5000
+    )
+    scrolled = page.evaluate("(scroller) => document.querySelector(scroller).scrollTop", _PANE_SCROLLER)
     page.mouse.wheel(0, -600)
-    page.wait_for_function("() => document.getElementById('ws-share-grants').scrollTop === 0", timeout=5000)
+    page.wait_for_function(
+        "(scroller) => document.querySelector(scroller).scrollTop === 0", arg=_PANE_SCROLLER, timeout=5000
+    )
     metrics = page.evaluate(
-        "() => { const list = document.getElementById('ws-share-grants');"
-        " return [list.scrollHeight, list.clientHeight]; }"
+        "(scroller) => { const column = document.querySelector(scroller);"
+        " return [column.scrollHeight, column.clientHeight]; }",
+        _PANE_SCROLLER,
     )
     if float(scrolled) <= 0 or metrics[0] <= metrics[1]:
-        raise SharePanelRenderError(f"the grant list is not its own scroll region: scrolled {scrolled}, {metrics}")
+        raise SharePanelRenderError(f"the right column does not scroll: scrolled {scrolled}, {metrics}")
     logger.info(
-        "[b27] grant list scrolls to {} of scrollHeight {} in a region {} tall", scrolled, metrics[0], metrics[1]
+        "[b27] the right column scrolls to {} of scrollHeight {} in a column {} tall", scrolled, metrics[0], metrics[1]
     )
 
 

@@ -940,7 +940,12 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     emits ``permission.replied`` and a cancelled turn emits ``session.idle``, both of
     which clear the marker promptly (verified live), so ``permissions_waiting`` does
     not strand alongside ``active``.
+
+    Field generators run for every listed agent whatever its type, so an agent of
+    another type gets no field rather than a verdict read off markers it never writes.
     """
+    if not isinstance(agent, OpenCodeAgent):
+        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / ACTIVE_MARKER_FILENAME)
     return classify_waiting_reason(is_active, is_active and agent.is_blocked_on_dialog())

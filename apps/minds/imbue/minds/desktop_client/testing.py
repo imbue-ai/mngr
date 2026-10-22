@@ -95,6 +95,7 @@ from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
+from imbue.minds.desktop_client.ui_publisher import DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
@@ -481,6 +482,7 @@ def _empty_workspaces_message() -> UiWorkspacesMessage:
 def build_ui_state_publisher_for_test(
     derive_workspaces: Callable[[], UiWorkspacesMessage] = _empty_workspaces_message,
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = tuple,
+    min_seconds_between_passes: float = DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
 ) -> tuple[UiStatePublisher, "queue.Queue[str | None]"]:
     """A publisher over a fresh broadcaster, plus the queue one registered window reads.
 
@@ -505,12 +507,15 @@ def build_ui_state_publisher_for_test(
         derive_providers=lambda: UiProvidersMessage(
             accounts=(), device_providers=(), last_event_at=None, last_full_snapshot_at=None
         ),
-        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
-        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
+        derive_requests_and_notifications=lambda: (
+            UiRequestsMessage(count=0, request_ids=()),
+            UiNotificationsMessage(entries=(), unresolved_count=0),
+        ),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
         derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
+        min_seconds_between_passes=min_seconds_between_passes,
     )
     return publisher, broadcaster.register()
 

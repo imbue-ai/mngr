@@ -16,9 +16,6 @@ from imbue.mngr.interfaces.host import HostFileReadInterface
 
 INITIAL_BACKWARD_SCAN_WINDOW_BYTES: Final[int] = 64 * 1024
 
-# Past the end of any real file, so a tail read from here returns only the file's size.
-_FILE_SIZE_PROBE_OFFSET: Final[int] = 2**62
-
 
 class JsonlRecordVisitor(MutableModel, ABC):
     """Consumes a JSONL file's records newest-first and reports when older records no longer matter."""
@@ -43,7 +40,7 @@ class JsonlBackwardScanResult(FrozenModel):
 
 def read_jsonl_file_size(host: HostFileReadInterface, path: Path) -> int:
     """Return a file's size without reading any of its content. Raises FileNotFoundError if it does not exist."""
-    return host.read_file_tail_from_offset(path, _FILE_SIZE_PROBE_OFFSET).file_size
+    return host.read_file_tail_from_offset(path, 0, max_byte_count=0).file_size
 
 
 def scan_jsonl_file_backward(

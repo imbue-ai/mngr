@@ -7,7 +7,6 @@ import {
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
-  labelVersionNote,
   standingUpdateNotice,
   updateActivityNotice,
   updateBadgeFor,
@@ -34,7 +33,6 @@ const OUT_OF_DATE = {
   availability: "OUT_OF_DATE" as const,
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
-  is_version_from_label: false,
   activity: "IDLE" as const,
 };
 
@@ -407,20 +405,6 @@ describe("updateActivityNotice", () => {
     const applying = updateActivityNotice({ ...OUT_OF_DATE, activity: "APPLYING" }, true);
     expect(applying.message).toContain("services restart");
     expect(applying.isWaiting).toBe(false);
-  });
-});
-
-describe("labelVersionNote", () => {
-  // A running machine that has never updated itself also falls back to the
-  // label, and there the label is exactly its version.
-  it("offers to start only a machine that is actually stopped", () => {
-    expect(labelVersionNote("STOPPED")).toContain("start it");
-  });
-
-  it("says nothing over a running machine, whose label is the answer", () => {
-    for (const liveness of ["RUNNING", "STARTING", "STOPPING", "UNKNOWN", "", undefined]) {
-      expect(labelVersionNote(liveness)).toBeNull();
-    }
   });
 });
 

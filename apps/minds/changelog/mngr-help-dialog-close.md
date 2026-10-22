@@ -1,0 +1,1 @@
+The report-a-bug dialog an agent opens can be closed again. When an agent asked to file a report twice in quick succession, the dialog's close X (and Escape) stopped working. Closing it, and pressing Done after sending, now always returns to the machine the report is about. Before, Done could land on a stale screen such as an already answered permission request.

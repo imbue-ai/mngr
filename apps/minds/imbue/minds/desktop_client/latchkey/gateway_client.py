@@ -30,6 +30,7 @@ called from the FastAPI request thread under
 """
 
 import json
+import ssl
 import threading
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -437,6 +438,9 @@ class LatchkeyGatewayClient(MutableModel):
     _latchkey: Latchkey | None = PrivateAttr(default=None)
 
     _transport: httpx.BaseTransport | None = PrivateAttr(default=None)
+    # Built once and handed to every per-call client: httpx otherwise builds a
+    # context per client, parsing the whole certifi bundle each time.
+    _ssl_context: ssl.SSLContext = PrivateAttr(default_factory=httpx.create_ssl_context)
     _base_url: str | None = PrivateAttr(default=None)
     _password: str | None = PrivateAttr(default=None)
     _admin_jwt: str | None = PrivateAttr(default=None)
@@ -574,7 +578,7 @@ class LatchkeyGatewayClient(MutableModel):
         """Return a per-call :class:`httpx.Client` honouring the optional test transport."""
         if self._transport is not None:
             return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self._transport)
-        return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS)
+        return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, verify=self._ssl_context)
 
     def _wrap_transport_error(self, e: httpx.HTTPError, context: str) -> LatchkeyGatewayClientError:
         """Turn an :mod:`httpx` exception into our error type, invalidating cached init on connect-level failures.
@@ -601,7 +605,7 @@ class LatchkeyGatewayClient(MutableModel):
         """Return a per-stream :class:`httpx.Client` honouring the optional test transport."""
         if self._transport is not None:
             return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self._transport)
-        return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT)
+        return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, verify=self._ssl_context)
 
     def iter_permission_requests(self) -> Iterator[StreamedPermissionRequest | PermissionRequestDeleted]:
         """Yield every existing + future pending permission request, and every request that stops being pending.

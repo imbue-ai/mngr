@@ -43,6 +43,7 @@ from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import make_command_agent
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
@@ -1200,6 +1201,14 @@ def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProvide
     agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
     assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_pi_waiting_reason_is_absent_for_an_agent_of_another_type(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent, host = make_command_agent(local_provider, tmp_path / "command-work")
+
+    assert _waiting_reason(agent, host) is None
 
 
 def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:

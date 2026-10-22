@@ -23,6 +23,7 @@ from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.mock_host_test import HangingTmuxHost
+from imbue.mngr.agents.mock_host_test import is_send_preflight_command
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
@@ -33,6 +34,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -558,6 +560,40 @@ def test_send_tmux_literal_keys_long_message_arrives_as_one_bracketed_paste(
         assert received.startswith(PASTE_START_MARKER)
         assert received.endswith(PASTE_END_MARKER)
         assert message.encode() in received
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
+def test_send_tmux_literal_keys_leaves_copy_mode_before_typing(
+    test_agent: BaseAgent,
+) -> None:
+    """A pane left in copy-mode is taken out of it by the same invocation that types the message."""
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    session_name = f"{send_keys_agent.mngr_ctx.config.prefix}{send_keys_agent.name}"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
+    target_arg = tmux_target.as_shell_arg()
+    message = "typed past copy-mode 58213"
+    send_keys_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 cat && tmux copy-mode -t {target_arg}",
+        timeout_seconds=5.0,
+    )
+
+    def _pane_state() -> str:
+        return send_keys_agent.host.execute_idempotent_command(
+            f"tmux display-message -p -t {target_arg} '#{{pane_in_mode}}'", timeout_seconds=5.0
+        ).stdout.strip()
+
+    try:
+        assert _pane_state() == "1"
+        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
+
+        assert _pane_state() == "0"
+        wait_for(
+            lambda: message in (capture_tmux_pane_content(send_keys_agent.host, target_arg) or ""),
+            error_message="Expected the message typed into the pane once copy-mode was left",
+        )
     finally:
         cleanup_tmux_session(session_name)
 
@@ -1173,11 +1209,6 @@ class _StubHost:
         self.host_dir = Path("/tmp/stub-host")
         self.is_local = is_local
 
-    # Send preflight, not the command under test: resolving the agent's pane and leaving copy-mode
-    # run before every send, and a test scripting results is scripting the SEND. Serving these from
-    # the default keeps the scripted queue lined up with the command each test actually means.
-    _PREFLIGHT_COMMAND_PREFIXES = ("tmux show-options", "tmux copy-mode")
-
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
         self.executed_command_timeouts.append(kwargs.get("timeout_seconds"))
@@ -1185,7 +1216,7 @@ class _StubHost:
             if self.pane_id is None:
                 return CommandResult(success=False, stdout="", stderr="invalid option: @mngr_agent_pane")
             return CommandResult(success=True, stdout=f"{self.pane_id}\n", stderr="")
-        if command.startswith(self._PREFLIGHT_COMMAND_PREFIXES):
+        if is_send_preflight_command(command):
             return self._default_result
         if self._command_results:
             return self._command_results.pop(0)
@@ -1198,7 +1229,7 @@ class _StubHost:
         Assertions about "what this send did" mean the send, not the pane resolution and
         mode-clearing that precede every one of them.
         """
-        return [c for c in self.executed_commands if not c.startswith(self._PREFLIGHT_COMMAND_PREFIXES)]
+        return [c for c in self.executed_commands if not is_send_preflight_command(c)]
 
     def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
         return self._execute_command(command, **kwargs)
@@ -1267,6 +1298,20 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
     assert len(stub.written_files) == 0
 
 
+def test_send_tmux_literal_keys_leaves_pane_modes_in_the_same_tmux_invocation(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Leaving copy-mode rides along with the typing rather than costing a process spawn of its own."""
+    stub = _StubHost(pane_id="%7")
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
+
+    assert stub.executed_commands[1:] == [
+        "tmux if-shell -F -t %7 '#{pane_in_mode}' 'copy-mode -q -t %7' \\; send-keys -t %7 -l -- hello"
+    ]
+
+
 def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1281,47 +1326,30 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     assert len(stub.written_files) == 1
     assert stub.written_files[0][1] == long_message
 
-    # Then execute load-buffer, paste-buffer, and cleanup
-    assert len(stub.sent_commands) == 3
-    assert "load-buffer" in stub.sent_commands[0]
-    assert "-b" in stub.sent_commands[0]
-    assert "paste-buffer" in stub.sent_commands[1]
-    assert "-b" in stub.sent_commands[1]
-    assert "-p" in stub.sent_commands[1]
-    assert "delete-buffer" in stub.sent_commands[2]
-    assert "rm -f" in stub.sent_commands[2]
-
-
-def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """load-buffer failure should raise SendMessageError."""
-    stub = _StubHost(
-        command_results=[
-            CommandResult(success=False, stdout="", stderr="load failed"),
-        ]
-    )
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    with pytest.raises(SendMessageError, match="load-buffer failed"):
-        agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
+    # Then load, leave any mode and paste in one tmux invocation, and clean up
+    assert len(stub.sent_commands) == 2
+    load_and_paste = stub.sent_commands[0]
+    assert load_and_paste.index("load-buffer -b") < load_and_paste.index("copy-mode -q")
+    assert load_and_paste.index("copy-mode -q") < load_and_paste.index("paste-buffer -p -b")
+    assert "delete-buffer" in stub.sent_commands[1]
+    assert "rm -f" in stub.sent_commands[1]
 
 
 @pytest.mark.flaky
-def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
+def test_send_tmux_literal_keys_long_message_raises_on_load_or_paste_failure(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """paste-buffer failure should raise SendMessageError."""
+    """A failed load-buffer/paste-buffer invocation raises SendMessageError and still cleans up."""
     stub = _StubHost(
         command_results=[
-            CommandResult(success=True, stdout="", stderr=""),
             CommandResult(success=False, stdout="", stderr="paste failed"),
         ]
     )
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    with pytest.raises(SendMessageError, match="paste-buffer failed"):
+    with pytest.raises(SendMessageError, match="load-buffer/paste-buffer failed: paste failed"):
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
+    assert "delete-buffer" in stub.sent_commands[-1]
 
 
 def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
@@ -1467,7 +1495,7 @@ def test_send_targets_the_recorded_pane_and_leaves_copy_mode(
 
     commands = stub.executed_commands
     assert any("show-options" in c and "@mngr_agent_pane" in c for c in commands)
-    assert any(c.startswith("tmux copy-mode -q") for c in commands)
+    assert any(c.startswith("tmux if-shell -F") and "copy-mode -q" in c for c in commands)
     # The send goes to the pane ID, not to session:window.
     send_command = next(c for c in commands if "send-keys" in c)
     assert "%7" in send_command

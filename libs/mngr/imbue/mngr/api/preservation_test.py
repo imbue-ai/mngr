@@ -366,9 +366,14 @@ class _OneFileFailingReader(HostFileReadInterface):
             raise OSError("simulated read failure")
         return self.contents_by_path[key]
 
-    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
         content = self.read_file(path)
-        return FileTailRead(file_size=len(content), content=content[start_byte:])
+        return FileTailRead(
+            file_size=len(content),
+            content=content[start_byte : None if max_byte_count is None else start_byte + max_byte_count],
+        )
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         return self.read_file(path).decode(encoding)

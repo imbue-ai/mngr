@@ -46,6 +46,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
     const WORKSPACE_PACKAGES = [
       'minds',
       'imbue-mngr',
+      'imbue-mngr-autocompact',
       'imbue-mngr-aws',
       'imbue-mngr-azure',
       'imbue-mngr-claude',

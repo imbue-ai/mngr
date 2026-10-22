@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import AgentMessageCard
@@ -538,6 +539,7 @@ def _agent_message(
     body: str = "Finished the migration; 3 tables moved.",
     workspace_agent_id: str = _WORKSPACE_ID,
     chat_agent_id: str = _CHAT_ID,
+    destination: NotificationDestination | None = None,
 ) -> AgentMessageCard:
     return AgentMessageCard(
         chat_agent_id=chat_agent_id,
@@ -546,7 +548,12 @@ def _agent_message(
         workspace_agent_id=workspace_agent_id,
         workspace_name="alpha",
         workspace_accent="#aabbcc",
+        destination=destination,
     )
+
+
+def _routine_destination() -> NotificationDestination:
+    return NotificationDestination.model_validate({"type": "minds:show-routine", "routine_id": "inbox-digest"})
 
 
 def _system_event(workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed") -> SystemEventCard:
@@ -796,6 +803,45 @@ def test_an_agent_message_dispatches_the_chat_deep_link_with_the_workspace_as_ti
     assert request.body == "Finished the migration; 3 tables moved."
     assert request.url == f"/workspace/{_WORKSPACE_ID}?chat={_CHAT_ID}"
     assert request.entry == entry
+
+
+def test_an_agent_message_with_a_destination_carries_it_and_dispatches_the_bare_workspace_link() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    entry = feed.append_agent_message(_agent_message(destination=_routine_destination()))
+    message = feed.reconcile((), {})
+
+    (listed,) = message.entries
+    assert listed.destination == _routine_destination()
+    assert listed.model_dump(mode="json")["destination"] == {
+        "type": "minds:show-routine",
+        "routine_id": "inbox-digest",
+    }
+    # The entry action delivers the destination once the workspace is up; a
+    # ``?chat=`` deep link would focus the chat on top of it.
+    (request,) = dispatcher.dispatched
+    assert request.url == f"/workspace/{_WORKSPACE_ID}"
+    assert request.entry == entry
+
+
+def test_an_agent_message_from_an_agent_that_is_not_a_chat_dispatches_the_bare_workspace_link() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    feed.append_agent_message(_agent_message(chat_agent_id=""))
+
+    (request,) = dispatcher.dispatched
+    assert request.url == f"/workspace/{_WORKSPACE_ID}"
+
+
+def test_reading_a_chat_leaves_a_message_from_an_agent_that_is_not_a_chat_unread() -> None:
+    feed = _make_feed()
+    feed.append_agent_message(_agent_message(chat_agent_id=""))
+
+    assert feed.mark_chat_read("") is False
+    assert feed.mark_chat_read(_CHAT_ID) is False
+    assert feed.reconcile((), {}).unresolved_count == 1
 
 
 def test_native_banner_event_carries_the_feed_entry_for_the_shared_open_action(

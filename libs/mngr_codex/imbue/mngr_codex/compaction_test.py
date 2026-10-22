@@ -62,13 +62,18 @@ class _RecordingHost(FakeHost):
             raise OSError("Simulated read failure")
         return self.files[Path(path)]
 
-    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
         if Path(path) in self.raise_on_read:
             raise OSError("Simulated read failure")
         if Path(path) not in self.files:
             raise FileNotFoundError(f"File not found: {path}")
         content = self.files[Path(path)].encode("utf-8")
-        return FileTailRead(file_size=len(content), content=content[start_byte:])
+        return FileTailRead(
+            file_size=len(content),
+            content=content[start_byte : None if max_byte_count is None else start_byte + max_byte_count],
+        )
 
     def write_text_file(
         self,

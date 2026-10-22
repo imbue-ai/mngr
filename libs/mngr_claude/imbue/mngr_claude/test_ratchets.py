@@ -24,6 +24,7 @@ _STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = (
 # (it prints its appended-event count to stdout for common_transcript.sh to capture, its
 # data interface) and __init__ methods (stdlib only, so no pydantic models).
 _COMMON_TRANSCRIPT_CONVERT_SCRIPT: tuple[str, ...] = ("common_transcript_convert.py",)
+_FAKE_CLAUDE_TUI_SCRIPT: tuple[str, ...] = ("fake_claude_tui.py",)
 
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
@@ -58,7 +59,9 @@ def test_prevent_global_keyword() -> None:
 
 def test_prevent_bare_print() -> None:
     rc.check_bare_print(
-        _DIR, snapshot(0), excluded_patterns=_STANDALONE_RESOURCE_SCRIPTS + _COMMON_TRANSCRIPT_CONVERT_SCRIPT
+        _DIR,
+        snapshot(0),
+        excluded_patterns=_STANDALONE_RESOURCE_SCRIPTS + _COMMON_TRANSCRIPT_CONVERT_SCRIPT + _FAKE_CLAUDE_TUI_SCRIPT,
     )
 
 

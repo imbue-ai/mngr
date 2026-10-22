@@ -1,0 +1,1 @@
+When a wiring step's transient-failure streak reaches the report threshold, the error now also says when the streak started, which SSH info fields changed during it (field names only), and since when this process has seen the host in its reported state. That separates a host that moved or restarted under the streak from one that kept refusing the same connection.

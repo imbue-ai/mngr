@@ -4,6 +4,15 @@
 # another env. Run it from any directory; it never changes the caller's cwd.
 #
 #     apps/minds/scripts/start-desktop.sh
+#     apps/minds/scripts/start-desktop.sh --reopen
+#
+# `--reopen` is for when the app is already running from this checkout: it
+# skips the dependency sync and the UI build and starts Electron as-is. The
+# new process hands its launch to the running instance through Electron's
+# single-instance lock (which brings a window forward, or reopens one when
+# none is open) and exits, so this is how a desktop without a tray icon gets
+# its window back. Both processes have to resolve the same state root, so run
+# it with the same env activated as the running app.
 #
 # This is the one place that knows how to launch the dev app -- the Linux
 # installer's launcher and the internal `just minds-start` recipes all end
@@ -28,6 +37,15 @@ if [ "$current_pnpm" != "$required_pnpm" ]; then
     echo "error: active pnpm is ${current_pnpm:-none}, but apps/minds requires ${required_pnpm} (apps/minds/package.json engines.pnpm)." >&2
     echo "       Install it into the selected Node, then re-run:" >&2
     echo "         npm install --global pnpm@${required_pnpm}" >&2
+    exit 2
+fi
+
+if [ "${1:-}" = "--reopen" ]; then
+    exec pnpm run start:prebuilt
+fi
+if [ $# -ne 0 ]; then
+    echo "error: unknown argument(s): $*" >&2
+    echo "usage: start-desktop.sh [--reopen]" >&2
     exit 2
 fi
 

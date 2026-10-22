@@ -343,7 +343,7 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     )
 
     displayable = displayable_pending_requests(inbox, backend_resolver)
-    payload = _build_requests_payload(inbox, backend_resolver)
+    payload = _build_requests_payload(displayable, backend_resolver)
 
     assert [req.request_id for req in displayable] == [visible_request.request_id]
     assert payload["count"] == 1
@@ -835,7 +835,7 @@ def test_dispatcher_returns_400_when_no_handler_claims_request_type(tmp_path: Pa
 def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_path: Path) -> None:
     """The channel snapshot's notifications frame is derived end-to-end from the request inbox.
 
-    Covers the real wiring behind ``derive_notifications``: the displayable
+    Covers the real wiring behind ``derive_requests_and_notifications``: the displayable
     pending set, the inbox-card display derivation (catalog title, workspace
     attribution, brand-mark service), and resolution via a recorded response.
     """

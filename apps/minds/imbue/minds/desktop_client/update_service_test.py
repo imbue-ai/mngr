@@ -194,7 +194,6 @@ def test_a_schedule_armed_on_a_machine_with_only_a_patch_available_runs_in_the_w
         detection=UpdateDetection(availability=availability),
         current_version="minds-v0.4.0",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
     service.schedule_store.schedule(agent_id)
     dispatched: list[AgentId] = []

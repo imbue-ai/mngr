@@ -1,14 +1,15 @@
 {
   "name": "imbue-studio",
   "productName": "Imbue Studio",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "description": "Imbue Studio - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
     "prestart": "node scripts/ensure-binaries.js && pnpm run build:ui",
-    "start": "MINDS_DISABLE_CRASHPAD=1 electron .",
+    "start": "pnpm run start:prebuilt",
+    "start:prebuilt": "MINDS_DISABLE_CRASHPAD=1 electron .",
     "build": "node scripts/build.js",
     "build:ui": "pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run generate && pnpm -C frontend run build",
     "dist": "pnpm build && pnpm exec todesktop build",
@@ -20,7 +21,7 @@
     "@todesktop/runtime": "^1.6.0",
     "builder-util-runtime": "9.7.0",
     "electron-updater": "6.8.9",
-    "latchkey": "^3.19.0",
+    "latchkey": "^3.19.3",
     "semver": "^7.6.3",
     "smol-toml": "^1.6.1"
   },

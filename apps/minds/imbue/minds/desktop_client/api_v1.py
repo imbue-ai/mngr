@@ -280,6 +280,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MES
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
+from imbue.minds.desktop_client.workspace_update_state import ORIGINAL_MINDS_VERSION_LABEL
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
@@ -336,7 +337,7 @@ _CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=AgentNotificationRequest, resp=json_response_model(OkResponse))
 def _handle_notification(agent_id: str) -> OkResponse | Response:
-    """Land a chat agent's message in the notification feed (bell, badge, toast, OS banner)."""
+    """Land a workspace agent's message in the notification feed (bell, badge, toast, OS banner)."""
     feed = get_state().notification_feed
     if feed is None:
         return _json_error("Notification feed not configured", 501)
@@ -345,10 +346,16 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
     body = AgentNotificationRequest.model_validate(request.get_json(silent=True, force=True) or {})
     if not body.message:
         return _json_error("'message' field is required and must be a string", 400)
-    text = f"{body.title}: {body.message}" if body.title else body.message
 
     feed.append_agent_message(
-        build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver), watched_by=body.watched_by
+        build_agent_message_card(
+            AgentId(agent_id),
+            title=body.title,
+            message=body.message,
+            backend_resolver=get_state().backend_resolver,
+            destination=body.destination,
+        ),
+        watched_by=body.watched_by,
     )
     return OkResponse(ok=True)
 
@@ -535,7 +542,7 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         account_email=account.email if account is not None else None,
         provider_name=info.provider_name if info is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
-        original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
+        original_minds_version=backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL),
         color=backend_resolver.get_workspace_color(agent_id),
         # Discovery lists only this user's own workspaces: the connector's records
         # listing is the caller's, and the "shared with you" index has no read side yet.
@@ -687,7 +694,7 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
 
-    original = backend_resolver.get_agent_label(parsed_id, "original_minds_version")
+    original = backend_resolver.get_agent_label(parsed_id, ORIGINAL_MINDS_VERSION_LABEL)
     # The (best-effort) in-workspace git read runs through the shared
     # warm-process MngrCaller (initialized at startup); any failure yields the
     # empty/None defaults rather than raising.
@@ -2032,8 +2039,7 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         kind="create",
         status=str(info.status),
         # Human-readable stage caption for the creating page (e.g. "Cloning
-        # repository...", "Failed: ..."), mode-aware. Restores the live caption
-        # the old per-stage SSE status frames carried.
+        # repository...", "Failed: ..."), mode-aware.
         status_text=status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
         is_done=info.status == AgentCreateAttemptStatus.DONE,
         agent_id=str(info.agent_id) if info.agent_id is not None else None,
@@ -2143,10 +2149,11 @@ def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, Installation
 def _resolve_workspace_version_ref(parsed_id: AgentId) -> str | None:
     """The workspace's own template version as the update detector last resolved it.
 
-    ``None`` when nothing has read one yet -- a fresh app that has not swept, or
-    a machine whose version neither its git nor its create-time label names. The
-    backup-service update treats that as "not below the floor": refusing on a
-    version nobody could read would strand ordinary machines.
+    ``None`` when the detector has none -- a fresh app that has not swept, or a
+    machine whose git has not answered this session and whose create-time label
+    does not place it below the floor. The backup-service update treats that as
+    "not below the floor": refusing on a version nobody could read would strand
+    ordinary machines.
     """
     service = get_state().workspace_update_service
     if service is None:
@@ -5215,8 +5222,8 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["PATCH"],
     )
 
-    # Operation dismissal (replaces /api/destroying/<id>/dismiss). Only a destroy
-    # operation has a dismissable on-disk record; create/restart cards self-clear.
+    # Operation dismissal. Only a destroy operation has a dismissable on-disk
+    # record; create/restart cards self-clear.
     blueprint.add_url_rule(
         "/workspaces/operations/destroy/<operation_id>",
         view_func=_handle_dismiss_destroy_operation,

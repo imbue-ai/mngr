@@ -127,6 +127,20 @@ class ImbueCloudRateLimitedError(ImbueCloudAccountError):
     """The connector refused a lookup because the caller's rolling rate limit is exhausted (HTTP 429)."""
 
 
+class ImbueCloudWorkspacesPresentError(ImbueCloudAccountError):
+    """The connector refused to delete or finalize an account that still holds Imbue Cloud hosts.
+
+    Carries the structured detail from the connector's 403 (``code:
+    workspaces_present``): ``workspace_count`` is how many hosts, running or
+    stopped, the account still holds. Typed so an operator tool can report
+    the refusal as a skip instead of reading the 403 as a bad admin key.
+    """
+
+    def __init__(self, message: str, workspace_count: int) -> None:
+        super().__init__(message)
+        self.workspace_count = workspace_count
+
+
 class ImbueCloudCleanupGrantBudgetError(ImbueCloudError):
     """Raised when the connector refuses a storage-cleanup grant: the failed-grant budget is exhausted.
 

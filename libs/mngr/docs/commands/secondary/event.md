@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
+mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--latest-by SOURCE:FIELD] [--follow] [--tail N] [--head N]
 ```
 
 View events from an agent or host.
@@ -26,6 +26,13 @@ Use --include and --exclude to further restrict events via CEL expressions.
 All --include filters must match for an event to be included, and events
 matching any --exclude filter are dropped. Use --follow to continuously
 stream new events.
+
+The history is read a piece at a time and merged across sources as it is read,
+so a large history does not have to fit in memory. Use --latest-by SOURCE:FIELD
+for a source whose history only matters as its latest state (e.g.
+`services:service`, where each event re-announces a service): of that source's
+past events, only the newest per value of FIELD is printed, after the rest of
+the history.
 
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
@@ -60,6 +67,7 @@ mngr event [OPTIONS] TARGET [SOURCES]...
 | `--source` | text | Event source to include, relative to events/ (e.g. 'messages', 'logs/mngr'). Can be repeated. | None |
 | `--include` | text | CEL expression that events must match to be included (repeatable, all must match). | None |
 | `--exclude` | text | CEL expression; events matching any exclude filter are dropped (repeatable). | None |
+| `--latest-by` | text | Of SOURCE's past events, show only the newest per value of FIELD (repeatable, one per source). In --follow mode a new event is printed unless it is older than the newest one already printed for its value. | None |
 
 ## Common
 
@@ -130,6 +138,12 @@ $ mngr event my-agent --exclude 'source.startsWith("logs/")'
 
 ```bash
 $ mngr event my-agent --tail 100
+```
+
+**Show each service's latest registration**
+
+```bash
+$ mngr event my-agent services --latest-by services:service
 ```
 
 **Follow all events in real-time**

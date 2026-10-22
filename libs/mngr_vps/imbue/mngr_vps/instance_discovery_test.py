@@ -276,7 +276,7 @@ class _LiveListingOuter(_LocalFakeOuter):
     ) -> CommandResult:
         if "xargs -r docker inspect" in command:
             return CommandResult(stdout=f"{self.host_id_value}\n", stderr="", success=True)
-        if command.startswith("CID=$(docker ps -aq --filter label="):
+        if "CID=$(docker ps -aq --filter label=" in command:
             if self.listing_fails:
                 return CommandResult(stdout="", stderr="docker exec failed", success=False)
             return CommandResult(stdout=self.listing_stdout, stderr="", success=True)

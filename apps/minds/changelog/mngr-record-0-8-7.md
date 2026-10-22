@@ -1,0 +1,3 @@
+- Record the minds 0.8.7 release (`apps/minds/docs/deploy/history/minds-v0.8.7.md`) and reset `next_deploy.md` after it: alpha serves 0.8.7, beta and stable 0.8.5, and the background-mode check, the production fast-path lease and the beta and stable promotion carry over.
+
+- Correct the release runbooks where 0.8.7 found them stale: `just dwt-mngr-pin` also vendors the studio skill into the pin commit, a launch-to-msg marker skip is identified by its skipped jobs rather than its duration, the scheduled run's pin push lands right after step 4, a local agent can run the Vault OIDC login, the production desktop check needs the installed app quit first, and `services.md`'s deploy block covers both tiers with the Modal Secret names it actually pushes.

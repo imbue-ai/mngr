@@ -116,7 +116,8 @@ const GRANTS_SYNC_RETRY_MS = 15_000;
  * allowance and the cooldown are named only at the moment of refusal (spec
  * P5, O5); every other code is the desktop's or the connector's own. */
 const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
-  over_allowance: "You have reached your invitation limit for now.",
+  over_allowance:
+    "Access granted, but you've reached your invitation email limit for now.",
   too_soon: "You invited this person too recently.",
   grants_out_of_date:
     "The permissions have not reached Imbue Cloud yet. Try again in a moment.",
