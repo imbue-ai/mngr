@@ -147,6 +147,7 @@ def _armed(*, override_ref: str = "", is_auto_armed: bool = False) -> MngrCallRe
 
 _RUN_CHAT_ID = "agent-" + "c" * 32
 _STOPPED_LEAD_LINE = f"update-old\tSTOPPED\t{_RUN_CHAT_ID}\t\n"
+_STOPPED_LEADS_RUN = json.dumps({"chat_agent_name": "update-old"}) + "\n"
 
 
 @pytest.mark.parametrize(
@@ -155,15 +156,21 @@ _STOPPED_LEAD_LINE = f"update-old\tSTOPPED\t{_RUN_CHAT_ID}\t\n"
         # Its chat was deleted: the run is over, and there is no chat left to open.
         (update_run_probe_stdout(agents=""), UpdateActivity.STALLED, True),
         # Stopped where nothing will restart it: over, but its chat is still there to open and resume.
-        (update_run_probe_stdout(agents=_STOPPED_LEAD_LINE), UpdateActivity.STALLED, False),
+        (update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE), UpdateActivity.STALLED, False),
         # Stopped where the workspace's watchdog restarts it: still under way.
         (
-            update_run_probe_stdout(agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
+            update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
             UpdateActivity.RUNNING,
             False,
         ),
+        # Stopped before it recorded its run: the watchdog has no run to restart it for.
+        (
+            update_run_probe_stdout(agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
+            UpdateActivity.STALLED,
+            False,
+        ),
     ],
-    ids=["deleted", "stopped-no-watchdog", "stopped-watchdog"],
+    ids=["deleted", "stopped-no-watchdog", "stopped-watchdog", "stopped-watchdog-unrecorded"],
 )
 @pytest.mark.witnesses("workspace-updates.gone-agent-closed-out", partial="the app's report only")
 def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_back(

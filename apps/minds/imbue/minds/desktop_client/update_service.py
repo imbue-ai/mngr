@@ -621,7 +621,11 @@ class WorkspaceUpdateService(MutableModel):
             ):
                 logger.info("The update in machine {} is holding for the user; saying so", agent_id)
             return
-        if not probe.is_run_alive:
+        # The watchdog restarts a stopped lead only once that lead has put its run on the record.
+        is_run_alive = probe.is_run_alive and (
+            is_records_run or probe.agent_liveness is not UpdateAgentLiveness.STOPPED
+        )
+        if not is_run_alive:
             self._waiting_streak_by_agent.pop(aid_str, None)
             if self.state_store.set_activity(agent_id, UpdateActivity.STALLED, only_from=_POLLED_ACTIVITIES):
                 logger.info("The update run in machine {} is gone with no verdict; unlocking the row", agent_id)
