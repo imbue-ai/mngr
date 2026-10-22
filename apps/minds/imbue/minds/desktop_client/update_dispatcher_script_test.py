@@ -190,9 +190,11 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
 @pytest.mark.parametrize(
     ("run", "agents", "busy", "state", "action"),
     [
-        # The lead is gone with no verdict: close the run out.
+        # The lead's chat was deleted with no verdict: close the run out.
         (_OPEN_RUN, [], _NOTHING_BUSY, {}, "close_out"),
-        (_OPEN_RUN, [_agent(_LEAD, "DONE")], _NOTHING_BUSY, {}, "close_out"),
+        # The lead stopped or exited with no verdict (a workspace restart, a crash, a stop): bring it back.
+        (_OPEN_RUN, [_agent(_LEAD, "DONE")], _NOTHING_BUSY, {}, "revive"),
+        (_OPEN_RUN, [_agent(_LEAD, "STOPPED")], _NOTHING_BUSY, {}, "revive"),
         # A listing that could not be read is no evidence of anything.
         (_OPEN_RUN, None, _NOTHING_BUSY, {}, "nothing"),
         # The worker is moving: nothing is owed yet.
@@ -375,7 +377,10 @@ def test_a_refresh_that_lands_while_a_tick_creates_the_chat_keeps_the_apps_field
     assert (schedule["ceiling"], schedule["marked_chat"]) == ("minds-v0.9.1", _LEAD)
 
 
-@pytest.mark.witnesses("workspace-updates.gone-agent-closed-out")
+@pytest.mark.witnesses(
+    "workspace-updates.gone-agent-closed-out",
+    partial="the workspace's close-out; not the app's report or a fresh start",
+)
 def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -452,6 +457,25 @@ def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     assert len(messages) == 1
     assert messages[0][:2] == [_LEAD_ID, "-m"]
     assert "no recorded result yet" in messages[0][2]
+
+
+@pytest.mark.witnesses("workspace-updates.stopped-agent-revived")
+def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """A workspace restart stops every chat, and the user wants the update to carry on; only the lead judges a loop."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_LEAD, "STOPPED", _LEAD_ID), _agent(_WORKER, "STOPPED")])
+
+    for minute in range(3):
+        _tick(program, staged, _IN_WINDOW + 60 * minute)
+
+    messages = staged.tool_calls("message_chat.py")
+    assert [message[:2] for message in messages] == [[_LEAD_ID, "-m"]] * 3
+    assert [f"Restarts so far: {count}." in message[2] for count, message in enumerate(messages, 1)] == [True] * 3
+    assert staged.tool_calls("update_self.py") == []
+    assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
 def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(

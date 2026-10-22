@@ -122,7 +122,7 @@ Feature: Running an update
   @open-chat-from-outcome
   Scenario: A run's chat is one click away from where its progress or outcome is reported
     A scheduled run shows no window of its own while it runs, so its report is the way in.
-    Given a workspace whose last update landed, failed, or is waiting for a decision
+    Given a workspace whose last update landed or is waiting for a decision
     Then the outcome on the workspace's row offers a button into the run's chat
     And the outcome over the workspace offers a button into the run's chat and a way to dismiss it
     Given a workspace whose update is preparing, applying, or waiting for the user, and whose run's chat exists
@@ -136,13 +136,33 @@ Feature: Running an update
     Then the workspace reminds the agent that it owes a result
     And it is not reminded again for a while
 
-  @gone-agent-closed-out
-  Scenario: An update whose agent is gone is closed out by the workspace
+  @failed-outcome-shows-details
+  Scenario: An update that failed is reported with a way to its details
+    Whether the run's chat can still be opened is a question its details answer, so the report over the workspace does not promise it.
+    Given a workspace whose last update failed
+    Then the outcome over the workspace offers a way to see its details and a way to dismiss it
+    And its details offer a button into the run's chat only while that chat exists
+
+  @stopped-agent-revived
+  Scenario: An update whose agent stopped carries on
+    A workspace restart stops every chat in it, and the user still wants the update that was under way.
+    Only the agent can tell a loop from bad luck, so it is told how many times it has been restarted and decides when to give up.
     Given a workspace with an update in flight
-    And its agent is gone without recording a result
+    And its agent stopped without recording a result
+    Then the workspace starts the agent again, telling it how many times it has been restarted
+    And the app still reports that workspace as updating
+    And starting another update of that workspace is answered with the one under way
+
+  @gone-agent-closed-out
+  Scenario: An update whose chat was deleted is closed out by the workspace
+    Deleting the update's chat is how the user cancels an update under way.
+    Given a workspace with an update in flight
+    And its chat was deleted without recording a result
     Then the workspace records the update as stuck
     And the worker it handed off to is stopped with its work kept
     And the leases that agent held are released
+    And the app reports that the update didn't finish, without a button into its chat
+    And an update of that workspace can be started again at once
 
   @one-run-per-workspace
   Rule: A workspace runs at most one update at a time

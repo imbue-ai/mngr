@@ -54,10 +54,17 @@ WATCHDOG_REMINDER_MESSAGE: Final[str] = (
     "update-self script. Until a result is recorded you will keep being reminded."
 )
 
-# The verdict detail the watchdog records for a run whose lead is gone.
-WATCHDOG_GONE_LEAD_DETAIL: Final[str] = (
-    "The update agent stopped before it finished; its chat has what it got through."
+# What the watchdog sends a stopped lead whose run has no verdict; sending it is what restarts the chat.
+WATCHDOG_REVIVE_MESSAGE_TEMPLATE: Final[str] = (
+    "A note from the Imbue Studio app: this update's chat stopped before the update recorded a result "
+    "(the workspace may have restarted), so the app has started it again. Restarts so far: {count}. "
+    "Check where the update got to and carry on. If it keeps stopping for a reason you cannot find or "
+    'fix, record `run-status verdict STUCK --detail "<why, one plain line>"` from the update-self '
+    "script and tell the user."
 )
+
+# The verdict detail the watchdog records for a run whose lead's chat was deleted.
+WATCHDOG_GONE_LEAD_DETAIL: Final[str] = "The update's chat was deleted before the update finished."
 
 _APP_CONSTANTS_PLACEHOLDER: Final[str] = "# @APP_CONSTANTS@"
 
@@ -71,6 +78,7 @@ def _app_constants_block() -> str:
         "override": OVERRIDE_NOTE_TEMPLATE,
         "no_backup": NO_BACKUP_NOTE,
         "reminder": WATCHDOG_REMINDER_MESSAGE,
+        "revive": WATCHDOG_REVIVE_MESSAGE_TEMPLATE,
         "gone_lead_detail": WATCHDOG_GONE_LEAD_DETAIL,
     }
     lines = [
@@ -350,23 +358,30 @@ def find_agent(agents, name):
     return None
 
 
-def find_run_lead(agents, run):
-    """The run's lead: by the name its record holds, else by the chat id the last dispatch gave that name.
+def find_chat(agents, name, chat_id):
+    """A chat's agent: by ``name``, else by ``chat_id`` ('' for none); None when neither is listed.
 
-    Renaming a chat renames its agent, so the record's name can go stale under a live lead; its
-    chat id does not. A chat that moved to a new agent lists its ended predecessor beside it.
+    Renaming a chat renames its agent, so a name can go stale under a live chat; its chat id
+    does not. A chat that moved to a new agent lists its ended predecessor beside it.
     """
-    name = str(run.get("chat_agent_name") or "")
-    lead = find_agent(agents, name)
-    if lead is not None:
-        return lead
-    dispatch = read_json(LAST_DISPATCH_PATH) or {}
-    chat_id = str(dispatch.get("chat_id") or "") if dispatch.get("chat_agent_name") == name else ""
-    if not chat_id:
-        return None
+    agent = find_agent(agents, name)
+    if agent is not None or not chat_id:
+        return agent
     members = [agent for agent in agents if chat_id in (agent.get("id"), chat_id_of(agent))]
     live = [agent for agent in members if not is_agent_ended(agent)]
     return (live or members or [None])[0]
+
+
+def dispatched_chat_id(name):
+    """The chat id the last dispatch gave the chat it made as ``name``; '' when it made none under that name."""
+    dispatch = read_json(LAST_DISPATCH_PATH) or {}
+    return str(dispatch.get("chat_id") or "") if dispatch.get("chat_agent_name") == name else ""
+
+
+def find_run_lead(agents, run):
+    """The run's lead: by the name its record holds, else by the chat id the last dispatch gave that name."""
+    name = str(run.get("chat_agent_name") or "")
+    return find_chat(agents, name, dispatched_chat_id(name))
 
 
 def is_agent_ended(agent):
@@ -549,13 +564,20 @@ def run_started_at(run):
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def is_run_in_flight(run, agents):
-    """Whether the record names a run with no verdict whose lead is still there; unknown agents count as there."""
+def is_run_in_flight(run, agents, is_stopped_lead_revived):
+    """Whether the record names a run with no verdict whose lead is still there; unknown agents count as there.
+
+    A stopped lead counts while ``is_stopped_lead_revived``: the watchdog brings it back. A lead whose
+    chat was deleted never does.
+    """
     if not isinstance(run, dict) or run_verdict(run) is not None or not run.get("chat_agent_name"):
         return False
     if agents is None:
         return True
-    return not is_agent_ended(find_run_lead(agents, run))
+    lead = find_run_lead(agents, run)
+    if lead is None:
+        return False
+    return is_stopped_lead_revived or not is_agent_ended(lead)
 
 
 def pending_dispatched_chat(run, agents, now):
@@ -564,7 +586,9 @@ def pending_dispatched_chat(run, agents, now):
 
     A new lead records its start and takes the update lease only minutes after its chat is made,
     so until then the last dispatch is the one sign of it. Only for a short while after the
-    dispatch, so a lead that never records a start cannot hold updates back for good.
+    dispatch, so a lead that never records a start cannot hold updates back for good. An unlisted
+    chat counts only while the chat app may still be creating it, which it answered without a chat
+    id; one the create gave an id to was there, so unlisted it was deleted.
     """
     dispatch = read_json(LAST_DISPATCH_PATH)
     if dispatch is None or not dispatch.get("chat_agent_name"):
@@ -584,10 +608,13 @@ def pending_dispatched_chat(run, agents, now):
     )
     if is_run_recorded:
         return None
-    listed = find_agent(agents, name) if agents is not None else None
-    if listed is not None and is_agent_ended(listed):
-        return None
-    return name, str(dispatch.get("chat_id") or ""), float(dispatched_at)
+    chat_id = str(dispatch.get("chat_id") or "")
+    if agents is not None:
+        listed = find_chat(agents, name, chat_id)
+        is_deleted = listed is None and bool(chat_id)
+        if is_deleted or (listed is not None and is_agent_ended(listed)):
+            return None
+    return name, chat_id, float(dispatched_at)
 
 
 def display_version(ref):
@@ -978,7 +1005,8 @@ def tick_schedule(now):
 
 def dispatch_scheduled(schedule, run, agents, now):
     """Start the scheduled run, marking ``schedule`` with its chat; the skip reason when it could not start."""
-    if is_run_in_flight(run, agents) or pending_dispatched_chat(run, agents, now) is not None:
+    # This runs under cron, so the watchdog is here to bring a stopped lead back.
+    if is_run_in_flight(run, agents, is_stopped_lead_revived=True) or pending_dispatched_chat(run, agents, now) is not None:
         return SKIP_UPDATE_IN_FLIGHT
     if is_update_lease_held(agents):
         return SKIP_LEASE_HELD
@@ -996,16 +1024,23 @@ def dispatch_scheduled(schedule, run, agents, now):
 
 
 def decide_watchdog_action(run, agents, busy, watchdog_state, now):
-    """What the watchdog does about a run with no verdict: ``close_out``, ``remind``, ``count_idle``, ``reset``,
-    or ``nothing``."""
+    """What the watchdog does about a run with no verdict: ``close_out``, ``revive``, ``remind``, ``count_idle``,
+    ``reset``, or ``nothing``.
+
+    A stopped lead is revived however often it stops: a workspace restart stops every chat, and
+    the run should carry on. Only the lead can tell a loop from bad luck, so the revival message
+    leaves that judgment to it.
+    """
     if not isinstance(run, dict) or run_verdict(run) is not None or not run.get("chat_agent_name") or agents is None:
         return "nothing"
     if run.get("apply_phase"):
         # The apply's own recovery owns a run that is landing.
         return "reset"
     lead = find_run_lead(agents, run)
-    if is_agent_ended(lead):
+    if lead is None:
         return "close_out"
+    if is_agent_ended(lead):
+        return "revive"
     if run.get("is_holding"):
         return "reset"
     worker_name = run.get("worker_agent_name")
@@ -1029,11 +1064,12 @@ def _watchdog_state_for(run):
 
 
 def send_to_chat(agent, text):
-    """Message an agent's chat through the workspace's chat messenger; whether it was delivered."""
+    """Message an agent's chat through the workspace's chat messenger, starting it if it stopped; whether it was
+    delivered."""
     if os.path.isfile(MESSAGE_CHAT_SCRIPT):
         argv = [sys.executable or "python3", MESSAGE_CHAT_SCRIPT, chat_id_of(agent), "-m", text]
     else:
-        argv = ["mngr", "message", str(agent.get("name")), "-m", text]
+        argv = ["mngr", "message", str(agent.get("name")), "--start", "-m", text]
     sent = run_command(argv, MNGR_CREATE_TIMEOUT_SECONDS, agent_env())
     if sent.returncode not in (0, 7):
         log("could not message %s: %s" % (agent.get("name"), bounded(sent.stderr)))
@@ -1115,6 +1151,13 @@ def tick_watchdog(now):
         return
     if action == "close_out":
         close_out(run, agents)
+        return
+    if action == "revive":
+        revivals = int(state.get("revivals") or 0) + 1
+        if send_to_chat(find_run_lead(agents, run), MESSAGE_PARTS["revive"].format(count=revivals)):
+            state.update({"revivals": revivals, "idle_ticks": 0})
+            write_json(WATCHDOG_PATH, state)
+            log("restarted stopped lead %s (restart %d)" % (run["chat_agent_name"], revivals))
         return
     if action == "reset":
         if state.get("idle_ticks"):

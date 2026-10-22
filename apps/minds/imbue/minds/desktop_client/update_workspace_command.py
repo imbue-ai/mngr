@@ -411,7 +411,8 @@ def mode_now(context):
     run = read_json(RUN_PATH)
     # An ALREADY_RUNNING answer names when the run it found began, which tells its record apart from an
     # earlier run's under the same chat name.
-    if is_run_in_flight(run, agents):
+    # Only where cron runs the watchdog is a stopped lead brought back.
+    if is_run_in_flight(run, agents, is_stopped_lead_revived=is_cron_available(context["live_cron_dir"])):
         lead = find_run_lead(agents or [], run)
         emit(
             dict(

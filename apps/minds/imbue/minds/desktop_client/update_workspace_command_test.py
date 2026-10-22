@@ -340,6 +340,92 @@ def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_i
     assert staged.chat_creates() == []
 
 
+_DISPATCHED_CHAT = "update-to-minds-v0-9-0"
+_DISPATCHED_CHAT_ID = "agent-" + "e" * 32
+
+
+@pytest.mark.parametrize(
+    ("dispatched_chat_id", "listed", "outcome"),
+    [
+        # Deleted: the create gave it an id, so it was there, and it is no longer listed by name or id.
+        (_DISPATCHED_CHAT_ID, [], UpdateArmOutcome.CREATED),
+        # Still being created: the chat app answered before it had an id, and it is not listed until it lands.
+        ("", [], UpdateArmOutcome.ALREADY_RUNNING),
+        # Renamed: listed under its new name, by the id the create gave it.
+        (
+            _DISPATCHED_CHAT_ID,
+            [{"name": "my-update", "id": _DISPATCHED_CHAT_ID, "state": "RUNNING"}],
+            UpdateArmOutcome.ALREADY_RUNNING,
+        ),
+    ],
+)
+def test_update_now_counts_a_chat_dispatched_moments_ago_only_while_it_can_still_be_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dispatched_chat_id: str,
+    listed: list[dict[str, str]],
+    outcome: UpdateArmOutcome,
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state(
+        "run.json", {"chat_agent_name": "update-to-minds-v0-8-7", "started_at": _NOW - 86400, "verdict": "UPDATED"}
+    )
+    staged.write_state(
+        "last-dispatch.json",
+        {
+            "chat_agent_name": _DISPATCHED_CHAT,
+            "chat_id": dispatched_chat_id,
+            "started_by": "immediate",
+            "dispatched_at": _NOW - 120,
+        },
+    )
+    staged.set_agents(listed)
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    assert parse_update_command_result(answer).outcome is outcome
+    assert len(staged.chat_creates()) == (1 if outcome is UpdateArmOutcome.CREATED else 0)
+
+
+@pytest.mark.parametrize(
+    ("lead_state", "has_cron", "outcome"),
+    [
+        # The watchdog brings a stopped lead back, so its run is still under way.
+        ("STOPPED", True, UpdateArmOutcome.ALREADY_RUNNING),
+        ("DONE", True, UpdateArmOutcome.ALREADY_RUNNING),
+        # No cron, no watchdog: nothing will bring it back, so it does not hold a new run back.
+        ("STOPPED", False, UpdateArmOutcome.CREATED),
+        # Its chat was deleted: there is nothing to bring back.
+        (None, True, UpdateArmOutcome.CREATED),
+    ],
+)
+@pytest.mark.witnesses("workspace-updates.stopped-agent-revived", partial="update now's answer only")
+@pytest.mark.witnesses("workspace-updates.gone-agent-closed-out", partial="a fresh start only")
+def test_update_now_counts_a_stopped_lead_as_under_way_only_where_the_watchdog_revives_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    lead_state: str | None,
+    has_cron: bool,
+    outcome: UpdateArmOutcome,
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch, has_cron=has_cron)
+    staged.write_state("run.json", {"chat_agent_name": _DISPATCHED_CHAT, "started_at": _NOW - 600})
+    staged.set_agents(
+        [{"name": _DISPATCHED_CHAT, "id": _DISPATCHED_CHAT_ID, "state": lead_state}] if lead_state is not None else []
+    )
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    result = parse_update_command_result(answer)
+    assert result.outcome is outcome
+    if outcome is UpdateArmOutcome.ALREADY_RUNNING:
+        assert result.chat_id == _DISPATCHED_CHAT_ID
+
+
 @pytest.mark.parametrize(
     ("stderr", "outcome"),
     [
