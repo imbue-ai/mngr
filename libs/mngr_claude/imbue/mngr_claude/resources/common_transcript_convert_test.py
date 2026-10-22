@@ -15,7 +15,9 @@ from imbue.mngr.agents.common_transcript_records import PINNED_ATIF_SCHEMA_VERSI
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_claude.resources import common_transcript_convert
 from imbue.mngr_claude.resources.testing import DEFAULT_PROMPT_TOKENS
+from imbue.mngr_claude.resources.testing import make_absorbed_mid_turn_record
 from imbue.mngr_claude.resources.testing import make_assistant_record
+from imbue.mngr_claude.resources.testing import make_queued_command_record
 from imbue.mngr_claude.resources.testing import make_tool_result_record
 from imbue.mngr_claude.resources.testing import make_user_record
 from imbue.mngr_claude.resources.testing import read_observations
@@ -390,6 +392,148 @@ def test_compaction_becomes_a_system_step_carrying_the_summary(tmp_path: Path) -
     assert step["observation"] == {"results": [{"content": summary}]}
     assert validate_common_transcript_record(step) is None
     assert read_steps(output_file, "user") == []
+
+
+# -- Messages sent mid-turn --
+
+
+def _turn_with_a_message_sent_mid_turn(
+    command_mode: str = "prompt",
+    prompt: str | list[dict[str, Any]] = "also add a dark mode",
+    origin_kind: str = "human",
+    is_meta: bool | None = None,
+) -> list[dict[str, Any]]:
+    """A tool call whose result carries a message the user sent while the call ran, then the next inference.
+
+    The message was queued at 00:00:00, before the call; claude moved it into the turn at 00:00:02.5,
+    just after the tool result, and the agent's next inference followed at 00:00:03. Timestamps carry
+    milliseconds, as claude writes them, since the converter orders them as text.
+    """
+    return [
+        make_assistant_record(
+            "u1",
+            text="",
+            tool_uses=[{"id": "t1", "name": "Bash"}],
+            message_id="msg_1",
+            timestamp="2026-01-01T00:00:01.000Z",
+        ),
+        make_tool_result_record("u2", "t1", "output", timestamp="2026-01-01T00:00:02.000Z"),
+        make_absorbed_mid_turn_record("c1", "also add a dark mode", timestamp="2026-01-01T00:00:02.500Z"),
+        make_queued_command_record(
+            "u3",
+            "c1",
+            prompt,
+            command_mode=command_mode,
+            origin_kind=origin_kind,
+            is_meta=is_meta,
+            timestamp="2026-01-01T00:00:00.000Z",
+        ),
+        make_assistant_record(
+            "u4", text="Adding dark mode too.", message_id="msg_2", timestamp="2026-01-01T00:00:03.000Z"
+        ),
+    ]
+
+
+def test_a_message_sent_mid_turn_becomes_a_user_step(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn())
+    _convert_complete(input_file, output_file)
+    assert [step["message"] for step in read_steps(output_file, "user")] == ["also add a dark mode"]
+
+
+def test_a_message_sent_mid_turn_is_stamped_when_it_joined_the_turn(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn())
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "user")[0]["timestamp"] == "2026-01-01T00:00:02.500Z"
+
+
+def test_a_message_sent_mid_turn_sits_between_the_tool_result_and_the_next_inference(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn())
+    _convert_complete(input_file, output_file)
+    assert [record["event_id"] for record in read_stream(output_file)[1:]] == [
+        "u1-assistant",
+        "u2-tool_result-t1",
+        "u3-user",
+        "u4-assistant",
+    ]
+
+
+def test_a_background_task_notice_added_mid_turn_is_not_a_user_step(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn(command_mode="task-notification"))
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "user") == []
+
+
+def test_a_message_sent_mid_turn_without_its_queue_removal_is_not_a_user_step(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, [make_queued_command_record("u1", "c1", "also add a dark mode")])
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "user") == []
+
+
+def test_a_message_sent_mid_turn_with_a_pasted_image_keeps_its_text_and_marks_the_image(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    prompt = [
+        {"type": "text", "text": "also add a dark mode"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+    ]
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn(prompt=prompt))
+    _convert_complete(input_file, output_file)
+    assert [step["message"] for step in read_steps(output_file, "user")] == ["also add a dark mode\n[image omitted]"]
+
+
+def test_a_message_another_session_sent_mid_turn_is_a_system_step(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(input_file, _turn_with_a_message_sent_mid_turn(origin_kind="peer", is_meta=True))
+    _convert_complete(input_file, output_file)
+    assert (read_steps(output_file, "user"), [step["message"] for step in read_steps(output_file, "system")]) == (
+        [],
+        ["also add a dark mode"],
+    )
+
+
+def test_a_queue_removal_with_a_non_string_command_id_is_skipped(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    records = [
+        make_absorbed_mid_turn_record(["c1"], "also add a dark mode", timestamp="2026-01-01T00:00:02.500Z"),
+        make_user_record("u1", text="hello"),
+    ]
+    write_raw_transcript(input_file, records)
+    _convert_complete(input_file, output_file)
+    assert [step["message"] for step in read_steps(output_file, "user")] == ["hello"]
+
+
+def test_a_queue_removal_with_a_non_string_timestamp_is_skipped(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    records = [*_turn_with_a_message_sent_mid_turn()]
+    records[2] = make_absorbed_mid_turn_record("c1", "also add a dark mode", timestamp=1767225602.5)
+    write_raw_transcript(input_file, records)
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "user") == []
+
+
+def test_a_queued_message_with_a_non_string_source_id_is_skipped(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    records = [*_turn_with_a_message_sent_mid_turn()]
+    records[3] = make_queued_command_record("u3", ["c1"], "also add a dark mode", timestamp="2026-01-01T00:00:00.000Z")
+    write_raw_transcript(input_file, records)
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "user") == []
+
+
+def test_other_attachments_emit_nothing(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    hook_output = {
+        "type": "attachment",
+        "uuid": "u1",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "attachment": {"type": "hook_success", "content": "ok"},
+    }
+    write_raw_transcript(input_file, [hook_output])
+    assert _convert_complete(input_file, output_file) == 0
 
 
 # -- Observations --
