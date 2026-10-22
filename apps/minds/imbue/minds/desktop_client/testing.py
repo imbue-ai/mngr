@@ -108,6 +108,7 @@ from imbue.minds.desktop_client.update_apply_window import BUSY_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import BUSY_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import WATCHDOG_INSTALLED_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_RESULT_MARKER
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SOURCE
@@ -1205,7 +1206,9 @@ def ready_machine_launch_stdout(
     return skill_chat_launch_stdout(skill_name, script_exit_code=2, fallback_stdout="")
 
 
-def update_run_probe_stdout(*, run: str = "", agents: str | None = "", busy: str | None = "") -> str:
+def update_run_probe_stdout(
+    *, run: str = "", agents: str | None = "", busy: str | None = "", is_watchdog_installed: bool = False
+) -> str:
     """One workspace's answer to the update run probe, in the wire format.
 
     Section bodies pass through verbatim (no newline added); ``agents=None``
@@ -1214,10 +1217,12 @@ def update_run_probe_stdout(*, run: str = "", agents: str | None = "", busy: str
     """
     agent_section = f"{AGENTS_FAILED_SENTINEL}\n" if agents is None else agents
     busy_section = "" if busy is None else f"{BUSY_BEGIN_SENTINEL}\n{busy}{BUSY_END_SENTINEL}\n"
+    watchdog_line = f"{WATCHDOG_INSTALLED_SENTINEL}\n" if is_watchdog_installed else ""
     return (
         f"{RUN_BEGIN_SENTINEL}\n{run}{RUN_END_SENTINEL}\n"
         f"{AGENTS_BEGIN_SENTINEL}\n{agent_section}{AGENTS_END_SENTINEL}\n"
         f"{busy_section}"
+        f"{watchdog_line}"
     )
 
 

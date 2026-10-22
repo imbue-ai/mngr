@@ -298,6 +298,7 @@ export function noticeBandFor(
 
 const OPEN_RECOVERY: NoticeAction = { label: "Open recovery", kind: "open-recovery" };
 const SEE_UPDATE: NoticeAction = { label: "See update", kind: "update-workspace" };
+const SEE_UPDATE_DETAILS: NoticeAction = { label: "See details", kind: "update-workspace" };
 const OPEN_UPDATE_CHAT: NoticeAction = { label: "Open chat", kind: "open-update-chat" };
 const DISMISS_UPDATE_OUTCOME: NoticeAction = { label: "Dismiss", kind: "dismiss-update-outcome" };
 // Dismissing a pending decision lets a fresh run set the kept work aside, so it
@@ -387,8 +388,8 @@ function updateRunNotice(
  * What a finished run, or one that never went out, still owes the reader, or
  * null: the machine-side counterpart to the row badge, which cannot be seen
  * from inside the machine. A run's chat says what it found, so it is opened
- * from here; a run that never went out has no chat, and its modal carries the
- * error.
+ * from here; a run that failed, or never went out, has its details in the
+ * modal, which also knows whether the run's chat is still there to open.
  */
 function updateOutcomeNotice(outcome: UpdateRunOutcome, isUpdateChatKnown: boolean): NoticePayload | null {
   const chatActions = isUpdateChatKnown ? [OPEN_UPDATE_CHAT] : [];
@@ -398,7 +399,7 @@ function updateOutcomeNotice(outcome: UpdateRunOutcome, isUpdateChatKnown: boole
         key: "workspace-update-outcome",
         variant: "error",
         message: "This workspace's update didn't start.",
-        actions: [{ label: "See details", kind: "update-workspace" }, DISMISS_UPDATE_OUTCOME],
+        actions: [SEE_UPDATE_DETAILS, DISMISS_UPDATE_OUTCOME],
       };
     case "decision-pending":
       return {
@@ -412,7 +413,7 @@ function updateOutcomeNotice(outcome: UpdateRunOutcome, isUpdateChatKnown: boole
         key: "workspace-update-outcome",
         variant: "error",
         message: "This workspace's update didn't finish.",
-        actions: [...chatActions, DISMISS_UPDATE_OUTCOME],
+        actions: [SEE_UPDATE_DETAILS, DISMISS_UPDATE_OUTCOME],
       };
     case "needs-attention":
       return {

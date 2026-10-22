@@ -173,6 +173,9 @@ class _RunFacts(FrozenModel):
     chat_agent_id: str = Field(
         default="", description="The run's chat's id, for opening it: from the create, or the poll's listing"
     )
+    is_chat_gone: bool = Field(
+        default=False, description="Whether the poll found the run's chat deleted, so there is no chat left to open"
+    )
     is_sign_in_refused: bool = Field(
         default=False, description="Whether the last arm or start was refused because no account is signed in"
     )
@@ -249,6 +252,8 @@ def _started_by(run: _RunFacts, schedule: _ScheduleFacts) -> UpdateStartedBy | N
 
 
 def _chat_agent_id(run: _RunFacts, schedule: _ScheduleFacts) -> str:
+    if run.is_chat_gone:
+        return ""
     if run.chat_agent_id:
         return run.chat_agent_id
     dispatch = schedule.last_dispatch
@@ -300,6 +305,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         success_note_version=run.success_note_version,
         chat_agent_name=run.record.chat_agent_name,
         chat_agent_id=_chat_agent_id(run, schedule_facts),
+        is_chat_gone=run.is_chat_gone,
         dispatch_failure=run.dispatch_failure.message if run.dispatch_failure is not None else "",
         dispatch_failure_detail=run.dispatch_failure.detail if run.dispatch_failure is not None else "",
     )
@@ -507,6 +513,7 @@ class WorkspaceUpdateStateStore(MutableModel):
                 to_update(facts.field_ref().target_override, target_override),
                 to_update(facts.field_ref().dispatch_failure, None),
                 to_update(facts.field_ref().chat_agent_id, ""),
+                to_update(facts.field_ref().is_chat_gone, False),
             )
         self._fire_on_change()
         return True
@@ -560,6 +567,7 @@ class WorkspaceUpdateStateStore(MutableModel):
                     ),
                 ),
                 to_update(facts.field_ref().chat_agent_id, chat_agent_id),
+                to_update(facts.field_ref().is_chat_gone, False),
                 to_update(facts.field_ref().is_sign_in_refused, False),
                 to_update(facts.field_ref().target_override, facts.target_override if is_claimed_run else ""),
             )
@@ -576,6 +584,16 @@ class WorkspaceUpdateStateStore(MutableModel):
             self._run_by_agent[aid_str] = facts.model_copy_update(
                 to_update(facts.field_ref().chat_agent_id, chat_agent_id)
             )
+        self._fire_on_change()
+
+    def note_chat_gone(self, agent_id: AgentId) -> None:
+        """The poll found the in-flight run's chat deleted: there is nothing left to open."""
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str)
+            if facts is None or facts.is_chat_gone:
+                return
+            self._run_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().is_chat_gone, True))
         self._fire_on_change()
 
     def release_failed_claim(self, agent_id: AgentId, failure: UpdateDispatchFailure | None) -> bool:
@@ -697,7 +715,10 @@ class WorkspaceUpdateStateStore(MutableModel):
             # The held chat id is the earlier run's, even under the same (reused) chat name; the last
             # dispatch names this one's.
             if not is_same_run:
-                new_facts = new_facts.model_copy_update(to_update(new_facts.field_ref().chat_agent_id, ""))
+                new_facts = new_facts.model_copy_update(
+                    to_update(new_facts.field_ref().chat_agent_id, ""),
+                    to_update(new_facts.field_ref().is_chat_gone, False),
+                )
             self._run_by_agent[aid_str] = new_facts
         self._fire_on_change()
 

@@ -19,6 +19,7 @@ from datetime import timedelta
 from datetime import timezone
 from enum import auto
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -36,6 +37,8 @@ from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.update_dispatcher_script import DISPATCHER_CRON_NAME
+from imbue.minds.desktop_client.update_dispatcher_script import LIVE_CRON_DIRECTORY
 from imbue.minds.desktop_client.update_dispatcher_script import RUN_RECORD_PATH
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
@@ -81,6 +84,8 @@ AGENTS_END_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_END"
 AGENTS_FAILED_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_FAILED"
 BUSY_BEGIN_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_BEGIN"
 BUSY_END_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_END"
+# Printed when the workspace's cron runs the update dispatcher, whose watchdog restarts a stopped lead.
+WATCHDOG_INSTALLED_SENTINEL: Final[str] = "MNGR_UPDATE_WATCHDOG_INSTALLED"
 
 # The template's background-task CLI, relative to the work_dir; a template that predates it prints nothing.
 BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
@@ -94,7 +99,10 @@ class UpdateAgentLiveness(UpperCaseStrEnum):
     """Whether an update run's chat agent is still there in the workspace."""
 
     ALIVE = auto()
+    STOPPED = auto()
+    """Listed, but not running: stopped or exited, as a workspace restart leaves every chat. A message restarts it."""
     GONE = auto()
+    """Not listed at all: its chat was deleted."""
     UNKNOWN = auto()
     """The probe could not answer. Never read as GONE: that would unlock a live run's row."""
 
@@ -121,6 +129,10 @@ class UpdateRunProbe(FrozenModel):
     chat_agent_id: str = Field(
         default="", description="The run's chat's id as the listing gives it, for opening it; '' when not listed"
     )
+    is_watchdog_installed: bool = Field(
+        default=False,
+        description="Whether the workspace's cron runs the update watchdog, which restarts a stopped lead",
+    )
 
     @property
     def is_apply_in_progress(self) -> bool:
@@ -134,10 +146,19 @@ class UpdateRunProbe(FrozenModel):
 
     @property
     def is_run_alive(self) -> bool:
-        """Whether the evidence says a run is still going; unanswered and UNKNOWN count as alive."""
-        if not self.is_probe_answered:
+        """Whether the evidence says a run is still going; unanswered and UNKNOWN count as alive, and a stopped
+        lead does where the watchdog will restart it."""
+        if not self.is_probe_answered or self.is_apply_in_progress:
             return True
-        return self.is_apply_in_progress or self.agent_liveness is not UpdateAgentLiveness.GONE
+        match self.agent_liveness:
+            case UpdateAgentLiveness.GONE:
+                return False
+            case UpdateAgentLiveness.STOPPED:
+                return self.is_watchdog_installed
+            case UpdateAgentLiveness.ALIVE | UpdateAgentLiveness.UNKNOWN:
+                return True
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def build_update_run_probe_args(workspace_address: str) -> list[str]:
@@ -166,7 +187,8 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
         f"echo {AGENTS_END_SENTINEL}; "
         f"echo {BUSY_BEGIN_SENTINEL}; "
         f"{inner_busy} 2>/dev/null || true; "
-        f"echo {BUSY_END_SENTINEL}"
+        f"echo {BUSY_END_SENTINEL}; "
+        f"test -f {shlex.quote(LIVE_CRON_DIRECTORY + '/' + DISPATCHER_CRON_NAME)} && echo {WATCHDOG_INSTALLED_SENTINEL}; true"
     )
     return ["exec", "--agent", workspace_address, script, "--no-start"]
 
@@ -283,14 +305,16 @@ def _classify_agent_listing(
 ) -> tuple[UpdateAgentLiveness, bool]:
     """The run's chat agent's liveness (and whether the run is WAITING) from the listing.
 
-    An answered listing that does not carry the lead is GONE, since an ended chat stays listed.
+    An answered listing that does not carry the lead is GONE, since an ended chat stays listed (STOPPED).
 
     An idle lead is only "waiting" when it is not busy and its named worker is not moving
     either: the lead sits idle for most of the run while a background worker does the
     merge, or while a command it started in the background runs.
     """
-    if chat_agent is None or chat_agent.state in _ENDED_AGENT_STATES:
+    if chat_agent is None:
         return UpdateAgentLiveness.GONE, False
+    if chat_agent.state in _ENDED_AGENT_STATES:
+        return UpdateAgentLiveness.STOPPED, False
     if not _is_idle(chat_agent, busy_agents):
         return UpdateAgentLiveness.ALIVE, False
     worker = _listed_agent(agents, worker_agent_name) if worker_agent_name else None
@@ -334,6 +358,7 @@ def parse_update_run_probe(stdout: str, chat_agent_name: str, chat_agent_id: str
         agent_liveness=liveness,
         is_agent_waiting=is_waiting,
         chat_agent_id=listed_chat_agent_id,
+        is_watchdog_installed=WATCHDOG_INSTALLED_SENTINEL in (line.strip() for line in lines),
     )
 
 

@@ -593,6 +593,8 @@ class WorkspaceUpdateService(MutableModel):
             and not _is_earlier_runs_record(status, state.run_started_at)
         )
         self.state_store.note_chat_agent_id(agent_id, probe.chat_agent_id)
+        if probe.is_probe_answered and probe.agent_liveness is UpdateAgentLiveness.GONE:
+            self.state_store.note_chat_gone(agent_id)
         if is_records_run:
             assert status is not None
             # The run's own record outranks the claim: its start is what the sweep dedups the file by,
@@ -632,10 +634,14 @@ class WorkspaceUpdateService(MutableModel):
                 agent_id, UpdateActivity.WAITING, only_from=frozenset({UpdateActivity.RUNNING})
             ):
                 logger.info("The update agent in machine {} is waiting in its chat; saying so", agent_id)
-        elif probe.is_probe_answered and probe.agent_liveness is UpdateAgentLiveness.ALIVE:
+        elif probe.is_probe_answered and probe.agent_liveness in (
+            UpdateAgentLiveness.ALIVE,
+            UpdateAgentLiveness.STOPPED,
+        ):
             self._waiting_streak_by_agent.pop(aid_str, None)
             # Post-apply, the agent is composing its results; the window is left
             # to close on its own (a verdict, the tracker's probe, or its deadline).
+            # A stopped lead that reached here is one the workspace's watchdog is restarting.
             self.state_store.set_activity(
                 agent_id,
                 UpdateActivity.RUNNING,

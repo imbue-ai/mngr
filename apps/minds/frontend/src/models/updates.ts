@@ -123,6 +123,10 @@ export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
   );
 }
 
+/** What an update does to the chats running in its workspace, said wherever one is started. */
+export const RUNNING_CHATS_PAUSE_LINE =
+  "Running chats pause for a few minutes while the update is applied, then continue.";
+
 /** Whether the last run ended in a way the user has to be told about as a
  * failure. Not NEEDS_DECISION: that run did its job and handed the user a
  * question, which has a state of its own. */
@@ -249,8 +253,9 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
     }
     case "STALLED":
       return {
-        message:
-          "The update agent is no longer running and never reported a result. Check in with it in the update chat.",
+        message: update.is_chat_gone
+          ? "The update's chat was deleted before the update recorded a result."
+          : "The update agent is no longer running and never reported a result. Check in with it in the update chat.",
         isWaiting: false,
       };
     default:

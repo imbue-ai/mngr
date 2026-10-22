@@ -329,6 +329,21 @@ describe("the update modal over a run's outcome on a machine it cannot update in
   });
 });
 
+describe("the update modal over a run whose agent stopped without a result", () => {
+  it.each([
+    // Nothing restarts it, but its chat is still there: opening it is how the run is resumed.
+    ["stopped", { chat_agent_id: "agent-lead-7", is_chat_gone: false }, ["Open chat", "Dismiss"]],
+    // Its chat was deleted: there is nothing to open.
+    ["deleted", { chat_agent_id: "", is_chat_gone: true }, ["Dismiss"]],
+  ] as const)("offers the run's chat only while it exists (%s)", (_case, chat, labels) => {
+    const update = { ...OUT_OF_DATE_UPDATE, activity: "STALLED", chat_agent_name: "update-to-v0-9-0", ...chat };
+    const root = harness(() => Promise.resolve(jsonResponse({})), update as UiWorkspaceUpdate).draw();
+
+    expect(buttonLabels(root)).toEqual(labels);
+    expect(allText(root).includes("deleted")).toBe(chat.is_chat_gone);
+  });
+});
+
 describe("the update modal over a machine behind only by a patch", () => {
   const PATCH: UiWorkspaceUpdate = {
     ...OUT_OF_DATE_UPDATE,

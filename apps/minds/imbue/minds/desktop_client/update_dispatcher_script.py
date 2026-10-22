@@ -39,6 +39,10 @@ RUN_RECORD_PATH: Final[str] = f"{UPDATE_STATE_DIR}/run.json"
 SCHEDULE_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/schedule.json"
 LAST_DISPATCH_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/last-dispatch.json"
 
+# The cron drop-in that runs the dispatcher's tick, in the directory the cron daemon reads.
+DISPATCHER_CRON_NAME: Final[str] = "update-self-dispatch"
+LIVE_CRON_DIRECTORY: Final[str] = "/etc/cron.d"
+
 # Opens the program's one JSON answer on stdout, so it can be found in noisy output.
 UPDATE_COMMAND_RESULT_MARKER: Final[str] = "MINDS_UPDATE_COMMAND_JSON:"
 
@@ -86,6 +90,8 @@ def _app_constants_block() -> str:
         f"RUN_PATH = {json.dumps(RUN_RECORD_PATH)}",
         f"SCHEDULE_PATH = {json.dumps(SCHEDULE_FILE_PATH)}",
         f"LAST_DISPATCH_PATH = {json.dumps(LAST_DISPATCH_FILE_PATH)}",
+        f"CRON_NAME = {json.dumps(DISPATCHER_CRON_NAME)}",
+        f"LIVE_CRON_DIR = {json.dumps(LIVE_CRON_DIRECTORY)}",
         f"RESULT_MARKER = {json.dumps(UPDATE_COMMAND_RESULT_MARKER)}",
         f"CHECK_SIGN_IN_FLAG = {json.dumps(UPDATE_COMMAND_CHECK_SIGN_IN_FLAG)}",
         f"STARTED_BY_SCHEDULED = {json.dumps(UpdateStartedBy.SCHEDULED.value.lower())}",
@@ -141,9 +147,7 @@ except ImportError:
 DISPATCHER_PATH = STATE_DIR + "/dispatcher.py"
 LOG_PATH = STATE_DIR + "/dispatcher.log"
 WATCHDOG_PATH = STATE_DIR + "/watchdog.json"
-CRON_NAME = "update-self-dispatch"
 DURABLE_CRON_PATH = "data/.state/cron.d/" + CRON_NAME
-LIVE_CRON_DIR = "/etc/cron.d"
 CRON_LOCK_PATH = "/run/update-self-dispatch.lock"
 CRON_PATH_LINE = "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SKILL_PATH = ".agents/skills/update-self/SKILL.md"

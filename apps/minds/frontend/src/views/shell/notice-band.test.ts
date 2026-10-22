@@ -323,8 +323,9 @@ describe("noticeBandFor, an update run", () => {
   });
 
   it.each([
-    ["failed", true, ["open-update-chat", "dismiss-update-outcome"]],
-    ["failed", false, ["dismiss-update-outcome"]],
+    // Whether the failed run's chat is still there to open is the modal's to say.
+    ["failed", true, ["update-workspace", "dismiss-update-outcome"]],
+    ["failed", false, ["update-workspace", "dismiss-update-outcome"]],
     ["needs-attention", true, ["open-update-chat", "dismiss-update-outcome"]],
     ["decision-pending", true, ["open-update-chat", "skip-update"]],
     ["decision-pending", false, ["skip-update"]],

@@ -138,13 +138,18 @@ def test_a_run_with_no_chat_name_reads_unknown_rather_than_gone() -> None:
     assert probe.is_run_alive is True
 
 
+@pytest.mark.parametrize("is_watchdog_installed", (True, False))
 @pytest.mark.parametrize("ended_state", ("DONE", "STOPPED"))
-def test_an_agent_positively_ended_reads_as_gone(ended_state: str) -> None:
+@pytest.mark.witnesses("workspace-updates.stopped-agent-revived", partial="the app's reading only")
+def test_a_stopped_lead_is_still_going_only_where_the_watchdog_brings_it_back(
+    ended_state: str, is_watchdog_installed: bool
+) -> None:
     """STOPPED is what an agent with no tmux session reports, i.e. what a container restart leaves behind."""
-    probe = parse_update_run_probe(update_run_probe_stdout(agents=f"{_CHAT}\t{ended_state}\n"), _CHAT)
+    stdout = update_run_probe_stdout(agents=f"{_CHAT}\t{ended_state}\n", is_watchdog_installed=is_watchdog_installed)
+    probe = parse_update_run_probe(stdout, _CHAT)
 
-    assert probe.agent_liveness is UpdateAgentLiveness.GONE
-    assert probe.is_run_alive is False
+    assert probe.agent_liveness is UpdateAgentLiveness.STOPPED
+    assert probe.is_run_alive is is_watchdog_installed
 
 
 @pytest.mark.parametrize(
@@ -157,7 +162,7 @@ def test_an_agent_positively_ended_reads_as_gone(ended_state: str) -> None:
             UpdateAgentLiveness.ALIVE,
             "agent-chat-1",
         ),
-        ("renamed-update\tDONE\tagent-chat-1\t\n", UpdateAgentLiveness.GONE, "agent-chat-1"),
+        ("renamed-update\tDONE\tagent-chat-1\t\n", UpdateAgentLiveness.STOPPED, "agent-chat-1"),
         ("unrelated\tRUNNING\tagent-other\t\n", UpdateAgentLiveness.GONE, ""),
     ),
 )

@@ -38,6 +38,7 @@ import {
 } from "../../../models/machineSize";
 import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
+  RUNNING_CHATS_PAUSE_LINE,
   devOverridePrefill,
   isArmedByAutoUpdate,
   isRecreationRequired,
@@ -426,7 +427,8 @@ function renderUpdatesGroup(
       m(
         "p",
         { class: "type-helper text-secondary mb-3" },
-        "Updating runs an agent inside this workspace, which uses credits. Its chat is the record of what was done.",
+        "Updating runs an agent inside this workspace, which uses credits. Its chat is the record of what was done. " +
+          RUNNING_CHATS_PAUSE_LINE,
       ),
       held !== null
         ? // The question replaces the controls so there is one way to answer it.

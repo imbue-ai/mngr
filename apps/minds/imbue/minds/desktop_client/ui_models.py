@@ -545,7 +545,10 @@ class UiWorkspaceUpdate(FrozenModel):
         description="Name of the run's chat agent; empty when no run has claimed this machine",
     )
     chat_agent_id: str = Field(
-        default="", description="The run's chat's id, for opening it from the app; '' when unknown"
+        default="", description="The run's chat's id, for opening it from the app; '' when unknown or deleted"
+    )
+    is_chat_gone: bool = Field(
+        default=False, description="Whether the run's chat was deleted before the run recorded how it ended"
     )
     is_backup_configured: bool = Field(
         default=False,

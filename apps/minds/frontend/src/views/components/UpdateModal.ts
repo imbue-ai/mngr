@@ -7,6 +7,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import {
+  RUNNING_CHATS_PAUSE_LINE,
   displayVersion,
   isArmedByAutoUpdate,
   isRecreationRequired,
@@ -389,8 +390,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           m(
             "p",
             { class: "type-helper text-tertiary" },
-            "Updating runs an agent inside this workspace, which uses credits. " +
-              "Running chats pause for a few minutes while the update is applied, then continue.",
+            `Updating runs an agent inside this workspace, which uses credits. ${RUNNING_CHATS_PAUSE_LINE}`,
           ),
           m(
             "button",

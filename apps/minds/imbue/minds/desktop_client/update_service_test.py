@@ -145,24 +145,50 @@ def _armed(*, override_ref: str = "", is_auto_armed: bool = False) -> MngrCallRe
     return update_command_answer("ARMED", mode="arm", schedule=schedule)
 
 
-# The run's chat listed with no live process: the probe's positive "this run is over".
-_GONE_AGENT_STDOUT = update_run_probe_stdout(agents="update-old\tSTOPPED\n")
+_RUN_CHAT_ID = "agent-" + "c" * 32
+_STOPPED_LEAD_LINE = f"update-old\tSTOPPED\t{_RUN_CHAT_ID}\t\n"
 
 
-def test_a_run_that_vanished_is_stalled_and_tells_no_listener(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+@pytest.mark.parametrize(
+    ("probe_stdout", "activity", "is_chat_gone"),
+    [
+        # Its chat was deleted: the run is over, and there is no chat left to open.
+        (update_run_probe_stdout(agents=""), UpdateActivity.STALLED, True),
+        # Stopped where nothing will restart it: over, but its chat is still there to open and resume.
+        (update_run_probe_stdout(agents=_STOPPED_LEAD_LINE), UpdateActivity.STALLED, False),
+        # Stopped where the workspace's watchdog restarts it: still under way.
+        (
+            update_run_probe_stdout(agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
+            UpdateActivity.RUNNING,
+            False,
+        ),
+    ],
+    ids=["deleted", "stopped-no-watchdog", "stopped-watchdog"],
+)
+@pytest.mark.witnesses("workspace-updates.gone-agent-closed-out", partial="the app's report only")
+def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_back(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    probe_stdout: str,
+    activity: UpdateActivity,
+    is_chat_gone: bool,
 ) -> None:
-    """A gone agent is the run's end as much as a verdict is, but it landed nothing."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_GONE_AGENT_STDOUT))
+    """An ended run is the run's end as much as a verdict is, but it landed nothing."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     landings_told: list[AgentId] = []
     service.add_on_update_landed_callback(lambda agent_id, run_started_at, ended_at: landings_told.append(agent_id))
     agent_id = AgentId.generate()
-    begin_dispatched_update_run(service.state_store, agent_id, "update-old")
+    assert service.state_store.try_begin_run(agent_id, target_override="")
+    assert service.state_store.adopt_dispatched_chat(
+        agent_id, chat_agent_name="update-old", chat_agent_id=_RUN_CHAT_ID
+    )
 
     service.poll_in_flight_runs()
 
-    assert service.state_store.get(agent_id).activity is UpdateActivity.STALLED
+    state = service.state_store.get(agent_id)
+    assert (state.activity, state.is_chat_gone) == (activity, is_chat_gone)
+    assert state.chat_agent_id == ("" if is_chat_gone else _RUN_CHAT_ID)
     assert landings_told == []
 
 
