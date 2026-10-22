@@ -4,6 +4,28 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Imbue Studio no longer pins a CPU core when a workspace keeps re-announcing its apps.
+
+- An update to the backend's view of workspaces that changes nothing -- a workspace re-announcing services it already announced, a discovered-agents snapshot identical to the last one -- no longer wakes the backend's listeners (the UI channel, the update detector, latchkey auto-register and the rest). A workspace still running the retired `app-watcher` re-announces every app every few seconds, and replaying its multi-gigabyte services log used to trigger a full UI re-derive per line.
+
+- The output of `mngr forward` is read through a buffer instead of one byte per system call.
+
+- Each UI update reads the pending permission requests from the latchkey gateway once, shared by the inbox badge and the notification feed, instead of twice.
+
+- Requests to the latchkey gateway reuse one TLS context per client instead of parsing the certificate bundle every time a client is built.
+
+- UI updates are spaced at least 100 ms apart. A change arriving inside that gap is folded into the next update, not dropped.
+
+Changed: the bundled Python environment installs the config-merge library as `imbue-overlay` (renamed from `overlay`); the build and the launch-time reinstall list use the new name.
+
+## 2026-10-21
+
+- The pre-push `ty` check passes on macOS again for pushes that change Python. The desktop app's API socket now picks its peer-credential read by checking `sys.platform` (`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux), which type checkers read per platform, so a Mac no longer type-checks the Linux-only `socket.SO_PEERCRED`. On any other platform the read refuses the connection with `PeerCredentialsError` instead of failing with an `AttributeError`. The read no longer takes a `platform` argument, since it can only ever read the running machine's option.
+
+The report-a-bug dialog an agent opens can be closed again. When an agent asked to file a report twice in quick succession, the dialog's close X (and Escape) stopped working. Closing it, and pressing Done after sending, now always returns to the machine the report is about. Before, Done could land on a stale screen such as an already answered permission request.
+
 ## 2026-10-21
 
 When an invitation is refused because the granter has reached their invitation email limit, the share panel row now says "Access granted, but you've reached your invitation email limit for now." instead of "You have reached your invitation limit for now." Granters read the old wording as the share itself having failed; the grant is saved either way, and only the invitation email is held back.

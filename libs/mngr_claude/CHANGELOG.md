@@ -38,6 +38,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr message` with an unrecognized slash command (e.g. `/zzz`) returns in about 2 seconds with a warning that Claude rejected it, instead of waiting out the relaxed window and reporting success.
 - Changed: Message sends spawn far fewer processes (16 to 6, together with the mngr changes).
 - Changed: Lower idle CPU cost of the transcript watchers: `common_transcript.sh` skips conversion when the raw transcript is unchanged, and `stream_transcript.sh` counts all session files in one `wc` per poll and finds a not-yet-written session file with a shell glob instead of running `find` every second.
+- Changed: `imbue-mngr-claude` depends on `imbue-overlay` for config merging (the PyPI name `overlay` is an unrelated project).
 
 ### Removed
 

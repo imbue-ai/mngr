@@ -66,6 +66,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Shared helpers: `start_pid_death_watcher` / `is_pid_alive` (`imbue.mngr.utils.parent_process`), the `ByteSize` primitive (`512m`, `4GiB`), `OUTER_HOST_HOSTNAME_IN_CONTAINER` (`imbue.mngr.primitives`), `discover_hosts_within_per_host_timeout` (`imbue.mngr.interfaces.provider_instance`), `PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME` (`imbue.mngr.api.discovery_events`) and `get_default_cli_events_log_dir` (`imbue.mngr.utils.logging`). `HostNameConflictError` can carry the conflicting host's id, state and a remediation hint.
 - Added: `host_log_dir` config on every provider moves mngr's plain-text service logs (shutdown, activity watcher, volume sync) outside `host_dir` (default `<host_dir>/logs`). The docker provider's `volume_mount_path` mounts the per-host volume at a configurable path with `host_dir` inside it (requires `isolate_host_volumes=true`).
 - Added: Docker provider sizing: `[providers.docker]` `default_cpus` / `default_memory` cap new containers (`--memory-swap` equals the memory cap), `mngr list` reports real CPU and memory instead of the 1 CPU / 1 GB placeholder, and `mngr docker resize HOST [--cpus N] [--memory SIZE]` changes a host's caps, which `mngr start` and snapshot restore re-apply.
+- Added: `mngr event --latest-by SOURCE:FIELD` (repeatable, one per source) prints only the newest past event per FIELD value for SOURCE (e.g. `services:service`), after the rest of the history; with `--follow`, a new event is printed unless it is older than the newest one already printed for its value. Cannot be combined with `--head` / `--tail`.
 
 ### Changed
 
@@ -109,7 +110,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Commands that target existing agents (`exec`, `message`, `start`, `stop`, `label`, `connect`, `transcript`, `event`, ...; not `destroy`) skip discovery when every address names a host id and provider (`AGENT@host-<id>.PROVIDER`), reading only that host and failing with "not found" if the agent is not there. Providers gain `discover_host_and_agents`.
 - Changed: Faster listing: `get_agents` / `discover_agents` read every agent's `data.json` in one command instead of two SSH round trips per agent; the provider listing script (imbue_cloud, VPS, Modal) collects activity times and tmux panes for all agents at once; and the outer listing script reuses the previous container id and answers `LISTING_UNCHANGED=true` when the records' `LISTING_FINGERPRINT` is unchanged.
 - Changed: Fewer process spawns: stopping an agent (`mngr stop`, `mngr start --restart`, `mngr destroy`) lists its processes with one `ps` snapshot instead of one `pgrep -P` per process; local `write_file` applies the mode and atomic rename in-process; `load_config` resolves the git worktree root once (`resolve_project_config_dir` is split, adding `derive_project_config_dir`).
-- Changed: `mngr event --follow` polls remote sources with ranged reads (new `HostFileReadInterface.read_file_tail_from_offset`) instead of re-downloading the whole `events.jsonl` on every poll.
+- Changed: `mngr event --follow` polls remote sources with ranged reads (new `HostFileReadInterface.read_file_tail_from_offset`, whose optional `max_byte_count` bounds each read) instead of re-downloading the whole `events.jsonl` on every poll.
 - Changed: `mngr cleanup` destroys hosts concurrently (up to 32 at a time), still reporting results in selection order.
 - Changed: A `[commands.<name>]` table in a higher-precedence settings layer merges with lower layers parameter by parameter instead of replacing their whole map.
 - Changed: `AgentDetails.initial_branch` reports the branch the agent's work_dir was checked out on at creation, including a pre-existing branch (`--branch BASE`), and is `None` when detached; `mngr start`'s missing-work_dir hint names it. New: `AgentInterface.get_checked_out_branch_name()` and `DiscoveredAgent.checked_out_branch_name`. `created_branch_name` still governs `mngr destroy --remove-created-branch`.
@@ -119,6 +120,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `resources/Dockerfile` pins Claude Code 2.1.293 (up from 2.1.141; adds Claude Fable 5 and 5.1, Opus 5 and 5.5, Sonnet 5.5 and Haiku 5.5; kept equal to default-workspace-template's `[agent_types.claude].version`), offload 0.10.0 (up from 0.9.7) and restic 0.18.1 (SHA256-verified, replacing Debian's 0.14), installs `lsof`, and pre-fetches the dugite-native git asset into `/opt/dugite-native-cache` (`MINDS_DUGITE_NATIVE_CACHE_DIR`, about 60 MB). `start-dockerd.sh` fails at once if dockerd dies during startup (deadline `DOCKERD_STARTUP_TIMEOUT_SECONDS`, default 60s).
 - Changed: The `imbue-mngr-skills` Claude Code / Codex plugin (`mngr-help`, `find-agent`, `message-agent`, `wait-for-agent`) now lives in `libs/mngr/skills_plugin/` and is published to the `imbue-ai/imbue-skills` marketplace, replacing the frozen `imbue-ai/mngr-claude-skills`. `mngr extras claude-plugin` offers `imbue-code-guardian`, `imbue-mngr-skills@imbue-skills` and the new `imbue-studio-skills@imbue-skills`.
 - Changed: The `imbue-mngr` wheel no longer ships the test-only modules `imbue/mngr/agents/agent_release_testing.py` and `imbue/mngr/providers/provider_release_testing.py`.
+- Changed: `imbue-mngr` depends on `imbue-overlay` for config merging (the PyPI name `overlay` is an unrelated project).
 
 ### Removed
 
@@ -184,6 +186,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: On a stopped volume-backed host (e.g. Modal), listing a missing directory returns an empty listing instead of raising an uncaught error, and a path outside the host directory is refused with a plain message.
 - Fixed: `OuterHost.read_file` raises `IsADirectoryError` for a directory over SSH, and `RemoteGitContext.get_current_branch` raises on a detached HEAD instead of returning `"HEAD"`, matching the local implementations.
 - Fixed: The local provider's `get_host_resources` reports `frequency_ghz=None` instead of crashing when `psutil.cpu_freq()` raises `SystemError` on some macOS hosts.
+- Fixed: `mngr event` reads event history in bounded chunks, merging sources by timestamp as it reads, instead of holding all of it in memory (a 5.4 GB services log drove a `--follow` to 37 GB).
 
 ### Security
 

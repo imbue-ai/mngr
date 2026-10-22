@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
+
 ## 2026-10-20
 
 `mngr list` no longer reports a `plugin.pi-coding.waiting_reason` field on agents of other types. The pi-coding field generator ran for every listed agent, so a `command` or `codex` agent showed `END_OF_TURN` under `plugin.pi-coding` (the marker it reads is one such an agent never writes), at the cost of one remote `path_exists` call per agent per `mngr list`. The generator now returns nothing for an agent that is not a PiCodingAgent, as the codex generator already did. Reported by 19 mappers in the 2026-10-13 TMR run.

@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
+
+Changed: `imbue-mngr-claude` depends on `imbue-overlay` instead of `overlay`. The PyPI name `overlay` belongs to an unrelated third-party project, so the old pin could never be installed from PyPI.
+
 ## 2026-10-20
 
 A Claude agent whose turn end another Stop hook blocks (exit code 2, which sends Claude back to work on the hook's feedback) now stays RUNNING through the continuation. Before, `wait_for_stop_hook.sh` cleared the `active` marker once the other hooks exited, and since no hook fires when the continuation starts, the agent read WAITING while it was still working. The script now reads the session transcript the same way it already does for queued prompts: Claude Code writes the block's `Stop hook feedback:` record as soon as the blocking hook exits and the turn's `stop_hook_summary` only after every hook finishes, so a feedback record newer than the latest summary means the turn end was blocked. An interrupt (SIGTERM, SIGINT) and a StopFailure turn end still mark the agent inactive.

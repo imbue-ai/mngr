@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
+
 ## 2026-10-20
 
 The codex `waiting_reason` field generator's docstring no longer claims its registration limits it to codex agents; field generators run for every listed agent, and the existing `isinstance` guard is what keeps the field off other types.

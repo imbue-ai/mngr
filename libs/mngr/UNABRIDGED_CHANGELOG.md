@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+`mngr event` reads and replays an event history a piece at a time instead of holding all of it in memory.
+
+- History files are read in bounded chunks, and the sources are merged by timestamp as they are read. Before, every historical event was parsed and held until the read finished, so it could be sorted. A 200 MB services history peaked at 1.3 GB this way; it now peaks at about 200 MB. On one workspace, a 5.4 GB services log drove a `mngr event ... --follow` process to a 37 GB footprint. What still grows with the history is the set of emitted event ids kept to drop duplicates, for sources no `--latest-by` rule folds. A `--follow` that re-reads a remote file from its start, after a rotation, also reads it in bounded chunks.
+
+- New `--latest-by SOURCE:FIELD` option: of SOURCE's past events, only the newest per value of FIELD is printed, after the rest of the history (also for a source that first appears during `--follow`). Use it for a source whose history only matters as its latest state, such as `services:service`. With the option set, `--follow` still prints every new event, including one in the same second as the newest printed for its value. It skips only events it has already accounted for and events older than the newest one printed for their value, so a reader that restarts from the top of the file does not replay the folded history. The option cannot be combined with `--head` or `--tail`.
+
+- `HostFileReadInterface.read_file_tail_from_offset` takes an optional `max_byte_count`, so a large file can be read a piece at a time over SFTP. A stopped host's volume has no ranged read, so it still returns the rest of the file in one piece; a zero `max_byte_count` (a size check) is answered from its directory listing, so sizing a stopped host's event file or agent transcript does not download it.
+
+Changed: `imbue-mngr` depends on `imbue-overlay` instead of `overlay`. The PyPI name `overlay` belongs to an unrelated third-party project, so the old pin could never be installed from PyPI.
+
+## 2026-10-21
+
+On macOS, following agent events (the `mngr observe` follower and local event-source tails) no longer stays on the slow fallback poll when the events directory does not exist yet at startup. The directory watch used to report success for a missing directory, so it was never retried, and it went dead once the directory appeared; every later event then waited out the fallback interval (10 seconds by default) instead of arriving at once. The watch now refuses a missing directory, as it already did on Linux, and the tails retry it until the directory exists.
+
 ## 2026-10-21
 
 `SendFailureKind` gains two kinds, so a client of the message API can tell a send that typed nothing from one whose text may already be with the agent:

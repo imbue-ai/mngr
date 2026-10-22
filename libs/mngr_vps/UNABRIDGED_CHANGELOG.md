@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
+
 ## 2026-10-20
 
 The discovery test's canned outer now recognizes the outer listing script by its label lookup rather than by its first line, which the script no longer opens with (it first inspects the container a previous listing found).

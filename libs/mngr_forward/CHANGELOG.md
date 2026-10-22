@@ -29,6 +29,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Dead per-agent `mngr event` streams respawn with exponential backoff (2s doubling to 60s; a flat 15 minutes after repeated target-not-found exits) and are held back while discovery reports the host stopping, stopped, paused, crashed, failed or destroyed; a child whose reader dies now exits so it is respawned, and its exit log includes its last stderr lines.
 - Changed: Discovery lines written by a different mngr version are skipped with one warning per distinct failure, and additive fields from newer versions parse cleanly.
 - Changed: `mngr forward` logs why it exits (the signal, or the escaping exception and its frame, plus the exit status) and, when an agent host's sshd refuses this device's key, what was offered (user, port, error, key SHA256 fingerprint and mtime, allowed auth types); serve-loop exceptions are logged as one line (traceback at debug), each repeating failure at most once a minute.
+- Changed: Per-agent services streams run `mngr event ... --latest-by services:service`, so a (re)spawned stream replays each service's latest registration instead of the agent's whole services history.
 
 ### Removed
 
