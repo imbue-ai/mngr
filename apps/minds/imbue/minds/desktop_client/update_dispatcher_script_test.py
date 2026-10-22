@@ -478,6 +478,20 @@ def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it
     assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
+@pytest.mark.parametrize("wrapper_dir", ["system/libs/routines", "system/libs/automations"])
+def test_under_cron_the_agent_environment_is_restored_through_the_templates_wrapper_wherever_it_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, wrapper_dir: str
+) -> None:
+    """The routines rework moved the wrapper; a template from before it keeps it where it was."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    monkeypatch.delenv("MNGR_HOST_DIR")
+    wrapper = staged.root / wrapper_dir / "with_agent_env.sh"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text('export MNGR_AGENT_ID=agent-services\nexec "$@"\n')
+
+    assert program.agent_env()["MNGR_AGENT_ID"] == "agent-services"
+
+
 def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:

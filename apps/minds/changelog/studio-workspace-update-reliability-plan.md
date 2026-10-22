@@ -27,3 +27,13 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 - Clicking a workspace's "Preparing update…", "Updating…" or "Needs your answer" badge while its update is under way opens the update's chat directly, instead of a window whose only button opened that chat. A run still starting, before its chat exists, opens the update window as before.
 
 - A stuck update now reads "The update ran into a problem it couldn't recover from." in the update window, instead of saying it couldn't clean up after itself, which was rarely true, and a refused one reads "The update wasn't applied." instead of "The update didn't run.", since a refused update often ran and was rolled back. The watchdog's reminder to an idle update agent now asks it to record whichever result fits, with stuck reserved for a fault it cannot recover from, so an update waiting for your decision is not recorded as stuck.
+
+- An update whose chat stopped, as a workspace restart stops every chat, now carries on: the workspace starts the chat again and tells the update agent how many times it has had to, and the agent gives up (recording the update as stuck) only if it keeps stopping for a reason it cannot fix. The row keeps saying the update is under way meanwhile. To cancel an update under way, delete its chat or tell its agent to stop; an agent told to stop ends the update without applying it.
+
+- Deleting an update's chat no longer blocks updating that workspace for 15 minutes ("An update is already starting in this workspace"), and no longer bounces the row back to "Preparing update". The update reports that it didn't finish, and its window says the chat was deleted and offers no chat to open.
+
+- "This workspace's update didn't finish." now offers "See details", which opens the update window, instead of "Open chat".
+
+- The workspace's Updates settings now say that running chats pause for a few minutes while an update is applied, as the update window does.
+
+- A workspace's update dispatcher keeps finding the template's environment wrapper after the Routines rework moved it.

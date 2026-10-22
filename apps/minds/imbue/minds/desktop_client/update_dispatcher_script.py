@@ -153,7 +153,8 @@ CRON_PATH_LINE = "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin
 SKILL_PATH = ".agents/skills/update-self/SKILL.md"
 UPDATE_SELF_SCRIPT = ".agents/skills/update-self/scripts/update_self.py"
 MESSAGE_CHAT_SCRIPT = "system/scripts/message_chat.py"
-AGENT_ENV_WRAPPER = "system/libs/automations/with_agent_env.sh"
+# The template's env wrapper, newest home first: the routines rework moved it out of automations.
+AGENT_ENV_WRAPPERS = ("system/libs/routines/with_agent_env.sh", "system/libs/automations/with_agent_env.sh")
 HOST_ENV_FILE = "/home/user/.mngr/env"
 LOCAL_SETTINGS_PATH = ".mngr/settings.local.toml"
 ACCOUNT_GATE_SCRIPT = "system/scripts/require_create_account.py"
@@ -313,8 +314,9 @@ def agent_env():
         return dict(_AGENT_ENV_CACHE[0])
     env = dict(os.environ)
     if "MNGR_HOST_DIR" not in env:
-        if os.path.isfile(AGENT_ENV_WRAPPER):
-            argv = ["bash", AGENT_ENV_WRAPPER, "env", "-0"]
+        wrapper = next((path for path in AGENT_ENV_WRAPPERS if os.path.isfile(path)), None)
+        if wrapper is not None:
+            argv = ["bash", wrapper, "env", "-0"]
         else:
             argv = ["bash", "-c", 'set -a; [ -f "$1" ] && . "$1"; set +a; env -0', "_", HOST_ENV_FILE]
         listed = run_command(argv, SHORT_COMMAND_TIMEOUT_SECONDS)
