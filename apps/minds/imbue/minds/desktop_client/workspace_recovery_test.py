@@ -3419,7 +3419,7 @@ def test_a_healthy_provider_measures_nothing(root_concurrency_group: Concurrency
 
 
 def test_the_resolver_s_chatter_does_not_stack_probes(root_concurrency_group: ConcurrencyGroup) -> None:
-    """The resolver fires on every discovery event; the network is not measured per event."""
+    """The resolver fires on every provider snapshot; the network is not measured per snapshot."""
     resolver = _resolver_with_errored_provider("imbue_cloud_someone", backend="imbue_cloud")
     detector, prober = build_stub_connectivity_detector(root_concurrency_group, is_internet_up=False, is_ssh_up=False)
 
@@ -3447,7 +3447,7 @@ def test_a_provider_error_that_never_clears_is_measured_once_not_forever(
 ) -> None:
     """A broken provider on a working network must not turn into a network poll.
 
-    The trigger fires on every discovery event, and a provider can stay errored
+    The trigger fires on every provider snapshot, and a provider can stay errored
     for the life of the app -- a revoked token, a backend outage of its own.
     Latched on the in-flight flag and the reading-reuse window alone, that is a
     probe of three public hosts every couple of seconds forever, which is the

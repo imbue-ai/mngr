@@ -1361,7 +1361,6 @@ def start_mngr_forward(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        bufsize=0,
         env=env,
         cwd=str(Path.home()),
     )

@@ -241,11 +241,17 @@ class HostFileReadInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
         """Read a file's bytes from ``start_byte`` to EOF, never past the ``file_size`` the same call reports.
 
-        A ``file_size`` below the caller's saved offset means the file was truncated or
-        rotated. Raises FileNotFoundError if the file does not exist.
+        ``max_byte_count`` caps how many bytes come back, so a large file can be read
+        in bounded pieces; a host with no ranged read may return the rest of the file
+        regardless. A zero ``max_byte_count`` asks for the size only and must return no
+        content on every host, without reading the file. A ``file_size`` below the
+        caller's saved offset means the file was truncated or rotated. Raises
+        FileNotFoundError if the file does not exist.
         """
         ...
 

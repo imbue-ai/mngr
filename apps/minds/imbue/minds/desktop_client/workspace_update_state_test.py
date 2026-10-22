@@ -745,7 +745,7 @@ def test_a_sweep_that_loses_a_workspace_keeps_the_row_whose_run_is_in_flight(
 
 
 def test_only_a_material_discovery_change_is_worth_a_sweep() -> None:
-    """The resolver fires its change callback on every snapshot, identical or not."""
+    """The resolver fires its change callback on many changes that leave the workspace set alone."""
     agent_id, other_id = AgentId.generate(), AgentId.generate()
     running = {agent_id: HostState.RUNNING}
 

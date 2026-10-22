@@ -1280,7 +1280,7 @@ def test_read_file_tail_from_offset_disconnects_a_dead_transport_before_retrying
     )
 
     with pytest.raises(HostConnectionError, match="second attempt"):
-        outer._read_file_tail_from_offset_with_transient_retry("/agent/events/events.jsonl", 0, None)
+        outer._read_file_tail_from_offset_with_transient_retry("/agent/events/events.jsonl", 0, None, None)
 
     assert transport.open_call_count == 2
     assert fake.disconnect_call_count == 1
@@ -1393,7 +1393,7 @@ def test_read_file_tail_from_offset_pipelines_a_whole_file_in_request_sized_read
     fake_sftp = _FakeSftpClient(content)
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
 
-    whole_file = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
+    whole_file = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)
     assert whole_file.content == content
     whole_file_reader = fake_sftp.opened_files[-1]
     assert whole_file_reader.prefetched_file_sizes == [len(content)]
@@ -1403,12 +1403,44 @@ def test_read_file_tail_from_offset_pipelines_a_whole_file_in_request_sized_read
 
     delta_size = 100
     delta = outer._read_file_tail_from_offset_via_paramiko(
-        "/agent/events/events.jsonl", len(content) - delta_size, None
+        "/agent/events/events.jsonl", len(content) - delta_size, None, None
     )
     assert delta.content == content[-delta_size:]
     assert fake_sftp.opened_files[-1].prefetched_file_sizes == []
     # Unsized, paramiko would fill an 8 KiB buffer per synchronous request.
     assert fake_sftp.opened_files[-1].requested_read_sizes == [delta_size]
+
+
+def test_read_file_tail_from_offset_reads_and_prefetches_no_more_than_the_byte_cap(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A capped read returns the requested range only, and prefetches no further, so a huge file can be read in pieces."""
+    content = bytes(range(256)) * 1_000
+    fake_sftp = _FakeSftpClient(content)
+    outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
+    start_byte = 1_000
+    max_byte_count = 100_000
+
+    piece = outer._read_file_tail_from_offset_via_paramiko(
+        "/agent/events/events.jsonl", start_byte, max_byte_count, None
+    )
+
+    assert piece.file_size == len(content)
+    assert piece.content == content[start_byte : start_byte + max_byte_count]
+    assert fake_sftp.opened_files[-1].prefetched_file_sizes == [start_byte + max_byte_count]
+
+
+def test_a_local_read_is_capped_at_the_byte_cap(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b"0123456789")
+    outer = OuterHost(
+        id=HostId.generate(), connector=PyinfraConnector(create_local_pyinfra_host()), mngr_ctx=temp_mngr_ctx
+    )
+
+    piece = outer.read_file_tail_from_offset(path, 2, max_byte_count=3)
+
+    assert piece.file_size == 10
+    assert piece.content == b"234"
 
 
 def test_read_file_tail_from_offset_stops_at_the_size_it_reported(temp_mngr_ctx: MngrContext) -> None:
@@ -1424,7 +1456,7 @@ def test_read_file_tail_from_offset_stops_at_the_size_it_reported(temp_mngr_ctx:
     fake_sftp = _GrowingFakeSftpClient(content, appended)
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
 
-    tail = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
+    tail = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)
 
     assert fake_sftp.stat_size == len(content)
     assert tail.file_size == len(content)
@@ -1483,4 +1515,4 @@ def test_read_file_tail_from_offset_raises_file_not_found_when_the_file_vanishes
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, _FakeSftpClientVanishingOnOpen(b"first line\n"))
 
     with pytest.raises(FileNotFoundError):
-        outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
+        outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)

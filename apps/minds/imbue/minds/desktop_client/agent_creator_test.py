@@ -107,6 +107,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.progress import ProgressEvent
 from imbue.mngr.utils.progress import ProgressEventKind
@@ -114,6 +115,9 @@ from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 # A SuperTokens user id (UUID v4) and a connection instance name, as the create path carries them.
 _USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
@@ -1327,6 +1331,7 @@ def _make_test_creator(
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
     on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = None,
+    latchkey: Latchkey | None = None,
 ) -> AgentCreator:
     paths = InstallationPaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -1347,6 +1352,7 @@ def _make_test_creator(
         on_create_attempts_changed=on_create_attempts_changed,
         on_create_attempt_done=on_create_attempt_done,
         mngr_binary=mngr_binary if mngr_binary is not None else MNGR_BINARY,
+        latchkey=latchkey,
     )
 
 
@@ -1617,8 +1623,15 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
     fake_mngr.chmod(0o755)
     tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
     aid = AgentId.generate()
-    # A few not-ready probes keep the wait open long enough for the follow to have started.
-    with scripted_workspace_probe_server(not_ready_count=10) as port:
+
+    def _hold_until_the_follow_recorded_its_call() -> None:
+        # The follow starts before the first probe; holding that probe keeps the
+        # ready answer from stopping the follow before it ran.
+        poll_until(lambda: calls_path.read_text() != "", poll_interval=0.01)
+
+    with scripted_workspace_probe_server(
+        not_ready_count=0, on_first_request=_hold_until_the_follow_recorded_its_call
+    ) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2432,6 +2445,57 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         assert observed_waiting, "the create attempt never reached WAITING_FOR_READY"
         assert info is not None and info.status is AgentCreateAttemptStatus.DONE
         creator.wait_for_all()
+
+
+@pytest.mark.timeout(30)
+def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions_link(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Every notification that publishes the canonical agent id comes after the host permissions file landed.
+
+    Latchkey auto-register defers an agent whose host permissions file is not
+    there yet and retries only on a resolver change; an unchanged agents view
+    is not one. This notification (wired to the resolver's ``notify_change``)
+    is the first change after the link, so firing it before the link would
+    leave a new workspace's own agent unregistered until the next discovery
+    poll.
+    """
+    aid = AgentId.generate()
+    hid = HostId.generate()
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, hid))
+    latchkey = make_full_fake_latchkey(tmp_path / "latchkey")
+    host_permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, hid)
+    create_attempt_ids: list[CreateAttemptId] = []
+    is_host_file_present_by_canonical_notification: list[bool] = []
+
+    def _on_changed() -> None:
+        if not create_attempt_ids:
+            return
+        info = creator.get_create_attempt_info(create_attempt_ids[0])
+        if info is not None and info.agent_id == aid:
+            is_host_file_present_by_canonical_notification.append(host_permissions_path.is_file())
+
+    with scripted_workspace_probe_server(not_ready_count=0) as port:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+            on_create_attempts_changed=_on_changed,
+            latchkey=latchkey,
+        )
+        create_attempt_ids.append(
+            creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="link-order-name-71003")
+        )
+        _wait_until_finished(creator, create_attempt_ids[0])
+        info = creator.get_create_attempt_info(create_attempt_ids[0])
+        assert info is not None and info.status is AgentCreateAttemptStatus.DONE
+        creator.wait_for_all()
+
+    assert is_host_file_present_by_canonical_notification
+    assert all(is_host_file_present_by_canonical_notification), is_host_file_present_by_canonical_notification
 
 
 def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_path: Path, monkeypatch) -> None:

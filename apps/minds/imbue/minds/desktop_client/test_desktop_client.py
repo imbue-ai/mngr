@@ -97,6 +97,7 @@ from imbue.minds.desktop_client.testing import skill_chat_launch_stdout
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.testing import write_stub_mngr
+from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
@@ -1104,8 +1105,10 @@ def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     expected = {"count": 0, "request_ids": [], "workspace_agent_ids": []}
-    assert _build_requests_payload(None, resolver) == expected
-    assert _build_requests_payload(StaticPendingRequests(), resolver) == expected
+    assert _build_requests_payload(displayable_pending_requests(None, resolver), resolver) == expected
+    assert (
+        _build_requests_payload(displayable_pending_requests(StaticPendingRequests(), resolver), resolver) == expected
+    )
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1113,7 +1116,9 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     agent_id = str(AgentId())
     event = create_predefined_permission_request(agent_id=agent_id, scope="slack-api", rationale="post updates")
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(StaticPendingRequests(pending=(event,)), resolver)
+    payload = _build_requests_payload(
+        displayable_pending_requests(StaticPendingRequests(pending=(event,)), resolver), resolver
+    )
     assert payload["count"] == 1
     assert payload["request_ids"] == [event.request_id]
 
@@ -1142,8 +1147,8 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     )
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload_a = _build_requests_payload(inbox_with_a, resolver)
-    payload_b = _build_requests_payload(inbox_with_b, resolver)
+    payload_a = _build_requests_payload(displayable_pending_requests(inbox_with_a, resolver), resolver)
+    payload_b = _build_requests_payload(displayable_pending_requests(inbox_with_b, resolver), resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [request_b.request_id]

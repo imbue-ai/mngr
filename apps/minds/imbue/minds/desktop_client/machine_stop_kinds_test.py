@@ -185,7 +185,7 @@ def test_read_lifecycle_answers_none_without_a_cli(tmp_path: Path) -> None:
 
 
 def test_the_loop_still_lists_on_its_cadence_while_wakes_keep_arriving(tmp_path: Path) -> None:
-    # Discovery fires the wake on every snapshot, at the poll's own cadence; a
+    # Discovery fires the wake on every provider snapshot, at the poll's own cadence; a
     # wake must not push the full pass back, or a kind changed server-side under
     # an unchanged state (the operator's hand-back) would never be re-read.
     tracker, cli, _agent, host_id = _build(tmp_path, HostState.STOPPED)

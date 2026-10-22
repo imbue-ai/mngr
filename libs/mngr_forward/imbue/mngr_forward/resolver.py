@@ -170,14 +170,21 @@ class ForwardResolver(MutableModel):
         resulting name up in the other. Persists the post-mutation maps, which
         carry every instance rather than just this one, so the persisted cache
         is a complete point-in-time view a later run can seed from in a single
-        read.
+        read. Maps identical to the stored ones are neither stored nor persisted,
+        so an agent re-announcing the same registrations costs no disk write.
         """
+        snapshot: PersistedServiceMap | None = None
         with self._lock:
             instance_str = str(instance_key)
-            self._services_by_instance[instance_str] = dict(services)
-            self._label_to_name_by_instance[instance_str] = dict(label_to_name)
-            snapshot = self._snapshot_maps_locked()
-        self._persist_snapshot(snapshot)
+            if (
+                self._services_by_instance.get(instance_str) != services
+                or self._label_to_name_by_instance.get(instance_str) != label_to_name
+            ):
+                self._services_by_instance[instance_str] = dict(services)
+                self._label_to_name_by_instance[instance_str] = dict(label_to_name)
+                snapshot = self._snapshot_maps_locked()
+        if snapshot is not None:
+            self._persist_snapshot(snapshot)
 
     def resolve_by_origin_label(self, instance_key: AgentInstanceKey, origin_label: str) -> ProxyTarget | None:
         """Resolve a ``<label>.host-<hex>`` service origin to its backend.
