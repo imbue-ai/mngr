@@ -1,1 +1,0 @@
-Marked `test_assemble_command_is_posix_compatible` as `@pytest.mark.flaky` with a 60s timeout: it shells out to shellcheck and was observed exceeding the default 10s pytest-timeout under CI sandbox load (12.348s).

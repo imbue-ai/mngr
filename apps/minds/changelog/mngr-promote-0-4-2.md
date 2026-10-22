@@ -1,1 +1,0 @@
-Promoted the minds 0.4.2 build (ToDesktop `260825un55i8ix7`) to the stable, beta, and alpha release channels, moving all three off 0.4.1. The pair was proven end-to-end by launch-to-msg on the `minds-v0.4.2` tags in both repos.

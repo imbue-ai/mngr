@@ -1,1 +1,0 @@
-Merges the Debian 13 default (issue #975): the default marketplace image is `Debian:debian-13:13-gen2`, a `SkuNotAvailable` create raises `AzureVmSizeUnavailableError` naming the size and region, and the release tests default to `Standard_D2s_v6`. See the `mngr-host-sizing-debian-13` entry for the details.

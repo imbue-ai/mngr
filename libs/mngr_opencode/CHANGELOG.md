@@ -10,10 +10,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `version` field on the opencode agent type pins the installed opencode CLI; provisioning verifies the installed opencode matches and errors on mismatch.
 - Added: `update_policy` field on the opencode agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs opencode's startup auto-update via the `autoupdate` key in the per-agent `opencode.json`.
+- Added: `output_style` and `append_system_prompt` config fields, written to the per-agent `AGENTS.md`, so `mngr create --type opencode --template chat` works.
+- Added: `MNGR_OPENCODE_BIN` may be a multi-word launch command (e.g. a wrapper), used for both the server and the TUI.
 
 ### Changed
 
 - Changed: Opencode agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
+- Changed: The common transcript is now the ATIF-shaped stream (`header` / `step` / `observation`, pinned to `ATIF-v1.7`) instead of the `user_message` / `assistant_message` / `tool_result` envelope: tool arguments and output are no longer truncated, reasoning is captured as `reasoning_content`, per-record annotations move under `extra`, `source` is renamed `emitter`, and the header `event_id` is unique per agent.
+
+### Fixed
+
+- Fixed: `mngr list` reports an opencode agent blocked on a tool-approval prompt as `WAITING` instead of `RUNNING`.
+- Fixed: `mngr list` no longer shows `plugin.opencode.waiting_reason` on agents of other types (nor spends a remote call per agent on it).
+- Fixed: The message-delivery `curl` POST times out after `send_command_timeout_seconds` (default 15s), so a hung server fails the send instead of holding the agent's message lock forever.
+- Fixed: The TUI starts on hosts whose `/tmp` is `noexec` (such as the workspace image): `TMPDIR` points at a per-agent directory under the agent state dir.
 
 ## [v0.2.17] - 2026-06-18
 

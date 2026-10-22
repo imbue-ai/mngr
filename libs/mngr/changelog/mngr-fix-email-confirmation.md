@@ -1,1 +1,0 @@
-Regenerated the `mngr imbue_cloud` CLI reference to document the new `auth is-verified` subcommand (checks email-verification status and promotes a pending session once verified; part of the email-verification-required sign-in flow shipped in mngr_imbue_cloud).

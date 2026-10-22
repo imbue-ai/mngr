@@ -1,7 +1,0 @@
-When an invitation is refused because the granter has reached their invitation email limit, the share panel row now says "Access granted, but you've reached your invitation email limit for now." instead of "You have reached your invitation limit for now." Granters read the old wording as the share itself having failed; the grant is saved either way, and only the invitation email is held back.
-
-A refused invitation's message now appears in full on its own line under the person's name, wrapping as needed. It used to share the row's single line, where a long message was cut short and pushed the person's name out of view.
-
-When a share panel row is short of room, the gray note beside the name ("(hasn't signed up yet)", or an account's email beside its display name) now shortens first, and the name keeps its full width until the note is gone.
-
-Fixed the share panel showing no people at all, even with someone granted, once the Visiting agents section was added under the list: the list scrolled on its own, so it was the one block the section could squeeze, and it was squeezed to no height. The whole right side of the panel now scrolls as one (heading, link, add row, people, then visiting agents), so neither part can squeeze the other out of sight and each gets the full height of the panel. `apps/minds/scripts/share_panel_renders.py` scrolls that column instead of the list, answers the visiting agents request with an empty list, and waits for a scroll to land before hovering for a tooltip.

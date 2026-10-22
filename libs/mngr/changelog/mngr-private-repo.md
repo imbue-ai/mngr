@@ -1,1 +1,0 @@
-Move the agent-capability-mixins design doc from the repo-root `specs/` into `libs/mngr/future_specs/capability-mixins.md` so the public doc that references it (`docs/concepts/agent_capabilities.md`) points at a path that exists on the public mirror.

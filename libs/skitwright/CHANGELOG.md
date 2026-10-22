@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `imbue.skitwright.redaction.redact_secret_values(text, env, secret_names)`, which replaces each named environment variable's value in `text` with `<redacted NAME>` to keep credentials out of saved transcripts.
+
 ### Changed
 
 - Changed: `expect()` now raises a dedicated custom exception type instead of `TypeError`.

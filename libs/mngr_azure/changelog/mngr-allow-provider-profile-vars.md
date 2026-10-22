@@ -1,5 +1,0 @@
-An Azure provider instance can now authenticate through this machine's `az login` instead of a pasted service principal: set `use_azure_cli_login = true` together with `tenant_id` and `subscription_id` on the `[providers.<instance>]` block (mutually exclusive with `client_secret`). The block then carries no secret, and the credential is an `AzureCliCredential` pinned to that tenant and subscription, never `DefaultAzureCredential`, so `AZURE_CLIENT_*` variables and managed identities are not consulted.
-
-A machine without that login (or without the `az` CLI) raises the new `ProviderCredentialSourceMissingError` with `az login --tenant <tenant>` as the fix, and discovery keeps re-checking the provider until the login exists. A block that combines the switch with a client secret, or omits either id, is refused as a configuration error.
-
-`imbue.mngr_azure.config` now exposes `az_cli_profile_path()` and `read_az_profile_subscriptions()`, the location and parser of the Azure CLI's `azureProfile.json`, so other tools (the Imbue Studio add-connection modal) list the az login's subscriptions through the one reader.

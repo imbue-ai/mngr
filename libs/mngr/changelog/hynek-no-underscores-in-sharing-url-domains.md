@@ -1,1 +1,0 @@
-The generated `mngr imbue_cloud shares create` reference now gives `system-interface-<rand>` as the example `--entry-label`: workspaces mint service origin labels without underscores from now on, so new share links no longer contain one. Previously minted `system_interface-<rand>` labels remain valid.

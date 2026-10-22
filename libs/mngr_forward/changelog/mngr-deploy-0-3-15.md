@@ -1,3 +1,0 @@
-The forward SSH tunnel now prefers the explicitly-supplied `known_hosts_path` from host SSH info when verifying host keys, falling back to the file next to the SSH key for producers that predate the field. It still refuses to connect when no pin file can be found anywhere (never trust-on-first-use), and the refusal error now names every candidate path it checked.
-
-The repeated per-agent "SSH tunnel setup failed" warning is now rate-limited to one line per agent per minute, reporting the count of suppressed earlier failures, instead of logging once per retry (about once a second while a workspace view is open).

@@ -1,1 +1,0 @@
-The shared agent release-test arc now observes RUNNING/WAITING through overridable profile hooks (`is_waiting_after_create` / `is_reporting_running`) instead of hard-coding the `active` marker file. The default still reads the marker (claude and the other ports are unchanged); a harness whose lifecycle is read live overrides it (codex reads the daemon's `thread/status`).

@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr file list` and `mngr file put` accept a `--format` template rendering one line per record (`list`: `name`, `path`, `file_type`, `size`, `modified`, `permissions`; `put`: `path`, `size`); `get` still rejects templates.
+
+### Changed
+
+- Changed: `mngr file list` on a missing directory errors (`Error: No directory at <path>.`, exit 1) instead of printing `(empty)`, and refuses a path that names a file.
+- Changed: `mngr file get --output` reports what it did: `Wrote <n> bytes from <path> to <local path>` in human format, a `file_read` event (`path`, `output_path`, `size`) in json/jsonl; both paths are absolute.
+- Changed: `--relative-to state` on a host target is a usage error instead of a silently reinterpreted base.
+
+### Fixed
+
+- Fixed: `mngr file get` on a missing path or a directory prints a clean error (`Error: No file at <path>.` / `Error: <path> is a directory, not a file.`) instead of a traceback, on local, remote and stopped hosts.
+- Fixed: `mngr file list` crashed on a file on a stopped host backed by a storage service, and leaked that service's own error for a missing directory there; both are now clean refusals.
+- Fixed: `mngr file put` refuses writing onto a directory, beneath a file, or from an `--input` directory, and `get --output` refuses a local destination that is a directory or beneath a file.
+
 ## [v0.1.14] - 2026-06-18
 
 ## [v0.1.13] - 2026-06-16

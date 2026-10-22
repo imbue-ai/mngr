@@ -1,7 +1,0 @@
-`mngr list` now reports an agent blocked on a tool-approval dialog (or an `AskUserQuestion`) as `WAITING` rather than `RUNNING`.
-
-Such an agent is inside a turn -- its `active` marker is still set -- but is making no progress, so it belongs with the agents waiting on you rather than with the ones working. Agent plugins already treated it that way, but only for `mngr wait`/`message`/`find`; the agent listing reads the lifecycle probe directly and never saw it. The two disagreed about the same agent at the same moment: `mngr list` showed `RUNNING` while `mngr wait <agent> WAITING` returned immediately.
-
-Being blocked on the user is now an input to the state rather than a correction applied afterwards. An agent type answers `is_blocked_on_dialog()` and the lifecycle probe folds that into the state it builds, so every reader sees the same answer. `mngr observe` reads the listing too, so a blocked agent now shows up as a `RUNNING` -> `WAITING` transition -- and `mngr notify` raises a desktop notification the moment the agent needs you, rather than only at the end of the turn. Agent types that raise no such dialog (pi, plain command agents) or whose dialogs mngr cannot observe (antigravity) inherit a `False` default and are unaffected.
-
-This does not reach the batched provider listings, which stat marker files by fixed name and have no agent to ask: aws, azure, gcp, imbue_cloud, modal, ovh, vps and vultr still report such an agent as `RUNNING`. local, docker, ssh and lima are fixed.

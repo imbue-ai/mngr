@@ -1,3 +1,0 @@
-Registered a new shared pytest marker, `witnesses(coordinate, partial=None)`, in the centralized marker list.
-Tests anywhere in the monorepo can now declare which behavior unit they verify (by its coordinate, e.g. `browser-authorization.fresh-code`), with `partial=` noting what the test does not cover.
-See the `behaviors` skill for the coordinate system.

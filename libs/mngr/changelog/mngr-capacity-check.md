@@ -1,1 +1,0 @@
-`CommandResult` gained an optional `exit_code` field (populated by the outer-host streaming execution paths), so callers can distinguish a command that really exited non-zero from one whose output stream died -- used by the remote docker build error reporting in mngr_vps.

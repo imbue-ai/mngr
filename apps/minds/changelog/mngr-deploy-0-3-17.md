@@ -1,7 +1,0 @@
-Merge the codex/pi-coding plugin bundling fix from `mngr/build-0-3-17` (see `mngr-build-0-3-17.md`): the packaged desktop app now carries the `imbue-mngr-codex` and `imbue-mngr-pi-coding` mngr plugins, fixing "Unknown fields in agent_types.codex" on every workspace create against the minds-v0.3.17 default-workspace-template. This branch independently found and fixed the same bug from the failed minds-v0.3.17 tag launch-to-msg run; the two fixes were content-identical and the `mngr/build-0-3-17` version was kept.
-
-Reset `docs/next_deploy.md` after the minds-v0.3.17 staging + production deployment: completed checklist items removed; the still-open post-deploy cleanup items and the accepted mixed-fleet states carry over.
-
-Relocate the deployment/operations docs into `apps/minds/docs/deploy/` (tier runbooks, Vault layout, pool/box operations, release procedure, environments, incident runbooks), which is now excluded from the public mirror -- see `docs/deploy/README.md`. Adds `docs/deploy/history/` with one distilled record per shipped release (minds-v0.3.15 through v0.3.17).
-
-Add `test_bundled_agent_types.py` (snapshot-resume suite): asserts every plugin-provided agent type declared by the default-workspace-template's `.mngr/settings.toml` is bundled into the packaged desktop app's workspace-package lists, with an actionable failure naming all four mirrored lists -- the minds-v0.3.17 release blocker class, previously caught only by the tag-time launch-to-msg run.

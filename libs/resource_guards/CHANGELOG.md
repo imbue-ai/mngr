@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `register_session_cleanup_callback(callback)` and `run_session_cleanup_callbacks()`: callbacks the shared conftest hooks run once at the end of each pytest session (after the last test's teardown, before guards are torn down), e.g. to sweep leaked docker containers.
+
 ## [v0.1.8] - 2026-06-05
 
 ## [v0.1.7] - 2026-05-28

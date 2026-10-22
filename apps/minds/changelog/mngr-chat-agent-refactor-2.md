@@ -1,3 +1,0 @@
-Paired branch for phase 2 of the default-workspace-template's chat-agent-split plan (`docs/system/blueprint/chat-agent-split/plan-chat-agent-split.md` there): the template names a chat apart from the agent it runs on, every chat-app-created agent carries `MINDS_CHAT_ID`, and the chat app's routes move under `/api/chats` with the `/api/agents` spellings kept as aliases, so the minds e2e and deployment suites run unchanged.
-
-The workspace glossary's "chat agent" entry now names the agent a chat currently runs on, beside a new "chat" entry for the conversation itself. No code in this repository changes.

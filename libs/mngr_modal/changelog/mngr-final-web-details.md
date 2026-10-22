@@ -1,1 +1,0 @@
-Marked `test_exec_cwd_override_on_modal` and `test_mngr_create_echo_command_on_modal` as `@pytest.mark.flaky`: fresh Modal sandboxes transiently accept TCP before sshd answers the SSH handshake, and a slow Modal window can outlast mngr's deliberately bounded banner-read connect retry, so offload now retries the whole test instead of failing the run on the infrastructure fluke.

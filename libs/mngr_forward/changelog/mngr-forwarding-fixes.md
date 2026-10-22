@@ -1,1 +1,0 @@
-Follow-up fixes on the self-hosted sharing branch: no user-visible `mngr_forward` changes beyond the sibling `mngr-finish-forwarding` entry (only a stale comment in the goto-redirect test was corrected).

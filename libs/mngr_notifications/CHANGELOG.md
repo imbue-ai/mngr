@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr notify` detects a running observer with mngr's read-only `is_observe_writer_running` probe: it no longer creates a lock file in a host dir that never had an observer, sees an observer whose lock file another user owns, and starts an observer when the probe itself fails.
+
+### Fixed
+
+- Fixed: The watcher's RUNNING -> UNKNOWN -> WAITING notification tracking is keyed by agent instance (`<agent_id>@<host_id>`), so same-id agents on different hosts no longer share it.
+
 ## [v0.1.14] - 2026-06-18
 
 ## [v0.1.13] - 2026-06-16

@@ -1,1 +1,0 @@
-The Slack mock in the launch-to-message e2e script drains POST bodies the same way. The provider sign-in relay reads a request body of up to 64 KiB before answering, so a POST to its port gets its page rather than a reset connection. A Content-Length that is not a number is treated as no body, where it used to drop the connection unanswered.

@@ -1,9 +1,0 @@
-Cost can now be computed at fast-mode rates.
-
-Fast mode returns the same tokens faster for twice the price ($10/$50 per MTok against $5/$25 on Claude Opus 5 and Claude Opus 4.8, across the full context window), and it is chosen per request rather than per model -- the same model id bills at either rate depending on how the request asked. The pricing table held only the standard rate, so any fast-mode traffic priced through it came out at half of what it actually cost, with nothing to indicate that.
-
-`compute_cost` takes an `is_fast_mode` flag that applies `FAST_MODE_PRICE_MULTIPLIER` (2x) to the model's standard rates. Every bucket doubles, not just input and output: the cache rates are multiples of the input rate (a cache write costs 1.25x an input token, a read 0.1x), so doubling the input rate carries them along. Only Opus 5 and Opus 4.8 can serve fast mode, listed in `FAST_MODE_MODELS`; a model outside that set reports null rather than falling back to the standard rate, since silently halving a real bill is worse than reporting the number as unavailable. The default is unchanged, so existing callers keep their current behaviour -- and a caller that cannot observe which tier served a request necessarily prices it standard, which is a floor rather than a figure.
-
-Added Claude Opus 5 to the standard pricing table, which was missing it entirely -- usage reported against that model priced as unknown.
-
-Estimated costs price every prompt-cache write at the 5-minute-TTL rate (1.25x an input token). Anthropic bills a 1-hour write at 2x, and the token buckets carry no TTL, so a cost estimate over 1-hour-cached traffic understates that bucket by 37.5%. This is now stated where the rate is applied and where the bucket is defined; correcting it needs the TTL carried through from every writer.

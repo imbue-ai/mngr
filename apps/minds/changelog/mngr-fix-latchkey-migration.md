@@ -1,1 +1,0 @@
-The gen-2 cutover runbook's per-workspace verification now includes latchkey: a 0.6.1+ desktop follows a migrated workspace's new coordinates within one discovery cycle, while a <= 0.6.0 desktop needs an app restart before latchkey works again, so 0.6.1+ cohorts should be migrated first.

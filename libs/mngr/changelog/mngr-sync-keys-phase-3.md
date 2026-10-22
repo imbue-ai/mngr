@@ -1,3 +1,0 @@
-The host-key store gains `move_host_endpoint_pins`: relocate one host's pins from an old endpoint to a new one with their keys and origins intact, evicting whatever stale pins the recycled endpoint held. Used by imbue_cloud's stop/start path so an adopted host's user-origin pins follow the workspace to its new box instead of regressing to connector bake-time keys.
-
-`ssh_utils` gains `is_server_presenting_host_key`, a public one-shot unauthenticated probe of which host key an endpoint currently serves (used by imbue_cloud's crash-safe host-key rotation to decide whether an interrupted install landed).

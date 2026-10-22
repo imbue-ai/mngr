@@ -1,9 +1,0 @@
-Merge the web-only workspace/accounts work (`mngr/hopefully-last-web-details`) into main.
-
-Added an "Enable web access" toggle (default off) to the create form's advanced view: when on, the workspace is brought up shared post-create so it is reachable from the hosted web client (imbue_cloud rows delegate to the connector's enable-sharing primitive; local docker/lima rows run the desktop share flow with the owning account as the sole grantee, and the Flask app-context crash in that path is fixed). Desktop-injected share materials now include `SHARE_CHROME_ORIGIN` so desktop-shared workspaces are embeddable and health-probeable from `/web`.
-
-All sign-up/sign-in moves to the connector's hosted browser page: every auth entry point launches `mngr imbue_cloud auth login` with a new Mithril waiting modal (copy-the-link fallback), the legacy in-app JinjaX auth pages / `static/auth.js` / check-your-email flow are deleted, email verification is non-blocking, and signing out revokes only this device's session. `minds env deploy` now builds the connector's accounts + web-chrome frontend bundles before `modal deploy`.
-
-Per-env dev share relays: `minds env deploy` pins the connector's sharing secret to each dev/ci env's own relay (region label = env name; stand one up with `just provision-dev-relay`); staging/production keep their Vault-configured fleet. New `docs/next_deploy.md` deployment checklist.
-
-Hid the internal `owner-exec` service from the workspace Share dialog and SPA share-target endpoints. Fixed the backup restore/update scripts to run `uv sync --all-packages` (a plain root-closure `uv sync` pruned non-root workspace members and broke `owner-exec` on restore). Workspace records now sync Ed25519 client SSH keys (RSA PEM from older installs still supported), plus a tombstone-safety test for web-created cloud rows and a crossed desktop/web CAS-edit test.

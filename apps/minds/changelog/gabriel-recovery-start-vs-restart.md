@@ -1,9 +1,0 @@
-# Say "start" for the recovery that starts a machine, and "restart" only for the one that stops it
-
-Minds recovers a wedged machine two ways, and the code called both a restart. On the stuck edge it runs `mngr start` alone -- idempotent, a no-op against a host that is already up, and unable to bounce a live container. Only the recovery card's "Restart machine" click stops the host first. One name for both meant the code claimed the app had taken a machine down and brought it back when it had not.
-
-The two are now one enum, `HostRecoveryKind` (`START` / `RESTART`), replacing the `skip_stop` / `start_only` / `restart_is_start_only` booleans through the dispatch, the worker, the health tracker, the `/ui` health frame, and the card, badge and notice band. The generic path is named for what it does (`dispatch_host_recovery`, `AgentHealth.RECOVERING` / `RECOVERY_FAILED`, `mark_recovering`, and so on), leaving "restart" only where the machine is really stopped. Behavior is unchanged.
-
-The agent-facing wire is untouched, because agents inside workspaces call it: the `/api/v1/workspaces/<id>/restart` route, its `start_only` field, the `kind: "restart"` handle, and the two model names published at `/api/schema` all keep their spelling, with no compatibility shim.
-
-The SPA's own `/ui` channel is versioned rather than frozen, so its health frame does change. `is_restart_start_only` becomes `recovery_kind` (`"start"` / `"restart"` / null), `is_restart_a_no_op` becomes `is_recovery_a_no_op`, and the two health values themselves become `"recovering"` and `"recovery_failed"` -- they reach no agent-facing surface, so all three of their consumers (the SPA, the recovery-info payload, and the Electron shell) ship from this repo. `UI_SCHEMA_VERSION` goes to 8, so a window held open across the upgrade reloads once instead of matching neither recovery value.

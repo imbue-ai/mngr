@@ -1,3 +1,0 @@
-Add `anthropic/claude-opus-5` to the usage pricing table, at the current Opus tier ($5 / $25 per 1M input / output tokens), so a usage source that reports Claude Opus 5 tokens without a dollar figure is priced rather than reported unpriced.
-
-Pin the Anthropic entries directly against litellm's `model_prices_and_context_window` map, the same map the LiteLLM proxy bills from. They were previously pinned against the proxy's inline price table, which no longer exists -- the proxy now takes pricing from litellm's map rather than carrying its own copy. OpenAI entries were already pinned this way; both providers now answer to the same source, which also means the new Opus 5 entry is checked against it rather than hand-verified.

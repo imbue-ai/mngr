@@ -1,5 +1,0 @@
-Corrects what the docs say about replying to an agent that is mid-turn. The README and the peek-reply docstring both claimed a busy agent cannot give its submission signal until its current turn ends, and explained the peek reply's background send by that claim.
-
-That is not how a claude agent behaves. Its durable evidence is the reply appearing in its transcript, and Claude Code writes a queued reply there as it queues it, so `mngr message` to an agent mid-turn confirms in seconds rather than at the end of the turn. Measured against a claude agent held in a foreground tool call: the send returned successfully in 4.4s while the agent stayed `RUNNING`.
-
-The ~90s figure is unchanged and remains correct as the bound the send waits within, which is why the peek reply is still not awaited on the UI thread. The turn-end behaviour does apply to agent types whose evidence is a turn marker rather than transcript content (codex, antigravity), where the marker only advances once the queued prompt opens a turn; the docs now say which case is which.

@@ -10,6 +10,27 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `version` field on the pi agent type pins the installed pi CLI via `npm install -g @earendil-works/pi-coding-agent@<version>`; provisioning errors on mismatch.
 - Added: `update_policy` field (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs pi's startup version check via `PI_SKIP_VERSION_CHECK`.
+- Added: Context compaction (`HasCompactionMixin`): `PiCodingAgent` implements `request_compaction` (delivered via the `mngr_compact` inbox sentinel; supports `message_lock_timeout_seconds` and `expected_idle_since`), `get_cache_ttl_minutes`, `get_context_tokens` and `get_idle_since`, and compactions are recorded in the raw transcript, the common transcript and the usage stream. Idle time and context size come from an incremental tail scan (`PiCompactionTranscriptScanner`, `extract_assistant_timestamp_from_record`, `extract_context_tokens_from_record`, `is_compaction_record`).
+- Added: `output_style` and `append_system_prompt` on the pi-coding agent type, written to `APPEND_SYSTEM.md` in the per-agent pi config dir, so `mngr create --type pi -t chat` works.
+- Added: The lifecycle extension mirrors the live model and effort to `model_state.json` (`{model, effort, fast}`), written before the readiness sentinel and on every switch, and applies switches requested through the `pi_control.json` single-slot mailbox via pi's `setModel` / `setThinkingLevel`.
+- Added: `pi_inbox` interrupt sentinels: `{"minds_interrupt": true}` interrupts the running turn and resubmits its queued messages as one turn; `{"minds_interrupt_retract": true}` interrupts and discards them.
+- Added: `share_home_npm_dir` option (default off) symlinks an agent's npm extension dir to `~/.pi/agent/npm` so the extension transpile cache is shared, cutting extension-heavy startup from ~30s to ~10s. Only safe when every pinned package is preinstalled; ignored on remote hosts.
+- Added: pi's stderr is tee'd to `stderr.log` in the agent's state dir (collected by bug reports) as well as the pane. The pane shell must be bash, zsh or ksh.
+- Added: A `pi_process_started` marker is stamped on every launch and resume, so an agent killed mid-turn no longer shows a stuck "Thinking..." after restart.
+
+### Changed
+
+- Changed: The common transcript is the ATIF-shaped stream (`header` / `step` / `observation`, `ATIF-v1.7`): untruncated tool arguments and outputs, thinking as `reasoning_content`, ATIF token metric names and `cost_usd`, compaction summaries as `context_management` system steps, and a per-agent-unique header `event_id`.
+- Changed: Messages sent to a running pi agent are delivered as `steer` (injected at the next tool boundary) instead of `followUp` (after the turn ends).
+- Changed: At load, the lifecycle extension archives `pi_inbox` lines from a previous process to `pi_inbox_history` and truncates `pi_inbox`.
+- Changed: Renamed the `auto_dismiss_dialogs` agent-type field to `auto_dismiss_dialogs_at_startup`.
+- Changed: Provisioning copies the home npm extension install into the per-agent dir, so first boot no longer spends 45-55s in npm before readiness.
+
+### Fixed
+
+- Fixed: `mngr list` no longer reports `plugin.pi-coding.waiting_reason` on agents of other types.
+- Fixed: Common-transcript and usage event ids are derived from the message's timestamp and content instead of a per-agent counter (`pi-0`, `evt-pi-usage-0`) that collided across agents under fleet-wide dedupe.
+- Fixed: The inbox append that delivers a message has a timeout, so a stuck host command fails the send instead of holding the message lock forever.
 
 ## [v0.1.14] - 2026-06-18
 

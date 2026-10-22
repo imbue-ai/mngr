@@ -4,6 +4,458 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20
+
+A Claude agent whose turn end another Stop hook blocks (exit code 2, which sends Claude back to work on the hook's feedback) now stays RUNNING through the continuation. Before, `wait_for_stop_hook.sh` cleared the `active` marker once the other hooks exited, and since no hook fires when the continuation starts, the agent read WAITING while it was still working. The script now reads the session transcript the same way it already does for queued prompts: Claude Code writes the block's `Stop hook feedback:` record as soon as the blocking hook exits and the turn's `stop_hook_summary` only after every hook finishes, so a feedback record newer than the latest summary means the turn end was blocked. An interrupt (SIGTERM, SIGINT) and a StopFailure turn end still mark the agent inactive.
+
+`mngr list` no longer reports a `plugin.claude.waiting_reason` field on agents of other types. The claude field generator ran for every listed agent, so a `command` or `codex` agent showed `END_OF_TURN` under `plugin.claude` (the marker it reads is one such an agent never writes), at the cost of one remote `path_exists` call per agent per `mngr list`. The generator now returns nothing for an agent that is not a ClaudeAgent, as the codex generator already did. Reported by 19 mappers in the 2026-10-13 TMR run.
+
+## 2026-10-19
+
+The Claude submission-confirmation probes no longer print "No such file or directory" when the agent's session transcript does not exist yet (an agent that has not had a user turn). The missing file was always treated as "keep polling", but the stray error became the only stderr in an unconfirmed send's diagnostics and pointed the investigation at the wrong cause.
+
+Sending a message to Claude Code is faster, most noticeably on Imbue Cloud workspaces where every process spawn is slow. The send now uses the pane capture taken by the dialog preflight for the readiness and leftover-input checks instead of capturing again, dialog keypresses reuse the pane ID resolved for the send, and submission evidence is checked in Claude's own session transcript before mngr's raw copy, since Claude writes its own transcript first. Combined with the mngr changes, a send goes from 16 process spawns to 6.
+
+## 2026-10-16
+
+A claude agent's background tasks (activity tracking, transcript streaming, the common transcript converter and the response-streaming watcher) keep running after the agent is renamed, including after it restarts. The supervisor tracks the agent's tmux session by its session id, which a rename does not change, and new launch commands no longer carry the session name.
+
+- An agent created by an older mngr keeps its supervisor script, which follows the session name it is given. `mngr start` rewrites that name out of its stored launch command, so after its next restart its background tasks run for its current session (and survive restarts); a live rename still ends them until the next restart.
+
+- The background-tasks and response-streaming pidfiles are keyed on the agent id, so a new agent that takes a renamed agent's old name gets its own watchers.
+
+## 2026-10-15
+
+Fixed mngr leaving a claude agent permanently stuck in Claude Code's shell mode after a bare `!`.
+
+Claude draws a dim hint inside an empty input box: `Try "how do I log an error?"` on a fresh
+agent, `Press up to edit queued messages` while a message is queued, or the model's suggested
+next prompt in normal mode. mngr read the hint as typed text, so it mistook the stranded
+shell-mode box for a human's unsubmitted command and refused to touch it.
+
+mngr now reads Claude's pane with its styling and drops the input box's dim hint text before
+deciding what is typed there. The strand is recovered whichever hint is showing, and the
+pre-send check no longer warns about a hint as leftover text. A human's draft is never taken
+for a hint, even one that reads `Try "how do I log an error?"` word for word.
+
+With colour suppressed for the agent (`NO_COLOR`, `FORCE_COLOR=0`, `TERM=dumb`), the hint is
+not dim and reads as typed text: mngr refuses the send rather than backspace, and the pre-send
+check warns about it.
+
+A new test fails when the claude version `dialogs.py` was read from differs from the one the
+mngr Dockerfile installs, so the binary drift checks cannot silently skip in CI.
+
+## 2026-10-14
+
+Claude agents report when they are compacting their context, so consumers such as the workspace chat app can show a status while a compaction runs.
+
+- A new `PreCompact` hook writes a `compacting` marker to the agent state dir, holding `{"trigger": "manual"|"auto"|"unknown", "started_at": "<utc iso>"}`, and emits an activity event. It fires for a `/compact` and for Claude Code's own auto-compaction.
+
+- A new `PostCompact` hook writes `last_compaction.json` (`{"trigger": ..., "ended_at": ...}`) to the agent state dir, removes the `compacting` marker, and emits an activity event. The summary is not copied; it stays in the transcript.
+
+- Both hooks always exit 0, so a missing `jq`, an unwritable state dir or a malformed payload can never block or interrupt a compaction. A payload without a recognised `trigger` records `"unknown"`.
+
+- The startup/resume `SessionStart` hook also removes a stranded `compacting` marker. A compaction cancelled with Escape, or one whose summarization request fails, fires no `PostCompact`, so the marker can be left behind; consumers should also treat an old marker as stale.
+
+- Hooks are written only when an agent is created, so an agent created before these hooks existed never writes these files.
+
+- Autocompact does not compact a Claude agent a second time right after a compaction. A compaction writes no usage record, so the newest usage still reports the pre-compaction total, over `min_context_tokens`. A `compact_boundary` record that is newer, in file order, than every assistant usage makes `get_context_tokens()` return `None`, and the agent is left alone until its next reply reports a real size. The boundary's own `postTokens` estimate is not used as the size: on 42 real compactions the next turn's usage was 2.0 to 8.4 times `postTokens` (42k to 101k tokens more), because the estimate leaves out the session's fixed overhead. The idle timestamp is unaffected, and a suppressed size is logged at debug level with the agent and transcript path. The new `is_compact_boundary_record` identifies the boundary record.
+
+- Sending a message to a Claude agent whose `/compact` was cancelled does not turn the message into compaction instructions. Claude Code puts a cancelled `/compact` back into its input box, where appending the next message would start another compaction and lose the message. The send clears a leftover `/compact` (bare or with instructions) with Ctrl+E, Ctrl+U, confirms the input row is empty, and records a `cleared_restored_input_text` delivery event. Any other leftover draft is kept and warned about, and so is a `/compact` the keys fail to clear.
+
+- `ClaudeAgent.request_compaction` supports the new bounded message-lock wait and idle re-check: it takes the lock itself (raising `MessageLockTimeoutError` when the wait runs out), skips with `AgentNoLongerIdleError` when the agent is no longer idle since the expected moment, and only then sends `/compact`. A skipped compaction sends nothing and records nothing.
+
+The autocompact eligibility check reads a Claude agent's idle timestamp and context token count from one backward scan of the transcript's tail, cached between checks, rather than parsing the whole transcript once per value. An unchanged transcript costs a size probe that re-reads none of its complete lines. A check reads tens of kilobytes, where whole-transcript parsing peaked at about 62 MB of memory for a 6.5 MB transcript and about 500 MB for a 52 MB one. The values found match a whole-transcript parse, except that a final line without a trailing newline is read once its newline arrives, and a record containing U+0085, U+2028 or U+2029, which `str.splitlines()` splits apart, is read whole. Removed the whole-text parsers `extract_latest_assistant_timestamp_from_jsonl` and `extract_context_tokens_from_jsonl`; added the per-record `extract_assistant_timestamp_from_record` and `extract_context_tokens_from_record` and `ClaudeCompactionTranscriptScanner`.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+Fixed the modal claude-provisioning release test, which looked for "Claude installed successfully" in the create output. The message interpolates the binary name, so it reads "claude" -- the capitalised form the test asserted on is never emitted, and the check could only fail.
+
+Fixed the modal clone release test, which failed with "No agent type provided". `mngr clone` forwards its arguments to `create`, which resolves the agent type from an explicit flag, a positional, or a config default -- it never reads the type off the source agent. The test sandbox sets no default, so the type is now passed explicitly, matching the create helpers alongside it.
+
+## 2026-10-12
+
+The claude message-delivery release test no longer fails its unknown-slash-command step when Claude is still busy with an earlier turn. Claude queued the command, and the enqueue confirmed the send before Claude rejected it, so no rejection event was recorded; the step now waits for Claude to finish its earlier turns before sending the command. The test is also marked flaky.
+
+Claude Code's offer to install a language-server plugin ("Would you like to install this LSP plugin?") is now switched off in the Claude config mngr seeds for every agent, in both the shared and the per-agent config modes. Claude Code makes that offer whenever it edits a file whose server binary is on PATH, a tmux-driven agent cannot answer it, and a person accepting it once installs the plugin for the whole config dir, which then starts a language server of several hundred MB behind every later session.
+
+## 2026-10-07
+
+Move the dialog registry's `CLAUDE_CODE_VERSION` snapshot from 2.1.280 to 2.1.293, the new pin in the shared mngr Dockerfile. Every dialog pattern and option label in `dialogs.py` was re-checked against the 2.1.293 binary, and all of them still appear in it, so no pattern changed.
+
+Since 2.1.281, Claude Code shows its permission prompt for a recursive `rm` on command-substitution output (such as `rm -rf "$(pwd)"`) even under `--dangerously-skip-permissions`, and its first option approves the command. A new test pins how mngr handles that prompt, using a pane captured from a live 2.1.293 session. The prompt's `Esc to cancel` footer makes it a benign dialog, so mngr presses Escape, which denies the command. It never reaches the unknown-dialog fallback, which would press "1" and approve it, even when `sensibly_deal_with_dialogs` includes `ALL_KNOWN_AND_UNKNOWN_DIALOGS`.
+
+## 2026-10-06
+
+Claude's streaming output now reaches the stream buffer in terminals where Claude draws the content-block marker as U+23FA BLACK CIRCLE FOR RECORD rather than U+25CF BLACK CIRCLE.
+
+The watcher recognised only U+25CF, so in those terminals no pane line was ever assistant text: region extraction returned nothing on every poll, the buffer kept its id line and never gained a body, and streaming was silently off for the agent's whole life. Which glyph Claude uses depends on the terminal it detects, not on its version, which is why this affected macOS while Linux was unaffected.
+
+## 2026-10-05
+
+Threads this plugin starts on a `ConcurrencyGroup` now go through `start_mngr_thread`, which destroys the thread's gevent Hub when it finishes. A thread that ran a host command used to leave its Hub, and the pipe pair it holds, open for the rest of the process's life. A new `test_prevent_raw_start_new_thread` ratchet keeps raw `start_new_thread` calls out.
+
+## 2026-10-02
+
+- The offline `on_before_host_destroy` test now builds its volume-backed host from mngr's generic mock provider instead of the docker provider, which moved into its own plugin. No behavior change.
+
+## 2026-10-01
+
+`anthropic` 1.3.0 adds a `toolset_name` field to `ToolUseBlock`, so mngr's stream-json dump now carries `"toolset_name":null` alongside the `"caller":null` it already emitted. Added to the list of known wire-shape departures from the real `claude` binary in the `stream_json` module docstring; the only consumer is mngr's own lenient parser, which accepts the field present, absent, or null.
+
+pytest 9.1 no longer honours `pytest_plugins` outside the rootdir conftest, which is how this package borrowed mngr_modal's Modal test fixtures whenever the suite is run from the monorepo root. It now calls mngr_modal's `register_modal_test_fixtures`, mirroring the existing `register_plugin_test_fixtures`.
+
+## 2026-09-30
+
+Removed the 20 comment lines that had accumulated inside `libs/mngr_claude/imbue/mngr_claude/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+A Claude chat that has never been messaged no longer costs a `find` process every second. Claude only writes a session's transcript file after the first message, and until then the transcript poller (`stream_transcript.sh`) searched the whole `projects/` tree once per poll cycle, indefinitely. On a busy 4-vCPU workspace, two such idle chats had each been doing this for ~14 hours, at ~10% of a core apiece. The lookup is now a shell glob over `projects/*/<session-id>.jsonl`, the layout Claude uses, and it spawns no process. A session's file is still picked up on the first poll after it appears.
+
+## 2026-09-27
+
+Record agent compaction even if sending the `/compact` command raises an exception. This prevents `mngr autocompact` from repeatedly attempting compaction when compaction requests fail.
+
+Marked `test_provision_prompts_for_all_dialogs_when_interactive` flaky: it runs a real local-provider provision and timed out once on an overloaded CI sandbox; no behavior change.
+
+## 2026-09-25
+
+A claude agent no longer reports WAITING for a whole turn that began with a queued prompt.
+
+Claude Code fires UserPromptSubmit, which sets the `active` marker, when a prompt is queued. That happens mid-turn, or during the roughly 3 seconds the previous turn's Stop hook takes to finish. The Stop hook then cleared the marker, so the queued prompt's turn ran with the agent reporting WAITING, and consumers such as the workspace chat app's activity indicator showed it idle. This almost always hit a new chat's first message, which arrives right after the welcome greeting. The Stop hook now checks the session transcript for a queued prompt that is about to start the next turn, and leaves the marker in place when it finds one. The same holds when the previous turn ended on an API error (StopFailure), where Claude Code starts the queued prompt without waiting for the hook. A queued slash command such as `/clear` or `/compact` does not count, so the agent still goes idle when one of those is all that is queued. Claude Code queues a background task's completion notification the same way as a prompt, so an agent also stays RUNNING into the follow-up turn such a notification starts when it arrives before the turn ends.
+
+## 2026-09-24
+
+Move the dialog registry's `CLAUDE_CODE_VERSION` snapshot from 2.1.269 to 2.1.280, the new pin in the shared mngr Dockerfile. Every dialog pattern and option label in `dialogs.py` was re-checked against the 2.1.280 binary before the constant moved: all of them still appear in it verbatim, so no pattern changed.
+
+The two drift guards that do that checking (`test_patterns_match_installed_binary` and `test_option_labels_match_installed_binary`) now also look for the pinned build where `claude.ai/install.sh` keeps it, `~/.local/share/claude/versions/<version>`. They named only the npm install path, so on every host provisioned by install.sh -- the mngr Dockerfile that offload CI runs them in, the workspace image and a developer laptop -- they silently skipped, which is the exact failure mode they exist to prevent. They still skip when the pinned build is not installed, rather than checking whichever claude is on PATH.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-09-17
+
+Test doubles that implement the host file-write interface (`FakeHost` subclasses in the compaction and skill-agent tests) now accept `write_text_file`'s `is_atomic` parameter, matching the interface: `write_file` and `write_text_file` are atomic by default on every host and take `is_atomic=False` to write in place. No behavior change in this project's own code.
+
+## 2026-09-15
+
+Hardened `stop_watcher`, the helper in the `common_transcript.sh` tests that shuts down a
+background watcher started by a test.
+
+The watcher (`common_transcript.sh`) converts a Claude transcript by running a Python converter
+as a child process, and the tests start it in its own process group so one signal reaches both.
+A lock directory, the convert lock, stops two conversions from running at once. `stop_watcher`
+used to send SIGTERM to the group, wait for the watcher's bash process, and then delete the lock
+directory. It now sends SIGKILL instead. SIGKILL cannot be caught or ignored, so deleting the lock
+directory afterwards no longer depends on nothing in the group handling SIGTERM. Nothing does
+today, so this is a hardening rather than a bug fix: with the scripts as they are, the old
+sequence also killed everything in the group.
+
+The kill is sent before the wait. Waiting reaps the bash process and frees its pid for reuse, and
+that pid is also the process group id, so a kill sent after the wait could hit an unrelated group.
+
+Added a test that stops a stand-in watcher whose child ignores SIGTERM and checks that nothing in
+the group is left running once `stop_watcher` returns.
+
+Tests only. No change to the shipped script or to any agent's behaviour.
+
+The mngr_claude behavior corpus is witnessed by `mngr witness` instead of `mngr tmr-behaviors`: the project's prompt variant moves from `tmr/behaviors_mapper.j2` to `witness/mapper.j2`, where the new command discovers it, and every corpus README's incipit now names the `behaviors` skill.
+
+A claude agent whose turn ended on an API error -- a usage limit, a rate limit, a prompt too long -- now reports WAITING instead of staying RUNNING forever.
+
+Claude Code has two mutually exclusive turn-end paths. A turn that finishes normally fires `Stop`; a turn that dies on an API error fires `StopFailure` and returns before the `Stop` pass ever runs. mngr registered only `Stop`, so the `active` marker that `UserPromptSubmit` created was never removed and the lifecycle probe kept reporting the agent as RUNNING until its claude process restarted. Nothing else cleared it: the usage-limit selector fires no `PermissionRequest`, and Claude Code suppresses its `idle_prompt` notification while a dialog is on screen or quota auto-resume is armed.
+
+The effect was visible anywhere lifecycle state is read. In the minds app, a workspace whose update agent hit a usage limit sat on "Preparing update..." indefinitely, and the wedged run slot refused any retry.
+
+`StopFailure` now runs the same turn-end script as `Stop`, so the transcript flush still lands ahead of the cleared marker and a consumer woken by the turn-end signal sees the error that ended the turn. Agents pick this up when they are next provisioned.
+
+## 2026-09-14
+
+Implement context compaction support for Claude Code agents, including `ContextCompactionConfig` settings, idle time tracking via stop hooks and assistant transcript timestamps, token usage extraction, filtering synthetic compaction summaries from common transcripts, and passing optional instructions to `/compact <instructions>`.
+
+## 2026-09-13
+
+Marked `test_running_watcher_defers_the_open_trailing_inference` as a known flake so a single
+failure stops turning CI red while its cause is still open (tracked as MIND-263).
+
+The cause is measured but not fixed. The test drives the real `common_transcript.sh` watcher and
+then runs a turn-end flush through a helper that allows the flush 10 seconds. When the flush has
+to wait for the convert lock, the script waits its lock timeout, gives up, waits its retry delay,
+and tries once more -- 60.76s end to end on the shipped 30s default, measured. The helper kills it
+long before that, so contention surfaces as `subprocess.TimeoutExpired` rather than the skip the
+script performs.
+
+Also corrected the `stop_watcher` docstring, which claimed the lock directory is only cleared once
+the watcher's process group is dead. Only the bash parent is waited for; the converter shares that
+group and can outlive it, so the lock can be cleared while a live converter still holds it.
+Escalating to the group after the parent has been reaped is not the fix -- its pid is available for
+reuse at that point, so the signal could reach an unrelated process group.
+
+Tests only -- no change to the shipped script or to any agent's behaviour.
+
+## 2026-09-12
+
+The interactive claude agent now captures its own stderr to `stderr.log` in the agent's
+state directory. Agents run under tmux rather than supervisord, so a startup error or
+crash reached none of the workspace's service logs, and unlike codex, antigravity and
+opencode this harness wrote no diagnostic file of its own -- a bug report had no way to
+see it. The TUI still renders on stdout, so the pane is unchanged; the file is truncated
+per launch, which bounds it without rotation. The bug-report collector picks it up with
+the rest of the agent's logs.
+
+Note the tradeoff: stderr now goes to the file instead of the pane, so a crash message
+that used to stay in the pane's scrollback is no longer visible there. It is still
+collected -- from the file, and durably, which the pane was not.
+
+The capture wraps the whole resume/resume-uuid/create fallback chain rather than each
+branch, so a branch that fails keeps its stderr instead of having it truncated by the
+branch that follows -- that output is exactly why the fallback happened.
+
+The interactive claude agent's stderr now reaches both the pane and the agent's `stderr.log`, instead of only the file. The previous change captured stderr to the file for bug reports but took it off the pane, so a crash message was no longer visible where someone looking at a dead agent expects it. The launch chain now redirects stderr through `tee` (via shell process substitution), which keeps stdout and the TUI untouched, preserves the resume/resume-uuid/create fallback chain's exit status, and truncates the file per launch as before. `tee -i` is used so a Ctrl-C the harness handles itself cannot kill the copy and leave claude writing to a broken pipe.
+
+This makes the agent pane's shell a bash/zsh/ksh requirement (process substitution is not POSIX), which every shipped image and both desktop platforms already satisfy.
+
+## 2026-09-11
+
+Move the dialog registry's `CLAUDE_CODE_VERSION` snapshot from 2.1.227 to 2.1.269, the new pin in the shared mngr Dockerfile. Every dialog pattern and option label in `dialogs.py` was re-checked against the 2.1.269 binary before the constant moved: all of them still appear in it verbatim, so no pattern changed.
+
+Claude agents no longer open Claude Code's diff sidebar: `diffSidebarOpen` is now written as `false` into the per-agent `.claude.json` that mngr provisions for every agent with an isolated config dir (remote, deploy, and local agents with `isolate_local_config_dir=true`, the default). Shared-mode local agents (`isolate_local_config_dir=false`) use the user's own Claude config and are unchanged.
+
+Unattended (remote/deploy) Claude agents also get two more `settings.json` flags that stop Claude Code from interrupting automated input and output: `feedbackDrafts` is set to `"off"` and `feedbackSurveyRate` is set to `0`, which disables the session quality survey. Attended local agents are unchanged.
+
+## 2026-09-01
+
+The claude common transcript now emits the ATIF-shaped stream records described in `specs/atif-transcript-alignment/spec.md`, replacing the bespoke `user_message` / `assistant_message` / `tool_result` records. Every stream starts with a `header` line pinning the ATIF revision, and each following line is a `step` or an `observation`.
+
+The stream is now full fidelity: tool `arguments` are the complete input objects (no more 200-char previews), tool outputs and stop-hook text are untruncated (no more 2000-char cap), and the model's thinking is captured as `reasoning_content`. Display truncation lives in `mngr transcript` instead, with `--full` to disable it.
+
+Claude fans one API response out over several transcript lines; those lines are now grouped by their shared `message.id` into a single agent step, so one step is one LLM inference and its token usage is counted once instead of once per line. Because those lines arrive over several seconds, the converter holds back the last inference until a later line proves it finished; the turn-end flush (`--single-pass`) knows the turn is over and emits it.
+
+Framework-injected `isMeta` records (stop-hook output, local-command caveats) are now real system steps rather than fake `meta` tool results, and a context compaction is recorded as a system step carrying the ATIF v1.7 `context_management` convention with the summary on its inline observation.
+
+Each agent step also records `llm_call_count: 1` (one step is one inference by construction), and a native Task subagent's records -- which claude interleaves into the same session file with `isSidechain: true` -- are grouped in their own lane and marked `is_sidechain` in the step's (or observation result's) `extra`, so a subagent's turn can no longer split the main thread's inference in two.
+
+The trade-off of holding the last inference back: mid-turn, the newest in-flight inference appears in the common transcript only once it is provably complete (the next record that closes it, or the turn-end flush), so a live `mngr transcript --follow` tail lags the agent by up to one inference.
+
+The claude silent-decode ratchet entry now counts `common_transcript_convert.py`'s decode catches (with the justification recorded alongside them) instead of excluding the whole file, matching its codex and antigravity siblings. The file stays waived only for the rules that genuinely do not apply to a standalone stdlib-only script (bare print, `__init__` methods).
+
+A claude release test that still counted user turns by the retired `user_message` record type now counts ATIF user steps.
+
+The `emit_common_transcript` config field's description now describes the ATIF-shaped stream (user turns, agent turns, tool results) rather than the retired record vocabulary.
+
+Trimmed historical framing from the converter's module docstring.
+
+The ATIF stream header's `event_id` is now unique per agent stream: `header-<sha256(agent_id:emitter)[:32]>` instead of the fixed `"header"`. A fixed id repeats identically for every agent on every host, so analytics' fleet-wide event-id dedupe collapsed all header rows to one per account, destroying the per-agent (emitter, `schema_version`) mix.
+
+The agent id is the agent state directory's basename (a UUID4-based value), so distinct agents never collide and a restart reuses the same id.
+
+The claude common-transcript emitter now writes ATIF-shaped stream records (`header` / `step` / `observation`) per `specs/atif-transcript-alignment/spec.md`: full-fidelity tool arguments and outputs, thinking captured as `reasoning_content`, one step per LLM inference (multi-line API responses grouped by `message.id`), sidechain lanes for native Task subagents, compactions as `context_management` system steps, and a per-agent-unique header `event_id`. The per-layer `mngr-atif-*.md` entries in this PR carry the details.
+
+## 2026-08-30
+
+The Claude-agent behavior corpus's per-folder `overview.md` files are renamed to `README.md`, each now opening with the mandated incipit that points any reader to the tmr-behaviors skill. Their prose is otherwise unchanged.
+
+Marked `test_assemble_command_is_posix_compatible` as `@pytest.mark.flaky` with a 60s timeout: like its mngr_codex sibling (observed timing out under CI sandbox load), it shells out to shellcheck and is exposed to the same default 10s pytest-timeout.
+
+## 2026-08-26
+
+Sends to a claude agent no longer fail when something is holding the TUI's input.
+
+A dialog left open in the terminal — the model bar's switch confirmation, a plugin-install offer, anything claude puts in front of the prompt — used to abort every subsequent send. The mechanism that was supposed to clear it pressed Enter `auto_accept_prompt_depth` times, and that defaults to `0`: mngr detected the dialog and then did nothing about it.
+
+`mngr_claude.dialogs` replaces it. Preflight now classifies whatever owns the pane and deals with it: Escape for anything Esc closes harmlessly, Backspace for a shell-mode strand, or — for a confirmation whose nickname the operator listed in the new `sensibly_deal_with_dialogs` — cycling the selector onto a *named* option before pressing Enter. Anything else refuses the send with an error naming what is in the way.
+
+The new field takes nicknames from `mngr_claude.dialogs.SELECTABLE_NICKNAMES`, or the single wildcard `"*"`. It never presses Enter on whatever option happens to be highlighted: the pane is shared with anyone attached to the tmux session, so a stray arrow key — or a claude release that reorders the options — would otherwise turn "confirm the switch" into "buy credits". If the named option is not reachable, the send refuses rather than guessing.
+
+Shell mode goes through the same loop rather than sitting beside it as a special case. A bare `!` strand self-clears with Backspace exactly as a dialog self-clears with Escape; a human's unsubmitted `!<command>` refuses the send with the actionable error PR #397 established. One classifier, one loop, no carve-outs.
+
+Removed: `auto_accept_prompt_depth`, `auto_accept_preflight_prompt_depth`, `_accept_dialogs_up_to_depth`, and the `DialogIndicator` family. One of those indicators matched a string absent from every version of Claude Code we have ever shipped, which nothing noticed across two version pins — the new module carries a release test asserting each pattern still matches the installed binary.
+
+Renamed `auto_dismiss_dialogs` to `auto_dismiss_dialogs_at_startup`, in every plugin that has it. The name described what it does — dismissing the dialogs that appear before the agent is up — but read as though it governed dialogs generally, which is now a different setting.
+
+The dialog patterns are labelled with the claude build they were read out of, and every one was re-verified against the currently pinned 2.1.227 — including the four option labels the answerable dialogs cycle onto, since a stale label refuses a send rather than answering it.
+
+Fixed dialog and shell-mode detection in conversations that have prior turns. Claude Code prefixes every echoed past user message with the same `❯` glyph that marks the live input box, so searching the whole pane for it reported "ready to type" however the pane was actually occupied -- a message sent while the settings window was open was typed into that window's search field, and a message sent while another surface held the pane was appended to a past turn and then failed 90 seconds later as unconfirmed. The input box is now identified by its position at the bottom of the pane, and dialogs and shell mode are recognised on their own evidence before the input box is looked for, so a short dialog with a user turn echoed just above it is still found.
+
+Because detection had been silently failing, errors that were unreachable now appear: an open `/config`, `/model` or `/theme` at send time is reported instead of swallowing the message, and a human's unsubmitted `!<command>` is reported instead of timing out.
+
+`ShellCommandPendingError` was removed. Nothing caught it and its recovery wording already lives on the shell-mode dialog itself, so there is now a single error for "something is holding the input".
+
+Shell mode is recognised by the input row itself rather than by whether a prompt glyph appears near it. In a short conversation the echo of a past user turn falls close enough to the bottom that "a prompt is nearby" is true while shell mode is holding the input, which would have let a send walk into it. Shell mode is also checked ahead of the dialog surfaces, as it was before, and the error naming an unsubmitted command still tells you which keys resolve it and which command connects you to the agent.
+
+Shell mode is now recognised by the agent's input row rather than by whether a prompt glyph appears anywhere near the bottom of the pane. In a short conversation the echo of a past user turn sits close enough to the input to be mistaken for it, which would have left shell mode undetected there for the same reason dialogs were undetected before this change. Shell mode is also checked ahead of the dialog surfaces again, as it was originally.
+
+A pane that has not finished painting is now waited for rather than refused. A new agent's first message is delivered as soon as Claude Code signals that its session started, which happens before its interface has drawn, so checking once and giving up would have failed the opening message of every new agent -- including the workspace's welcome chat. A pane that stays unreadable is still refused.
+
+A dialog found while an agent is starting is reported rather than dismissed, which is how it behaved before this work. Startup is not send time: the dialogs cleared at send time are ones a message has to get past, whereas one that stopped an agent from starting is worth surfacing, and pressing keys at an interface that never signalled readiness is guesswork. Known startup dialogs are still pre-dismissed by configuration before launch, unchanged.
+
+`sensibly_deal_with_dialogs` now takes a named token in place of a wildcard. `ALL_KNOWN_DIALOGS` covers every dialog mngr can name, each answered on the option named for it, so it grows with the catalogue without ever becoming a guess. The `*` wildcard is gone: it invited being written to mean "all the ones you know", and a token that says which dialogs it covers cannot be misread that way. A dialog mngr cannot name is refused whatever this list says -- answering one would mean guessing at an option nobody has looked at, which would be a separate feature with a flag of its own. The module now says benign and non-benign throughout, since whether mngr dealing with a surface can be regretted is the axis the whole design turns on.
+
+`sensibly_deal_with_dialogs` no longer accepts the token for answering surfaces mngr cannot name: nothing implements that yet, and accepting it promised behaviour that silently did not happen. The pre-rename `auto_dismiss_dialogs` name is rejected as an unknown field rather than aliased -- an alias could not have worked, since agent types are built with `model_construct`, which skips the validators an alias needs.
+
+mngr no longer presses keys at a pane that is not showing a selector. `UsageLimitReached`'s caption is also the option it answers, so an agent merely explaining the usage limit put that text on screen -- and the option-cycling walk would then press Down a dozen times into whatever held the input, which for a live composer meant a dozen keystrokes nobody typed. Dismissing a dialog also leaves copy-mode first, since a pane in a mode shows scrollback rather than the live screen and would be read as stuck.
+
+A blocked send now says what is wrong once. The error was assembled by four layers that each added a sentence, so a user reading a single modal was told "the send failed" three times and "go fix it in the terminal" three more: a generic preamble with the internal dialog nickname in parentheses, then the dialog's own advice, then a `mngr connect` command, then the client's own paraphrase. The dialog's advice is now the whole reason, verbatim. How to REACH the terminal is left to the client, since naming a CLI command is wrong in a window that has a terminal tab, and the sentence before it already said to use the terminal.
+
+`sensibly_deal_with_dialogs` gains `ALL_KNOWN_AND_UNKNOWN_DIALOGS`. It is everything `ALL_KNOWN_DIALOGS` covers, plus a fallback for a surface mngr cannot name: press `1`. That last part is a guess and is meant to read as one -- an unnamed dialog's first option is unknown by definition, and among the four dialogs mngr does name it would have been the wrong answer for two, since the usage-limit prompt's first option buys credits and the LSP prompt's installs. It is a single digit rather than a walk onto "option 1" because locating that option means reading the highlight against a pattern pinned to `1.`, and a highlighted `11.` row contains `1.` -- so the walk could land on the wrong row and press Enter on it. Two things bound the guess: the digit is only sent to a pane that actually shows a numbered selector, so a "1" is never typed as text into whatever holds the input; and pressing is not succeeding, since the caller re-classifies afterwards, refuses the send if the pane did not change, and gives up after its pass budget. Opting in is only possible through the token -- listing the nickname `Unrecognized` grants nothing, because opting into guessing should be a deliberate act rather than something a broader-sounding setting quietly includes.
+
+Deleted `specs/claude-send-path-input-ownership/escape-then-send.md`. It was the planned walkthrough written before the work, and `spec.md` covers the same subsystem in full; keeping both left two documents for one design, and the stale one said the input region was the last 8 non-blank lines where the code says 12.
+
+## 2026-08-25
+
+Comment-only terminology sweep: mngr-level prose speaks host/agent instead of the minds-level workspace vocabulary.
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-19
+
+Make the Claude plugin stop importing the heavy `anthropic` SDK at `mngr` startup, reducing CLI cold-start latency (MIND-179). `mngr`'s console script imports every plugin entry module on every invocation, including `imbue.mngr_claude.headless_claude_agent`, which transitively imported `imbue.mngr_claude.stream_json` -- and that module pulled in the `anthropic` SDK (~900 modules) just to register the agent type.
+
+The `anthropic`-typed stream-json boundary (the emit-side event builders and the consume-side typed validators, including the static exhaustiveness tripwire over the stream-event union) now lives in a new `imbue.mngr_claude.stream_json_impl` module that imports `anthropic` at top level. `imbue.mngr_claude.stream_json` is now a thin, SDK-free facade: importing it never pulls `anthropic`, and every public function forwards to the implementation, which is imported lazily on first call. The SDK now loads only when a Claude stream is actually produced or consumed. Measured locally, `from imbue.mngr.main import cli` dropped from ~4860 to ~2690 imported modules with zero `anthropic` modules (previously ~890). This also removes the same SDK cost from the `robinhood` plugin's startup path, which reached `anthropic` through the same module.
+
+No user-facing behavior change. The public functions keep identical signatures and behavior on `imbue.mngr_claude.stream_json`, except that the four consume-side functions returning or accepting `anthropic` types (`validate_stream_event`, `classify_stream_event`, `parse_stream_event`, `parse_assistant_message`) are annotated `Any` on the facade; import them from `imbue.mngr_claude.stream_json_impl` when the precise static types are wanted.
+
+## 2026-08-17
+
+The claude agent type gains two settings, `output_style` and `append_system_prompt`, that a
+create template can set so a role describes claude's behaviour without spelling out argv.
+
+`output_style` becomes the `outputStyle` setting in the managed settings claude launches with,
+applied after `settings_overrides` so a role's style wins over a configured one without
+disturbing the other resolved keys (model, fastMode, and the rest). The name is validated during
+provisioning against `.claude/output-styles/` in the work dir -- the same directory claude itself
+reads -- so a misspelled name or a broken symlink fails the create instead of producing an agent
+that launches silently unstyled.
+
+`append_system_prompt` is a list, so `append_system_prompt__extend = [...]` in a template makes
+each stacked role contribute a block. The blocks are joined into ONE `--append-system-prompt`
+launch flag: claude's flag is last-wins (verified against 2.1.220), so passing it per block
+would deliver only the final one and silently drop every role stacked before it. Create
+templates that previously spelled this out as `agent_args = ["--append-system-prompt", "..."]`
+can use the setting instead.
+
+The `model_state_hook.py` Claude Code hook (and its SessionStart/UserPromptSubmit/PostToolUse/Stop
+registrations) is removed. The chat model bar's live model/effort/fast now comes from the
+workspace's statusline command, which Claude Code re-runs on every session start, assistant
+message, and refresh tick -- strictly more reactive than the hook (which could not see idle
+`/model` switches) and immune to the `<synthetic>` model ids the hook could record from
+framework-generated transcript messages. The statusline writes the harness-uniform
+`$MNGR_AGENT_STATE_DIR/model_state.json` snapshot that the system interface reads for
+every harness.
+
+Claude provisioning now installs a Chat-only `meta+q` -> `chat:cancel` keybinding that the
+Minds workspace UI uses to flush a claude agent's queued messages into its live turn without a
+SIGKILL-restart. `ensure_chat_cancel_tap_keybinding` merges the chord into the user-scope
+`keybindings.json` (creating the file/entry when absent); it is idempotent and never clobbers a
+`meta+q` already bound in the Chat or Global context, so a user's own binding wins and the tap
+simply reports itself unavailable. In shared-config mode claude reads the file directly; in
+isolated mode the per-agent config dir inherits it via the existing keybindings sync.
+`is_tap_binding_active` reports whether the chord is live for the running claude process (bound
+on disk, and written no later than the process-start marker, since claude reads keybindings only
+at launch).
+
+Added `mark_claude_agent_idle`, a small primitive that clears a claude agent's `active` and
+`permissions_waiting` markers and emits one activity event, out-of-band. It runs the exact shell
+snippet the Notification / SessionStart / Stop hooks already run, so the marker semantics and the
+activity-event format have a single source of truth. The Minds workspace stop button calls it
+after a native (chord) interrupt: claude fires no hook when the user interrupts a turn, so the
+`active` marker is otherwise stranded and the agent keeps reporting RUNNING for ~60s; clearing it
+drops the activity indicator immediately and the emitted event pokes `mngr observe` to re-probe.
+
+Renamed the agent's live model-state file from `minds_model_state.json` to `model_state.json`. The plugin has no reason to be aware of Minds -- Minds is one client of this file, not what it is for -- and the name is now the plain description of its contents. The pi lifecycle extension's copy is renamed to match. Agents created before this write the old name until their next model change, so a client reading the new name sees no selection until then; nothing else depends on it.
+
+Seed the `mngr_claude` behavior corpus (`libs/mngr_claude/behaviors/`) with the message-delivery area: the `stays-ready` invariant and the `shell-input.feature` scenarios specifying how `!`-prefixed (bang) messages behave when delivered to a Claude agent.
+
+Fix a `!`-prefixed message stranding a Claude agent in shell mode. mngr delivers a leading `!` as a literal keystroke, which flips Claude Code into shell (bash) mode -- the input row's `❯` prompt becomes `!` and the footer reads "! for shell mode". Two problems followed: a `!` command was confirmed under the strict policy (whose evidence probes never match a shell-mode submission, so the send hung for the full window and then failed), and a bare `!` left the agent stuck in shell mode (submitting an empty shell line is a no-op), hiding the `❯` prompt that readiness keys off.
+
+The Claude plugin now recognizes `!` shell-command messages: it confirms them under the relaxed policy (they leave no durable submission record, like slash commands), and after delivery it leaves an empty shell-mode line (a single Backspace) so the `❯` prompt returns. As a result, `!echo <text>` runs the command and its output appears in the conversation, and a bare `!` is inert and leaves the agent ready for the next message.
+
+The plugin also distinguishes a non-empty shell command a human left unsubmitted from that auto-recovered empty case: because mngr always submits its own sends with Enter, a pending `!<command>` on the input row can only be one a human typed directly and did not submit. Rather than finish or discard it, mngr refuses the send at preflight with an actionable error (connect and press Enter to run it or Escape to cancel) instead of a generic readiness timeout. This is specified by the `pending-shell-command-blocks` behavior and its witnessing test.
+
+Add the witnessing tests for the `mngr_claude` behavior corpus (`libs/mngr_claude/behaviors/`, the message-delivery area), generated by a `mngr tmr-behaviors` map-reduce run with the new `libs/mngr_claude/tmr/behaviors_mapper.j2` prompt variant (an additive extension of the packaged `behavior_mapper.j2`, mirroring the minds variant). Both `shell-input.feature` scenarios (`runs-command`, `bare-bang-inert`) are witnessed to FULL by e2e release tests driving a real Claude Code TUI; the `stays-ready` invariant is witnessed across four message instances with an honest partial note (the universal quantifier is untestable in kind).
+
+- `ensure_chat_cancel_tap_keybinding` no longer crashes on a keybindings.json whose Chat entry has a non-object `"bindings"` value: the malformed value is replaced with a fresh dict (with a warning logged), mirroring the existing handling of a non-list top-level `"bindings"`. Added a unit test for the non-dict case. This also fixes the type error the old `setdefault` call produced.
+
+- `is_tap_binding_active` now logs a warning when keybindings.json is malformed JSON instead of silently returning False (still never raises), satisfying the silent-decode-error ratchet.
+
+- Sorted imports and reformatted `claude_config.py` / `claude_config_test.py` with ruff.
+
+- Provisioning seeds minds_model_state.json from the launch settings (model, fastMode) so the chat model bar is populatable the moment readiness fires; the statusline's later writes reconcile the seed to claude's self-reported values.
+
+- Claude common-transcript converter: tool results converted in a later pass than their call are now labeled with the real tool name instead of "unknown" (the call-id-to-name map is built from the full input before the cross-pass dedup skip).
+
+- Claude common-transcript converter: assistant messages containing only thinking/redacted_thinking blocks no longer emit empty assistant records (which readers rendered as "(no content)" turns).
+
+- Claude common-transcript converter: slash-command plumbing records (`<command-name>`/`<command-message>` expansions, `<local-command-stdout>` output, and the isMeta `<local-command-caveat>` wrapper) are filtered out instead of leaking into the transcript as fake user turns and "meta" tool results. Genuine turns that merely quote the markup mid-text are unaffected. All three fixes are covered by tests driven by a scrubbed fixture captured from real claude-code 2.1.207 sessions.
+
+- New U5 enforcement test (`resources/common_transcript_diff_test.py`): a native-vs-common transcript diff that independently enumerates every user-visible turn in the real claude-code 2.1.207 session fixture -- with every legitimately-excluded shape (bookkeeping record types, slash-command plumbing, thinking-only messages, isMeta framework injections) named in explicit allowlists -- and asserts the converted common transcript contains exactly those turns, exactly once, in order, with tool results paired to their calls under the real tool names. Unlisted native shapes fail the enumeration, so a future binary's new record shape (or a converter filter that broadens to swallow genuine turns) fails loudly instead of shipping green on schema validity alone. Also asserts reconverting the same session appends nothing.
+
+## 2026-08-13
+
+`mngr list` now reports a Claude agent blocked on a permission dialog or an `AskUserQuestion` as `WAITING` rather than `RUNNING`.
+
+The plugin already treated such an agent as waiting, but only for the reader `mngr wait`/`message`/`find` use; the agent listing reads the lifecycle probe directly and never saw it, so `mngr list` showed `RUNNING` for an agent that was making no progress.
+
+The plugin now answers `is_blocked_on_dialog()` and the probe folds that into the state it builds, so both readers agree.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Reduced the idle CPU cost of the per-agent transcript watchers, which polled continuously whether or not the agent was producing output.
+
+`common_transcript.sh` now skips a conversion pass entirely when the raw transcript has not changed since the last completed pass. Each pass spawns a Python interpreter that re-reads and re-parses both the whole input transcript and the whole output file, so on an idle agent that work was repeated every 5 seconds for no result. Measured on a real 12MB transcript, steady-state idle cost dropped by roughly 93% (56 to 4 CPU ticks per 20 seconds) with identical converted output. The change-detection state is held in memory only, so a restart still performs one full reconciling pass exactly as before, and a pass skipped because a concurrent `--single-pass` flush holds the convert lock is retried on the next cycle rather than being lost.
+
+`stream_transcript.sh` now counts the session-history file and every resolved session file in a single `wc` invocation per poll, instead of one invocation per session per poll. The previous cost grew with the number of sessions an agent had been resumed through and never shrank, since the session history is append-only. Idle cost is now roughly flat in session count: measured over 20 seconds, 5 sessions dropped from 53 to 18 CPU ticks and 15 sessions from 133 to 38.
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-07-29
+
+Fix a class of claude agent restart deadlocks where a stale `claude_session_id` marker stranded the launch: the tmux window died with "No conversation found" followed by "Session ID ... is already in use", and the agent could never start again.
+
+- The launch command's resume gate now checks the exact session file claude consults on `--resume` (the project dir encoded from the agent's work dir) and requires it to be non-empty, instead of matching any same-named file anywhere in the config dir (which passed for sessions claude cannot actually resume, e.g. one started from another cwd, and for blank session files). A `find` over `projects/` remains as a backstop in case the project-dir encoder ever diverges from Claude Code's.
+
+- The launch chain gained a self-healing middle branch: when the tracking-file session is unresumable, the agent explicitly resumes its own first session (`--resume <agent-uuid>`) instead of falling straight through to `--session-id <agent-uuid>`, which always fails with "already in use" once that session exists. Fallback branches re-export `MAIN_CLAUDE_SESSION_ID` so the SessionStart hook heals the tracking file.
+
+- The mngr readiness hooks no longer accept writes from nested claude processes. A `claude` run from inside the agent (e.g. a Bash tool call) inherits the agent's env and config dir, so its hooks previously fired against the agent's state dir -- overwriting `claude_session_id` with a foreign session and clearing the `active` marker mid-turn. Hooks now exit early when the firing claude was started outside the agent's work dir (via `CLAUDE_PROJECT_DIR`), or when a different still-live claude process has claimed the agent's state (via a new `claude_main_pid` marker recorded from `CLAUDE_PID`). All checks fail open when the signals are unavailable. The launch command clears the `claude_main_pid` claim before each claude launch, so a stale claim (e.g. a recycled pid after a host reboot that now belongs to another live claude) cannot block the hooks of a freshly launched agent.
+
+Existing agents pick up the new launch command and hooks on re-provisioning; agents created before this change keep their stored command until then.
+
+Combined-fixes integration PR (carries mngr/fix-remote-workspace): fixes claude agent restart deadlocks caused by stale `claude_session_id` markers -- the resume gate now checks the exact session file claude consults, the launch chain self-heals via `--resume <agent-uuid>`, and readiness hooks ignore writes from nested claude processes. See `mngr-fix-remote-workspace.md` in this directory for details.
+
+## 2026-07-28
+
+Sending an unrecognized slash command (a typo like `/zzz`) to a Claude agent via `mngr message` now returns in about 2 seconds with an accurate warning naming the rejection evidence ("rejected ... nothing was executed") instead of polling the full 15-second relaxed window and reporting plain success. Claude records a structured warning the instant it rejects an unknown command; two new rejection probes watch for that record (in both the raw and native transcripts) past the pre-Enter baseline, keyed on Claude's own runtime verdict rather than any list of known commands -- so built-in, plugin, and user-defined commands are never affected, and a typo of any of them is still caught.
+
+The Claude message-delivery journey release test now sends an unknown slash command and asserts the rejection event is recorded, so a future Claude Code change to the "Unknown command" warning record is caught by the release suite rather than silently degrading typo sends back to best-effort success.
+
+Added a transcript record contract release test (`test_claude_transcript_record_contract`): drives a live claude through an idle prompt, a queued busy send, and an unknown command, then asserts the raw native session JSONL contains each record shape mngr consumes (user records, enqueue records, the dequeue-or-remove delivery outcome, the queue-operation vocabulary, the Unknown-command warning, the projects/<encoded-cwd>/<session-id>.jsonl layout, and top-level record uuids). Assertions parse the raw file directly rather than going through mngr's probes, so when a Claude Code release reshapes a record the failure names the drifted record, the mngr consumer to update, and the claude version that broke it.
+
+## 2026-07-23
+
+Hardened the Claude agent against interactive TUI selectors (e.g. the `/model` "Switch model?" confirmation) that could previously leave an agent silently stuck after a message was already delivered.
+
+Three new `[agent_types.claude]` settings. Two depth knobs, both defaulting to `0` (off):
+
+- `auto_accept_prompt_depth`: after a message is delivered, if it opened a blocking numbered selector, auto-accept the highlighted default (press Enter) up to this many times, clearing chained dialogs. At `0`, or if a selector persists, `mngr message` now reports the message as delivered-but-blocked (a distinct outcome) instead of hanging with no signal.
+
+- `auto_accept_preflight_prompt_depth`: if a blocking dialog is already present when a send starts (or while the agent is coming up), auto-accept its default up to this many times before aborting. Independent of `auto_accept_prompt_depth` and of `auto_dismiss_dialogs`. Permission prompts (the `permissions_waiting` marker) are never auto-accepted -- they remain a hard error.
+
+- `post_submit_dialog_observe_seconds` (default `2.0`): how long to keep watching the pane after a message is delivered before concluding no blocking selector appeared, and the per-accept re-check window while clearing chained dialogs. Raise it on slow or high-latency hosts where dialogs take longer to render.
+
+Detection is structural (a rule line followed by an indented `❯`-arrow numbered option), so it also catches new/unknown confirmation dialogs, including in the pre-send preflight check. It recognizes both selector styles Claude Code uses: confirmation dialogs ruled with box-drawing dashes (`────`) and the interactive `/model` picker ruled with an upper-eighth block (`▔▔▔▔`). Each auto-accept is logged and recorded as an agent event capturing the selector text.
+
+Also fixed a latent bug: the Claude readiness/leftover-input checks matched the `❯` glyph anywhere, so an open selector's indented option line could be mistaken for the input prompt. Both are now anchored to a line that begins with `❯` at column 0. Because of that anchoring, agent startup now relies on Claude's own `session_started` signal (skipping the generic TUI-ready wait) so that a selector blocking startup is auto-accepted (up to `auto_accept_preflight_prompt_depth`) instead of hanging on the create path.
+
 ## 2026-07-14
 
 Add `auto_disable_questions` to `ClaudeAgentConfig`: when True, appends `--disallowed-tools AskUserQuestion` to the agent invocation so unattended agents can't block on questions (recent Claude Code releases no longer treat AskUserQuestion as a permission prompt, so `auto_allow_permissions` alone no longer covers it). Appended as a separate flag; Claude accumulates repeated `--disallowed-tools` flags, so a list already supplied via `cli_args` is preserved.

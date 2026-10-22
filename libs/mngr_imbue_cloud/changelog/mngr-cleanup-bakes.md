@@ -1,3 +1,0 @@
-Slice pool bakes (`mngr imbue_cloud admin pool create`) now run every inner `mngr create` in a throwaway mngr namespace (a fresh `MNGR_HOST_DIR` under `~/.cache/mngr-bake/` with an inert `MNGR_PREFIX=mngr-bake-`) instead of the operator's own mngr data root. Bake-time `slice-*` hosts, agents, and discovery events therefore no longer leak into the activated minds env's data root, which previously made the minds desktop app briefly render every recent bake as a phantom workspace at startup (issue #496, Part A).
-
-The namespace is deleted when the whole invocation succeeds and retained (its path logged) on any failure -- including a partial one -- as the client-side debugging artifact; each bake invocation sweeps retained namespaces older than 7 days.

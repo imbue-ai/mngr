@@ -1,1 +1,0 @@
-Pi agents now stamp a `pi_process_started` marker (and clear a stale `active` marker) on every launch/resume, mirroring `mngr_claude`'s `claude_process_started` and `mngr_codex`'s `codex_process_started`. This gives the system-interface activity indicator a restart boundary, so a pi agent killed mid-turn no longer shows a stuck "Thinking..." after it restarts.

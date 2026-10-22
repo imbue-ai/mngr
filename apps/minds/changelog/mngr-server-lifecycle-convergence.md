@@ -1,3 +1,0 @@
-Deploy runbooks updated for the Phase 3 server lifecycle convergence (issue #496): `production-release-deployment.md` is rewritten around the env-aware `just order-server` / `await-delivery` / `setup-server` recipes -- the Step 0 credential export block is gone (activate the tier instead), each box step is one command, and `setup-server` now installs + verifies the observability collector fail-closed. Also removed stray markup left at the end of the file, and resolved the runbook's open TODO about first-class lifecycle recipes.
-
-`host-pool-setup.md` Step 5 and the observability bring-up doc now describe the in-process collector install (Vault boxes credential; clean skip when absent) instead of the old `--extra-prep-script` shell assembly.

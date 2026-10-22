@@ -1,1 +1,0 @@
-- Promoted minds 0.8.6 to the alpha channel: the desktop alpha entry serves ToDesktop build `2610143magb5chk` (mac and Linux, 100% rollout) and the web alpha pin moves to `minds-v0.8.6`, which the production pool holds verified rows at in both regions. Beta and stable stay on 0.8.5.

@@ -1,1 +1,0 @@
-The codex `waiting_reason` field generator's docstring no longer claims its registration limits it to codex agents; field generators run for every listed agent, and the existing `isinstance` guard is what keeps the field off other types.

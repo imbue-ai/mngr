@@ -4,6 +4,328 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20
+
+The codex `waiting_reason` field generator's docstring no longer claims its registration limits it to codex agents; field generators run for every listed agent, and the existing `isinstance` guard is what keeps the field off other types.
+
+## 2026-10-16
+
+A renamed codex agent keeps working.
+
+- A codex agent that was renamed and then stopped and started came back without its app-server, so its TUI could not connect and the agent sat stopped: its stored launch command spawned the app-server window into the session's old name. The launch command now finds its session when it runs, and `mngr start` upgrades the stored command of an agent created before this change.
+
+- The transcript keeps streaming after the agent (or its minds chat) is renamed, so `mngr transcript` keeps growing. The background-tasks supervisor that runs the raw transcript streamer, the common transcript converter and the usage writer tracks the agent's tmux session by its session id, which a rename does not change. For an agent created by an older mngr, `mngr start` also rewrites the session name its stored command passes the supervisor, so its transcript runs again after its next restart.
+
+- The supervisor's pidfile is keyed on the agent id, so a new agent that takes a renamed agent's old name gets its own supervisor.
+
+## 2026-10-14
+
+`CodexAgent.request_compaction` supports the bounded message-lock wait and idle re-check that mngr's autocompact plugin uses. With `message_lock_timeout_seconds` it raises `MessageLockTimeoutError` instead of waiting on another send, and with `expected_idle_since` it skips with `AgentNoLongerIdleError` when the agent is no longer idle since that moment. A skipped compaction sends nothing and records nothing. The idle start a compaction records is read once the lock is held.
+
+The autocompact eligibility check reads a Codex agent's idle timestamp and context token count from one backward scan of each rollout or transcript file's tail, cached between checks, rather than parsing whole files. An unchanged file costs no reads of its complete lines, and a grown one is read only from where the last check stopped. The values found match a whole-file parse, including skipping the task completion of a compaction turn named by a newer compaction record, except that a final line without a trailing newline is read once its newline arrives, and a record containing U+0085, U+2028 or U+2029, which `str.splitlines()` splits apart, is read whole. Removed the whole-text parsers `extract_latest_assistant_timestamp_from_jsonl` and `extract_context_tokens_from_jsonl`; added `CodexCompactionTranscriptScanner` and the per-record `extract_context_tokens_from_record`.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-08
+
+Comment and docstring prose that referred to the desktop app as "Minds" now
+says "Imbue Studio". No behavior change: every identifier (`MINDS_*` env vars,
+`minds-*` service and scope names, paths) keeps its spelling, per
+`apps/minds/style_guide.md`.
+
+Review follow-up to the Imbue Studio prose sweep: the rollout transcript
+fixture's comment said "running with Minds' codex features" and now names the
+product Imbue Studio.
+
+## 2026-10-07
+
+- The codex app-server client can sign in to ChatGPT: `start_chatgpt_login()` (browser login, returns the authorize URL), `start_device_login()` (device code), and `wait_login_completed()`, which waits for the `account/login/completed` notification of that login.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 17 comment lines that had accumulated inside `libs/mngr_codex/imbue/mngr_codex/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-29
+
+A codex agent's app-server socket lives in a directory of its own, `/tmp/mngr-codex-<hash>/app-server.sock`, which the daemon's launch creates at mode 0700. codex 0.157 and later refuse to bind a socket whose parent other users can write to, so a socket directly in a `/tmp` that is world-writable without the sticky bit (as on Modal sandboxes) keeps the daemon from starting, and codex creates there fail after their 45 s readiness wait.
+
+## 2026-09-28
+
+New `fall_back_to_account_default_model` setting for the `codex` agent type (default `false`). With it on and `model` pinned, mngr reads the account's `model/list` before it starts a thread (the root conversation it establishes at create, and a fresh thread on the send path). If the account does not offer the pinned model, the thread starts on the account's default model instead, and mngr logs a warning naming both. Without it, a pinned slug the account's plan cannot use fails every turn with "model is not supported when using Codex with a ChatGPT account". A thread that already exists keeps its model, so a model switched mid-conversation survives a restart. If the model list cannot be read, the thread starts on the pinned model as before.
+
+`CodexAppServerClient.model_list` now raises `CodexAppServerError` for a malformed `model/list` entry (one missing a required field) instead of a raw pydantic `ValidationError`, so every caller treats it like any other unreadable model list.
+
+## 2026-09-24
+
+A codex agent's ATIF trajectory now reports which model ran each step and what it cost.
+
+The common-transcript converter reads two rollout record types it previously discarded, and neither becomes a turn of its own:
+
+- `turn_context` supplies the turn's model and reasoning effort, stamped as `model_name` and `reasoning_effort` on every agent step of that turn.
+
+- `event_msg` / `token_count` supplies one model response's token usage, stamped as ATIF `metrics` (`prompt_tokens`, `completion_tokens`, `cached_tokens`, plus cache-write and reasoning-output counts under `metrics.extra`) on the last agent step that response produced. codex counts cached and cache-written input inside `input_tokens` and reasoning output inside `output_tokens`, which is already ATIF's convention, so the buckets are carried across rather than summed -- summing the per-step metrics over a trajectory reproduces codex's own running session total, and `mngr transcript --format atif` fills in `final_metrics` for codex the way it already did for claude. The sum falls short when a response leaves no agent step to carry its usage (one whose only message is empty), and differs from codex's final figure when codex itself resets or lowers its running total mid-session. A `token_count` that repeats the previous one's running total, which codex sometimes writes partway through a later response, measures nothing.
+
+Every other `event_msg` but a shell command's `item_completed` (below) stays ignored: the rest are display duplicates of response items.
+
+An agent step that no `token_count` ever closes -- an aborted or interrupted response -- carries no `metrics` at all rather than a fabricated row of zeros a reader would price as a free inference. Because codex writes the usage line only after the response items it measures and the outputs of the tool calls they made, a conversion pass over a still-growing rollout holds the trailing unmeasured step back until the usage lands. The converter daemon releases it on the next cycle once the rollout has stopped growing, so a response whose usage never arrives is never stranded -- except while a tool call of that response still awaits its output, however long the tool runs, since its usage is still coming.
+
+On a rollout codex writes in its paginated history mode (codex 0.154 does by default), each shell command a tool call ran also reaches the trajectory. codex's `CommandExecution` item becomes an extra observation result on the call that started the command -- a code-mode `exec` program can start several -- with an empty `content` and the command under `extra.command_execution`: the command line and argv, working directory, status, exit code, duration, start and end times, and its output, clipped to 16,000 characters with the full length recorded when it was longer. That is what actually ran, including a command the program built at run time and one that exited nonzero inside a program that did not fail. codex does not say which call started a command, so ownership is read from time: the program that was running when the command started, told apart by its own text when two were running and otherwise by the turn codex recorded the command in, which also picks among earlier calls for a command that started while no program was running; `attribution` says which rule decided. Rollouts in the legacy history mode carry no such items and convert as before.
+
+## 2026-09-23
+
+Implement `HasCompactionMixin` for the Codex CLI agent (`CodexAgent`), enabling context compaction via the Codex app-server's `thread/compact/start` JSON-RPC method, idle duration tracking, cache TTL reporting (30 minutes), and context token inspection from transcript events.
+
+## 2026-09-21
+
+When mngr cannot press through codex's "Hooks need review" screen at create, it no longer waits the full attach timeout for a TUI that is still on that screen, and no longer logs a second warning saying the screen was cleared. The create goes on as soon as the keypress fails, with the one warning that says the hooks may stay untrusted.
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-09-17
+
+Persisting a trusted source repo into the user's global Codex `config.toml` writes that file in place (`is_atomic=False`) rather than through the atomic rename that `write_text_file` now defaults to, so a `config.toml` that is a symlink into the user's dotfiles stays a symlink and keeps its mode and owner.
+
+## 2026-09-16
+
+Carries `mngr/chat-agent-refactor-8` into this branch: a codex agent created with an initial message no longer has that first turn cut off, since mngr waits for the visible TUI to finish attaching after the "Hooks need review" screen before it sends the message. No further mngr_codex changes in this PR.
+
+## 2026-09-15
+
+A codex agent created with an initial message no longer has that first turn cut off. Once mngr presses through codex's "Hooks need review" screen, it now waits for the visible TUI to finish attaching before it sends the message. Before, the freed TUI's own resume could shut the just-started thread down and rebuild it, which aborted a turn that had begun a few milliseconds earlier and left the message unanswered ("Conversation interrupted" in the pane). The wait is bounded and a TUI that never shows its composer is logged, not fatal.
+
+Codex chats remain reachable for sending messages after their history grows beyond 1 MiB. The local WebSocket client now accepts the complete history returned by the Codex daemon instead of disconnecting during resume or status reads.
+
+## 2026-09-12
+
+`RUST_LOG` for the codex daemon is unchanged, and now records why. Adding `codex_app_server=info` looks like the obvious way to get the request and connection behind each daemon log line, and it does -- but codex builds the app-server's stderr layer with `FmtSpan::FULL`, so enabling one of its spans also synthesizes an `enter`/`exit` record every time the runtime polls the underlying future. Measured on a live workspace: 10,660 of each from 82 actual requests, 99% of the file's bytes, and the log grew about a megabyte a minute on an idle agent with no rotation to stop it. `RUST_LOG` cannot separate the two, because EnvFilter decides only whether a span is enabled and disabling it is what drops the attribution. The same request and connection attribution is already recorded, without the lifecycle records, in the app-server's own SQLite log database, which the bug-report collector now reads instead.
+
+## 2026-09-01
+
+Trimmed historical framing from a test comment (comments state the current constraint, not the migration history).
+
+The codex common-transcript emitter now writes ATIF-shaped stream records
+(`header` / `step` / `observation`) instead of the legacy
+`user_message` / `assistant_message` / `tool_result` envelopes, per
+`specs/atif-transcript-alignment/spec.md`. Every stream opens with a
+`header` line pinning `ATIF-v1.7`, and the envelope's `source` field is
+renamed `emitter` (ATIF claims `source` for the step originator).
+
+Full fidelity: tool `arguments` is the complete parsed JSON object (a
+`custom_tool_call` script or any other non-object invocation rides whole under
+`_raw`) and tool output is recorded untruncated. The 200-character input
+previews and 2000-character output cap are gone; truncation is now purely a
+display-time concern in `mngr transcript`.
+
+Tool calls carry codex's native `call_id` as the ATIF `tool_call_id`, so
+results pair back to their call without a synthetic id. An output whose call
+was never seen is no longer dropped -- it is emitted with the tool name
+`unknown` so the output is never lost.
+
+Newly captured: rollout `reasoning` items become agent steps carrying
+`reasoning_content` (dropped only when the item exposes nothing but its
+encrypted payload), and codex's instruction injections -- the AGENTS.md context
+blob and the `<user_instructions>` / `<environment_context>` initial-context
+items -- become system steps carrying their full text instead of being silently
+dropped.
+
+An assistant message carrying no text no longer produces an empty agent step,
+matching how an empty user message is dropped. codex records a tool invocation
+as its own rollout item, so such a message has nothing left to show.
+
+The ATIF stream header's `event_id` is now unique per agent stream: `header-<sha256(agent_id:emitter)[:32]>` instead of the fixed `"header"`. A fixed id repeats identically for every agent on every host, so analytics' fleet-wide event-id dedupe collapsed all header rows to one per account, destroying the per-agent (emitter, `schema_version`) mix.
+
+The agent id is the agent state directory's basename (a UUID4-based value), so distinct agents never collide and a restart reuses the same id.
+
+The codex common-transcript emitter now writes ATIF-shaped stream records (`header` / `step` / `observation`) per `specs/atif-transcript-alignment/spec.md`: full-fidelity tool arguments and outputs, native `call_id` pairing, `reasoning` items and instruction injections captured instead of dropped, and a per-agent-unique header `event_id`. The per-layer `mngr-atif-*.md` entries in this PR carry the details.
+
+The app-server websocket transport now raises its typed `TransportClosedError` from `send` as well as `receive`, so a request written to a connection that has closed surfaces as the same retryable transport error regardless of which side of the round-trip hits the closure first (previously a write-side closure escaped as a raw `websockets.ConnectionClosed`).
+
+## 2026-08-30
+
+Marked `test_assemble_command_is_posix_compatible` as `@pytest.mark.flaky` with a 60s timeout: it shells out to shellcheck and was observed exceeding the default 10s pytest-timeout under CI sandbox load (12.348s).
+
+## 2026-08-27
+
+# Globally unique codex common-transcript event ids
+
+- Common-transcript event ids are now derived by hashing the rollout line's timestamp and the first 1024 characters of its content (plus the item kind), instead of the line index alone. Line-index ids (`line-3-user`) repeated identically for every codex agent on every host, which collides under fleet-wide dedup by event id (e.g. in analytics). Re-processing the same input stays idempotent, and outputs written by the old converter are still recognized so upgrading never re-appends already-converted history.
+
+## 2026-08-26
+
+Renamed `auto_dismiss_dialogs` to `auto_dismiss_dialogs_at_startup`. Same behaviour; the name now says when it applies.
+
+## 2026-08-25
+
+Release-test helpers' `workspace`/`prepare_adoption_workspace` identifiers renamed to `project_dir`/`prepare_adoption_project_dir` (mngr-level terminology sweep; no behavior change).
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-24
+
+mngr no longer writes hook commands of its own choosing into a codex agent's `hooks.json`.
+
+`build_codex_hooks_config` now emits only mngr's own bookkeeping hook -- `UserPromptSubmit` -> `record_session_pointers.sh`, which records the rollout session id and transcript path. The fixed list of guard commands it used to carry is gone.
+
+Codex loads hooks from every active config layer and does not let a higher-precedence layer replace a lower one, so a repo that wants guards on its own agents puts them in its `.codex/hooks.json`; they run alongside mngr's. Nothing is needed from mngr for that: the plugin already marks the work dir trusted and passes `--dangerously-bypass-hook-trust`, which is what a project layer's hooks require.
+
+## 2026-08-17
+
+Fixed intermittent "Sending…/Queued…" hangs (and eventual send failures) when
+messaging a codex agent after a turn that produced substantial output. The
+pre-send readiness poll looked for codex's `/model to change` header, which sits
+at the top of the TUI and scrolls out of the visible pane once a turn renders
+enough output -- so the poll could not confirm the composer was ready and
+withheld the paste until it timed out. Readiness now keys off the composer
+prompt glyph (`›`), which is pinned at the bottom input line and never scrolls
+off -- the same approach `mngr_claude` already uses with `❯`.
+
+The codex agent type gains two settings, `output_style` and `append_system_prompt`, that a
+create template can set so a role describes codex's behaviour without spelling out argv.
+
+Codex has no output-style concept, so both land in the top-level `developer_instructions` key of
+the per-agent `config.toml` -- the key that appends to codex's built-in instructions (unlike
+`model_instructions_file`, which replaces them). The `append_system_prompt` blocks go in first,
+in stack order, then the style file's body verbatim, frontmatter block included, so a style
+reads the same whichever harness runs it. The style comes last so it is the nearest instruction
+to the model, matching how a harness with a real output-style setting applies the style over the
+prompt. Style names are resolved from `.agents/output-styles/` in the work dir.
+
+Known limit: a style that suppresses a harness's built-in prompt cannot behave identically here,
+because `developer_instructions` can only append.
+
+A message submitted to a codex agent while a turn is running is now confirmed as accepted the
+instant it is queued, rather than hanging until the running turn ends. codex queues such a
+message without firing `UserPromptSubmit`, so the `active` marker -- the previous sole evidence
+of submission -- does not advance until the turn finishes. Send confirmation now also watches the
+queued-input sidecar the patched codex binary appends to on every enqueue, so a queued message
+confirms immediately (the two probes are OR-ed; a started message still trips the marker). Agents
+on an older codex binary without the sidecar are unaffected: that probe simply never fires.
+
+Codex agents now enforce the same PreToolUse policy guards claude does. `build_codex_hooks_config`
+adds a `PreToolUse` entry that runs the workspace's existing guard scripts from the work dir
+(`$MNGR_AGENT_WORK_DIR/system/scripts/`): block a command that pipes into `tail`/`head`, block
+`git rebase` / `git commit --amend|--fixup` / `git pull --rebase`, and rewrite every bash command
+with the OOM self-tag + the agent's git identity. Codex speaks claude's hook protocol (same
+`PreToolUse` payload and the exit-2+stderr block convention, verified live under code mode), so it
+reuses the exact same scripts with no new logic. See `system/scripts/POLICY_HOOKS.md`.
+
+Fixed the command-rewrite guard failing under recent codex (verified against codex-cli 0.146.0),
+which surfaced as repeated `PreToolUse hook returned updatedInput without permissionDecision:allow`
+errors and meant the OOM self-tag + git-identity rewrite never applied on codex. Newer codex
+requires a hook that returns `updatedInput` to also carry an explicit `permissionDecision: "allow"`;
+`build_codex_hooks_config` now invokes the rewrite script with a `--codex` flag that adds that
+decision. The two block guards are unaffected (they return no `updatedInput`), and the rewriter's
+`allow` does not weaken them -- codex honors an earlier block over a later allow (verified live).
+
+Codex agents now also run the tk workflow-discipline guards, matching claude: `build_codex_hooks_config`
+adds the require-steps soft reminder and the non-standalone `tk start`/`close` block to `PreToolUse`,
+the open-steps carryover reminder to `UserPromptSubmit` (with a `--codex` flag so it is emitted as
+`additionalContext` JSON -- codex rejects UserPromptSubmit stdout that starts with `[`), and the
+open-steps stop nudge to `Stop`. All are the same dwt scripts claude runs, from the work dir. Verified
+live against codex-cli 0.146.0. See `system/scripts/POLICY_HOOKS.md`.
+
+Deleted the retired marker-lifecycle files that the app-server rewrite had already
+orphaned: `set_active_marker.sh`, `clear_active_marker.sh`, `codex_marker_state.sh`,
+`subagent_started.sh`, `subagent_stopped.sh` and their four test files. They tested
+helpers (`run_codex_hook`, `install_common_transcript_flush_stub`,
+`SUBMIT_WAIT_CHANNEL_PREFIX`) that no longer exist, so they failed at collection.
+
+Rebuilt the `codex` agent to run entirely over the stock `codex app-server` (JSON-RPC) instead of screen-scraping the TUI, while preserving every mngr harness contract at 1:1 parity with the TUI form. The app-server is invisible to clients: `mngr create` / `message` / `stop` / `start` / `connect` / `destroy` and `mngr ls` lifecycle behave exactly as for claude and pi.
+
+- `CodexAgent` now subclasses `BaseAgent` (like pi/opencode) with its own `send_message` (`turn/start` when idle, `turn/steer` when a turn is running) and a `thread/status`-derived RUNNING/WAITING lifecycle; the old `tmux send-keys` drive and the on-disk marker hooks are gone.
+
+- `mngr create` establishes ONE durable root conversation up front — `thread/start` + `thread/inject_items` materializes the rollout with no model turn — and persists it, so the terminal (`codex resume <id> --remote`), `mngr message`, and Minds all land in the same conversation; `mngr stop`/`start` resumes it.
+
+- The daemon now launches with `--dangerously-bypass-hook-trust --enable hooks`, and create auto-clears codex's one-time "Hooks need review" screen, so the workspace safety hooks (PreToolUse guards) and the transcript recorder actually run — on typed AND web/CLI turns.
+
+- Fixes found by driving the real release lifecycle: the unix-socket path moved to a short `/tmp` location (a deep state dir exceeded `SUN_LEN`, so the daemon could not bind); mngr records the rollout path itself (`codex_transcript_path`) since the hook that used to does not fire before the first turn; the transcript supervisor no longer races the executable-bit on its scripts; and an `--adopt`/`--from` agent gets its send/transcript pointers written so it recalls its resumed history.
+
+The codex app-server daemon sidecar window now inherits the agent environment (the same env the
+visible `--remote` TUI already sources). Turns run in the daemon, so it is where codex fires its
+hooks; the detached `tmux new-window` previously started with a bare environment, so every hook
+resolved `$MNGR_AGENT_STATE_DIR/...` / `$MNGR_AGENT_WORK_DIR/...` to a nonexistent path and died
+with exit 127 -- silently disabling the transcript-marker writer and the PreToolUse safety guards.
+
+The visible `codex --remote` terminal now launches with `--dangerously-bypass-hook-trust`. codex
+parks newly-discovered command hooks as untrusted ("in review") until a human approves them in the
+TUI, and an untrusted hook never runs -- not for a typed turn and not for a programmatic
+(web/CLI) `turn/start`. The flag clears that review gate so the workspace's safety hooks (the
+pipe/rebase blockers, the OOM + git-identity command rewrite, and the tk workflow guards) run on
+every turn regardless of who sent it. It is consent-gated: it only takes effect on a workspace the
+user has already trusted.
+
+Fixed a latency bug where a codex Stop/shoulder-tap could block for seconds during a heavily-streaming turn. `CodexAppServerClient.poll_notifications` held the frame lock for the whole drain, waiting up to `timeout` for *each* subsequent frame -- so while a turn streamed continuously the background reader pinned the lock and a concurrent fire-and-forget `interrupt_nowait` waited behind it (observed ~3.8s under load). The drain now waits `timeout` only for the first frame and drains the rest of the already-buffered burst non-blocking, then releases -- so an interrupt cuts in promptly (observed ~0.1s). Behavior is otherwise unchanged.
+
+The codex app-server client (`CodexAppServerClient`) is now safe for one persistent connection shared between a background notification reader and live request threads: a reentrant frame-level lock serializes `poll_notifications`, `_request`, and `_notify` so the reader and a concurrent send/interrupt never steal each other's frames. This is what lets the system interface give each codex agent one long-lived connection driving its message ledger.
+
+Removed the retired stop-retract idle machinery now that the system interface interrupts codex through its live ledger rather than a control file: `mark_codex_agent_idle`, the `codex_marker_state.sh` marker helper (and its provisioning), and the legacy `permissions_waiting` marker name.
+
+The codex release end-to-end test now observes RUNNING from the daemon's live `thread/status` (a turn in flight is `active`), matching how the live lifecycle reads it, since codex no longer writes an `active` marker.
+
+- Reformatted `codex_config_test.py` with ruff (no behavior change).
+
+- New `mark_codex_agent_idle(agent_state_dir, host_dir)` in `codex_config.py`: marks a codex agent idle out-of-band by running the provisioned `codex_marker_state.sh` helpers (lock, clear the `codex_root_active` root-turn flag, recompute the `active` marker -- in-flight subagents keep it -- and clear a stranded `permissions_waiting`), then appends one activity event so `mngr observe` promptly re-probes. The programmatic sibling of the four lifecycle hooks' own marker maintenance and of mngr_claude's `mark_claude_agent_idle`. Caller: the system-interface stop button after a native retract interrupt, where codex fires no Stop hook and would otherwise report RUNNING forever.
+
+- The codex common-transcript converter now surfaces tool activity from the patched codex 0.146.0 build: the unified exec tool's `custom_tool_call` / `custom_tool_call_output` rollout items are converted into paired assistant tool_call / tool_result records (previously every tool call and result was silently dropped, so codex transcripts showed zero tool activity). The legacy `function_call` / `function_call_output` shapes remain supported. Verified against a real 0.146.0 rollout committed as a test fixture (`resources/test_fixtures/codex_0146_rollout_exec_turn.jsonl`, excluded from the wheel).
+
+- Instruction injections that ride in as user-role rollout messages -- the AGENTS.md context blob (`# AGENTS.md instructions for <dir>` with an `<INSTRUCTIONS>` envelope) and codex's `<user_instructions>` / `<environment_context>` items -- are now filtered out of the common transcript, so only genuine user turns emit as `user_message` records.
+
+- The codex raw-transcript streamer (`stream_transcript.sh`) no longer duplicates rollout lines when its 1s poll daemon interleaves with the turn-end `--single-pass` flush: every emit pass now re-reads the persisted per-rollout offset and advances it under the same per-agent lock the common-transcript converter uses (`mngr_common_transcript_lib.sh`), instead of trusting a per-process in-memory offset cache that went stale whenever the other instance advanced the offset first. Whichever pass runs second now sees the other's offset and emits nothing, so every rollout line reaches the raw transcript exactly once, in order. Covered by a new interleaving regression test driven by a real codex 0.146.0 rollout fixture.
+
+- New U5 enforcement test (`resources/common_transcript_diff_test.py`): a native-vs-common transcript diff that independently enumerates every user-visible turn in the real codex 0.146.0 rollout fixture -- with every legitimately-excluded shape (session/event bookkeeping line types, reasoning items, developer-role and user-role instruction injections) named in explicit allowlists -- and asserts the converted common transcript contains exactly those turns, exactly once, in order, with each tool call structurally paired to its result. Unlisted rollout shapes fail the enumeration, so a future binary's new item kind (the exact blind spot that let the 0.146 tool-drop ship green on schema validity) fails loudly. Also asserts reconverting the same rollout appends nothing.
+
+Removed the codex private-prompt file mechanism: codex no longer copies a repo-committed `.codex/AGENTS.md` into `CODEX_HOME/AGENTS.md` at provision time. Codex-specific instructions now reach the agent through `developer_instructions` (the harness-neutral `append_system_prompt` channel, set on the `[agent_types.codex]` config block) -- the same channel every other harness already uses -- so there is one uniform way to deliver per-harness instructions and no bespoke per-agent file copy.
+
+Dropped the now-unused `get_codex_global_instructions_path` and `get_repo_codex_instructions_path` helpers and the `_GLOBAL_INSTRUCTIONS_FILENAME` constant from `codex_config`.
+
+Codex now launches on the stock `codex app-server`: each agent runs the daemon in a hidden sidecar tmux window and the visible TUI attaches to it via `codex --remote`, replacing the single-process `codex` launch. `tmux kill-session` reaps the daemon with the session, so there are no orphaned daemons or leaked sockets, and a stale socket is cleaned on every start.
+
+Added `CodexAppServerClient`, a per-agent WebSocket JSON-RPC client for the daemon (behind an injected transport for deterministic testing): `initialize` handshake, `thread/start`/`resume`/`read`, `submit` (idle -> `turn/start`, busy -> `turn/steer`, with a single ABA re-decide), `interrupt`, `model/list`, and `thread/settings/update`.
+
+Readiness now resolves by connecting to the daemon and completing the `initialize` handshake instead of polling the TUI prompt glyph.
+
+Sending a message to a codex agent now drives the daemon over JSON-RPC instead of typing into the TUI: over a short-lived per-call connection mngr discovers the agent's thread, reads its live status, and delivers the message as a new turn when idle or parks it into the running turn when busy. This is invisible to callers -- the `mngr message` command and its exit codes are unchanged (a message that is not accepted still fails; a message that lands but leaves codex blocked on an approval is still reported as delivered-but-blocked). The old keystroke-injection send path, its submission-evidence probes, and the readiness prompt-glyph are retired for codex.
+
+A codex agent's running-vs-waiting state now comes solely from the daemon's live `thread/status`: a turn in flight reads RUNNING (held until the turn fully completes, not merely until the model stops producing tokens), a turn parked on an approval or input it cannot self-clear reads WAITING, and an idle thread reads WAITING. Process presence (via tmux/ps) still answers alive-vs-dead (STOPPED/DONE), and because the visible `codex --remote` window's life is tied to the daemon, a dead daemon reads STOPPED. The old on-disk lifecycle markers -- the `active` and `permissions_waiting` files, the four marker hooks (`set_active_marker.sh`, `clear_active_marker.sh`, `subagent_started.sh`, `subagent_stopped.sh`) and their shared lock/recompute helper -- are deleted, along with the every-launch marker-reset prelude; there is no marker fallback. A single new `record_session_pointers.sh` UserPromptSubmit hook records the rollout session id and transcript path (the pointers the resume/adopt and raw-transcript machinery need), preserving those flows unchanged; it does no lifecycle work.
+
+`CodexAppServerClient` now captures the `ThreadInfo` seed from the most recent `thread/start` / `thread/resume` on `last_thread_info`, so a caller that binds through the opener can seed the model bar to the settings the daemon resumed with (model / effort / service tier) without a second RPC.
+
+## 2026-08-13
+
+`mngr list` now reports a codex agent blocked on a tool-approval dialog as `WAITING` rather than `RUNNING`.
+
+The plugin already treated such an agent as waiting, but only for the reader `mngr wait`/`message`/`find` use; the agent listing reads the lifecycle probe directly and never saw it, so `mngr list` showed `RUNNING` for an agent that was making no progress.
+
+The plugin now answers `is_blocked_on_dialog()` and the probe folds that into the state it builds, so both readers agree.
+
+## 2026-08-04
+
+Tightened the recorded `trailing comments` ratchet count from 14 to 12. The two that went away were never trailing comments: they are `openai/codex #15269` issue references inside prose, which the rule now exempts.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Reduced the idle CPU cost of the per-agent transcript watchers, which polled continuously whether or not the agent was producing output.
+
+`common_transcript.sh` now skips a conversion pass entirely when the raw rollout stream has not changed since the last completed pass. Each pass spawns a Python interpreter that re-reads and re-parses both the whole input file and the whole output file, so on an idle agent that work was repeated every 5 seconds for no result. The change-detection state is held in memory only, so a restart still performs one full reconciling pass exactly as before, and a pass skipped because a concurrent `--single-pass` flush holds the convert lock is retried on the next cycle rather than being lost.
+
+`stream_transcript.sh` no longer forks subprocesses to discover the active rollout on every poll. The hook-recorded rollout path is now read with the `read` builtin rather than `head`, and the offset key is derived with parameter expansion rather than `basename` piped through `tr`. Both are exact equivalents of what they replace; at a one-second poll interval they were most of an idle cycle's work.
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
 ## 2026-07-14
 
 # Codex: marker-based message delivery confirmation

@@ -1,1 +1,0 @@
-The latchkey-permissions doc now describes denial the way it describes a grant: both verdicts go to the request's chat by the same route, since both are delivered by the one shared resolve epilogue. Before, only the grant step had been updated when the nudge moved to the workspace's chat app, so the deny step still said the message went to the agent.

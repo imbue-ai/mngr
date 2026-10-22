@@ -1,1 +1,0 @@
-No behaviour change. Pinned, with a test, that a log attachment group capping its file count sweeps the newest matching file by modification time. Bug reports rely on this for rotated logs: the groups that carry them keep exactly one file, and keeping any other rotation would still produce a well-formed report -- one holding the bytes that do not cover the incident.

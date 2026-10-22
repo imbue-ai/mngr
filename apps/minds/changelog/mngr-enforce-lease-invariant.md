@@ -1,3 +1,0 @@
-- "Remove from list" on a cloud workspace that still holds its lease is now refused by the connector (tombstone-first); the desktop surfaces it as a 409 with a hint to destroy the workspace instead of a generic sync error.
-
-- Docs: the backup-retention doc notes that a destroyed cloud workspace's record stays until its lease is released; the stop/start deploy doc's Operations section lists the new `minds-admin workspaces release` operator escape hatch; the workspace-sync spec records the new lease invariant (lease-time record stub, release-time record retirement, tombstone-first deletes, the connector sweep).

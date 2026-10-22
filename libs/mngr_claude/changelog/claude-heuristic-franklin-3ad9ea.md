@@ -1,1 +1,0 @@
-The Claude submission-confirmation probes no longer print "No such file or directory" when the agent's session transcript does not exist yet (an agent that has not had a user turn). The missing file was always treated as "keep polling", but the stray error became the only stderr in an unconfirmed send's diagnostics and pointed the investigation at the wrong cause.

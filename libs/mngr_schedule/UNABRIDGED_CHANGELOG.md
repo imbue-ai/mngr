@@ -4,6 +4,88 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+Scheduled triggers no longer fail verification because of a provider the container cannot reach.
+
+A Modal container has no docker daemon, so a docker provider there is unreachable for the container's whole life. `mngr list` inside it completes the listing but exits with the provider-inaccessible code, which the verification poll could not tell apart from a real failure, so it timed out while the agent it was watching ran fine. The container's mngr no longer installs the docker plugin at all, so there is no docker backend to register, probe, or fail on.
+
+The `test_schedule_add` release tests also asked their triggers to create an agent of type `echo`, which is not a registered type, so every triggered `mngr create` failed to parse its arguments. They now ask for a `command` agent running `echo`.
+
+`mngr schedule add --include-project-settings` sent the deployer's project-local settings to the wrong path whenever `MNGR_ROOT_NAME` was not the default. A project's config dir is `<project root>/.<root name>`, but the staging hook looked under `.mngr` regardless, so with a non-default root name it staged nothing and those overrides never reached the container. It now asks mngr core for the config file's name instead of rebuilding the path, and the container reads them at the path its own propagated `MNGR_ROOT_NAME` implies.
+
+## 2026-10-08
+
+The recorded `Args:`-in-docstrings ratchet count drops from 1 to 0: its one match was the test class `TestAutoFixCreateArgs`, which the tightened rule no longer counts.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 6 comment lines that had accumulated inside `libs/mngr_schedule/imbue/mngr_schedule/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-23
+
+Tightened the direct-subprocess ratchet count from 7 to 6 now that the shared rule no longer counts `subprocess.Popen[...]` type annotations as spawns. (Affects test infrastructure only.)
+
+## 2026-09-22
+
+mngr_schedule: stop the `schedule run --provider local` CLI test from creating a real agent.
+
+`test_schedule_run_local_deployed_trigger` deployed a trigger and then ran it for real. A deployed trigger's `run.sh` ends in `exec uv run mngr create --message hello`, so on CI the test started an actual agent creation, which has no bound on how long it takes. Sometimes it outlived the test's 30s timeout, and the `uv` and `mngr` processes it had started survived to the end of the pytest session, where the leak scan found them and failed the run against an unrelated test in another package. The test could not catch a regression either way: its only assertion, `assert isinstance(result.exit_code, int)`, holds for every possible outcome.
+
+The test now puts a stub `uv` first on PATH before deploying, so the generated script execs the stub and exits at once. It asserts that the stub's distinctive exit code reaches the caller, which happens only if the creation record was found, the generated `run.sh` ran, and the CLI passed the script's status through. The `@pytest.mark.timeout(30)` that had been papering over the slow run is gone.
+
+Test-only change; `mngr schedule run` behaves exactly as before.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-09-16
+
+- `mngr schedule add --provider modal` creates the per-user Modal environment when it does not exist yet, the way `mngr create @.modal` does, instead of failing with "Provider 'modal' has no state yet" on a fresh install (the Modal provider stopped auto-creating its environment on read-only commands, which also caught the schedule deploy).
+
+## 2026-09-10
+
+mngr_schedule: follow the Modal CLI JSON parser to its new home.
+
+`parse_modal_app_listings` moved from `imbue.mngr.utils.modal_cli` to `imbue.mngr_modal.modal_cli`, and `ModalCliOutputError` from `imbue.mngr.errors` to `imbue.mngr_modal.errors`. `remove_modal_schedule` and the `cleanup_modal_app` test helper import from the new locations. No behaviour change.
+
+## 2026-09-09
+
+mngr_schedule: fix two Modal app lookups that could never find an app.
+
+`remove_modal_schedule` (in `implementations/modal/deploy.py`, production code) and the `cleanup_modal_app` test helper both matched `modal app list --json` rows on `"Description"` and read the id from `"App ID"`. The Modal CLI emits `description` and `app_id`, so the match never succeeded: `mngr schedule remove` logged "Modal app not found in environment" and left the app running, and the test helper leaked its app.
+
+Both now parse through mngr's `utils/modal_cli.py`, which raises `ModalCliOutputError` if the payload stops carrying the keys we read.
+
+## 2026-08-17
+
+`get_mngr_dockerfile_path` now resolves the mngr Dockerfile from the `imbue.mngr` package location (via `importlib.resources`) for every install mode, instead of navigating from the enclosing git root in EDITABLE/SKIP mode.
+
+The Dockerfile is a packaged resource at `imbue/mngr/resources/Dockerfile`, so the package-derived path is identical in a standalone checkout and also correct when the monorepo is vendored inside another git repository (where the enclosing git root is not the mngr checkout).
+
+Fix scheduled deployments silently dropping the deployer's `config.toml` and top-level profile files when the mngr host directory lives outside `$HOME`. `get_files_for_deploy` now derives staged destinations from the mngr root-name convention (`~/.{root_name}/...`) rather than the local file's position under `$HOME`, so these files stage correctly regardless of where the host dir physically lives (previously the collection raised and all deploy files were skipped).
+
+(GitHub issue #392)
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

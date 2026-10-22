@@ -1,7 +1,0 @@
-A Docker image build whose working directory has been deleted now fails with an error that says so, instead of a bare `FileNotFoundError` raised from inside `posixpath`.
-
-A relative build context (every `[create_templates.*]` block passes `"."`) resolves against the building process's working directory. When that directory has been deleted, `Path(".").exists()` still returns `True` -- the process holds an open file descriptor on the unlinked directory -- so the context survives the is-it-a-path filter and then dies inside `Path.resolve()`'s `os.getcwd()`, naming nothing the operator can act on. `build_image_on_outer_from_build_args` now checks for this up front and raises `MngrError` explaining what happened. The build is not salvageable at that point, since the context directory is genuinely gone; the change is to the diagnosis, not the outcome.
-
-Reverted the absolute-path branch added in #217, which was inert. It was guarded on `os.path.isabs(raw_context)`, but no configuration in either repo has ever used an absolute build context, and its stated premise -- that `Path.resolve()` calls `os.getcwd()` even for an already-absolute path -- is false, so it changed nothing for any input. Its `os.path.normpath` was also strictly less correct than the `resolve()` it replaced: `normpath` collapses `..` lexically, which walks through a symlink to the wrong directory.
-
-The check is scoped to relative contexts on purpose. An absolute context needs no working directory and builds fine without one.

@@ -1,3 +1,0 @@
-Hosts are now opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`; discovery reads the host id from the instance's `mngr-host-id` tag to pick that key, skipping (with a warning) instances that carry none. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them.
-
-The Vultr release tests now run `mngr` from the `temp_git_repo` fixture's checkout instead of the process cwd, which the test isolation moves out of any git repository (every `mngr create` failed with "Not inside a git repository").

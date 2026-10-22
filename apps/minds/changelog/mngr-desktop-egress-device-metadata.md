@@ -1,1 +1,0 @@
-The desktop latchkey gateway is now started with this install's device id as detent custom metadata (`customMetadata.deviceId`), so a permission rule can be limited to one of the user's computers. No rule uses it yet; this prepares for routing a remote workspace's requests through the desktop.
