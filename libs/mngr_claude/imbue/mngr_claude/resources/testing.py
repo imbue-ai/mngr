@@ -137,6 +137,53 @@ def make_tool_result_record(
     )
 
 
+def make_absorbed_mid_turn_record(command_uuid: Any, prompt: str, *, timestamp: Any) -> dict[str, Any]:
+    """Build the raw queue operation claude writes when it moves a queued message into the running turn."""
+    return {
+        "type": "queue-operation",
+        "operation": "remove",
+        "timestamp": timestamp,
+        "content": prompt,
+        "reason": "absorbed_mid_turn",
+        "commandUuid": command_uuid,
+    }
+
+
+def make_queued_command_record(
+    uuid: str,
+    command_uuid: Any,
+    prompt: str | list[dict[str, Any]],
+    *,
+    command_mode: str = "prompt",
+    origin_kind: str = "human",
+    is_meta: bool | None = None,
+    timestamp: str = DEFAULT_USER_TIMESTAMP,
+) -> dict[str, Any]:
+    """Build the raw attachment line claude writes for a message added to a running turn.
+
+    Claude stamps it with the time the message was queued, so the default sorts before the
+    assistant and tool-result lines it follows in the file, as a real one does. A message from
+    another session has origin kind "peer" and ``isMeta`` set.
+    """
+    attachment: dict[str, Any] = {
+        "type": "queued_command",
+        "prompt": prompt,
+        "source_uuid": command_uuid,
+        "commandMode": command_mode,
+        "origin": {"kind": origin_kind},
+        "timestamp": timestamp,
+    }
+    if is_meta is not None:
+        attachment["isMeta"] = is_meta
+    return {
+        "type": "attachment",
+        "uuid": uuid,
+        "timestamp": timestamp,
+        "isSidechain": False,
+        "attachment": attachment,
+    }
+
+
 def write_raw_transcript(input_file: Path, records: Sequence[Mapping[str, Any] | str]) -> None:
     """Write raw transcript lines: built records, or verbatim strings for bad input."""
     lines = [record if isinstance(record, str) else json.dumps(record) for record in records]
