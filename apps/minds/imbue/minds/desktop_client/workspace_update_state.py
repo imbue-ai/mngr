@@ -286,6 +286,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         in_place_compatible_ref=run.record.in_place_compatible_ref,
         is_scheduled=schedule is not None,
         override_ref=schedule.override_ref if schedule is not None else "",
+        is_schedule_auto_armed=schedule.is_auto_armed if schedule is not None else False,
         schedule_window=(
             format_update_window((schedule.window_start_hour, schedule.window_end_hour))
             if schedule is not None

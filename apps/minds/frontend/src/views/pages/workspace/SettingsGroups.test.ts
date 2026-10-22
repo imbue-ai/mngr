@@ -1162,24 +1162,34 @@ describe("the Updates settings group's app-wide settings changed elsewhere", () 
 });
 
 describe("the Updates settings group under auto-update", () => {
-  it("offers no schedule of its own, and a skip instead of a cancel for an armed machine", async () => {
-    const { draw, requests } = harness();
+  function underAutoUpdate(updates: Record<string, UiWorkspaceUpdate>): void {
     getAppContext().stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
-      updates: {
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          is_scheduled: true,
-        },
-        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
-      },
+      updates,
       update_window: "2:00 AM-5:00 AM",
       is_auto_update_enabled: true,
     });
+  }
+
+  it("offers no plain schedule for a machine it will arm, and a skip instead of a cancel for one it armed", async () => {
+    const { draw, requests } = harness();
+    underAutoUpdate({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        is_workspace_readable: true,
+        is_scheduled: true,
+        is_schedule_auto_armed: true,
+      },
+      [UNBACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: false,
+        is_workspace_readable: true,
+      },
+    });
 
     expect(
-      pressableWithLabel(updatesGroupDeep(draw(UNBACKED)), "Schedule"),
+      byId(updatesGroup(draw(UNBACKED)), "ws-update-schedule-btn"),
     ).toBeUndefined();
     const armed = updatesGroup(draw(BACKED));
     expect(pressableWithLabel(armed, "Cancel schedule")).toBeUndefined();
@@ -1193,13 +1203,102 @@ describe("the Updates settings group under auto-update", () => {
 
     expect(requests).toEqual([`/ui/api/updates/${BACKED}/skip`]);
   });
+
+  it.each([
+    [
+      "only a patch behind",
+      {
+        ...OUT_OF_DATE,
+        availability: "PATCH_AVAILABLE",
+        current_version: "minds-v0.4.0",
+      },
+    ],
+    [
+      "of unknown version",
+      { ...OUT_OF_DATE, availability: "UNKNOWN", current_version: "" },
+    ],
+    ["whose release was skipped", { ...OUT_OF_DATE, is_update_skipped: true }],
+  ] as const)(
+    "offers to schedule a machine %s, which it will not arm itself",
+    async (_case, update) => {
+      const { draw, requests } = harness();
+      underAutoUpdate({
+        [BACKED]: {
+          ...(update as UiWorkspaceUpdate),
+          is_backup_configured: true,
+          is_workspace_readable: true,
+        },
+      });
+
+      press(updatesGroup(draw(BACKED)), "Schedule update");
+      await settleDispatch();
+
+      expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
+    },
+  );
+
+  it("offers to schedule a specific version on a machine it will arm", async () => {
+    const { draw, requests } = harness();
+    underAutoUpdate({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        is_workspace_readable: true,
+      },
+    });
+
+    press(updatesGroupDeep(draw(BACKED)), "Update to a specific version");
+    typeOverride(updatesGroupDeep(draw(BACKED)), "upstream/some-branch");
+    const schedule = byId(
+      updatesGroupDeep(draw(BACKED)),
+      "update-override-schedule-btn",
+    );
+    expect(schedule).toBeDefined();
+    (attrsOf(schedule as AnyVnode).onclick as () => void)();
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
+  });
+
+  it("lets the user cancel a schedule they armed, which says it is scheduled rather than that nothing is asked", async () => {
+    const { draw, requests } = harness();
+    underAutoUpdate({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        is_workspace_readable: true,
+        is_scheduled: true,
+        is_schedule_auto_armed: false,
+        override_ref: "upstream/some-branch",
+        schedule_window: "1:00 AM-4:00 AM",
+      },
+    });
+
+    const group = updatesGroup(draw(BACKED));
+    expect(allText(group)).toContain(
+      "Scheduled to update to upstream/some-branch in the next update window",
+    );
+    expect(allText(group)).not.toContain("No action is needed.");
+    expect(byId(group, "ws-update-skip-btn")).toBeUndefined();
+    press(group, "Cancel schedule");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule/cancel`]);
+  });
 });
 
 describe("the Updates settings group's skip question", () => {
   function armBacked(isScheduled: boolean): void {
     getAppContext().stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: isScheduled } },
+      updates: {
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          is_scheduled: isScheduled,
+          is_schedule_auto_armed: isScheduled,
+        },
+      },
       update_window: "2:00 AM-5:00 AM",
       is_auto_update_enabled: true,
     });

@@ -14,11 +14,13 @@ from inline_snapshot import snapshot
 from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
 from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
+from imbue.minds.desktop_client.testing import armed_update_schedule_file
 from imbue.minds.desktop_client.testing import load_update_workspace_program
 from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
+from imbue.minds.desktop_client.update_status import parse_update_schedule_record
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
 from imbue.minds.desktop_client.update_workspace_command import build_arm_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_now_arguments
@@ -54,7 +56,9 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1"), capsys)
+    answer = _run_mode(
+        program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys
+    )
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ARMED
@@ -72,6 +76,32 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
     assert live_line == (staged.root / "data" / ".state" / "cron.d" / "update-self-dispatch").read_text()
     assert "flock -n /run/update-self-dispatch.lock" in live_line
     assert f"cd {staged.root.resolve()} && python3 data/.state/update-apply/dispatcher.py tick" in live_line
+
+
+@pytest.mark.parametrize("is_auto_armed", (True, False))
+def test_the_schedule_file_records_whether_auto_update_armed_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], is_auto_armed: bool
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=is_auto_armed), capsys)
+
+    schedule = parse_update_command_result(answer).schedule
+    assert schedule is not None
+    assert schedule.is_auto_armed is is_auto_armed
+    assert staged.read_state("schedule.json") == answer["schedule"]
+
+
+def test_a_schedule_file_that_does_not_say_who_armed_it_reads_as_the_users() -> None:
+    """Every file written before auto-update existed was armed by a press."""
+    legacy = armed_update_schedule_file(ceiling_ref="minds-v0.9.0")
+    del legacy["is_auto_armed"]
+
+    schedule = parse_update_schedule_record(legacy)
+
+    assert schedule is not None
+    assert schedule.is_auto_armed is False
 
 
 @pytest.mark.parametrize(
@@ -97,7 +127,7 @@ def test_arming_refuses_a_workspace_that_cannot_run_a_scheduled_update(
     )
     program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
     assert parse_update_command_result(answer).outcome is outcome
     assert staged.read_state("schedule.json") is None
@@ -109,12 +139,12 @@ def test_re_arming_keeps_the_chat_the_dispatcher_already_started_this_window(
     """A second arm inside the window must not let the dispatcher start a second run."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, ""), capsys)
+    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     staged.write_state("schedule.json", {**schedule, "marked_chat": "update-to-minds-v0-9-0", "marked_at": _NOW - 60})
 
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, ""), capsys)
+    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
     rearmed = staged.read_state("schedule.json")
     assert rearmed is not None
@@ -382,7 +412,7 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1"), capsys)
+    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys)
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     staged.write_state(
@@ -446,7 +476,7 @@ def test_cancelling_deletes_the_schedule_and_says_whether_one_was_there(
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, ""), capsys)
+    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
     first = _run_mode(program, staged, "cancel", [], capsys)
     second = _run_mode(program, staged, "cancel", [], capsys)

@@ -1117,6 +1117,7 @@ def _schedule_record(**overrides: object) -> UpdateScheduleRecord:
         "window_end_hour": 5,
         "zone": "America/Los_Angeles",
         "override_ref": "",
+        "is_auto_armed": False,
         "marked_chat_name": "",
         "pending_skip_reason": "",
         "last_skip_reason": "",
@@ -1130,13 +1131,14 @@ def test_the_row_is_scheduled_exactly_as_the_workspaces_file_says(tmp_path: Path
     store, agent_id = _out_of_date_store(tmp_path)
     store.record_schedule(
         agent_id,
-        schedule=_schedule_record(override_ref="minds-v0.4.2", last_skip_reason="LEASE_HELD"),
+        schedule=_schedule_record(override_ref="minds-v0.4.2", is_auto_armed=True, last_skip_reason="LEASE_HELD"),
         last_dispatch=None,
         is_signed_in=None,
     )
 
     state = store.get(agent_id)
     assert state.is_scheduled is True
+    assert state.is_schedule_auto_armed is True
     assert (state.override_ref, state.schedule_window, state.schedule_zone) == (
         "minds-v0.4.2",
         "2:00 AM-5:00 AM",

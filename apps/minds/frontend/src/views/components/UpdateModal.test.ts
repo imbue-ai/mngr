@@ -357,6 +357,7 @@ describe("the update modal under auto-update", () => {
   const ARMED: UiWorkspaceUpdate = {
     ...OUT_OF_DATE_UPDATE,
     is_scheduled: true,
+    is_schedule_auto_armed: true,
     schedule_window: "1:00 AM-4:00 AM",
     schedule_zone: "",
   };
@@ -458,7 +459,7 @@ describe("the update modal under auto-update", () => {
         "You skipped v0.4.1 for this workspace. Imbue Studio won't update it automatically until a newer version is available.",
       );
       expect(allText(root)).not.toContain("schedules its update again");
-      expect(buttonLabels(root)).toEqual(["Update now"]);
+      expect(buttonLabels(root)).toEqual(["Schedule update", "Update now"]);
       press(root, "Update now");
       await settleDispatch();
       expect(requests).toEqual([`/ui/api/updates/${AGENT}/now`]);
@@ -479,6 +480,35 @@ describe("the update modal under auto-update", () => {
     expect(text).toContain(
       "Another update flow was working in this workspace during the last update window. Studio will try again in the next window.",
     );
+  });
+
+  it("offers to schedule a machine only a patch behind, which it will not arm itself", async () => {
+    const { draw, requests } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      { ...OUT_OF_DATE_UPDATE, availability: "PATCH_AVAILABLE", current_version: "minds-v0.4.0" },
+      true,
+    );
+
+    press(draw(), "Schedule update");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/schedule`]);
+  });
+
+  it.each([
+    ["armed by the user", { ...ARMED, is_schedule_auto_armed: false }],
+    ["armed after the release was skipped", { ...ARMED, is_schedule_auto_armed: false, is_update_skipped: true }],
+  ] as const)("shows a schedule %s as the user's own, to cancel rather than skip", async (_case, update) => {
+    const { draw, requests } = harness(() => Promise.resolve(jsonResponse({})), update as UiWorkspaceUpdate, true);
+    const root = draw();
+
+    expect(allText(root)).toContain("Scheduled to update in the next update window (1:00 AM-4:00 AM).");
+    expect(allText(root)).not.toContain("No action is needed.");
+    expect(buttonLabels(root)).toEqual(["Update now instead", "Cancel schedule"]);
+    press(root, "Cancel schedule");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/schedule/cancel`]);
   });
 
   it("offers no schedule on a machine not armed yet, only updating now", () => {

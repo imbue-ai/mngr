@@ -8,6 +8,8 @@ import { getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import {
   displayVersion,
+  isArmedByAutoUpdate,
+  isHandledByAutoUpdate,
   isRecreationRequired,
   isUpdateDispatchable,
   recordedDispatchFailure,
@@ -379,7 +381,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       // the way to name a different version, which lives in the machine's
       // settings (?override=1 lands there with the field open). Scheduling is the
       // default: the apply takes services down, and the update window is when
-      // nobody is in the machine. Under auto-update the app arms it itself.
+      // nobody is in the machine. A machine auto-update will arm is left to it.
       const pushOffer = (): void => {
         body.push(
           m(
@@ -402,10 +404,13 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             "Update to a different version…",
           ),
         );
-        if (!isAutoUpdateEnabled) actions.push(pressButton("schedule", "Schedule update", "primary"));
-        actions.push(pressButton("now", "Update now", isAutoUpdateEnabled ? "primary" : "secondary"));
+        const isScheduleOffered = !isHandledByAutoUpdate(update, isAutoUpdateEnabled);
+        if (isScheduleOffered) actions.push(pressButton("schedule", "Schedule update", "primary"));
+        actions.push(pressButton("now", "Update now", isScheduleOffered ? "secondary" : "primary"));
       };
-      const isSkipOffered = situation === "decision-pending" || (situation === "scheduled" && isAutoUpdateEnabled);
+      const isSkipOffered =
+        situation === "decision-pending" ||
+        (situation === "scheduled" && isArmedByAutoUpdate(update, isAutoUpdateEnabled));
       // A question about a skip no longer offered is dropped, so it cannot come back unasked.
       // Not while its skip is out: the skip cancels the schedule before it answers.
       if (!isSkipOffered && state.pendingAction !== "skip") state.isSkipConfirmOpen = false;
@@ -519,7 +524,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             ]),
           );
           actions.push(pressButton("now", "Update now instead", "primary"));
-          if (isAutoUpdateEnabled) {
+          if (isArmedByAutoUpdate(update, isAutoUpdateEnabled)) {
             // Cancelling would only be re-armed by the next sweep; skipping is the
             // way to say "not this release".
             pushSkipButton(`Skip ${skippedVersionText(update)}`);
@@ -544,7 +549,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             versionRows(),
             m("p", { class: "type-helper text-secondary" }, skippedLine(update, isAutoUpdateEnabled)),
           );
-          actions.push(pressButton("now", "Update now", "primary"));
+          actions.push(pressButton("schedule", "Schedule update", "primary"));
+          actions.push(pressButton("now", "Update now", "secondary"));
           break;
         case "offered":
           body.push(versionRows());

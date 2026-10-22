@@ -39,6 +39,8 @@ import {
 import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
   devOverridePrefill,
+  isArmedByAutoUpdate,
+  isHandledByAutoUpdate,
   isRecreationRequired,
   isUpdateDispatchable,
   recordedDispatchFailure,
@@ -288,9 +290,8 @@ function renderUpdatesGroup(
   const isUpdating = updates.isUpdating(agentId);
   // A run under way supersedes the schedule, and a skip or cancel beside it would not stop it.
   const isScheduled = (update.is_scheduled ?? false) && !isUpdating;
-  // Under auto-update the app arms the schedule itself, so the way
-  // to say "not this release" is a skip, which the sweep honors.
-  const isSkipOffered = isScheduled && isAutoUpdateEnabled;
+  const isSkipOffered =
+    isScheduled && isArmedByAutoUpdate(update, isAutoUpdateEnabled);
   const pendingSchedule = forMachine(local.pendingSchedule, agentId);
   // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
   // Not while its skip is out: the skip cancels the schedule before it answers.
@@ -510,7 +511,7 @@ function renderUpdatesGroup(
                         ? m(Spinner, { size: "sm" })
                         : "Cancel schedule",
                     )
-                  : isAutoUpdateEnabled
+                  : isHandledByAutoUpdate(update, isAutoUpdateEnabled)
                     ? null
                     : m(
                         Button,
@@ -603,28 +604,24 @@ function renderUpdatesGroup(
                           : "Update to this version",
                       ),
                       // The same confirmation the press above is; scheduling only
-                      // changes when the run happens. Under auto-update the app
-                      // arms schedules itself.
-                      isAutoUpdateEnabled
-                        ? null
-                        : m(
-                            Button,
-                            {
-                              variant: "secondary",
-                              id: "update-override-schedule-btn",
-                              disabled:
-                                isBusy ||
-                                isUpdating ||
-                                isDecisionPending ||
-                                overrideValue.trim() === "",
-                              onclick: () =>
-                                requestSchedule(overrideValue.trim()),
-                            },
-                            pendingSchedule?.action === "schedule" &&
-                              pendingSchedule.targetRef !== ""
-                              ? m(Spinner, { size: "sm" })
-                              : "Schedule",
-                          ),
+                      // changes when the run happens.
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "update-override-schedule-btn",
+                          disabled:
+                            isBusy ||
+                            isUpdating ||
+                            isDecisionPending ||
+                            overrideValue.trim() === "",
+                          onclick: () => requestSchedule(overrideValue.trim()),
+                        },
+                        pendingSchedule?.action === "schedule" &&
+                          pendingSchedule.targetRef !== ""
+                          ? m(Spinner, { size: "sm" })
+                          : "Schedule",
+                      ),
                     ]),
                     prefill && draft === null
                       ? m(

@@ -647,13 +647,18 @@ describe("the schedule's lines", () => {
     );
   });
 
-  it("names a version the user typed, and says under auto-update that nothing is asked", () => {
-    const line = scheduledLine({ ...ARMED, override_ref: "minds-v0.9.1" }, "", true, "America/Los_Angeles");
+  it("names a version the user typed, and says of auto-update's own schedule that nothing is asked", () => {
+    const autoArmed = { ...ARMED, is_schedule_auto_armed: true };
+    const line = scheduledLine({ ...autoArmed, override_ref: "minds-v0.9.1" }, "", true, "America/Los_Angeles");
     expect(line).toContain("to v0.9.1");
     expect(line).toContain("No action is needed.");
     // A sign-in is asked of the reader, beside this line.
-    expect(scheduledLine({ ...ARMED, needs_sign_in: true }, "", true, "America/Los_Angeles")).not.toContain(
+    expect(scheduledLine({ ...autoArmed, needs_sign_in: true }, "", true, "America/Los_Angeles")).not.toContain(
       "No action is needed.",
+    );
+    // One the user armed is theirs, under auto-update too.
+    expect(scheduledLine(ARMED, "", true, "America/Los_Angeles")).toBe(
+      "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
     );
   });
 

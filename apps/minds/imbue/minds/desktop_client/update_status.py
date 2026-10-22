@@ -318,6 +318,7 @@ class UpdateScheduleRecord(FrozenModel):
     window_end_hour: int = Field(description="Local hour the window closes at, in the file's zone")
     zone: str = Field(description="The IANA zone the window's hours are read in; '' for the workspace's own clock")
     override_ref: str = Field(description="The exact version the user typed, '' for the ceiling")
+    is_auto_armed: bool = Field(description="Whether auto-update armed it, rather than the user")
     marked_chat_name: str = Field(description="The update chat the dispatcher started this window; '' for none")
     pending_skip_reason: str = Field(description="Why the open window's run has not started yet; '' for none")
     last_skip_reason: str = Field(description="Why the last window closed without a start; '' for none")
@@ -357,6 +358,7 @@ def parse_update_schedule_record(raw: object) -> UpdateScheduleRecord | None:
         window_end_hour=end_hour,
         zone=str(record.get("zone") or ""),
         override_ref=str(record.get("override_ref") or ""),
+        is_auto_armed=record.get("is_auto_armed") is True,
         marked_chat_name=str(record.get("marked_chat") or ""),
         pending_skip_reason=str(record.get("pending_skip_reason") or ""),
         last_skip_reason=str(record.get("last_skip_reason") or ""),

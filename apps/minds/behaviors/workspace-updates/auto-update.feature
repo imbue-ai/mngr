@@ -31,7 +31,7 @@ Feature: Automatic workspace updates
   @skip-this-update
   Scenario: Skipping an update holds one workspace back until the next release
     Given auto-update is on
-    And a workspace with a scheduled update
+    And a workspace whose update auto-update scheduled
     When the user asks to skip that update
     Then the app says which release is skipped and what skipping it means, and skips it only once the user confirms
     When the user confirms
@@ -39,6 +39,16 @@ Feature: Automatic workspace updates
     And it is not scheduled again until the app moves to a newer release
     And the workspace view carries no out-of-date notice for it
     And its row says the release was skipped, with a way to update it by hand
+
+  @schedule-by-hand-under-auto-update
+  Scenario: With auto-update on, the user can still schedule an update auto-update would not make
+    Given auto-update is on
+    And a workspace auto-update will not schedule: one only a patch behind, one whose version is unknown, or one whose release was skipped
+    Then the workspace's settings offer to schedule its update
+    And they offer to schedule a specific version, for any workspace
+    When the user schedules an update
+    Then its update says it is scheduled, with a way to cancel the schedule rather than skip the release
+    And auto-update leaves that schedule as the user made it
 
   @sign-in-blocks-auto-update
   Scenario: A workspace that cannot be scheduled for want of a sign-in says so

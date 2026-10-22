@@ -133,10 +133,14 @@ def _record_start(started: list[AgentId], *, failure_reason: str | None) -> Call
 _HOST_OFFLINE = host_offline_exec_result()
 
 
-def _armed(*, override_ref: str = "") -> MngrCallResult:
+def _armed(*, override_ref: str = "", is_auto_armed: bool = False) -> MngrCallResult:
     """An arm that landed, carrying the schedule file it wrote (window and zone as the workspace has them)."""
     schedule = armed_update_schedule_file(
-        ceiling_ref=_CEILING, override_ref=override_ref, window=(23, 3), zone="Europe/Berlin"
+        ceiling_ref=_CEILING,
+        override_ref=override_ref,
+        window=(23, 3),
+        zone="Europe/Berlin",
+        is_auto_armed=is_auto_armed,
     )
     return update_command_answer("ARMED", mode="arm", schedule=schedule)
 
@@ -874,7 +878,7 @@ def test_an_armed_schedule_shows_on_the_row_at_once_from_the_workspaces_own_file
     service = _build_service(tmp_path, root_concurrency_group, caller=caller, started=started)
     agent_id = AgentId.generate()
 
-    schedule = service.schedule_update(agent_id, override_ref="minds-v0.9.1")
+    schedule = service.schedule_update(agent_id, override_ref="minds-v0.9.1", is_auto_armed=False)
 
     assert schedule.outcome is UpdateScheduleOutcome.ARMED
     state = service.state_store.get(agent_id)
@@ -882,10 +886,12 @@ def test_an_armed_schedule_shows_on_the_row_at_once_from_the_workspaces_own_file
     assert state.override_ref == "minds-v0.9.1"
     assert state.schedule_window == "11:00 PM-3:00 AM"
     assert state.schedule_zone == "Europe/Berlin"
+    assert state.is_schedule_auto_armed is False
     mode, flags = update_program_invocation(caller.calls[0])
     assert mode == "arm"
     assert flags["--ceiling"] == _CEILING
     assert flags["--override"] == "minds-v0.9.1"
+    assert flags["--auto-armed"] == "0"
     assert (flags["--window-start"], flags["--window-end"], flags["--zone"]) == ("23", "3", "America/Los_Angeles")
     assert started == []
 
@@ -898,14 +904,16 @@ def test_a_schedule_refused_for_sign_in_shows_on_the_row_until_an_arm_lands(
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
-    refused = service.schedule_update(agent_id, override_ref="")
+    refused = service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert refused.outcome is UpdateScheduleOutcome.NEEDS_SIGN_IN
     assert refused.failure_detail == "No AI account is signed in to this workspace."
     assert service.state_store.get(agent_id).needs_sign_in is True
     assert service.state_store.get(agent_id).is_scheduled is False
 
-    assert service.schedule_update(agent_id, override_ref="").outcome is UpdateScheduleOutcome.ARMED
+    assert (
+        service.schedule_update(agent_id, override_ref="", is_auto_armed=False).outcome is UpdateScheduleOutcome.ARMED
+    )
 
     assert service.state_store.get(agent_id).needs_sign_in is False
     assert service.state_store.get(agent_id).is_scheduled is True
@@ -931,7 +939,7 @@ def test_a_schedule_the_workspace_refused_arms_nothing_and_carries_its_words(
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
-    schedule = service.schedule_update(agent_id, override_ref="")
+    schedule = service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert schedule.outcome is expected_outcome
     assert schedule.failure_detail == detail
@@ -964,7 +972,7 @@ def test_a_schedule_the_workspace_did_not_answer_never_starts_it(
     service = _build_service(tmp_path, root_concurrency_group, caller=caller, started=started)
     agent_id = AgentId.generate()
 
-    schedule = service.schedule_update(agent_id, override_ref="")
+    schedule = service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert schedule.outcome is expected_outcome
     assert schedule.failure_detail == expected_detail
@@ -973,18 +981,21 @@ def test_a_schedule_the_workspace_did_not_answer_never_starts_it(
     assert service.state_store.get(agent_id).is_scheduled is False
 
 
-def test_an_auto_update_arm_targets_the_ceiling_with_no_override(
+@pytest.mark.witnesses("workspace-updates.schedule-by-hand-under-auto-update", partial="the schedule's provenance")
+def test_an_auto_update_arm_targets_the_ceiling_with_no_override_and_marks_itself(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    caller = RecordingMngrCaller(result=_armed())
+    caller = RecordingMngrCaller(result=_armed(is_auto_armed=True))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
     service.arm_for_auto_update(agent_id)
 
     mode, flags = update_program_invocation(caller.calls[0])
-    assert (mode, flags["--ceiling"], flags["--override"]) == ("arm", _CEILING, "")
-    assert service.state_store.get(agent_id).is_scheduled is True
+    assert (mode, flags["--ceiling"], flags["--override"], flags["--auto-armed"]) == ("arm", _CEILING, "", "1")
+    state = service.state_store.get(agent_id)
+    assert state.is_scheduled is True
+    assert state.is_schedule_auto_armed is True
 
 
 def test_an_auto_update_arm_the_workspace_refused_says_so_on_the_row_until_an_arm_lands(
@@ -1015,7 +1026,7 @@ def test_a_cancel_the_workspace_answered_takes_the_schedule_off_the_row(
     caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    service.schedule_update(agent_id, override_ref="")
+    service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert service.cancel_schedule(agent_id) is None
 
@@ -1042,7 +1053,7 @@ def test_a_cancel_that_did_not_reach_the_workspace_leaves_the_row_scheduled(
     caller = ScriptedMngrCaller(results=(_armed(), result))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    service.schedule_update(agent_id, override_ref="")
+    service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     refusal = service.cancel_schedule(agent_id)
 
@@ -1062,7 +1073,7 @@ def test_skipping_an_update_remembers_the_apps_ceiling_for_that_workspace_and_ca
         tmp_path, root_concurrency_group, caller=caller, minds_config=MindsConfig(data_dir=config_dir)
     )
     agent_id = AgentId.generate()
-    service.schedule_update(agent_id, override_ref="")
+    service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert service.skip_update(agent_id) is None
 

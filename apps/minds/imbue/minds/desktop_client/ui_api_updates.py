@@ -223,7 +223,7 @@ def _handle_schedule_update(agent_id: str) -> Response:
     # window would start a fresh run that sets the kept work aside.
     if service.state_store.get(parsed_id).is_run_in_flight:
         return _error_response(DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING], 409)
-    return _schedule_response(service.schedule_update(parsed_id, override_ref=target_ref))
+    return _schedule_response(service.schedule_update(parsed_id, override_ref=target_ref, is_auto_armed=False))
 
 
 def _handle_cancel_schedule(agent_id: str) -> Response:
@@ -355,7 +355,9 @@ def _dispatch_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> No
 
 def _schedule_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> None:
     # Re-arming rewrites the file, so a machine already pointed at a named version keeps it.
-    schedule = service.schedule_update_unwatched(agent_id, override_ref=_armed_target_ref(service, agent_id))
+    schedule = service.schedule_update_unwatched(
+        agent_id, override_ref=_armed_target_ref(service, agent_id), is_auto_armed=False
+    )
     logger.info("Bulk update schedule for {}: {}", agent_id, schedule.outcome.value)
 
 

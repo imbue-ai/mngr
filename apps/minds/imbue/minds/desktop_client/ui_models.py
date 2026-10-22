@@ -502,6 +502,9 @@ class UiWorkspaceUpdate(FrozenModel):
     override_ref: str = Field(
         default="", description="The exact version the user typed for the armed schedule; '' for the app's ceiling"
     )
+    is_schedule_auto_armed: bool = Field(
+        default=False, description="Whether auto-update armed the schedule, rather than the user; False when none"
+    )
     schedule_window: str = Field(
         default="", description="The armed schedule's window as a clock reads it, e.g. '2:00 AM-5:00 AM'; '' when none"
     )

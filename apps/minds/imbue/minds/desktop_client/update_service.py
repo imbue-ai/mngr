@@ -389,14 +389,18 @@ class WorkspaceUpdateService(MutableModel):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def schedule_update(self, agent_id: AgentId, *, override_ref: str) -> UpdateSchedule:
+    def schedule_update(self, agent_id: AgentId, *, override_ref: str, is_auto_armed: bool) -> UpdateSchedule:
         """Arm ``agent_id``'s update for its next window, through the workspace's own schedule file.
 
         Never starts a stopped workspace: the dispatcher that starts the run lives in the
         workspace's cron, so the workspace has to be running during the window anyway.
         """
         call = arm_update(
-            self.mngr_caller, self._address(agent_id), self.settings_source.settings_for(agent_id), override_ref
+            self.mngr_caller,
+            self._address(agent_id),
+            self.settings_source.settings_for(agent_id),
+            override_ref,
+            is_auto_armed=is_auto_armed,
         )
         result = _command_result(call)
         if result is None:
@@ -432,12 +436,14 @@ class WorkspaceUpdateService(MutableModel):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def schedule_update_unwatched(self, agent_id: AgentId, *, override_ref: str) -> UpdateSchedule:
+    def schedule_update_unwatched(
+        self, agent_id: AgentId, *, override_ref: str, is_auto_armed: bool
+    ) -> UpdateSchedule:
         """Arm ``agent_id``'s update for a caller nobody is waiting on, recording a refusal on the row.
 
         A sign-in refusal is the row's own state.
         """
-        schedule = self.schedule_update(agent_id, override_ref=override_ref)
+        schedule = self.schedule_update(agent_id, override_ref=override_ref, is_auto_armed=is_auto_armed)
         if schedule.outcome in (UpdateScheduleOutcome.ARMED, UpdateScheduleOutcome.NEEDS_SIGN_IN):
             return schedule
         logger.info("Could not arm the update of {}: {}", agent_id, schedule.outcome.value)
@@ -455,7 +461,7 @@ class WorkspaceUpdateService(MutableModel):
         Under auto-update the row says nothing of a behind workspace, so one whose arm keeps
         failing would never say so but for the refusal recorded on it.
         """
-        self.schedule_update_unwatched(agent_id, override_ref="")
+        self.schedule_update_unwatched(agent_id, override_ref="", is_auto_armed=True)
 
     def cancel_schedule(self, agent_id: AgentId) -> UpdateSchedule | None:
         """Delete the workspace's schedule file; None when it landed, else what stopped it."""

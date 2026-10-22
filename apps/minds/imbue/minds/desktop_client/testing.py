@@ -1804,6 +1804,7 @@ def armed_update_schedule_file(
     override_ref: str = "",
     window: tuple[int, int] = (2, 5),
     zone: str = "America/Los_Angeles",
+    is_auto_armed: bool = False,
 ) -> dict[str, Any]:
     """A ``schedule.json`` as the update program's arm writes it, and as its ARMED answer carries it."""
     return {
@@ -1814,6 +1815,7 @@ def armed_update_schedule_file(
         "window_end_hour": window[1],
         "zone": zone,
         "override_ref": override_ref,
+        "is_auto_armed": is_auto_armed,
         "is_backup_configured": False,
         "marked_chat": "",
         "marked_at": None,

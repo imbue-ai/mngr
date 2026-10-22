@@ -162,8 +162,8 @@ def _settings_arguments(settings: UpdateWorkspaceSettings) -> list[str]:
     ]
 
 
-def build_arm_arguments(settings: UpdateWorkspaceSettings, override_ref: str) -> list[str]:
-    return [*_settings_arguments(settings), "--override", override_ref]
+def build_arm_arguments(settings: UpdateWorkspaceSettings, override_ref: str, *, is_auto_armed: bool) -> list[str]:
+    return [*_settings_arguments(settings), "--override", override_ref, "--auto-armed", "1" if is_auto_armed else "0"]
 
 
 def build_read_arguments(settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool) -> list[str]:
@@ -256,10 +256,19 @@ def parse_update_workspace_facts(payload: Mapping[str, object]) -> UpdateWorkspa
 
 
 def arm_update(
-    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings, override_ref: str
+    mngr_caller: MngrCaller,
+    workspace_address: str,
+    settings: UpdateWorkspaceSettings,
+    override_ref: str,
+    *,
+    is_auto_armed: bool,
 ) -> UpdateCommandCall:
     return run_update_workspace_command(
-        mngr_caller, workspace_address, _ARM_MODE, build_arm_arguments(settings, override_ref), _ARM_TIMEOUT_SECONDS
+        mngr_caller,
+        workspace_address,
+        _ARM_MODE,
+        build_arm_arguments(settings, override_ref, is_auto_armed=is_auto_armed),
+        _ARM_TIMEOUT_SECONDS,
     )
 
 
@@ -377,6 +386,7 @@ def mode_arm(context):
     }
     schedule.update(_app_fields(context))
     schedule["override_ref"] = _arg(context, "--override")
+    schedule["is_auto_armed"] = _arg(context, "--auto-armed", "0") == "1"
     write_json(SCHEDULE_PATH, schedule)
     log(
         "armed a schedule (%s-%s %s, target %s)"

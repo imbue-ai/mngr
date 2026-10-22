@@ -21,3 +21,5 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 - A workspace whose update is running can no longer be scheduled, so a schedule cannot outlive the run and start a fresh one after it.
 
 - "Skip" in a workspace's Updates settings asks the same confirmation as the update window, and those settings, like the window, drop a scheduled update's controls while an update is under way.
+
+- With auto-update on, you can still schedule an update that auto-update would not make: "Schedule update" appears for a workspace only a patch behind, one whose version is unknown, or one whose release you skipped, and "Schedule" beside a specific version appears on every workspace. A schedule you made says "Scheduled to update" and offers "Cancel schedule"; only one auto-update made says "No action is needed" and offers a skip. Auto-update leaves your schedule as you made it, and a schedule you make after skipping a release shows as scheduled rather than skipped.

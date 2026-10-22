@@ -50,15 +50,23 @@ export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEna
     isUpdateOffered(update) &&
     (update.is_workspace_readable ?? false) &&
     !(update.needs_sign_in ?? false) &&
-    !(update.is_update_skipped ?? false) &&
+    !isUpdateSkipped(update) &&
     !update.dispatch_failure
   );
 }
 
+/** Whether this machine's armed schedule is auto-update's own while auto-update
+ * is on: it asks nothing of the reader, and the way to drop it is a skip, since
+ * the next sweep would re-arm a cancelled one. One the user armed is theirs to cancel. */
+export function isArmedByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): boolean {
+  return isAutoUpdateEnabled && (update.is_scheduled ?? false) && (update.is_schedule_auto_armed ?? false);
+}
+
 /** Whether the user skipped the release this machine is behind by: it is
- * neither updated automatically nor reminded about until a newer one ships. */
+ * neither updated automatically nor reminded about until a newer one ships. A
+ * schedule armed by hand since then is the newer intent, and outranks the skip. */
 export function isUpdateSkipped(update: UiWorkspaceUpdate): boolean {
-  return isUpdateOffered(update) && (update.is_update_skipped ?? false);
+  return isUpdateOffered(update) && (update.is_update_skipped ?? false) && !(update.is_scheduled ?? false);
 }
 
 /** The release a skip is for, as the reader sees it: the one this app ships. */
@@ -502,8 +510,8 @@ function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, viewer
 
 /** What an armed schedule says, for the modal and the machine's Updates
  * settings group. Window-relative rather than "tonight": the window is
- * configurable to any hours. Under auto-update the schedule is the app's own
- * doing, so it also says nothing is asked of the reader, unless a sign-in is. */
+ * configurable to any hours. One auto-update armed is the app's own doing, so
+ * it also says nothing is asked of the reader, unless a sign-in is. */
 export function scheduledLine(
   update: UiWorkspaceUpdate,
   appWindow: string,
@@ -513,7 +521,8 @@ export function scheduledLine(
   const override = update.override_ref ?? "";
   const target = override ? ` to ${displayVersion(override)}` : "";
   const windowText = scheduleWindowText(update, appWindow, viewerZone);
-  if (!isAutoUpdateEnabled) return `Scheduled to update${target} in the next update window (${windowText}).`;
+  if (!isArmedByAutoUpdate(update, isAutoUpdateEnabled))
+    return `Scheduled to update${target} in the next update window (${windowText}).`;
   const line = `Studio will update this workspace${target} in the next update window (${windowText}).`;
   return (update.needs_sign_in ?? false) ? line : `${line} No action is needed.`;
 }
