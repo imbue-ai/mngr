@@ -215,6 +215,20 @@ describe("the Updates settings group's no-backup question", () => {
     expect(requests).toEqual([]);
   });
 
+  it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
+    const { draw } = harness();
+    publishWorkspaceLiveness(UNBACKED, "RUNNING");
+    press(updatesGroup(draw(UNBACKED)), "Update now");
+
+    publishWorkspaceLiveness(UNBACKED, "STOPPED");
+    draw(UNBACKED);
+    publishWorkspaceLiveness(UNBACKED, "RUNNING");
+
+    expect(
+      pressableWithLabel(updatesGroup(draw(UNBACKED)), "Go ahead without backups"),
+    ).toBeUndefined();
+  });
+
   it("dispatches only once the question is answered, and only for the machine it asked about", async () => {
     const { draw, requests } = harness();
 

@@ -409,6 +409,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       // A question about a skip no longer offered is dropped, so it cannot come back unasked.
       // Not while its skip is out: the skip cancels the schedule before it answers.
       if (!isSkipOffered && state.pendingAction !== "skip") state.isSkipConfirmOpen = false;
+      if (situation === "stopped") state.noBackupConfirm = null;
 
       switch (situation) {
         case "needs-recreation":

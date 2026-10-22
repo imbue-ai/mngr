@@ -302,6 +302,8 @@ function renderUpdatesGroup(
     local.skipConfirmAgentId = null;
   }
   if (updates.isQuietWhileStopped(agentId)) {
+    if (forMachine(local.noBackupConfirm, agentId) !== null)
+      local.noBackupConfirm = null;
     return m("div", { class: "max-w-md" }, [
       m(SectionHeader, "Update"),
       m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, STOPPED_UPDATES_LINE),

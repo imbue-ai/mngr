@@ -662,4 +662,21 @@ describe("the update modal over a workspace that stops", () => {
     publishWorkspaceLiveness(AGENT, "RUNNING");
     expect(buttonLabels(draw())).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
   });
+
+  it("drops a held no-backups question, so it neither shows while stopped nor comes back unasked", () => {
+    const { draw, requests } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      is_backup_configured: false,
+    });
+    publishWorkspaceLiveness(AGENT, "RUNNING");
+    press(draw(), "Update now");
+    expect(pressableWithLabel(draw(), "Go ahead without backups")).toBeDefined();
+
+    publishWorkspaceLiveness(AGENT, "STOPPED");
+    expect(pressableWithLabel(draw(), "Go ahead without backups")).toBeUndefined();
+    publishWorkspaceLiveness(AGENT, "RUNNING");
+
+    expect(pressableWithLabel(draw(), "Go ahead without backups")).toBeUndefined();
+    expect(requests).toEqual([]);
+  });
 });
