@@ -402,7 +402,8 @@ def mode_arm(context):
 
 def mode_now(context):
     install_dispatcher(context)
-    install_cron_entry(context)
+    # Only where cron runs the watchdog is a stopped lead brought back.
+    is_watchdog_installed = install_cron_entry(context)
     refusal, account = _readiness_refusal(context, is_cron_needed=False)
     if refusal is not None:
         emit(dict(refusal, mode="now"))
@@ -411,8 +412,7 @@ def mode_now(context):
     run = read_json(RUN_PATH)
     # An ALREADY_RUNNING answer names when the run it found began, which tells its record apart from an
     # earlier run's under the same chat name.
-    # Only where cron runs the watchdog is a stopped lead brought back.
-    if is_run_in_flight(run, agents, is_stopped_lead_revived=is_cron_available(context["live_cron_dir"])):
+    if is_run_in_flight(run, agents, is_stopped_lead_revived=is_watchdog_installed):
         lead = find_run_lead(agents or [], run)
         emit(
             dict(
