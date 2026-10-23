@@ -75,12 +75,13 @@ from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
 from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
+from imbue.mngr.hosts.host import _MAX_SAFE_SEND_KEYS_LENGTH
 from imbue.mngr.hosts.host import _START_AGENT_LAUNCH_TIMEOUT_SECONDS
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
-from imbue.mngr.hosts.host import _build_agent_launch_steps
 from imbue.mngr.hosts.host import _build_generation_increment_fragment
 from imbue.mngr.hosts.host import _build_remote_lock_command
+from imbue.mngr.hosts.host import _build_sourced_launch_steps
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _increment_local_generation_counter
@@ -1296,12 +1297,12 @@ def test_build_start_agent_shell_command_writes_agent_command_to_launch_script(
     assert f"mkdir -p {expected_script_path.parent}" in result
 
 
-def test_build_start_agent_shell_command_types_additional_window_commands_directly(
+def test_build_start_agent_shell_command_types_short_additional_window_commands_directly(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Additional windows keep having their commands typed, never sourced from a script.
+    """Additional windows short enough to type have their commands typed, not sourced.
 
     Those windows inherit the user's tmux default-command, which need not be a POSIX shell --
     elvish, for instance, has no `.` builtin, so a sourced line would be a syntax error there.
@@ -1320,11 +1321,97 @@ def test_build_start_agent_shell_command_types_additional_window_commands_direct
         "htop",
         f". {_get_expected_launch_script_path(temp_host_dir, agent)}",
     ]
-    # Only the agent's command is ever written to a script.
+    # Only the agent's command is written to a script.
     assert result.count("printf '%s\\n'") == 1
 
 
-def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> None:
+def test_build_start_agent_shell_command_sources_over_long_additional_window_commands(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Each additional window is judged on its own command's length, and scripts are named by index.
+
+    A command past the pty's canonical-mode buffer cannot be typed at all: the pane keeps the
+    first 1KB and drops the rest along with the Enter, leaving the truncated text sitting at the
+    prompt.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    long_additional_command = "echo " + "y" * 4000
+    additional_commands = [
+        NamedCommand(command=CommandString(long_additional_command), window_name="terminal"),
+        NamedCommand(command=CommandString("htop"), window_name=None),
+    ]
+    result = _build_command_with_defaults(
+        agent, temp_host_dir, command="sleep 1000", additional_commands=additional_commands
+    )
+
+    state_dir = get_agent_state_dir_path(temp_host_dir, agent.id)
+    window_script_path = state_dir / "launch_window_1.sh"
+    assert _get_send_keys_literal_payloads(result) == [
+        f". {window_script_path}",
+        "htop",
+        f". {_get_expected_launch_script_path(temp_host_dir, agent)}",
+    ]
+    assert f"printf '%s\\n' {shlex.quote(long_additional_command)} > {window_script_path}" in result
+
+
+def test_build_start_agent_shell_command_measures_additional_window_commands_in_bytes(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The pty counts bytes, so a command of multi-byte characters must be judged in bytes.
+
+    A command well under the bound in characters can be several times over it in bytes, and would
+    be typed -- and truncated -- if the gate counted characters.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    multibyte_command = "echo " + "漢" * 400
+    assert len(multibyte_command) < _MAX_SAFE_SEND_KEYS_LENGTH <= len(multibyte_command.encode())
+    result = _build_command_with_defaults(
+        agent,
+        temp_host_dir,
+        command="sleep 1000",
+        additional_commands=[NamedCommand(command=CommandString(multibyte_command), window_name="wide")],
+    )
+
+    window_script_path = get_agent_state_dir_path(temp_host_dir, agent.id) / "launch_window_1.sh"
+    assert _get_send_keys_literal_payloads(result)[0] == f". {window_script_path}"
+
+
+def test_build_start_agent_shell_command_never_types_a_payload_the_pty_would_truncate(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """No window's typed payload may approach the pty's canonical-mode input buffer.
+
+    Every pane's shell is still in canonical mode when these keys arrive, and a pty silently
+    discards input past its buffer (1KB on macOS) -- including the trailing newline -- while both
+    the write and tmux report success. Any window whose payload tracked its command's length
+    would therefore be left holding a truncated line at its prompt, with nothing logged anywhere.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    additional_commands = [
+        NamedCommand(command=CommandString("echo " + "y" * 4000), window_name="terminal"),
+        NamedCommand(command=CommandString("htop"), window_name=None),
+    ]
+    result = _build_command_with_defaults(
+        agent,
+        temp_host_dir,
+        command="echo " + "x" * 4000,
+        additional_commands=additional_commands,
+    )
+
+    payloads = _get_send_keys_literal_payloads(result)
+    assert len(payloads) == 3
+    for payload in payloads:
+        payload_length = len(payload.encode())
+        assert payload_length < _MAX_SAFE_SEND_KEYS_LENGTH, f"typed payload of {payload_length} bytes risks truncation"
+
+
+def test_build_sourced_launch_steps_writes_command_verbatim(tmp_path: Path) -> None:
     """Running the generated write steps must reproduce the command byte-for-byte.
 
     Launch commands carry shell metacharacters, quotes, and backslashes that a careless
@@ -1337,7 +1424,7 @@ def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> Non
         ' export X="${S:-fallback}" && { test -s "$D/f.jsonl" || find "$D" -name \'*.jsonl\' | grep -q . ; }'
         r" && printf 'literal \n not newline' && claude --resume \"$X\""
     )
-    steps = _build_agent_launch_steps(
+    steps = _build_sourced_launch_steps(
         launch_script_path=launch_script_path,
         command=command,
         quoted_exact_window=shlex.quote("=mngr-test:=agent"),
