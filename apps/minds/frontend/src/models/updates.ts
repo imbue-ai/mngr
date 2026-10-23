@@ -105,14 +105,15 @@ export type StandingUpdateNotice = "none" | "out-of-date" | "needs-sign-in" | "n
 /** What a surface should say about this machine's version. A run in flight
  * silences the out-of-date line (the run is already being reported);
  * `isUpdating` rather than the pushed activity, so it does not reappear between
- * the press and the first frame. Recreation has no run to be silenced by. */
+ * the press and the first frame. Recreation has no run to be silenced by; a run
+ * that just landed this app's version silences the rest, as on the row badge. */
 export function standingUpdateNotice(
   update: UiWorkspaceUpdate,
   isUpdating: boolean,
   isAutoUpdateEnabled = false,
 ): StandingUpdateNotice {
   if (isRecreationRequired(update)) return "needs-recreation";
-  if (isUpdating || isUpdateSkipped(update)) return "none";
+  if (isUpdating || isUpdateSkipped(update) || isLandedOnSupportedVersion(update)) return "none";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (isUpdateOffered(update) && !isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return "out-of-date";
   return "none";
