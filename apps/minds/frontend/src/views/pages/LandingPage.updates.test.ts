@@ -1,6 +1,6 @@
 // What the machines list says about each workspace's update, and the one
 // click each state offers. The decisions are models/updates.ts's; these prove
-// the rows draw them and that each shortcut lands where it should.
+// the rows draw them and that each click lands where it should.
 
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
