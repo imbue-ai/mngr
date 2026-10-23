@@ -1287,7 +1287,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
     assert state.chat_agent_id == "agent-scheduled"
 
 
-@pytest.mark.witnesses("workspace-updates.decision-pending", partial="the row state; not the modal")
+@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state; not the modal")
 def test_a_needs_decision_verdict_is_a_pending_decision_and_not_a_failure(tmp_path: Path) -> None:
     store, agent_id = _out_of_date_store(tmp_path)
     store.observe_run_record(agent_id, _run_record(verdict=UpdateVerdict.NEEDS_DECISION))

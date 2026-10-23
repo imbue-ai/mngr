@@ -212,7 +212,7 @@ describe("a stopped machine's update state", () => {
       expect(store.updatableAgentIds()).toEqual([]);
 
       liveness["agent-a"] = "RUNNING";
-      expect(updateBadgeFor(store.publishedFor("agent-a"), false)?.state).toBe("decision-pending");
+      expect(updateBadgeFor(store.publishedFor("agent-a"), false)?.state).toBe("needs-decision");
     },
   );
 
@@ -605,13 +605,13 @@ describe("a run that ended needing the user's decision", () => {
 
   it("is its own state, not a failure", () => {
     expect(isFailureVerdict("NEEDS_DECISION")).toBe(false);
-    expect(updateRunOutcome(PENDING)).toBe("decision-pending");
-    expect(updateBadgeFor(PENDING, false)).toMatchObject({ state: "decision-pending", tone: "warn" });
+    expect(updateRunOutcome(PENDING)).toBe("needs-decision");
+    expect(updateBadgeFor(PENDING, false)).toMatchObject({ state: "needs-decision", tone: "warn" });
   });
 
   it("outranks the machine still reading behind, and puts its chat one click from the row", () => {
     const badge = updateBadgeFor(PENDING, false, true);
-    expect(badge?.state).toBe("decision-pending");
+    expect(badge?.state).toBe("needs-decision");
     expect(rowUpdateShortcutFor(PENDING, badge)).toBe("open-chat");
   });
 });

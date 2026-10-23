@@ -176,7 +176,7 @@ export function updateRunPhase(update: UiWorkspaceUpdate | null, isUpdating: boo
 
 /** What a machine's last run left behind for the user, once it is over, or
  * that the last one asked for never went out. */
-export type UpdateRunOutcome = "none" | "not-started" | "decision-pending" | "failed" | "needs-attention";
+export type UpdateRunOutcome = "none" | "not-started" | "needs-decision" | "failed" | "needs-attention";
 
 /** How the last run ended, for the surfaces that report it. Every failure is
  * one outcome: whatever the agent found, the next step is to check in with it.
@@ -185,7 +185,7 @@ export type UpdateRunOutcome = "none" | "not-started" | "decision-pending" | "fa
 export function updateRunOutcome(update: UiWorkspaceUpdate | null): UpdateRunOutcome {
   if (update === null) return "none";
   if (update.dispatch_failure) return "not-started";
-  if (update.is_decision_pending ?? false) return "decision-pending";
+  if (update.is_decision_pending ?? false) return "needs-decision";
   if (update.activity === "STALLED" || isFailureVerdict(update.verdict)) return "failed";
   // Not a failure, but detection resets the machine to UP_TO_DATE on its next
   // sweep, so this is the only account of the leftover work.
@@ -277,7 +277,7 @@ export type UpdateModalSituation =
   | "stopped"
   | "in-progress"
   | "not-started"
-  | "decision-pending"
+  | "needs-decision"
   | "failed"
   | "updated-with-note"
   | "needs-recreation"
@@ -294,7 +294,7 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (isUpdating) return "in-progress";
   const outcome = updateRunOutcome(update);
   if (outcome === "not-started") return "not-started";
-  if (outcome === "decision-pending") return "decision-pending";
+  if (outcome === "needs-decision") return "needs-decision";
   if (outcome === "failed") return "failed";
   if (outcome === "needs-attention") return "updated-with-note";
   if (isRecreationRequired(update)) return "needs-recreation";
@@ -314,7 +314,7 @@ export type UpdateBadgeState =
   | "updating"
   | "waiting"
   | "failed"
-  | "decision-pending"
+  | "needs-decision"
   | "needs-attention"
   | "needs-recreation"
   | "needs-sign-in"
@@ -331,13 +331,16 @@ export function updateChatAgentIdFor(update: UiWorkspaceUpdate | null, isUpdatin
   return update.chat_agent_id ?? "";
 }
 
-/** The chat a click on a machine's update badge lands in instead of the
- * update modal, or "" for the modal: a run under way whose chat is known, over
- * which the modal would only repeat the badge and offer that chat. */
-export function runChatInsteadOfModal(update: UiWorkspaceUpdate | null, isUpdating: boolean): string {
-  if (update === null || updateModalSituation(update, isUpdating) !== "in-progress") return "";
-  if (update.activity === "STARTING") return "";
-  return updateChatAgentIdFor(update, isUpdating);
+/** Whether a click on a machine's update badge opens the run's chat instead of
+ * the update modal, which during a run would only repeat the badge and offer
+ * that chat. Not while STARTING: the chat tab does not exist yet. */
+export function isBadgeOpeningRunChat(update: UiWorkspaceUpdate | null, isUpdating: boolean): boolean {
+  return (
+    update !== null &&
+    updateModalSituation(update, isUpdating) === "in-progress" &&
+    update.activity !== "STARTING" &&
+    updateChatAgentIdFor(update, isUpdating) !== ""
+  );
 }
 
 /** The machines-list row badge for one machine's update situation. */
@@ -401,9 +404,9 @@ export function updateBadgeFor(
       isSpinnerShown: false,
     };
   }
-  if (outcome === "decision-pending") {
+  if (outcome === "needs-decision") {
     return {
-      state: "decision-pending",
+      state: "needs-decision",
       tone: "warn",
       label: "Needs your answer",
       tooltip: "The update can't keep something you built in this workspace — decide in its chat",
@@ -518,7 +521,7 @@ export function rowUpdateShortcutFor(update: UiWorkspaceUpdate | null, badge: Up
   if (update === null || badge === null) return null;
   if (badge.state === "needs-sign-in") return "sign-in";
   const isSettledInChat =
-    badge.state === "decision-pending" || (badge.state === "failed" && updateRunOutcome(update) === "failed");
+    badge.state === "needs-decision" || (badge.state === "failed" && updateRunOutcome(update) === "failed");
   return isSettledInChat && (update.chat_agent_id ?? "") !== "" ? "open-chat" : null;
 }
 

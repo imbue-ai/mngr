@@ -410,7 +410,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         actions.push(pressButton("now", "Update now", "secondary"));
       };
       const isSkipOffered =
-        situation === "decision-pending" ||
+        situation === "needs-decision" ||
         (situation === "scheduled" && isArmedByAutoUpdate(update, isAutoUpdateEnabled));
       // A question about a skip no longer offered is dropped, so it cannot come back unasked.
       // Not while its skip is out: the skip cancels the schedule before it answers.
@@ -460,7 +460,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           if (isUpdateDispatchable(update)) actions.push(pressButton("now", "Try again", "primary"));
           actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
           break;
-        case "decision-pending":
+        case "needs-decision":
           pushOutcome("warn", verdictMessage(update));
           pushOpenChat();
           // Dismissing it is a skip: a fresh run would set the kept work aside.

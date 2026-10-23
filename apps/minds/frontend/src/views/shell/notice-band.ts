@@ -401,7 +401,7 @@ function updateOutcomeNotice(outcome: UpdateRunOutcome, isUpdateChatKnown: boole
         message: "This workspace's update didn't start.",
         actions: [SEE_UPDATE_DETAILS, DISMISS_UPDATE_OUTCOME],
       };
-    case "decision-pending":
+    case "needs-decision":
       return {
         key: "workspace-update-outcome",
         variant: "warn",

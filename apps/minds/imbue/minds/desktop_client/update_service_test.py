@@ -313,7 +313,7 @@ def test_a_verdict_that_landed_nothing_tells_no_listener(
     assert told == []
 
 
-@pytest.mark.witnesses("workspace-updates.decision-pending", partial="the row state, not the modal")
+@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state, not the modal")
 @pytest.mark.parametrize(
     ("verdict", "is_decision_pending"),
     ((UpdateVerdict.NEEDS_DECISION, True), (UpdateVerdict.REFUSED, False)),

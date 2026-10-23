@@ -91,7 +91,7 @@ Feature: Running an update
     When the user opens that workspace's update
     Then the app says that running chats pause for a few minutes while the update is applied, then continue
 
-  @decision-pending
+  @needs-decision
   Scenario: An update that cannot keep something the user built ends waiting for their decision
     Nothing is held open waiting: the run ends, and its chat is where the user decides.
     Given a workspace whose update agent found that the update cannot keep something the user built

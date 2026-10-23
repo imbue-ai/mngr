@@ -69,10 +69,11 @@ import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadgeTone } from "../../models/updates";
 import {
   displayVersion,
+  isBadgeOpeningRunChat,
   isUpdateOffered,
   rowUpdateShortcutFor,
-  runChatInsteadOfModal,
   updateBadgeFor,
+  updateChatAgentIdFor,
 } from "../../models/updates";
 import { autoUpdatePrompt } from "../../models/autoUpdatePrompt";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
@@ -463,7 +464,7 @@ export const LandingPage: m.ClosureComponent = () => {
       updates.isAutoUpdateEnabled,
     );
     if (badge === null) return null;
-    const runChatAgentId = runChatInsteadOfModal(published, updates.isUpdating(entry.id));
+    const isOpeningRunChat = isBadgeOpeningRunChat(published, updates.isUpdating(entry.id));
     const badgeButton = m(
       "button",
       {
@@ -471,12 +472,16 @@ export const LandingPage: m.ClosureComponent = () => {
         class: `${UPDATE_BADGE_CLASS} ${UPDATE_BADGE_TONES[badge.tone]} landing-update-badge`,
         "data-update-state": badge.state,
         "data-tooltip": badge.tooltip,
-        "aria-haspopup": runChatAgentId ? undefined : "dialog",
+        "aria-haspopup": isOpeningRunChat ? undefined : "dialog",
         // Raised through the shell so it is one modal with one owner (Escape,
         // navigation). The row behind is clickable, so the press stops here.
         onclick: (event: MouseEvent) => {
           event.stopPropagation();
-          if (runChatAgentId) getAppContext().shell.openWorkspaceChat(entry.id, runChatAgentId);
+          if (isOpeningRunChat)
+            getAppContext().shell.openWorkspaceChat(
+              entry.id,
+              updateChatAgentIdFor(published, updates.isUpdating(entry.id)),
+            );
           else getAppContext().shell.openUpdateModal(entry.id);
         },
       },

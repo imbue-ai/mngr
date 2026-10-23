@@ -327,8 +327,8 @@ describe("noticeBandFor, an update run", () => {
     ["failed", true, ["update-workspace", "dismiss-update-outcome"]],
     ["failed", false, ["update-workspace", "dismiss-update-outcome"]],
     ["needs-attention", true, ["open-update-chat", "dismiss-update-outcome"]],
-    ["decision-pending", true, ["open-update-chat", "skip-update"]],
-    ["decision-pending", false, ["skip-update"]],
+    ["needs-decision", true, ["open-update-chat", "skip-update"]],
+    ["needs-decision", false, ["skip-update"]],
     // A run that never went out has no chat; its modal carries the error.
     ["not-started", true, ["update-workspace", "dismiss-update-outcome"]],
   ] as const)("offers a %s outcome (chat known: %s) the buttons that settle it", (outcome, isUpdateChatKnown, kinds) => {
@@ -493,7 +493,7 @@ describe("noticeBandFor's auto-update states", () => {
 
   it("says a pending decision is the reader's move in the same words as a run waiting on them, not a failure", () => {
     const decision = noticeBandFor("healthy", "healthy", true, {
-      updateRunOutcome: "decision-pending",
+      updateRunOutcome: "needs-decision",
       isUpdateChatKnown: true,
     });
     const waiting = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "waiting", isUpdateChatKnown: true });
