@@ -182,7 +182,11 @@ class LatchkeyAutoRegister(MutableModel):
         host's machine watch runs, the watch carries the push instead.
         """
         with self._push_lock:
-            held = list(self._hosts_awaiting_machine.items())
+            held = [
+                (host_id, agent_id)
+                for host_id, agent_id in self._hosts_awaiting_machine.items()
+                if host_id not in self._hosts_watched_for_machine
+            ]
         return [(host_id, agent_id) for host_id, agent_id in held if self._has_machine(host_id)]
 
     def _has_machine(self, host_id: HostId) -> bool:
