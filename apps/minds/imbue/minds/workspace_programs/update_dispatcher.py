@@ -36,8 +36,11 @@ from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
+from enum import StrEnum
+from enum import auto
 from typing import Final
 from typing import TypedDict
+from typing import assert_never
 
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import emit_marker_json
@@ -158,6 +161,29 @@ _DISPATCHER_SCHEDULE_FIELDS: Final[tuple[str, ...]] = SCHEDULE_MARK_FIELDS + (
 
 # Who the background-task CLI reports busy: agent names, agent ids, and chat ids.
 BusyAgents = tuple[AbstractSet[str], AbstractSet[str], AbstractSet[str]]
+
+
+class ScheduleAction(StrEnum):
+    """What one tick does about an armed schedule."""
+
+    REMOVE = auto()
+    DISPATCH = auto()
+    RECORD_SKIP = auto()
+    NOTE_WINDOW = auto()
+    # The hold after a fresh dispatch has not passed.
+    WAIT = auto()
+    NOTHING = auto()
+
+
+class WatchdogAction(StrEnum):
+    """What one tick's watchdog does about a run with no verdict."""
+
+    CLOSE_OUT = auto()
+    REVIVE = auto()
+    REMIND = auto()
+    COUNT_IDLE = auto()
+    RESET = auto()
+    NOTHING = auto()
 
 
 class AgentEnvironment:
@@ -953,12 +979,11 @@ def decide_schedule_action(
     now: float,
     # Asked only when the answer turns on it, as it may list the workspace's agents.
     is_marked_lead_gone: Callable[[], bool],
-) -> str:
-    """What one tick does about an armed schedule: ``remove``, ``dispatch``, ``record_skip``, ``note_window``,
-    ``wait`` (the hold after a fresh dispatch has not passed), or ``nothing``."""
+) -> ScheduleAction:
+    """What one tick does about an armed schedule."""
     window_bounds = _schedule_window(schedule)
     if window_bounds is None:
-        return "nothing"
+        return ScheduleAction.NOTHING
     armed_at = epoch_or_none(schedule.get("armed_at")) or 0.0
     started_at = run_started_at(run)
     marked_chat = str(schedule.get("marked_chat") or "")
@@ -971,27 +996,27 @@ def decide_schedule_action(
         and (started_at is None or marked_at is None or started_at >= marked_at)
     )
     if run_verdict(run) is not None and ((started_at is not None and started_at >= armed_at) or is_marked_run):
-        return "remove"
+        return ScheduleAction.REMOVE
     window = current_window(now, *window_bounds)
     if window is None:
         seen = epoch_or_none(schedule.get("window_seen_open_at"))
         if seen is None:
-            return "nothing"
+            return ScheduleAction.NOTHING
         is_started_in_seen_window = (started_at is not None and started_at >= seen) or (
             marked_at is not None and marked_at >= seen
         )
-        return "note_window" if is_started_in_seen_window else "record_skip"
+        return ScheduleAction.NOTE_WINDOW if is_started_in_seen_window else ScheduleAction.RECORD_SKIP
     opened_at = window[0]
     if started_at is not None and started_at >= opened_at and started_at >= armed_at:
-        return "note_window"
+        return ScheduleAction.NOTE_WINDOW
     next_attempt_at = epoch_or_none(schedule.get("next_attempt_at"))
     is_held_back = next_attempt_at is not None and now < next_attempt_at
     if marked_at is not None and marked_at >= opened_at:
         is_start_recorded = is_marked_run and started_at is not None and started_at >= marked_at
         if not is_start_recorded and is_marked_lead_gone():
-            return "wait" if is_held_back else "dispatch"
-        return "note_window"
-    return "wait" if is_held_back else "dispatch"
+            return ScheduleAction.WAIT if is_held_back else ScheduleAction.DISPATCH
+        return ScheduleAction.NOTE_WINDOW
+    return ScheduleAction.WAIT if is_held_back else ScheduleAction.DISPATCH
 
 
 def _save_schedule_marks(schedule: Mapping[str, object]) -> None:
@@ -1036,46 +1061,46 @@ def _tick_schedule(now: float, agent_environment: AgentEnvironment) -> None:
     agents = functools.cache(lambda: list_agents(agent_environment))
     action = decide_schedule_action(schedule, run, now, lambda: _is_marked_lead_gone(schedule, agents(), now))
     window = current_window(now, *window_bounds)
-    if action == "remove":
-        try:
-            os.remove(SCHEDULE_FILE_PATH)
-        except FileNotFoundError:
-            return
-        write_log_line("retired the schedule: the run it covers has a verdict (%s)" % run_verdict(run))
-        return
-    if action == "record_skip":
-        reason = str(schedule.get("pending_skip_reason") or SKIP_WINDOW_CLOSED)
-        schedule.update(
-            {
-                "last_skip_reason": reason,
-                "last_skip_at": now,
-                "pending_skip_reason": "",
-                "next_attempt_at": None,
-                "window_seen_open_at": None,
-            }
-        )
-        _save_schedule_marks(schedule)
-        write_log_line("the update window closed without a start: %s" % reason)
-        return
-    if action == "note_window":
-        seen = window[0] if window is not None else None
-        if schedule.get("window_seen_open_at") != seen or schedule.get("pending_skip_reason"):
-            schedule.update({"window_seen_open_at": seen, "pending_skip_reason": ""})
+    match action:
+        case ScheduleAction.REMOVE:
+            try:
+                os.remove(SCHEDULE_FILE_PATH)
+            except FileNotFoundError:
+                return
+            write_log_line("retired the schedule: the run it covers has a verdict (%s)" % run_verdict(run))
+        case ScheduleAction.RECORD_SKIP:
+            reason = str(schedule.get("pending_skip_reason") or SKIP_WINDOW_CLOSED)
+            schedule.update(
+                {
+                    "last_skip_reason": reason,
+                    "last_skip_at": now,
+                    "pending_skip_reason": "",
+                    "next_attempt_at": None,
+                    "window_seen_open_at": None,
+                }
+            )
             _save_schedule_marks(schedule)
-        return
-    if action in ("nothing", "wait"):
-        return
-    assert action == "dispatch", action
-    schedule["window_seen_open_at"] = window[0] if window is not None else None
-    reason = _dispatch_scheduled(schedule, run, agents(), now, agent_environment)
-    if reason is None:
-        schedule.update(
-            {"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + _REDISPATCH_AFTER_SECONDS}
-        )
-    else:
-        # A chat a failed create left behind is adopted by the next attempt, so it can come at once.
-        schedule.update({"pending_skip_reason": reason, "next_attempt_at": None})
-    _save_schedule_marks(schedule)
+            write_log_line("the update window closed without a start: %s" % reason)
+        case ScheduleAction.NOTE_WINDOW:
+            seen = window[0] if window is not None else None
+            if schedule.get("window_seen_open_at") != seen or schedule.get("pending_skip_reason"):
+                schedule.update({"window_seen_open_at": seen, "pending_skip_reason": ""})
+                _save_schedule_marks(schedule)
+        case ScheduleAction.NOTHING | ScheduleAction.WAIT:
+            pass
+        case ScheduleAction.DISPATCH:
+            schedule["window_seen_open_at"] = window[0] if window is not None else None
+            reason = _dispatch_scheduled(schedule, run, agents(), now, agent_environment)
+            if reason is None:
+                schedule.update(
+                    {"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + _REDISPATCH_AFTER_SECONDS}
+                )
+            else:
+                # A chat a failed create left behind is adopted by the next attempt, so it can come at once.
+                schedule.update({"pending_skip_reason": reason, "next_attempt_at": None})
+            _save_schedule_marks(schedule)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _dispatch_scheduled(
@@ -1119,35 +1144,34 @@ def decide_watchdog_action(
     busy: BusyAgents,
     watchdog_state: Mapping[str, object],
     now: float,
-) -> str:
-    """What the watchdog does about a run with no verdict: ``close_out``, ``revive``, ``remind``, ``count_idle``,
-    ``reset``, or ``nothing``.
+) -> WatchdogAction:
+    """What the watchdog does about a run with no verdict.
 
     A stopped lead is revived however often it stops: a workspace restart stops every chat, and
     the run should carry on. Only the lead can tell a loop from bad luck, so the revival message
     leaves that judgment to it.
     """
     if run is None or run_verdict(run) is not None or not run.get("chat_agent_name") or agents is None:
-        return "nothing"
+        return WatchdogAction.NOTHING
     if run.get("apply_phase"):
         # The apply's own recovery owns a run that is landing.
-        return "reset"
+        return WatchdogAction.RESET
     lead = find_run_lead(agents, run)
     if lead is None:
-        return "close_out"
+        return WatchdogAction.CLOSE_OUT
     if is_agent_ended(lead):
-        return "revive"
+        return WatchdogAction.REVIVE
     if run.get("is_holding"):
-        return "reset"
+        return WatchdogAction.RESET
     worker_name = str(run.get("worker_agent_name") or "")
     worker = find_agent(agents, worker_name) if worker_name else None
     if is_agent_busy(lead, busy) or is_agent_busy(worker, busy):
-        return "reset"
+        return WatchdogAction.RESET
     idle_ticks = _count_or_zero(watchdog_state.get("idle_ticks")) + 1
     last_reminded_at = epoch_or_none(watchdog_state.get("last_reminded_at")) or 0.0
     if idle_ticks >= _IDLE_TICKS_BEFORE_REMINDER and now - last_reminded_at >= _REMINDER_INTERVAL_SECONDS:
-        return "remind"
-    return "count_idle"
+        return WatchdogAction.REMIND
+    return WatchdogAction.COUNT_IDLE
 
 
 def _watchdog_state_for(run: Mapping[str, object]) -> dict[str, object]:
@@ -1279,26 +1303,28 @@ def _tick_watchdog(now: float, agent_environment: AgentEnvironment) -> None:
     state = _watchdog_state_for(run)
     busy = busy_agents(agent_environment) if agents is not None else (set(), set(), set())
     action = decide_watchdog_action(run, agents, busy, state, now)
-    if action == "nothing" or agents is None:
+    if agents is None:
         return
-    if action == "close_out":
-        close_out_run(run, agents, agent_environment)
-        return
-    if action == "revive":
-        revive_stopped_lead(run, agents, state, agent_environment)
-        return
-    if action == "reset":
-        if state.get("idle_ticks"):
-            state["idle_ticks"] = 0
+    match action:
+        case WatchdogAction.NOTHING:
+            pass
+        case WatchdogAction.CLOSE_OUT:
+            close_out_run(run, agents, agent_environment)
+        case WatchdogAction.REVIVE:
+            revive_stopped_lead(run, agents, state, agent_environment)
+        case WatchdogAction.RESET:
+            if state.get("idle_ticks"):
+                state["idle_ticks"] = 0
+                write_json_atomically(_WATCHDOG_STATE_PATH, state)
+        case WatchdogAction.COUNT_IDLE | WatchdogAction.REMIND:
+            state["idle_ticks"] = _count_or_zero(state.get("idle_ticks")) + 1
+            lead = find_run_lead(agents, run) if action is WatchdogAction.REMIND else None
+            if lead is not None and _send_to_chat(lead, WATCHDOG_REMINDER_MESSAGE, agent_environment):
+                state["last_reminded_at"] = now
+                write_log_line("reminded idle lead %s" % run["chat_agent_name"])
             write_json_atomically(_WATCHDOG_STATE_PATH, state)
-        return
-    state["idle_ticks"] = _count_or_zero(state.get("idle_ticks")) + 1
-    if action == "remind":
-        lead = find_run_lead(agents, run)
-        if lead is not None and _send_to_chat(lead, WATCHDOG_REMINDER_MESSAGE, agent_environment):
-            state["last_reminded_at"] = now
-            write_log_line("reminded idle lead %s" % run["chat_agent_name"])
-    write_json_atomically(_WATCHDOG_STATE_PATH, state)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def mode_tick(context: ProgramContext) -> None:
