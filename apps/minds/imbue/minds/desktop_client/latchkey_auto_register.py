@@ -59,7 +59,8 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # How a held push watches for its host's machine key (see the module docstring): the provisioning pass that records
 # it finishes seconds after the host file lands, so a few seconds between looks and a few minutes of looking cover
-# it, and a host that never gets a key costs one ``stat`` every interval for the watch's duration and nothing after.
+# it, and a host that never gets a key costs one ``stat`` every interval for the watch's duration; after that its
+# held push goes back to one ``stat`` per resolver change (``_collect_hosts_whose_machine_appeared``).
 DEFAULT_MACHINE_POLL_INTERVAL_SECONDS: Final[float] = 2.0
 DEFAULT_MACHINE_WATCH_SECONDS: Final[float] = 600.0
 
