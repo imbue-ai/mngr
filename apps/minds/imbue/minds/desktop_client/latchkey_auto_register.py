@@ -44,6 +44,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import EnvironmentStoppedError
+from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
@@ -139,8 +140,12 @@ class LatchkeyAutoRegister(MutableModel):
     _hosts_awaiting_machine: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
     _hosts_watched_for_machine: set[HostId] = PrivateAttr(default_factory=set)
     _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Set by :meth:`stop`; every machine watch waits on it, so they end with the subscription.
-    _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # Set by :meth:`stop` and, as a child of the group's shutdown event, by the group's shutdown; every machine
+    # watch waits on it alone, so a watch ends with the subscription or the app without waiting out a poll.
+    _stop_event: ShutdownEvent = PrivateAttr()
+
+    def model_post_init(self, __context: object) -> None:
+        self._stop_event = ShutdownEvent.from_parent(self.concurrency_group.shutdown_event)
 
     def start(self) -> None:
         """Subscribe to the resolver's change stream.
@@ -366,7 +371,6 @@ class LatchkeyAutoRegister(MutableModel):
         change, as before the watch existed. The watch also ends with
         :meth:`stop` and with the group's shutdown.
         """
-        shutdown_event = self.concurrency_group.shutdown_event
         deadline = time.monotonic() + self.machine_watch_seconds
         while True:
             self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
@@ -375,12 +379,7 @@ class LatchkeyAutoRegister(MutableModel):
             # watch, instead of relying on this one, which is about to exit.
             with self._push_lock:
                 agent_id = self._hosts_awaiting_machine.get(host_id)
-                is_over = (
-                    agent_id is None
-                    or self._stop_event.is_set()
-                    or shutdown_event.is_set()
-                    or time.monotonic() >= deadline
-                )
+                is_over = agent_id is None or self._stop_event.is_set() or time.monotonic() >= deadline
                 if is_over:
                     self._hosts_watched_for_machine.discard(host_id)
                     return
