@@ -280,6 +280,25 @@ describe("the update modal's verdict line", () => {
     expect(buttonLabels(root)).toEqual(["Dismiss"]);
   });
 
+  it.each([
+    ["a run that landed", { verdict: "UPDATED", availability: "UNKNOWN", unknown_reason: "NO_MACHINE_VERSION" }, true],
+    ["a run that landed with a note for the user", { verdict: "UPDATED_WITH_REBUILD_ITEMS" }, true],
+    ["a later run that found nothing to do", { verdict: "ALREADY_CURRENT", availability: "UP_TO_DATE" }, false],
+  ] as const)("dismisses the row's hidden Updated to X note along with %s only if that run earned it", async (_case, fields, isNoteDismissed) => {
+    const { draw, requests, onClose } = harness(() => Promise.resolve(jsonResponse({ ok: true })), {
+      ...OUT_OF_DATE_UPDATE,
+      success_note_version: "minds-v0.4.0",
+      ...fields,
+    } as UiWorkspaceUpdate);
+
+    press(draw(), "Dismiss");
+    await settleDispatch();
+
+    const dismissed = [`/ui/api/updates/${AGENT}/dismiss`];
+    expect(requests).toEqual(isNoteDismissed ? [...dismissed, `/ui/api/updates/${AGENT}/note/dismiss`] : dismissed);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("settles a failed run before offering another: its chat and Dismiss, no update buttons", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
       ...OUT_OF_DATE_UPDATE,

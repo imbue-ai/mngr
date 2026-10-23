@@ -185,14 +185,26 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     });
   }
 
-  /** Clears the run's outcome server-side, so the row's badge goes with it. */
-  function dismissOutcomeButton(agentId: string, isBusy: boolean, onClose: () => void): m.Children {
+  /** Clears the run's outcome server-side, so the row's badge goes with it. With
+   * `isNoteDismissedToo`, also the "Updated to X" note that run earned: the row
+   * hides that note behind its badge, so this is the note's Dismiss as well. */
+  function dismissOutcomeButton(
+    agentId: string,
+    isBusy: boolean,
+    onClose: () => void,
+    isNoteDismissedToo = false,
+  ): m.Children {
+    const dismiss = async (): Promise<UpdateActionResult> => {
+      const updates = getAppContext().stores.updates;
+      const result = await updates.dismissRunOutcome(agentId);
+      return result.isOk && isNoteDismissedToo ? await updates.dismissNote(agentId) : result;
+    };
     return m(
       Button,
       {
         variant: "secondary",
         disabled: isBusy,
-        onclick: () => run("dismiss", () => getAppContext().stores.updates.dismissRunOutcome(agentId), onClose),
+        onclick: () => run("dismiss", dismiss, onClose),
       },
       state.pendingAction === "dismiss" ? m(Spinner, { size: "sm" }) : "Dismiss",
     );
@@ -300,6 +312,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       const isUpdating = updates.isUpdating(agentId);
       const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
       const chatAgentId = updateChatAgentIdFor(update, isUpdating);
+      const isNoteShowing = (update.success_note_version ?? "") !== "";
       const situation = updates.isQuietWhileStopped(agentId) ? "stopped" : updateModalSituation(update, isUpdating);
 
       const body: m.Children[] = [];
@@ -477,7 +490,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         case "updated-with-note":
           pushOutcome("success", verdictMessage(update));
           pushOpenChat();
-          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose, isNoteShowing));
           break;
         case "needs-sign-in": {
           // A press the workspace just refused for want of a sign-in already says so in its own words.
@@ -563,7 +576,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           pushOutcome("success", verdictMessage(update));
           // The row hides its note, and the note's chat, behind any badge, so this is that chat's way in.
           if (update.verdict === "UPDATED") pushOpenChat();
-          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose, update.verdict === "UPDATED" && isNoteShowing));
           break;
         case "unknown":
           body.push(update.unknown_reason === "NO_APP_VERSION" ? noAppVersionBody(update) : unreadableMachineBody());
