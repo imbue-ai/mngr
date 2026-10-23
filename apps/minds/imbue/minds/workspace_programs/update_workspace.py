@@ -181,9 +181,10 @@ def mode_now(context: ProgramContext) -> None:
     # Only where cron runs the watchdog is a stopped lead brought back.
     is_watchdog_installed = _install_cron_entry(context)
     refusal, account = _readiness_refusal(context, is_cron_needed=False)
-    if refusal is not None or account is None:
-        emit_update_answer({**(refusal or {}), "mode": "now"})
+    if refusal is not None:
+        emit_update_answer({**refusal, "mode": "now"})
         return
+    assert account is not None
     agents = list_agents(agent_environment)
     run = read_json_object(RUN_RECORD_PATH)
     # An ALREADY_RUNNING answer names when the run it found began, which tells its record apart from an
