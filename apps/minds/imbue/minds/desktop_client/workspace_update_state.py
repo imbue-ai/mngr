@@ -49,7 +49,6 @@ from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_status import describe_skip_reason
-from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
 from imbue.minds.desktop_client.workspace_version import read_workspace_current_version
 from imbue.minds.errors import MindError
@@ -292,12 +291,8 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         is_scheduled=schedule is not None,
         override_ref=schedule.override_ref if schedule is not None else "",
         is_schedule_auto_armed=schedule.is_auto_armed if schedule is not None else False,
-        schedule_window=(
-            format_update_window((schedule.window_start_hour, schedule.window_end_hour))
-            if schedule is not None
-            else ""
-        ),
-        schedule_zone=schedule.zone if schedule is not None else "",
+        schedule_window_start_minute_utc=schedule.window_start_minute_utc if schedule is not None else None,
+        schedule_window_length_minutes=schedule.window_length_minutes if schedule is not None else None,
         last_skip_reason=describe_skip_reason(schedule.last_skip_reason) if schedule is not None else "",
         needs_sign_in=run.is_sign_in_refused or schedule_facts.is_sign_in_skip_standing,
         is_decision_pending=run.record.verdict is UpdateVerdict.NEEDS_DECISION,

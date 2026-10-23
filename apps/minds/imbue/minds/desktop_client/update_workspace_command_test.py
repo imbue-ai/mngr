@@ -7,6 +7,7 @@ from datetime import timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from inline_snapshot import snapshot
@@ -22,21 +23,41 @@ from imbue.minds.desktop_client.testing import update_program_context
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
+from imbue.minds.desktop_client.update_workspace_command import UtcUpdateWindow
 from imbue.minds.desktop_client.update_workspace_command import build_arm_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_now_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_read_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_update_workspace_command
 from imbue.minds.desktop_client.update_workspace_command import parse_update_command_result
 from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
+from imbue.minds.desktop_client.update_workspace_command import utc_update_window
 
 _NOW = 1_792_000_000.0
-_SETTINGS = UpdateWorkspaceSettings(
-    ceiling_ref="minds-v0.9.0",
-    window_start_hour=2,
-    window_end_hour=5,
-    zone="America/Los_Angeles",
-    is_backup_configured=True,
+_WINDOW = UtcUpdateWindow(start_minute_utc=9 * 60, length_minutes=3 * 60)
+_SETTINGS = UpdateWorkspaceSettings(ceiling_ref="minds-v0.9.0", window=_WINDOW, is_backup_configured=True)
+
+
+@pytest.mark.parametrize(
+    ("now", "window_hours", "zone", "start_minute_utc", "length_minutes"),
+    [
+        # Inside a window: the window open now.
+        ("2026-10-20T03:00:00-07:00", (2, 5), "America/Los_Angeles", 9 * 60, 3 * 60),
+        ("2026-10-20T08:00:00+02:00", (11, 12), "Europe/Berlin", 9 * 60, 60),
+        # A half-hour zone opens off the UTC hour.
+        ("2026-10-20T12:00:00+05:30", (2, 5), "Asia/Kolkata", 20 * 60 + 30, 3 * 60),
+        # A window that wraps local midnight, read after midnight, is the one that opened the evening before.
+        ("2026-10-21T01:00:00-07:00", (23, 3), "America/Los_Angeles", 6 * 60, 4 * 60),
+        # Outside every window: the next one, at its own offset (here past the fall-back on 2026-11-01).
+        ("2026-10-31T12:00:00-07:00", (2, 5), "America/Los_Angeles", 10 * 60, 3 * 60),
+    ],
 )
+@pytest.mark.witnesses("workspace-updates.window-in-the-users-zone")
+def test_the_users_local_window_reaches_the_workspace_in_utc(
+    now: str, window_hours: tuple[int, int], zone: str, start_minute_utc: int, length_minutes: int
+) -> None:
+    window = utc_update_window(window_hours[0], window_hours[1], ZoneInfo(zone), datetime.fromisoformat(now))
+
+    assert (window.start_minute_utc, window.length_minutes) == (start_minute_utc, length_minutes)
 
 
 def _run_mode(
@@ -64,11 +85,7 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
     assert result.outcome is UpdateArmOutcome.ARMED
     assert result.schedule is not None
     assert result.schedule.target_ref == "minds-v0.9.1"
-    assert (result.schedule.window_start_hour, result.schedule.window_end_hour, result.schedule.zone) == (
-        2,
-        5,
-        "America/Los_Angeles",
-    )
+    assert (result.schedule.window_start_minute_utc, result.schedule.window_length_minutes) == (9 * 60, 3 * 60)
     assert staged.read_state("schedule.json") == answer["schedule"]
     dispatcher = staged.root / "data" / ".state" / "update-apply" / "dispatcher.py"
     assert dispatcher.read_text() == Path(program.__file__ or "").read_text()
@@ -213,13 +230,7 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    settings = UpdateWorkspaceSettings(
-        ceiling_ref="minds-v0.9.0",
-        window_start_hour=2,
-        window_end_hour=5,
-        zone="America/Los_Angeles",
-        is_backup_configured=False,
-    )
+    settings = UpdateWorkspaceSettings(ceiling_ref="minds-v0.9.0", window=_WINDOW, is_backup_configured=False)
 
     _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
@@ -524,9 +535,7 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
     staged.write_state("run.json", {"chat_agent_name": "update-to-minds-v0-9-1", "started_at": _NOW})
     moved = UpdateWorkspaceSettings(
         ceiling_ref="minds-v0.10.0",
-        window_start_hour=23,
-        window_end_hour=3,
-        zone="Europe/Berlin",
+        window=UtcUpdateWindow(start_minute_utc=21 * 60 + 30, length_minutes=4 * 60),
         is_backup_configured=False,
     )
 
@@ -534,12 +543,11 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
 
     facts = parse_update_workspace_facts(answer)
     assert facts.schedule is not None
-    assert (facts.schedule.ceiling_ref, facts.schedule.window_start_hour, facts.schedule.window_end_hour) == (
-        "minds-v0.10.0",
-        23,
-        3,
-    )
-    assert facts.schedule.zone == "Europe/Berlin"
+    assert (
+        facts.schedule.ceiling_ref,
+        facts.schedule.window_start_minute_utc,
+        facts.schedule.window_length_minutes,
+    ) == ("minds-v0.10.0", 21 * 60 + 30, 4 * 60)
     assert facts.schedule.override_ref == "minds-v0.9.1"
     assert facts.schedule.marked_chat_name == "update-to-minds-v0-9-1"
     assert facts.schedule.last_skip_reason == "LEASE_HELD"
@@ -592,7 +600,7 @@ def test_the_shipped_command_runs_the_program_from_a_scratch_file_through_the_sh
 ) -> None:
     """What ``mngr exec`` runs: decode, run in the workspace root, remove the scratch file, keep the exit status."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    staged.write_state("schedule.json", {"window_start_hour": 2, "window_end_hour": 5})
+    staged.write_state("schedule.json", {"window_start_minute_utc": 9 * 60, "window_length_minutes": 3 * 60})
     scratch_dir = tmp_path / "scratch"
     scratch_dir.mkdir()
     monkeypatch.setenv("TMPDIR", str(scratch_dir))

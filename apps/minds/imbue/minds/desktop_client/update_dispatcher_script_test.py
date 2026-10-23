@@ -18,7 +18,6 @@ from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 
-_LOS_ANGELES = "America/Los_Angeles"
 _LEAD = STAGED_CREATED_CHAT["name"]
 _LEAD_ID = "agent-" + "1" * 32
 _WORKER = "update-self"
@@ -38,39 +37,38 @@ def program(tmp_path: Path) -> ModuleType:
 
 
 @pytest.mark.parametrize(
-    ("now", "window", "zone", "opened_at_utc"),
+    ("now", "start_minute_utc", "length_minutes", "opened_at_utc"),
     [
-        # Inside a plain window, in the workspace user's zone rather than the clock's.
-        ("2026-10-20T02:30:00-07:00", (2, 5), _LOS_ANGELES, "2026-10-20T09:00"),
-        ("2026-10-20T11:30:00+02:00", (11, 12), "Europe/Berlin", "2026-10-20T09:00"),
-        # A window that wraps midnight, read after midnight, opened the evening before.
-        ("2026-10-21T01:00:00-07:00", (23, 3), _LOS_ANGELES, "2026-10-21T06:00"),
-        # The spring-forward night has no 2 AM: the window opens at the first instant after the gap.
-        ("2026-03-08T03:30:00-07:00", (2, 5), _LOS_ANGELES, "2026-03-08T10:00"),
-        # The fall-back night has two 1 AMs: the window opened at the first.
-        ("2026-11-01T01:30:00-08:00", (1, 3), _LOS_ANGELES, "2026-11-01T08:00"),
+        ("2026-10-20T10:30:00+00:00", 9 * 60, 3 * 60, "2026-10-20T09:00"),
+        # A start off the hour, as a half-hour zone's window has.
+        ("2026-10-20T21:00:00+00:00", 20 * 60 + 30, 3 * 60, "2026-10-20T20:30"),
+        # A window that runs past UTC midnight, read after midnight, opened the day before.
+        ("2026-10-21T01:00:00+00:00", 22 * 60, 4 * 60, "2026-10-20T22:00"),
     ],
 )
-@pytest.mark.witnesses("workspace-updates.window-in-the-users-zone")
-def test_the_window_opens_at_the_start_hour_in_the_files_zone(
-    program: ModuleType, now: str, window: tuple[int, int], zone: str, opened_at_utc: str
+def test_the_window_opens_daily_at_its_utc_start(
+    program: ModuleType, now: str, start_minute_utc: int, length_minutes: int, opened_at_utc: str
 ) -> None:
-    bounds = program.current_window(_epoch(now), window[0], window[1], zone)
+    bounds = program.current_window(_epoch(now), start_minute_utc, length_minutes)
 
     assert bounds is not None
     assert _utc(bounds[0]) == opened_at_utc
+    assert bounds[1] - bounds[0] == length_minutes * 60
 
 
 @pytest.mark.parametrize(
-    ("now", "window"),
+    ("now", "start_minute_utc", "length_minutes"),
     [
-        ("2026-10-20T05:00:00-07:00", (2, 5)),
-        ("2026-10-20T01:59:00-07:00", (2, 5)),
-        ("2026-10-20T12:00:00-07:00", (23, 3)),
+        ("2026-10-20T12:00:00+00:00", 9 * 60, 3 * 60),
+        ("2026-10-20T08:59:00+00:00", 9 * 60, 3 * 60),
+        ("2026-10-20T12:00:00+00:00", 22 * 60, 4 * 60),
+        ("2026-10-20T09:00:00+00:00", 9 * 60, 0),
     ],
 )
-def test_outside_the_window_there_is_no_window(program: ModuleType, now: str, window: tuple[int, int]) -> None:
-    assert program.current_window(_epoch(now), window[0], window[1], _LOS_ANGELES) is None
+def test_outside_the_window_there_is_no_window(
+    program: ModuleType, now: str, start_minute_utc: int, length_minutes: int
+) -> None:
+    assert program.current_window(_epoch(now), start_minute_utc, length_minutes) is None
 
 
 _IN_WINDOW = _epoch("2026-10-20T03:00:00-07:00")
@@ -82,9 +80,8 @@ def _schedule(**fields: Any) -> dict[str, Any]:
     return {
         "armed_at": _WINDOW_OPENED - 86400,
         "ceiling": "minds-v0.9.0",
-        "window_start_hour": 2,
-        "window_end_hour": 5,
-        "zone": _LOS_ANGELES,
+        "window_start_minute_utc": 9 * 60,
+        "window_length_minutes": 3 * 60,
         "override_ref": "",
         "marked_chat": "",
         "marked_at": None,

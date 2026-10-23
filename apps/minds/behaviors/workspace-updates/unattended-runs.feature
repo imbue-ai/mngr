@@ -32,11 +32,13 @@ Feature: Scheduling an update
     And no second update agent is started there for the rest of that window
 
   @window-in-the-users-zone
-  Scenario: The window is read in the time zone of the computer that scheduled it
+  Scenario: The window keeps to the hours of the computer that scheduled it
     The workspace may run on a machine with any clock; the hours the user chose are the user's.
+    The app hands the workspace the window in UTC and redoes it on every read, so a
+    daylight-saving change reaches the workspace at the app's next read.
     Given the user's computer is in one time zone and the workspace's machine in another
     When the user schedules a workspace's update
-    Then the update starts within the configured hours of the user's time zone, across daylight-saving changes
+    Then the update starts within the configured hours of the user's time zone
 
   @gone-agent-restarted-in-window
   Scenario: A scheduled update whose agent vanished before it began is started again in the same window

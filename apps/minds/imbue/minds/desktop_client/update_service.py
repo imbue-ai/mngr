@@ -53,7 +53,9 @@ from imbue.minds.desktop_client.update_workspace_command import cancel_update_sc
 from imbue.minds.desktop_client.update_workspace_command import parse_update_command_result
 from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
 from imbue.minds.desktop_client.update_workspace_command import read_update_facts
+from imbue.minds.desktop_client.update_workspace_command import resolve_update_window_zone
 from imbue.minds.desktop_client.update_workspace_command import start_update_now
+from imbue.minds.desktop_client.update_workspace_command import utc_update_window
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
@@ -214,12 +216,11 @@ class UpdateSettingsSource(MutableModel):
         return self.paths is not None and has_canonical_env(self.paths, agent_id)
 
     def settings_for(self, agent_id: AgentId) -> UpdateWorkspaceSettings:
-        window = self.read_update_window()
+        start_hour, end_hour = self.read_update_window()
+        zone = resolve_update_window_zone(self.read_zone())
         return UpdateWorkspaceSettings(
             ceiling_ref=self.read_ceiling(),
-            window_start_hour=window[0],
-            window_end_hour=window[1],
-            zone=self.read_zone(),
+            window=utc_update_window(start_hour, end_hour, zone, datetime.now(timezone.utc)),
             is_backup_configured=self.is_backup_configured(agent_id),
         )
 

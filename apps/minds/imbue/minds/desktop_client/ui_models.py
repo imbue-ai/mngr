@@ -505,11 +505,11 @@ class UiWorkspaceUpdate(FrozenModel):
     is_schedule_auto_armed: bool = Field(
         default=False, description="Whether auto-update armed the schedule, rather than the user; False when none"
     )
-    schedule_window: str = Field(
-        default="", description="The armed schedule's window as a clock reads it, e.g. '2:00 AM-5:00 AM'; '' when none"
+    schedule_window_start_minute_utc: int | None = Field(
+        default=None, description="Minutes past UTC midnight the armed schedule's window opens at; None when none"
     )
-    schedule_zone: str = Field(
-        default="", description="The IANA zone the armed schedule's window is read in; '' when none or unknown"
+    schedule_window_length_minutes: int | None = Field(
+        default=None, description="How long the armed schedule's window stays open, in minutes; None when none"
     )
     last_skip_reason: str = Field(default="", description="Why the last update window closed without a start")
     needs_sign_in: bool = Field(

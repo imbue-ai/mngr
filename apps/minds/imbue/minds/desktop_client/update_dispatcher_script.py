@@ -5,8 +5,8 @@ The program is standard-library Python the app writes into each workspace it arm
 workspace itself has updated. The workspace's cron runs it every minute, flock-serialized, from
 the workspace root. Each tick:
 
-- **dispatches** an armed schedule inside its window (the hours and IANA zone the app wrote,
-  read with ``zoneinfo``) when no run has started since the window opened: it checks that no
+- **dispatches** an armed schedule inside its window (a UTC start minute and a length the app
+  wrote, from the user's local hours) when no run has started since the window opened: it checks that no
   run is in flight and no ``updating workspace`` lease is held, creates the update chat through
   the chat app's create route (a bare ``mngr create`` behind a chat app with none), and marks the
   file with the chat. A window that closes without a start records why in the file. A run with
@@ -133,15 +133,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
-from datetime import timedelta
 from datetime import timezone
-
-try:
-    from zoneinfo import ZoneInfo
-    from zoneinfo import ZoneInfoNotFoundError
-except ImportError:
-    ZoneInfo = None
-    ZoneInfoNotFoundError = Exception
 
 # @APP_CONSTANTS@
 DISPATCHER_PATH = STATE_DIR + "/dispatcher.py"
@@ -821,48 +813,21 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, acc
     return result
 
 
-def _zone(name):
-    if ZoneInfo is None or not name:
-        return None
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return None
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
-def _local(now, zone_name):
-    zone = _zone(zone_name)
-    moment = datetime.fromtimestamp(now, tz=timezone.utc)
-    return moment.astimezone(zone) if zone is not None else moment.astimezone()
-
-
-def _window_open_on(day, start_hour, zone_name):
-    """The instant (epoch) a window opens on local ``day``; a start hour skipped by daylight saving opens at the
-    first instant after the gap."""
-    zone = _zone(zone_name)
-    naive = datetime(day.year, day.month, day.day, start_hour)
-    aware = naive.replace(tzinfo=zone) if zone is not None else naive.astimezone()
-    return aware.timestamp()
-
-
-def current_window(now, start_hour, end_hour, zone_name):
+def current_window(now, start_minute_utc, length_minutes):
     """``(opened_at, closes_at)`` of the window ``now`` is inside, or None outside every window.
 
-    Hours are local to ``zone_name`` and the window is ``[start, end)``; ``start > end`` wraps midnight.
+    The window opens daily at ``start_minute_utc`` minutes past UTC midnight and lasts
+    ``length_minutes``, so it may run past midnight into the next UTC day.
     """
-    local = _local(now, zone_name)
-    hour = local.hour
-    if start_hour < end_hour:
-        is_inside = start_hour <= hour < end_hour
-        open_day = local.date()
-    else:
-        is_inside = hour >= start_hour or hour < end_hour
-        open_day = local.date() if hour >= start_hour else (local - timedelta(days=1)).date()
-    if not is_inside:
-        return None
-    opened_at = _window_open_on(open_day, start_hour, zone_name)
-    length_hours = (end_hour - start_hour) % 24
-    return opened_at, opened_at + length_hours * 3600.0
+    utc_midnight = now - now % SECONDS_PER_DAY
+    for opened_at in (utc_midnight + start_minute_utc * 60 - SECONDS_PER_DAY, utc_midnight + start_minute_utc * 60):
+        closes_at = opened_at + length_minutes * 60
+        if opened_at <= now < closes_at:
+            return opened_at, closes_at
+    return None
 
 
 def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
@@ -885,9 +850,7 @@ def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     )
     if run_verdict(run) is not None and ((started_at is not None and started_at >= armed_at) or is_marked_run):
         return "remove"
-    window = current_window(
-        now, int(schedule["window_start_hour"]), int(schedule["window_end_hour"]), str(schedule.get("zone") or "")
-    )
+    window = current_window(now, schedule["window_start_minute_utc"], schedule["window_length_minutes"])
     if window is None:
         seen = schedule.get("window_seen_open_at")
         if not isinstance(seen, (int, float)) or isinstance(seen, bool):
@@ -943,8 +906,8 @@ def tick_schedule(now):
     schedule = read_json(SCHEDULE_PATH)
     if (
         schedule is None
-        or not isinstance(schedule.get("window_start_hour"), int)
-        or not isinstance(schedule.get("window_end_hour"), int)
+        or not isinstance(schedule.get("window_start_minute_utc"), int)
+        or not isinstance(schedule.get("window_length_minutes"), int)
     ):
         return
     run = read_json(RUN_PATH)
@@ -969,9 +932,7 @@ def tick_schedule(now):
         return now - marked_at >= UNLISTED_MARKED_LEAD_GRACE_SECONDS
 
     action = decide_schedule_action(schedule, run, now, is_marked_lead_gone)
-    window = current_window(
-        now, schedule["window_start_hour"], schedule["window_end_hour"], str(schedule.get("zone") or "")
-    )
+    window = current_window(now, schedule["window_start_minute_utc"], schedule["window_length_minutes"])
     if action == "remove":
         try:
             os.remove(SCHEDULE_PATH)

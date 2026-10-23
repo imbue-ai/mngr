@@ -12,6 +12,7 @@ import {
   OUT_OF_DATE_UPDATE,
   publishWorkspaceLiveness,
   recordingFetch,
+  scheduleWindowAtLocalHour,
   settle,
   updatesShell,
 } from "../../testing";
@@ -373,8 +374,7 @@ describe("the update modal under auto-update", () => {
     ...OUT_OF_DATE_UPDATE,
     is_scheduled: true,
     is_schedule_auto_armed: true,
-    schedule_window: "1:00 AM-4:00 AM",
-    schedule_zone: "",
+    ...scheduleWindowAtLocalHour(1, 3),
   };
   function armed(isScheduled: boolean): void {
     getAppContext().stores.updates.applyUpdatesMessage({

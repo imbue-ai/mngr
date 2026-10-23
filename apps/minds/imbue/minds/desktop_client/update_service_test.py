@@ -138,12 +138,12 @@ _HOST_OFFLINE = host_offline_exec_result()
 
 
 def _armed(*, override_ref: str = "", is_auto_armed: bool = False) -> MngrCallResult:
-    """An arm that landed, carrying the schedule file it wrote (window and zone as the workspace has them)."""
+    """An arm that landed, carrying the schedule file it wrote (its window as the workspace has it)."""
     schedule = armed_update_schedule_file(
         ceiling_ref=_CEILING,
         override_ref=override_ref,
-        window=(23, 3),
-        zone="Europe/Berlin",
+        window_start_minute_utc=21 * 60 + 30,
+        window_length_minutes=4 * 60,
         is_auto_armed=is_auto_armed,
     )
     return update_command_answer("ARMED", mode="arm", schedule=schedule)
@@ -929,15 +929,16 @@ def test_an_armed_schedule_shows_on_the_row_at_once_from_the_workspaces_own_file
     state = service.state_store.get(agent_id)
     assert state.is_scheduled is True
     assert state.override_ref == "minds-v0.9.1"
-    assert state.schedule_window == "11:00 PM-3:00 AM"
-    assert state.schedule_zone == "Europe/Berlin"
+    assert (state.schedule_window_start_minute_utc, state.schedule_window_length_minutes) == (21 * 60 + 30, 4 * 60)
     assert state.is_schedule_auto_armed is False
     mode, flags = update_program_invocation(caller.calls[0])
     assert mode == "arm"
     assert flags["--ceiling"] == _CEILING
     assert flags["--override"] == "minds-v0.9.1"
     assert flags["--auto-armed"] == "0"
-    assert (flags["--window-start"], flags["--window-end"], flags["--zone"]) == ("23", "3", "America/Los_Angeles")
+    # 11 PM in Los Angeles is 06:00 UTC under daylight saving and 07:00 outside it.
+    assert flags["--window-start-minute-utc"] in ("360", "420")
+    assert flags["--window-length-minutes"] == "240"
     assert started == []
 
 

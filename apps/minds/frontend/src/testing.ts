@@ -352,6 +352,17 @@ export const OUT_OF_DATE_UPDATE: UiWorkspaceUpdate = {
   is_backup_configured: true,
 };
 
+/** An armed schedule's window fields for a window that opens at `startHour`
+ * in the test machine's local time, as the workspace's file carries it (UTC). */
+export function scheduleWindowAtLocalHour(
+  startHour: number,
+  lengthHours: number,
+): Pick<UiWorkspaceUpdate, "schedule_window_start_minute_utc" | "schedule_window_length_minutes"> {
+  const minutesPerDay = 24 * 60;
+  const startUtc = (((startHour * 60 + new Date().getTimezoneOffset()) % minutesPerDay) + minutesPerDay) % minutesPerDay;
+  return { schedule_window_start_minute_utc: startUtc, schedule_window_length_minutes: lengthHours * 60 };
+}
+
 /** A shell registered as the app's context, its updates store holding `updates`
  * as a `workspace_updates` frame would leave it. */
 export function updatesShell(

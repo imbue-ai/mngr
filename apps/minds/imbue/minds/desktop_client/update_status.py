@@ -308,15 +308,14 @@ def parse_update_run_record(raw: object) -> UpdateRunStatus | None:
 class UpdateScheduleRecord(FrozenModel):
     """One workspace's armed schedule, parsed from the file its in-workspace update command writes there.
 
-    The app writes the ceiling, the window, the zone and the override; the workspace's
+    The app writes the ceiling, the window and the override; the workspace's
     dispatcher writes the chat it started this window and why the last window was skipped.
     """
 
     armed_at: datetime | None = Field(description="When the schedule was armed (UTC), None if unreadable")
     ceiling_ref: str = Field(description="The app's release ceiling the run targets unless an override names another")
-    window_start_hour: int = Field(description="Local hour the window opens at, in the file's zone")
-    window_end_hour: int = Field(description="Local hour the window closes at, in the file's zone")
-    zone: str = Field(description="The IANA zone the window's hours are read in; '' for the workspace's own clock")
+    window_start_minute_utc: int = Field(description="Minutes past UTC midnight the window opens at")
+    window_length_minutes: int = Field(description="How long the window stays open, in minutes")
     override_ref: str = Field(description="The exact version the user typed, '' for the ceiling")
     is_auto_armed: bool = Field(description="Whether auto-update armed it, rather than the user")
     marked_chat_name: str = Field(description="The update chat the dispatcher started this window; '' for none")
@@ -330,8 +329,8 @@ class UpdateScheduleRecord(FrozenModel):
         return self.override_ref or self.ceiling_ref
 
 
-def _parse_hour(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
+def _parse_minute_of_day(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 24 * 60:
         return None
     return value
 
@@ -340,23 +339,22 @@ def parse_update_schedule_record(raw: object) -> UpdateScheduleRecord | None:
     """Parse one already-decoded schedule file, or None when it is not a usable one.
 
     Lenient per field, as a file a newer app wrote must stay readable; only a window with no
-    readable hours is dropped, since nothing could say when it runs.
+    readable start or length is dropped, since nothing could say when it runs.
     """
     if not isinstance(raw, dict):
         logger.warning("Dropped an update schedule file that is not an object: {!r}", str(raw)[:200])
         return None
     record: dict[str, object] = {str(key): value for key, value in raw.items()}
-    start_hour = _parse_hour(record.get("window_start_hour"))
-    end_hour = _parse_hour(record.get("window_end_hour"))
-    if start_hour is None or end_hour is None:
+    start_minute = _parse_minute_of_day(record.get("window_start_minute_utc"))
+    length_minutes = _parse_minute_of_day(record.get("window_length_minutes"))
+    if start_minute is None or length_minutes is None:
         logger.warning("Dropped an update schedule file with no readable window: {!r}", str(raw)[:200])
         return None
     return UpdateScheduleRecord(
         armed_at=parse_update_epoch(record.get("armed_at")),
         ceiling_ref=str(record.get("ceiling") or ""),
-        window_start_hour=start_hour,
-        window_end_hour=end_hour,
-        zone=str(record.get("zone") or ""),
+        window_start_minute_utc=start_minute,
+        window_length_minutes=length_minutes,
         override_ref=str(record.get("override_ref") or ""),
         is_auto_armed=record.get("is_auto_armed") is True,
         marked_chat_name=str(record.get("marked_chat") or ""),

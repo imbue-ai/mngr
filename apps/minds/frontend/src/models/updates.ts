@@ -525,17 +525,28 @@ export function rowUpdateShortcutFor(update: UiWorkspaceUpdate | null, badge: Up
   return isSettledInChat && (update.chat_agent_id ?? "") !== "" ? "open-chat" : null;
 }
 
-function localTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+const MINUTES_PER_DAY = 24 * 60;
+
+/** A minute of the day as a clock reads it, e.g. "2:00 AM" or "8:30 PM". */
+function formatClockMinute(minuteOfDay: number): string {
+  const hour = Math.floor(minuteOfDay / 60);
+  const minute = String(minuteOfDay % 60).padStart(2, "0");
+  return `${hour % 12 || 12}:${minute} ${hour < 12 ? "AM" : "PM"}`;
 }
 
-/** The window an armed schedule runs in: the one written into the workspace,
- * which is what its own clock acts on, else the app's. Its zone is named only
- * when it is not the reader's own. */
-function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, viewerZone: string): string {
-  const windowText = update.schedule_window || appWindow;
-  const zone = update.schedule_zone ?? "";
-  return zone !== "" && zone !== viewerZone ? `${windowText}, ${zone} time` : windowText;
+/** The viewer's offset from UTC, in minutes east of it. */
+function localUtcOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
+}
+
+/** The window an armed schedule runs in, in the reader's local time: the one
+ * written into the workspace, which is what its own clock acts on, else the app's. */
+function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, viewerUtcOffsetMinutes: number): string {
+  const startUtc = update.schedule_window_start_minute_utc;
+  const length = update.schedule_window_length_minutes;
+  if (startUtc == null || length == null) return appWindow;
+  const start = (((startUtc + viewerUtcOffsetMinutes) % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  return `${formatClockMinute(start)}-${formatClockMinute((start + length) % MINUTES_PER_DAY)}`;
 }
 
 /** What an armed schedule says, for the modal and the machine's Updates
@@ -546,11 +557,11 @@ export function scheduledLine(
   update: UiWorkspaceUpdate,
   appWindow: string,
   isAutoUpdateEnabled = false,
-  viewerZone: string = localTimeZone(),
+  viewerUtcOffsetMinutes: number = localUtcOffsetMinutes(),
 ): string {
   const override = update.override_ref ?? "";
   const target = override ? ` to ${displayVersion(override)}` : "";
-  const windowText = scheduleWindowText(update, appWindow, viewerZone);
+  const windowText = scheduleWindowText(update, appWindow, viewerUtcOffsetMinutes);
   if (!isArmedByAutoUpdate(update, isAutoUpdateEnabled))
     return `Scheduled to update${target} in the next update window (${windowText}).`;
   const line = `Studio will update this workspace${target} in the next update window (${windowText}).`;

@@ -6,8 +6,8 @@ the shell and run with the workspace's own ``python3`` from its root. Each mode 
 prints one marker-wrapped JSON answer:
 
 - ``arm``: install the dispatcher and the cron line, check the update-self skill, cron, and a
-  signed-in account, then write the schedule file with the ceiling, the window hours, the zone,
-  and any version the user typed;
+  signed-in account, then write the schedule file with the ceiling, the window (in UTC, from the
+  user's local hours), and any version the user typed;
 - ``now``: the same installs and checks (cron is not needed), then create the update chat with
   the auto-open label and return once its create has finished;
 - ``cancel``: delete the schedule file;
@@ -25,14 +25,20 @@ import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from datetime import tzinfo
 from enum import auto
 from typing import Final
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
 from imbue.minds.desktop_client.in_workspace_mngr import exec_log_detail
@@ -68,13 +74,50 @@ _READ_TIMEOUT_SECONDS: Final[float] = _ARM_TIMEOUT_SECONDS
 _CANCEL_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
+class UtcUpdateWindow(FrozenModel):
+    """The daily update window as the workspace's clock acts on it: a UTC start and a length."""
+
+    start_minute_utc: int = Field(ge=0, lt=24 * 60, description="Minutes past UTC midnight the window opens at")
+    length_minutes: int = Field(ge=0, lt=24 * 60, description="How long the window stays open")
+
+
+def resolve_update_window_zone(zone_name: str) -> tzinfo:
+    """The zone the user's window hours are read in: ``zone_name``, else the host's current offset."""
+    if zone_name:
+        try:
+            return ZoneInfo(zone_name)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            logger.warning("Read the update window in the host's offset, as zone {!r} is unknown: {}", zone_name, e)
+    host_zone = datetime.now().astimezone().tzinfo
+    assert host_zone is not None
+    return host_zone
+
+
+@pure
+def utc_update_window(start_hour: int, end_hour: int, zone: tzinfo, now: datetime) -> UtcUpdateWindow:
+    """The local ``[start_hour, end_hour)`` window in ``zone``, as UTC.
+
+    The UTC start is taken from the window open at ``now``, else the next to open, so it holds until
+    the zone's offset next changes; the app refreshes it on every read of the workspace.
+    """
+    length = timedelta(hours=(end_hour - start_hour) % 24)
+    local_today = now.astimezone(zone).date()
+    starts = (
+        datetime(day.year, day.month, day.day, start_hour, tzinfo=zone)
+        for day in (local_today - timedelta(days=1), local_today, local_today + timedelta(days=1))
+    )
+    opened_at_utc = next(start for start in starts if now < start + length).astimezone(timezone.utc)
+    return UtcUpdateWindow(
+        start_minute_utc=opened_at_utc.hour * 60 + opened_at_utc.minute,
+        length_minutes=int(length.total_seconds()) // 60,
+    )
+
+
 class UpdateWorkspaceSettings(FrozenModel):
     """The app's own values a command carries into the workspace."""
 
     ceiling_ref: str = Field(description="This app's release ceiling (``default_workspace_template_ref``)")
-    window_start_hour: int = Field(description="Local hour the update window opens at")
-    window_end_hour: int = Field(description="Local hour the update window closes at")
-    zone: str = Field(description="The app host's IANA time zone the window is read in; '' when unknown")
+    window: UtcUpdateWindow = Field(description="The update window, in UTC")
     is_backup_configured: bool = Field(description="Whether the workspace has backups to fall back on")
 
 
@@ -151,12 +194,10 @@ def _settings_arguments(settings: UpdateWorkspaceSettings) -> list[str]:
     return [
         "--ceiling",
         settings.ceiling_ref,
-        "--window-start",
-        str(settings.window_start_hour),
-        "--window-end",
-        str(settings.window_end_hour),
-        "--zone",
-        settings.zone,
+        "--window-start-minute-utc",
+        str(settings.window.start_minute_utc),
+        "--window-length-minutes",
+        str(settings.window.length_minutes),
         "--backup-configured",
         "1" if settings.is_backup_configured else "0",
     ]
@@ -341,9 +382,8 @@ def _app_fields(context):
     """The schedule fields the app owns, from this run's arguments."""
     return {
         "ceiling": _arg(context, "--ceiling"),
-        "window_start_hour": int(_arg(context, "--window-start", "2")),
-        "window_end_hour": int(_arg(context, "--window-end", "5")),
-        "zone": _arg(context, "--zone"),
+        "window_start_minute_utc": int(_arg(context, "--window-start-minute-utc")),
+        "window_length_minutes": int(_arg(context, "--window-length-minutes")),
         "is_backup_configured": _arg(context, "--backup-configured", "1") == "1",
     }
 
@@ -389,11 +429,11 @@ def mode_arm(context):
     schedule["is_auto_armed"] = _arg(context, "--auto-armed", "0") == "1"
     write_json(SCHEDULE_PATH, schedule)
     log(
-        "armed a schedule (%s-%s %s, target %s)"
+        "armed a schedule (%d minutes from %02d:%02d UTC, target %s)"
         % (
-            schedule["window_start_hour"],
-            schedule["window_end_hour"],
-            schedule["zone"],
+            schedule["window_length_minutes"],
+            schedule["window_start_minute_utc"] // 60,
+            schedule["window_start_minute_utc"] % 60,
             schedule["override_ref"] or schedule["ceiling"],
         )
     )

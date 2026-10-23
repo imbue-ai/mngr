@@ -23,6 +23,7 @@ import {
   jsonResponse,
   publishWorkspaceLiveness,
   renderDeep,
+  scheduleWindowAtLocalHour,
   settingsOverview,
   settle,
 } from "../../../testing";
@@ -1322,7 +1323,7 @@ describe("the Updates settings group under auto-update", () => {
         is_scheduled: true,
         is_schedule_auto_armed: false,
         override_ref: "upstream/some-branch",
-        schedule_window: "1:00 AM-4:00 AM",
+        ...scheduleWindowAtLocalHour(1, 3),
       },
     });
 

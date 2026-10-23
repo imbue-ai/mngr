@@ -1812,8 +1812,8 @@ def armed_update_schedule_file(
     *,
     ceiling_ref: str,
     override_ref: str = "",
-    window: tuple[int, int] = (2, 5),
-    zone: str = "America/Los_Angeles",
+    window_start_minute_utc: int = 9 * 60,
+    window_length_minutes: int = 3 * 60,
     is_auto_armed: bool = False,
 ) -> dict[str, Any]:
     """A ``schedule.json`` as the update program's arm writes it, and as its ARMED answer carries it."""
@@ -1821,9 +1821,8 @@ def armed_update_schedule_file(
         "schema": 1,
         "armed_at": datetime.now(timezone.utc).timestamp(),
         "ceiling": ceiling_ref,
-        "window_start_hour": window[0],
-        "window_end_hour": window[1],
-        "zone": zone,
+        "window_start_minute_utc": window_start_minute_utc,
+        "window_length_minutes": window_length_minutes,
         "override_ref": override_ref,
         "is_auto_armed": is_auto_armed,
         "is_backup_configured": False,

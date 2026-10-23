@@ -631,37 +631,42 @@ describe("rowUpdateShortcutFor", () => {
 });
 
 describe("the schedule's lines", () => {
+  // 1:00 AM-4:00 AM in Los Angeles under daylight saving (UTC-7).
+  const PACIFIC_DAYLIGHT = -7 * 60;
   const ARMED = {
     ...OUT_OF_DATE_UPDATE,
     is_scheduled: true,
-    schedule_window: "1:00 AM-4:00 AM",
-    schedule_zone: "America/Los_Angeles",
+    schedule_window_start_minute_utc: 8 * 60,
+    schedule_window_length_minutes: 3 * 60,
   };
 
-  it("names the window written into the workspace, and its zone only when it is not the reader's", () => {
-    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, "America/Los_Angeles")).toBe(
+  it("names the window written into the workspace in the reader's own local time", () => {
+    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, PACIFIC_DAYLIGHT)).toBe(
       "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
     );
-    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, "Europe/London")).toContain(
-      "(1:00 AM-4:00 AM, America/Los_Angeles time)",
+    // A half-hour zone east of UTC reads the same window in the afternoon.
+    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, 5 * 60 + 30)).toContain("(1:30 PM-4:30 PM)");
+    // A window that runs past the reader's midnight.
+    expect(scheduledLine({ ...ARMED, schedule_window_start_minute_utc: 6 * 60 }, "", false, PACIFIC_DAYLIGHT)).toContain(
+      "(11:00 PM-2:00 AM)",
     );
-    // A schedule read before the window field existed falls back to the app's.
-    expect(scheduledLine({ ...ARMED, schedule_window: "", schedule_zone: "" }, "2:00 AM-5:00 AM")).toContain(
-      "(2:00 AM-5:00 AM)",
-    );
+    // A schedule read with no window falls back to the app's.
+    expect(
+      scheduledLine({ ...ARMED, schedule_window_start_minute_utc: null }, "2:00 AM-5:00 AM", false, PACIFIC_DAYLIGHT),
+    ).toContain("(2:00 AM-5:00 AM)");
   });
 
   it("names a version the user typed, and says of auto-update's own schedule that nothing is asked", () => {
     const autoArmed = { ...ARMED, is_schedule_auto_armed: true };
-    const line = scheduledLine({ ...autoArmed, override_ref: "minds-v0.9.1" }, "", true, "America/Los_Angeles");
+    const line = scheduledLine({ ...autoArmed, override_ref: "minds-v0.9.1" }, "", true, PACIFIC_DAYLIGHT);
     expect(line).toContain("to v0.9.1");
     expect(line).toContain("No action is needed.");
     // A sign-in is asked of the reader, beside this line.
-    expect(scheduledLine({ ...autoArmed, needs_sign_in: true }, "", true, "America/Los_Angeles")).not.toContain(
+    expect(scheduledLine({ ...autoArmed, needs_sign_in: true }, "", true, PACIFIC_DAYLIGHT)).not.toContain(
       "No action is needed.",
     );
     // One the user armed is theirs, under auto-update too.
-    expect(scheduledLine(ARMED, "", true, "America/Los_Angeles")).toBe(
+    expect(scheduledLine(ARMED, "", true, PACIFIC_DAYLIGHT)).toBe(
       "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
     );
   });

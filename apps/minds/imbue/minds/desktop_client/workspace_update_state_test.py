@@ -1113,9 +1113,8 @@ def _schedule_record(**overrides: object) -> UpdateScheduleRecord:
     fields: dict[str, object] = {
         "armed_at": datetime(2026, 10, 19, tzinfo=timezone.utc),
         "ceiling_ref": "minds-v0.4.1",
-        "window_start_hour": 2,
-        "window_end_hour": 5,
-        "zone": "America/Los_Angeles",
+        "window_start_minute_utc": 9 * 60,
+        "window_length_minutes": 3 * 60,
         "override_ref": "",
         "is_auto_armed": False,
         "marked_chat_name": "",
@@ -1139,10 +1138,10 @@ def test_the_row_is_scheduled_exactly_as_the_workspaces_file_says(tmp_path: Path
     state = store.get(agent_id)
     assert state.is_scheduled is True
     assert state.is_schedule_auto_armed is True
-    assert (state.override_ref, state.schedule_window, state.schedule_zone) == (
+    assert (state.override_ref, state.schedule_window_start_minute_utc, state.schedule_window_length_minutes) == (
         "minds-v0.4.2",
-        "2:00 AM-5:00 AM",
-        "America/Los_Angeles",
+        9 * 60,
+        3 * 60,
     )
     assert state.last_skip_reason == "Another update flow was working in this workspace during the last update window."
 

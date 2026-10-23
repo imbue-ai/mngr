@@ -704,7 +704,7 @@ def test_scheduling_arms_the_workspace_and_shows_on_the_row_at_once(
     assert response.status_code == 200
     published = _published(app, agent_id)
     assert published.is_scheduled is True
-    assert published.schedule_window == "2:00 AM-5:00 AM"
+    assert (published.schedule_window_start_minute_utc, published.schedule_window_length_minutes) == (9 * 60, 3 * 60)
     mode, flags = update_program_invocation(_recording_caller(app).calls[0])
     assert (mode, flags["--ceiling"], flags["--override"]) == ("arm", _CEILING, "")
 
