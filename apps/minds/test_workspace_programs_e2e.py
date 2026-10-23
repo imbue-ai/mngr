@@ -34,12 +34,12 @@ from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_LOG_PATH
 from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
+from imbue.minds.workspace_programs.update_protocol import DURABLE_CRON_PATH
 from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
 from imbue.minds.workspace_programs.update_protocol import SCHEDULE_FILE_PATH
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
 
 _LIVE_CRON_PATH = f"{LIVE_CRON_DIRECTORY}/{DISPATCHER_CRON_NAME}"
-_DURABLE_CRON_PATH = f"data/.state/cron.d/{DISPATCHER_CRON_NAME}"
 
 
 @pytest.mark.minds_snapshot_resume
@@ -113,7 +113,7 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
         assert installed_digest == hashlib.sha256(build_workspace_program_archive(update_workspace)).hexdigest()
         tick_command = f"&& python3 {DISPATCHER_ARCHIVE_PATH} tick >> {DISPATCHER_LOG_PATH} 2>&1"
         assert tick_command in _run_in_workspace_root(running_workspace, f"cat {_LIVE_CRON_PATH}")
-        assert tick_command in _run_in_workspace_root(running_workspace, f"cat {_DURABLE_CRON_PATH}")
+        assert tick_command in _run_in_workspace_root(running_workspace, f"cat {DURABLE_CRON_PATH}")
 
         tick = exec_in_workspace_container(
             running_workspace.container_name,
@@ -129,5 +129,5 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
         _run_in_workspace_root(
             running_workspace,
             f"rm -f {SCHEDULE_FILE_PATH} {DISPATCHER_ARCHIVE_PATH} {DISPATCHER_LOG_PATH} {_LIVE_CRON_PATH} "
-            f"{_DURABLE_CRON_PATH}",
+            f"{DURABLE_CRON_PATH}",
         )

@@ -50,6 +50,7 @@ from imbue.minds.workspace_programs.update_dispatcher import write_file_if_chang
 from imbue.minds.workspace_programs.update_dispatcher import write_json_atomically
 from imbue.minds.workspace_programs.update_dispatcher import write_log_line
 from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
+from imbue.minds.workspace_programs.update_protocol import DURABLE_CRON_PATH
 from imbue.minds.workspace_programs.update_protocol import LAST_DISPATCH_FILE_PATH
 from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
 from imbue.minds.workspace_programs.update_protocol import OUTCOME_ALREADY_RUNNING
@@ -63,8 +64,6 @@ from imbue.minds.workspace_programs.update_protocol import SKIP_NEEDS_SIGN_IN
 from imbue.minds.workspace_programs.update_protocol import STARTED_BY_IMMEDIATE
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_CHECK_SIGN_IN_FLAG
 
-# The durable copy of the cron line, which the template reinstalls at boot.
-_DURABLE_CRON_PATH: Final[str] = f"data/.state/cron.d/{DISPATCHER_CRON_NAME}"
 _CRON_LOCK_PATH: Final[str] = "/run/update-self-dispatch.lock"
 _CRON_PATH_LINE: Final[str] = "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _CRON_FILE_MODE: Final[int] = 0o644
@@ -90,7 +89,7 @@ def _install_cron_entry(context: ProgramContext) -> bool:
     if not is_cron_available(context["live_cron_dir"]):
         return False
     line = _cron_line(os.path.realpath(os.getcwd())).encode("utf-8")
-    write_file_if_changed(_DURABLE_CRON_PATH, line, _CRON_FILE_MODE)
+    write_file_if_changed(DURABLE_CRON_PATH, line, _CRON_FILE_MODE)
     try:
         write_file_if_changed(os.path.join(context["live_cron_dir"], DISPATCHER_CRON_NAME), line, _CRON_FILE_MODE)
     except OSError as exc:

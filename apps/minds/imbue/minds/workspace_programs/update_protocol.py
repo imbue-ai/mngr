@@ -9,6 +9,8 @@ LAST_DISPATCH_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/last-dispatch.json"
 # The cron drop-in that runs the dispatcher's tick, in the directory the cron daemon reads.
 DISPATCHER_CRON_NAME: Final[str] = "update-self-dispatch"
 LIVE_CRON_DIRECTORY: Final[str] = "/etc/cron.d"
+# The cron line's durable copy, which the template reinstalls at boot.
+DURABLE_CRON_PATH: Final[str] = f"data/.state/cron.d/{DISPATCHER_CRON_NAME}"
 
 # Opens the program's one JSON answer on stdout (see ``program_support.emit_marker_json``).
 UPDATE_COMMAND_RESULT_MARKER: Final[str] = "MINDS_UPDATE_COMMAND_JSON:"
