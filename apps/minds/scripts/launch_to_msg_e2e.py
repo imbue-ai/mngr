@@ -69,6 +69,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import socketserver
@@ -534,6 +535,19 @@ def ensure_brew_curl() -> Path:
         raise E2EFailure("neither brew curl nor brew found; install brew + curl")
     subprocess.run([brew, "install", "curl"], check=True)
     return ensure_brew_curl()
+
+
+def write_curl_with_ca_bundle(curl: Path, ca_bundle: Path) -> Path:
+    """Write a ``curl`` wrapper that runs ``curl`` verifying against ``ca_bundle``.
+
+    The app sets ``CURL_CA_BUNDLE`` to its own certifi bundle on macOS,
+    replacing any the environment passes it, so the bundle is set inside the
+    wrapper, in the process the app's curl router execs."""
+    wrapper = SLACK_MOCK_STATE / "curl-bin" / "curl"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(f'#!/bin/sh\nCURL_CA_BUNDLE={shlex.quote(str(ca_bundle))} exec {shlex.quote(str(curl))} "$@"\n')
+    wrapper.chmod(0o755)
+    return wrapper
 
 
 def patch_etc_hosts() -> None:
@@ -1440,21 +1454,21 @@ def run_e2e() -> int:
     brew_curl = ensure_brew_curl()
     cert = ensure_cert()
     ca_bundle = ensure_combined_cert_bundle(cert)
-    logger.info("brew curl: {}; ca_bundle: {}", brew_curl, ca_bundle)
+    latchkey_curl = write_curl_with_ca_bundle(brew_curl, ca_bundle)
+    logger.info("brew curl: {}; ca_bundle: {}; latchkey curl: {}", brew_curl, ca_bundle, latchkey_curl)
 
     # 1. Launch Imbue Studio.app ourselves with --remote-debugging-port so Playwright
     # can attach via CDP. Use a free port to avoid clashes.
     cdp_port = _free_port()
     env = {
         **os.environ,
-        # ``LATCHKEY_CURL`` (read by latchkey's config.ts) pins the curl
-        # binary to brew curl (OpenSSL) so checkApiCredentials never falls
-        # back to /usr/bin/curl (SecureTransport, ignores CURL_CA_BUNDLE).
-        # Otherwise services_info would report INVALID, grant() would
-        # invoke auth_browser, and the request would resolve DENIED.
-        "LATCHKEY_CURL": str(brew_curl),
-        "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
-        "CURL_CA_BUNDLE": str(ca_bundle),
+        # latchkey's curl must trust the slack mock's cert, or services_info
+        # reports INVALID, grant() invokes auth_browser, and the request
+        # resolves DENIED. The packaged app replaces ``LATCHKEY_CURL`` with its
+        # curl router, which runs the first ``curl`` on PATH: the wrapper,
+        # whose brew curl (OpenSSL) then verifies against the combined bundle.
+        "LATCHKEY_CURL": str(latchkey_curl),
+        "PATH": f"{latchkey_curl.parent}:" + os.environ.get("PATH", ""),
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)

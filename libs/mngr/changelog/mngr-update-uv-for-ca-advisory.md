@@ -1,0 +1,1 @@
+The mngr Docker image (offload sandboxes, the schedule image, local docker hosts) installs uv 0.13.4 from its versioned installer instead of whatever `install.sh` resolved to, Node 24.22.1 (was 24.15.0) and Claude Code 2.1.307 (was 2.1.293). It also upgrades `ca-certificates`. These drop the compromised `emSign ECC Root CA - G3` root.

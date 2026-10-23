@@ -286,6 +286,20 @@ describe("noticeBandFor, out of date", () => {
     expect(noticeBandFor("healthy", "healthy", false, { standingUpdateNotice: "out-of-date" })).toBeNull();
   });
 
+  it("bands a machine with a security update more strongly than an ordinary one, with the same way into the modal", () => {
+    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "security-update" });
+    expect(band?.key).toBe("workspace-security-update");
+    expect(band?.variant).toBe("error");
+    expect(band?.action?.kind).toBe("update-workspace");
+    // Still a standing condition: a health condition and a run in flight outrank it.
+    expect(noticeBandFor("stuck", "healthy", true, { standingUpdateNotice: "security-update" })?.key).toBe(
+      "workspace-recovering",
+    );
+    expect(
+      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "security-update" })?.key,
+    ).toBe("workspace-update-preparing");
+  });
+
   it("bands a machine too old to update in place with the same way into the modal", () => {
     const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "needs-recreation" });
     expect(band?.key).toBe("workspace-needs-recreation");

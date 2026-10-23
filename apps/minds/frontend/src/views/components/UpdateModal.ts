@@ -10,12 +10,14 @@ import {
   displayVersion,
   isFailureVerdict,
   isRecreationRequired,
+  isSecurityUpdate,
   isUpdateDispatchable,
   recordedDispatchFailure,
   updateActivityNotice,
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
+import { Collapsible } from "./Collapsible";
 import { Modal, DialogCloseButton } from "./Modal";
 import { machineVerdict } from "./MachineVerdict";
 import { Notice } from "./Notice";
@@ -37,7 +39,18 @@ interface UpdateModalState {
   errorDetail: string;
   /** Which press is held for the go-ahead-without-backups confirmation. */
   noBackupConfirm: "now" | "schedule" | null;
+  isSecurityDetailsOpen: boolean;
 }
+
+/** What the fix behind the security floor addresses. Rewritten whenever a
+ * release raises `SECURITY_FLOOR_VERSION`, since that release's fix is the one
+ * every workspace below the floor lacks. */
+const SECURITY_FIX_DETAILS =
+  "Eight intermediate certificates issued under eMudhra's emSign root certificate authority were compromised: " +
+  "anyone can recover their private keys. Software that still trusts them can be tricked into connecting to an " +
+  "impostor posing as any website, which could then read or change what this workspace sends and receives, " +
+  "including credentials. This update moves the workspace's tools and certificate stores to versions that no " +
+  "longer trust them.";
 
 /** Where to go when a run ended without landing: its own chat has the details,
  * and whatever it found, the next step is a conversation with it. */
@@ -134,6 +147,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     error: "",
     errorDetail: "",
     noBackupConfirm: null,
+    isSecurityDetailsOpen: false,
   };
 
   function run(
@@ -233,7 +247,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This workspace is running a version of Imbue Studio too old to update in place. " +
+        "This workspace is running a version of Imbue Studio too old to update in place, and is missing security fixes. " +
           "To get it up to date, create a new workspace and move your work across.",
       ),
       m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
@@ -279,6 +293,27 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             updateVersionRow("Supported by Imbue Studio", update.supported_version),
           ]),
         );
+        if (isSecurityUpdate(update)) {
+          body.push(
+            m(Notice, { variant: "error" }, [
+              m("p", "This update includes a critical security fix."),
+              m(
+                Collapsible,
+                {
+                  id: "security-fix-details",
+                  isOpen: state.isSecurityDetailsOpen,
+                  onToggle: () => (state.isSecurityDetailsOpen = !state.isSecurityDetailsOpen),
+                  extra: "mt-1",
+                  triggerExtra:
+                    "inline-flex items-center gap-1 type-helper bg-transparent border-0 p-0 text-inherit hover:underline",
+                  panelExtra: "mt-1 type-helper",
+                  summary: m("span", "See details"),
+                },
+                m("p", SECURITY_FIX_DETAILS),
+              ),
+            ]),
+          );
+        }
       }
 
       const activity = updateActivityNotice(update, isUpdating);

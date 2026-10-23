@@ -37,13 +37,14 @@ and, with `--raspberry-pi`, a Raspberry Pi 5 always-on host
 
 ## macOS: prerequisites (install once)
 
-- [ ] **uv, git** -- the monorepo's core tooling. Every command is run via
-      `uv run ...` from the repo root.
+- [ ] **uv 0.13.4 or later, git** -- the monorepo's core tooling. Every
+      command is run via `uv run ...` from the repo root, and the root
+      `pyproject.toml`'s `required-version` refuses an older uv.
 
 - [ ] **Docker Desktop** (or colima / lima) -- local Imbue Studio agents run in
       Docker (or Lima) containers; start it before creating an agent.
 
-- [ ] **Node 24.15.0 (via nvm) + pnpm 10.33.4** -- the Electron desktop
+- [ ] **Node 24.22.1 (via nvm) + pnpm 10.33.4** -- the Electron desktop
       client. Both versions are pinned (`apps/minds/.nvmrc`,
       `apps/minds/package.json` `engines`, `engine-strict=true`), so
       `pnpm install` refuses any other version. `nvm install` reads the

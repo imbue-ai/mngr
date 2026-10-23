@@ -230,7 +230,7 @@ function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
       : update.availability === "APP_BEHIND"
         ? "This workspace is newer than this copy of Imbue Studio. Update the app to catch up."
         : isRecreationRequired(update)
-          ? "This workspace is too old to update in place. Create a new workspace and ask its agent to migrate your work across."
+          ? "This workspace is too old to update in place and is missing security fixes. Create a new workspace and ask its agent to migrate your work across."
           : "";
   return reason
     ? m("p", { class: "type-helper text-tertiary mt-2" }, reason)

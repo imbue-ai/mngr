@@ -27,14 +27,13 @@ info()  { printf '\033[1m==> %s\033[0m\n' "$1"; }
 warn()  { printf '\033[1mWARNING: %s\033[0m\n' "$1" >&2; }
 error() { printf '\033[1mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
 
-# ── Step 1: Install uv (Python package manager) ──────────────────────────────
-
+# Step 1: Install uv (Python package manager)
 if command -v uv &>/dev/null; then
     info "uv is already installed ($(uv --version))"
 else
     info "Installing uv..."
     # Source: https://github.com/astral-sh/uv
-    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    if ! curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh; then
         error "Failed to install uv. Install manually: https://docs.astral.sh/uv/getting-started/installation/"
     fi
     # Source uv's env file so it's available without restarting the shell
@@ -45,8 +44,7 @@ else
     info "uv installed ($(uv --version))"
 fi
 
-# ── Step 2: Install mngr ─────────────────────────────────────────────────────
-
+# Step 2: Install mngr
 if uv tool list 2>/dev/null | grep -q '^imbue-mngr '; then
     info "Upgrading mngr..."
     uv tool upgrade imbue-mngr
@@ -72,26 +70,21 @@ To fix, add this line to $SHELL_RC:
 Then restart your shell and re-run this script."
 fi
 
-# ── Step 3: Check / install system dependencies ──────────────────────────────
-
+# Step 3: Check / install system dependencies
 # No stdin redirect needed: mngr commands read from /dev/tty directly
 # when they need interactive input, so they work even when stdin is piped.
 # --scope core: only treat a *core* dependency (git/tmux/jq) as a hard failure, so a
 # missing optional dep (ssh/rsync/unison/claude) does not trigger the warning below.
 mngr dependencies --install interactive --scope core || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
-# ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
-
+# Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type)
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
 
-# ── Step 5: Common user-scope configuration ──────────────────────────────────
-
+# Step 5: Common user-scope configuration
 # Walks through common config (e.g. whether to isolate the Claude config dir for
 # local agents). Each step is skipped if already configured, so this is safe to
 # re-run. Reads interactive input from /dev/tty, so it works even when stdin is piped.
 mngr config wizard || warn "Configuration wizard did not complete. Run 'mngr config wizard' to finish."
-
-# ── Done ──────────────────────────────────────────────────────────────────────
 
 if ! (PATH="$ORIGINAL_PATH"; command -v mngr) &>/dev/null; then
     info "To use mngr, restart your shell or run:  source \"\$HOME/.local/bin/env\""

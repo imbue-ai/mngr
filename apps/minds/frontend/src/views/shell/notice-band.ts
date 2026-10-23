@@ -38,6 +38,7 @@ export interface NoticePayload {
     | "workspace-update-waiting"
     | "workspace-update-outcome"
     | "workspace-out-of-date"
+    | "workspace-security-update"
     | "workspace-needs-recreation";
   variant: "info" | "warn" | "error";
   message: string;
@@ -294,12 +295,20 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
         message: "This workspace is running an older version of Imbue Studio.",
         action: SEE_UPDATE,
       };
+    case "security-update":
+      // Error, not warn: the stronger of the two offers, since what it brings is a security fix.
+      return {
+        key: "workspace-security-update",
+        variant: "error",
+        message: "An update for this workspace is available, which includes a critical security fix.",
+        action: SEE_UPDATE,
+      };
     case "needs-recreation":
       // The same action as out-of-date: the modal behind it carries the steps.
       return {
         key: "workspace-needs-recreation",
         variant: "warn",
-        message: "This workspace is too old to update in place.",
+        message: "This workspace is too old to update in place and is missing security fixes.",
         action: { label: "See how to update", kind: "update-workspace" },
       };
     case "none":
