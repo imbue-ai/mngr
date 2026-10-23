@@ -43,13 +43,13 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
-from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
@@ -298,7 +298,8 @@ class LatchkeyAutoRegister(MutableModel):
             if host_id in self._hosts_being_pushed:
                 return
             self._hosts_being_pushed.add(host_id)
-        self.concurrency_group.start_new_thread(
+        start_mngr_thread(
+            self.concurrency_group,
             target=self._push_until_settled,
             args=(host_id,),
             name=f"latchkey-auto-register-push-{host_id}",
@@ -354,13 +355,14 @@ class LatchkeyAutoRegister(MutableModel):
         """Start the watch for ``host_id``'s machine; a group that is already ending (the app shutting down) gets
         none, and the push stays held for the resolver-change path."""
         try:
-            self.concurrency_group.start_new_thread(
+            start_mngr_thread(
+                self.concurrency_group,
                 target=self._watch_for_machine,
                 args=(host_id,),
                 name=f"latchkey-auto-register-machine-watch-{host_id}",
                 is_checked=False,
             )
-        except (EnvironmentStoppedError, InvalidConcurrencyGroupStateError) as e:
+        except InvalidConcurrencyGroupStateError as e:
             with self._push_lock:
                 self._hosts_watched_for_machine.discard(host_id)
             logger.debug("Started no machine watch for host {}: the app is shutting down ({})", host_id, e)
