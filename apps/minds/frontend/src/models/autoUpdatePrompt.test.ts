@@ -115,7 +115,6 @@ describe("answering the auto-update prompt", () => {
     await model.load();
     const modal = renderRoot(AutoUpdatePromptModal, {
       model,
-      trigger: "app-updated" as const,
     }) as unknown as m.Children;
 
     const decline = byId(modal, "auto-update-prompt-decline");
@@ -135,7 +134,6 @@ describe("answering the auto-update prompt", () => {
     const render = () =>
       renderRoot(AutoUpdatePromptModal, {
         model,
-        trigger: "out-of-date" as const,
       }) as unknown as m.Children;
 
     const start = byId(render(), "update-window-start-prompt");

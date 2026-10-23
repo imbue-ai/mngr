@@ -1,4 +1,4 @@
-// The "Between <hour> and <hour> local time" row that picks the window
+// The "Between <hour> and <hour> your time." row that picks the window
 // scheduled workspace updates start in. A plain renderer, like the switch: the
 // callers' tests read the selects straight off the vnode.
 
@@ -55,7 +55,7 @@ export function renderUpdateWindowPicker(
       hourSelect(startId, startHour, (hour) => onChange(hour, endHour)),
       m("label", { class: "type-body text-primary", for: endId }, "and"),
       hourSelect(endId, endHour, (hour) => onChange(startHour, hour)),
-      m("span", { class: "type-helper text-tertiary" }, "local time"),
+      m("span", { class: "type-helper text-tertiary" }, "your time."),
     ],
   );
 }

@@ -3,10 +3,7 @@
 // (models/autoUpdatePrompt.ts); this only says it and takes the answer.
 
 import m from "mithril";
-import type {
-  AutoUpdatePromptModel,
-  AutoUpdatePromptTrigger,
-} from "../../models/autoUpdatePrompt";
+import type { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import { Button } from "./Button";
 import { Modal } from "./Modal";
 import { Notice } from "./Notice";
@@ -15,19 +12,12 @@ import { renderUpdateWindowPicker } from "./UpdateWindowPicker";
 
 export interface AutoUpdatePromptModalAttrs {
   model: AutoUpdatePromptModel;
-  trigger: AutoUpdatePromptTrigger;
-}
-
-function openingLine(trigger: AutoUpdatePromptTrigger): string {
-  return trigger === "app-updated"
-    ? "Imbue Studio was just updated, and your workspaces can keep up with it on their own."
-    : "One of your workspaces is running an older version of Imbue Studio.";
 }
 
 export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs> {
   return {
     view(vnode) {
-      const { model, trigger } = vnode.attrs;
+      const { model } = vnode.attrs;
       return m(
         Modal,
         // Closing without an answer only puts it away for this session.
@@ -36,33 +26,31 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
           m(
             "h2",
             { class: "type-heading text-primary" },
-            "Update workspaces automatically?",
+            "Turn on auto-updates?",
           ),
-          m("p", { class: "type-body text-secondary" }, openingLine(trigger)),
           m(
             "p",
             { class: "type-body text-secondary" },
-            "With auto-updates on, Studio schedules each workspace's update for the window below " +
-              "whenever it falls behind. You can turn this off, or change the window, in Settings at any time.",
+            "Studio is up to date, but your workspaces aren't. Updating them may use tokens, " +
+              "so Studio won't do it without your OK.",
           ),
-          m("div", { class: "flex flex-col gap-1" }, [
+          m(
+            "p",
+            { class: "type-body text-secondary" },
+            "Auto-updates keep them current, overnight:",
+          ),
+          m("div", { class: "flex flex-col gap-2" }, [
             renderUpdateWindowPicker({
               idSuffix: "prompt",
               startHour: model.startHour,
               endHour: model.endHour,
               onChange: (start, end) => model.setWindow(start, end),
             }),
-            m(
-              "p",
-              { class: "type-helper text-tertiary" },
-              "A workspace must be running during the window for its update to start.",
-            ),
+            m("ul", { class: "type-helper text-tertiary list-disc pl-4" }, [
+              m("li", "Workspaces need to be running during this window"),
+              m("li", "You can change this anytime in Settings"),
+            ]),
           ]),
-          m(
-            "p",
-            { class: "type-helper text-tertiary" },
-            "Updating uses tokens and counts against your subscription or API usage.",
-          ),
           model.error ? m(Notice, { variant: "error" }, model.error) : null,
           m("div", { class: "flex flex-wrap items-center gap-2 pt-1" }, [
             m(

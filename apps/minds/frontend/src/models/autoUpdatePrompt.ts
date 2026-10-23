@@ -13,7 +13,8 @@ import type { SettingsOverview } from "./settings";
 
 export type AutoUpdatePromptDecision = "accepted" | "declined";
 
-/** Why the prompt is up, which picks its opening line. */
+/** Why the prompt is up: the first launch into a new app version, or a
+ * workspace reading as behind. */
 export type AutoUpdatePromptTrigger = "app-updated" | "out-of-date";
 
 export interface AutoUpdatePromptInputs {
