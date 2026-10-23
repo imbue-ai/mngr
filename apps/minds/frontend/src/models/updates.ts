@@ -534,18 +534,34 @@ export function formatClockMinute(minuteOfDay: number): string {
   return `${hour % 12 || 12}:${minute} ${hour < 12 ? "AM" : "PM"}`;
 }
 
-/** The viewer's offset from UTC, in minutes east of it. */
-function localUtcOffsetMinutes(): number {
-  return -new Date().getTimezoneOffset();
+const MS_PER_MINUTE = 60 * 1000;
+const MS_PER_DAY = MINUTES_PER_DAY * MS_PER_MINUTE;
+
+/** The reader's clock: the time now, and their offset from UTC (minutes east of it) at an instant. */
+interface ViewerClock {
+  readonly now: Date;
+  utcOffsetMinutesAt(instant: Date): number;
+}
+
+function localViewerClock(): ViewerClock {
+  return { now: new Date(), utcOffsetMinutesAt: (instant) => -instant.getTimezoneOffset() };
 }
 
 /** The window an armed schedule runs in, in the reader's local time: the one
- * written into the workspace, which is what its own clock acts on, else the app's. */
-function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, viewerUtcOffsetMinutes: number): string {
+ * written into the workspace, which is what its own clock acts on, else the app's.
+ * Read at the offset of the window open now, else the next to open, which is the
+ * one the app took the UTC start from. */
+function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, clock: ViewerClock): string {
   const startUtc = update.schedule_window_start_minute_utc;
   const length = update.schedule_window_length_minutes;
   if (startUtc == null || length == null) return appWindow;
-  const start = (((startUtc + viewerUtcOffsetMinutes) % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  const nowMs = clock.now.getTime();
+  const todaysOpeningMs = nowMs - (nowMs % MS_PER_DAY) + startUtc * MS_PER_MINUTE;
+  const openingMs =
+    [todaysOpeningMs - MS_PER_DAY, todaysOpeningMs].find((at) => nowMs < at + length * MS_PER_MINUTE) ??
+    todaysOpeningMs + MS_PER_DAY;
+  const offset = clock.utcOffsetMinutesAt(new Date(openingMs));
+  const start = (((startUtc + offset) % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
   return `${formatClockMinute(start)}-${formatClockMinute((start + length) % MINUTES_PER_DAY)}`;
 }
 
@@ -557,11 +573,11 @@ export function scheduledLine(
   update: UiWorkspaceUpdate,
   appWindow: string,
   isAutoUpdateEnabled = false,
-  viewerUtcOffsetMinutes: number = localUtcOffsetMinutes(),
+  clock: ViewerClock = localViewerClock(),
 ): string {
   const override = update.override_ref ?? "";
   const target = override ? ` to ${displayVersion(override)}` : "";
-  const windowText = scheduleWindowText(update, appWindow, viewerUtcOffsetMinutes);
+  const windowText = scheduleWindowText(update, appWindow, clock);
   if (!isArmedByAutoUpdate(update, isAutoUpdateEnabled))
     return `Scheduled to update${target} in the next update window (${windowText}).`;
   const line = `Studio will update this workspace${target} in the next update window (${windowText}).`;

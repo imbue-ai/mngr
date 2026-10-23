@@ -1130,20 +1130,24 @@ def test_skipping_an_update_remembers_the_apps_ceiling_for_that_workspace_and_ca
 
 @pytest.mark.parametrize(
     ("is_legacy_layout_script_present", "expected_tool"),
-    [(True, "layout.py"), (False, "uv")],
+    [(True, "layout.py"), (False, "workspace-layout")],
     ids=("before-workspace-layout", "workspace-layout"),
 )
 def test_the_sign_in_chat_opens_through_whichever_layout_command_the_workspace_has(
     tmp_path: Path, is_legacy_layout_script_present: bool, expected_tool: str
 ) -> None:
-    """Templates before minds-v0.8.6 have only ``system/scripts/layout.py``; later ones only ``workspace-layout``."""
+    """Templates before minds-v0.8.6 have only ``system/scripts/layout.py``; later ones only ``workspace-layout``.
+
+    The real ``uv`` runs the stand-in ``workspace-layout`` (outside a project it runs a command from PATH): the
+    script puts the image's tool dir first on PATH, so a stand-in ``uv`` would lose to one installed there.
+    """
     calls_file = tmp_path / "calls.jsonl"
     recorder = f"import json, sys\nopen({str(calls_file)!r}, 'a').write(json.dumps(sys.argv) + '\\n')\n"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text(f"#!{sys.executable}\n{recorder}")
-    fake_uv.chmod(0o755)
+    workspace_layout = bin_dir / "workspace-layout"
+    workspace_layout.write_text(f"#!{sys.executable}\n{recorder}")
+    workspace_layout.chmod(0o755)
     if is_legacy_layout_script_present:
         legacy_script = tmp_path / "system" / "scripts" / "layout.py"
         legacy_script.parent.mkdir(parents=True)

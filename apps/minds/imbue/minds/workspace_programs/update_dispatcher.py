@@ -826,15 +826,13 @@ def _create_through_mngr(
     return create_result(OUTCOME_CREATED, "", name, _created_agent_id(created.stdout))
 
 
-def _unreported_attempt_chat(
-    agents: Sequence[Mapping[str, str]] | None, target_ref: str, now: float
-) -> tuple[Mapping[str, str] | None, str]:
-    """``(agent, attempt id)`` for a live chat the last create made for ``target_ref`` but did not report
-    as made (it failed or timed out after the chat existed); ``(None, "")`` otherwise.
+def _recent_unreported_attempt_id(target_ref: str, now: float) -> str:
+    """The id of the last create of an update chat for ``target_ref`` when it is recent and was not reported
+    as made (it failed or timed out, perhaps after its chat existed); '' otherwise.
 
     Every create labels its chat with a fresh attempt id, written down before the create runs, and
-    an agent is listed with its labels from the start of its create. Only a recent attempt's chat is
-    taken: an older one may have run its update already, and is replaced as a reported chat would be.
+    an agent is listed with its labels from the start of its create. Only a recent attempt counts:
+    an older one's chat may have run its update already, and is replaced as a reported chat would be.
     """
     attempt = read_json_object(_DISPATCH_ATTEMPT_PATH) or {}
     attempt_id = str(attempt.get("attempt_id") or "")
@@ -846,11 +844,16 @@ def _unreported_attempt_chat(
         or now - attempted_at >= _REDISPATCH_AFTER_SECONDS
         or (read_json_object(LAST_DISPATCH_FILE_PATH) or {}).get("attempt_id") == attempt_id
     ):
-        return None, ""
-    for agent in agents or []:
+        return ""
+    return attempt_id
+
+
+def _find_attempt_chat(agents: Sequence[Mapping[str, str]], attempt_id: str) -> Mapping[str, str] | None:
+    """The live chat a create labelled with ``attempt_id``; None when none is listed."""
+    for agent in agents:
         if agent.get("labels." + _DISPATCH_ATTEMPT_LABEL) == attempt_id and not is_agent_ended(agent):
-            return agent, attempt_id
-    return None, ""
+            return agent
+    return None
 
 
 def create_update_chat(
@@ -878,12 +881,14 @@ def create_update_chat(
     message = _render_update_message(
         target_ref, ceiling_ref, bool(override_ref), bool(schedule_like.get("is_backup_configured", True))
     )
-    leftover, attempt_id = _unreported_attempt_chat(agents, target_ref, now)
+    attempt_id = _recent_unreported_attempt_id(target_ref, now)
+    leftover = _find_attempt_chat(agents or [], attempt_id) if attempt_id else None
     if leftover is not None:
         result = create_result(OUTCOME_CREATED, "", str(leftover.get("name") or ""), chat_id_of(leftover))
-        write_log_line(
-            "adopted update chat %s, which an earlier create made but did not report" % result["chat_agent_name"]
-        )
+    elif attempt_id and agents is None:
+        # Another create could double a chat the last one left behind, which only a listing would show.
+        detail = "Could not list this workspace's chats to look for one the last attempt may have made."
+        result = create_result(OUTCOME_CREATE_FAILED, detail)
     else:
         attempt_id = uuid.uuid4().hex
         write_json_atomically(
@@ -910,7 +915,8 @@ def create_update_chat(
                 "attempt_id": attempt_id,
             },
         )
-        write_log_line("created update chat %s (%s, target %s)" % (result["chat_agent_name"], started_by, target_ref))
+        how = "adopted" if leftover is not None else "created"
+        write_log_line("%s update chat %s (%s, target %s)" % (how, result["chat_agent_name"], started_by, target_ref))
     else:
         write_log_line(
             "did not create an update chat (%s, %s): %s" % (started_by, result["outcome"], result["detail"])

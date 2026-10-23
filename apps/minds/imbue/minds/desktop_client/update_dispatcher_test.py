@@ -557,6 +557,28 @@ def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
     dispatch = staged.read_state("last-dispatch.json")
     assert dispatch is not None
     assert (dispatch["chat_agent_name"], dispatch["chat_id"]) == (_LEAD, _LEAD_ID)
+    log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
+    assert any(line.endswith(f"adopted update chat {_LEAD} (scheduled, target minds-v0.9.0)") for line in log_lines)
+    assert not any("created update chat" in line for line in log_lines)
+
+
+def test_a_failed_create_is_not_made_again_while_the_chats_cannot_be_listed_to_find_its_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [ScriptedToolAnswer(exit_code=1, stderr="The chat app did not create the chat: timed out\n")],
+    )
+    _tick(staged, _IN_WINDOW)
+    staged.set_agents([], is_services_agent_listed=False)
+
+    _tick(staged, _IN_WINDOW + 60)
+
+    assert len(staged.chat_creates()) == 1
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None and schedule["pending_skip_reason"] == "DISPATCH_FAILED"
 
 
 @pytest.mark.parametrize(

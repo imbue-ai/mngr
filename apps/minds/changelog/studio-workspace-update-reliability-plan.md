@@ -40,7 +40,7 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - A scheduled update's window is written into the workspace in UTC, converted from your hours when Studio writes it and again every time it reads the workspace, so a workspace keeps to your hours whatever its own clock says, half-hour time zones included. A daylight-saving change takes effect the next time Studio reads the workspace. The update window and the workspace's Updates settings show the window in your local time, without a time zone name.
 
-- A scheduled update whose chat could not be created is tried again a minute later, instead of 15 minutes later (5 after a sign-in refusal). A chat a failed attempt created anyway is picked up by a retry for the same version within 15 minutes, rather than made a second time.
+- A scheduled update whose chat could not be created is tried again a minute later, instead of 15 minutes later (5 after a sign-in refusal). A chat a failed attempt created anyway is picked up by a retry for the same version within 15 minutes, rather than made a second time; while the workspace's chats cannot be listed, those 15 minutes pass before another is made.
 
 - The workspace's update dispatcher keeps its warnings in its log however it was run, with a timestamp, including the ones from a check Studio runs.
 

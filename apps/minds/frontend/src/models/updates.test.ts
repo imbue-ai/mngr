@@ -631,8 +631,12 @@ describe("rowUpdateShortcutFor", () => {
 });
 
 describe("the schedule's lines", () => {
+  /** A reader's clock at a fixed offset (minutes east of UTC). */
+  function readerAt(utcOffsetMinutes: number): { now: Date; utcOffsetMinutesAt: () => number } {
+    return { now: new Date("2026-10-20T12:00:00Z"), utcOffsetMinutesAt: () => utcOffsetMinutes };
+  }
   // 1:00 AM-4:00 AM in Los Angeles under daylight saving (UTC-7).
-  const PACIFIC_DAYLIGHT = -7 * 60;
+  const PACIFIC_DAYLIGHT = readerAt(-7 * 60);
   const ARMED = {
     ...OUT_OF_DATE_UPDATE,
     is_scheduled: true,
@@ -645,7 +649,7 @@ describe("the schedule's lines", () => {
       "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
     );
     // A half-hour zone east of UTC reads the same window in the afternoon.
-    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, 5 * 60 + 30)).toContain("(1:30 PM-4:30 PM)");
+    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, readerAt(5 * 60 + 30))).toContain("(1:30 PM-4:30 PM)");
     // A window that runs past the reader's midnight.
     expect(scheduledLine({ ...ARMED, schedule_window_start_minute_utc: 6 * 60 }, "", false, PACIFIC_DAYLIGHT)).toContain(
       "(11:00 PM-2:00 AM)",
@@ -654,6 +658,18 @@ describe("the schedule's lines", () => {
     expect(
       scheduledLine({ ...ARMED, schedule_window_start_minute_utc: null }, "2:00 AM-5:00 AM", false, PACIFIC_DAYLIGHT),
     ).toContain("(2:00 AM-5:00 AM)");
+  });
+
+  it("reads the window at the offset of its next opening, as the app wrote it, across a daylight-saving change", () => {
+    // Noon on the day before Los Angeles falls back: the next 2:00 AM is 10:00 UTC, past the change.
+    const fallBack = new Date("2026-11-01T09:00:00Z");
+    const reader = {
+      now: new Date("2026-10-31T19:00:00Z"),
+      utcOffsetMinutesAt: (instant: Date) => (instant < fallBack ? -7 * 60 : -8 * 60),
+    };
+    expect(scheduledLine({ ...ARMED, schedule_window_start_minute_utc: 10 * 60 }, "", false, reader)).toContain(
+      "(2:00 AM-5:00 AM)",
+    );
   });
 
   it("names a version the user typed, and says of auto-update's own schedule that nothing is asked", () => {
