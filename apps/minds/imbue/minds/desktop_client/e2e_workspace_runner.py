@@ -1358,16 +1358,9 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
     _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
-    # A sign-in with nothing more to say closes the chooser by itself; one whose success carries a
-    # detail stays on its success screen until Done.
-    chat.wait_for_function(
-        "() => document.querySelector('[data-e2e=provider-chooser]') === null"
-        " || document.querySelector('[data-e2e=status-success]') !== null",
-        timeout=300_000,
-    )
-    if chat.query_selector("[data-e2e=status-success]") is not None:
-        _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
-        chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
+    # An accepted key closes the chooser by itself, which ends the sign-in. The success screen it
+    # can show on the way out is not a step: its Done may be gone before a click lands.
+    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=300_000)
     logger.info("[{}] signed in via the chooser", label)
 
 
