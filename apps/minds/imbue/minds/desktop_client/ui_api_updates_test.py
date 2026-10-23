@@ -440,7 +440,7 @@ _RUNNING_AGENT_STDOUT = update_run_probe_stdout(agents="update-abc123\tRUNNING\n
 def test_a_poll_landing_mid_spawn_does_not_declare_the_run_stalled(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """A poll can land while the chat is still being created; STALLED is terminal."""
+    """A poll can land while the chat is still being created; STALLED there would report a starting run as failed."""
     _client, app = _build_client(
         tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_GONE_AGENT_STDOUT)
     )
