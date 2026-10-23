@@ -37,9 +37,6 @@ from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.update_dispatcher_script import DISPATCHER_CRON_NAME
-from imbue.minds.desktop_client.update_dispatcher_script import LIVE_CRON_DIRECTORY
-from imbue.minds.desktop_client.update_dispatcher_script import RUN_RECORD_PATH
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
@@ -47,6 +44,9 @@ from imbue.minds.desktop_client.update_status import parse_update_run_status
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
+from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
+from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState

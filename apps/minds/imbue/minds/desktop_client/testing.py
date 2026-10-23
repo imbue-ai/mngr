@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 import queue
@@ -23,7 +22,6 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 from typing import Final
 
@@ -109,17 +107,20 @@ from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import WATCHDOG_INSTALLED_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_RESULT_MARKER
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SOURCE
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SOURCE
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
-from imbue.minds.desktop_client.update_workspace_command import UPDATE_WORKSPACE_PROGRAM
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
+from imbue.minds.workspace_programs.update_dispatcher import ProgramContext
+from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
@@ -1609,6 +1610,7 @@ class StagedUpdateWorkspace(FrozenModel):
     calls_log: Path = Field(description="One JSON argv per line, for every stub mngr and tk call")
     agents_file: Path = Field(description="What the stub ``mngr list`` answers")
     live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
+    program_archive: Path = Field(description="The update program's zip application, as the app ships it")
 
     def set_agents(self, agents: Sequence[Mapping[str, str]], *, is_services_agent_listed: bool = True) -> None:
         """What the stub ``mngr list`` answers: ``agents`` (``id``, ``name``, ``state``, optionally ``chat_id``),
@@ -1700,12 +1702,15 @@ def stage_update_workspace(
     # A workspace with no cron has no drop-in directory for one either.
     if has_cron:
         live_cron_dir.mkdir()
+    program_archive = tmp_path / "update-program.pyz"
+    program_archive.write_bytes(build_workspace_program_archive(update_workspace))
     staged = StagedUpdateWorkspace(
         root=root,
         bin_dir=bin_dir,
         calls_log=tmp_path / "stub-calls.jsonl",
         agents_file=tmp_path / "stub-agents.json",
         live_cron_dir=live_cron_dir,
+        program_archive=program_archive,
     )
     staged.set_agents([])
     if has_message_chat:
@@ -1724,26 +1729,14 @@ def stage_update_workspace(
     return staged
 
 
-def load_update_workspace_program(directory: Path) -> ModuleType:
-    """The workspace update program, written to ``directory`` and loaded as a module of its own."""
-    program_path = directory / "update_workspace_program.py"
-    program_path.write_text(UPDATE_WORKSPACE_PROGRAM)
-    spec = importlib.util.spec_from_file_location(f"update_workspace_program_{uuid.uuid4().hex}", program_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def update_program_context(
-    program: ModuleType, staged: StagedUpdateWorkspace, argv: Sequence[str], now: float
-) -> dict[str, Any]:
-    """The context ``main`` hands a mode, for a run against ``staged`` at ``now``."""
+def update_program_context(staged: StagedUpdateWorkspace, argv: Sequence[str], now: float) -> ProgramContext:
+    """The context the update program's ``main`` hands a mode, for a run against ``staged`` at ``now``."""
     return {
         "argv": list(argv),
-        "program_path": str(Path(program.__file__ or "")),
+        "program_path": str(staged.program_archive),
         "live_cron_dir": str(staged.live_cron_dir),
         "now": now,
+        "agent_environment": AgentEnvironment(),
     }
 
 
@@ -1802,7 +1795,7 @@ def update_program_invocation(argv: Sequence[str]) -> tuple[str, dict[str, str]]
     arguments follow the program's scratch path and end where its exit status is kept.
     """
     command = argv[3]
-    invocation = command.split("; minds_update_exit=$?", 1)[0].rsplit('"$minds_update_program" ', 1)[1]
+    invocation = command.split("; minds_program_exit=$?", 1)[0].rsplit('"$minds_program" ', 1)[1]
     mode, *arguments = shlex.split(invocation)
     assert len(arguments) % 2 == 0, arguments
     return mode, dict(zip(arguments[::2], arguments[1::2], strict=True))

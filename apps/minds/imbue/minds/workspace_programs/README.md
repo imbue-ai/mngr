@@ -31,6 +31,12 @@ the rest of the app.
   read (answer markers, the official remote), so each value has one source.
 - `backup_check.py`, `backup_gate_probe.py`, `backup_apply_update.py`,
   `backup_restore.py`: the programs. Each module's docstring says what it does.
+- `update_protocol.py`: what the update program and the app share (state paths,
+  cron names, the answer marker, the outcome, skip-reason and started-by
+  strings, and the text of the messages the program sends).
+- `update_workspace.py`: the update program (its modes `arm`, `now`, `cancel`,
+  `read` and `tick`); `update_dispatcher.py`: the dispatcher its `tick` runs,
+  and what the modes share with it.
 
 ## Sharing code and constants
 
@@ -61,6 +67,10 @@ say) writes its archive's bytes to its own path and runs from there.
 - `desktop_client/backup_workspace_programs_test.py` runs the shipped archive
   through the real command against temporary git repositories, with stub `uv`
   and `supervisorctl` on `PATH`.
+- `desktop_client/update_dispatcher_test.py` and
+  `desktop_client/update_workspace_command_test.py` run the update program's
+  modes against a staged workspace with stub `mngr`, `tk` and template scripts,
+  in-process and through the shipped command.
 - `test_workspace_programs_e2e.py` (in `apps/minds/`) runs programs inside a
   real workspace container built from the default workspace template, through
   the `running_workspace` fixture in `apps/minds/conftest.py` and

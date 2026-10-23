@@ -16,8 +16,6 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 # prints are their return protocol, and their processes, loops, and imports are the container's.
 _EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = (
     "test_litellm_via_workspace.py",
-    "*/desktop_client/update_dispatcher_script.py",
-    "*/desktop_client/update_workspace_command.py",
     "*/desktop_client/update_program_stubs_testing.py",
 )
 

@@ -5,7 +5,6 @@ import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,11 +15,12 @@ from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
 from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
 from imbue.minds.desktop_client.testing import armed_update_schedule_file
-from imbue.minds.desktop_client.testing import load_update_workspace_program
 from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
+from imbue.minds.desktop_client.update_status import UpdateSkipReason
+from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
 from imbue.minds.desktop_client.update_workspace_command import UtcUpdateWindow
@@ -31,6 +31,9 @@ from imbue.minds.desktop_client.update_workspace_command import build_update_wor
 from imbue.minds.desktop_client.update_workspace_command import parse_update_command_result
 from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
 from imbue.minds.desktop_client.update_workspace_command import utc_update_window
+from imbue.minds.workspace_programs import update_protocol
+from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 
 _NOW = 1_792_000_000.0
 _WINDOW = UtcUpdateWindow(start_minute_utc=9 * 60, length_minutes=3 * 60)
@@ -61,13 +64,12 @@ def test_the_users_local_window_reaches_the_workspace_in_utc(
 
 
 def _run_mode(
-    program: ModuleType,
     staged: StagedUpdateWorkspace,
     mode: str,
     argv: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> dict[str, Any]:
-    program.MODES[mode](update_program_context(program, staged, argv, _NOW))
+    update_workspace.MODES[mode](update_program_context(staged, argv, _NOW))
     return read_update_program_answer(capsys.readouterr().out)
 
 
@@ -75,11 +77,8 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(
-        program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys
-    )
+    answer = _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ARMED
@@ -87,12 +86,12 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
     assert result.schedule.target_ref == "minds-v0.9.1"
     assert (result.schedule.window_start_minute_utc, result.schedule.window_length_minutes) == (9 * 60, 3 * 60)
     assert staged.read_state("schedule.json") == answer["schedule"]
-    dispatcher = staged.root / "data" / ".state" / "update-apply" / "dispatcher.py"
-    assert dispatcher.read_text() == Path(program.__file__ or "").read_text()
+    dispatcher = staged.root / "data" / ".state" / "update-apply" / "dispatcher.pyz"
+    assert dispatcher.read_bytes() == staged.program_archive.read_bytes()
     live_line = (staged.live_cron_dir / "update-self-dispatch").read_text()
     assert live_line == (staged.root / "data" / ".state" / "cron.d" / "update-self-dispatch").read_text()
     assert "flock -n /run/update-self-dispatch.lock" in live_line
-    assert f"cd {staged.root.resolve()} && python3 data/.state/update-apply/dispatcher.py tick" in live_line
+    assert f"cd {staged.root.resolve()} && python3 data/.state/update-apply/dispatcher.pyz tick" in live_line
 
 
 @pytest.mark.parametrize("is_auto_armed", (True, False))
@@ -100,9 +99,8 @@ def test_the_schedule_file_records_whether_auto_update_armed_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], is_auto_armed: bool
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=is_auto_armed), capsys)
+    answer = _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=is_auto_armed), capsys)
 
     schedule = parse_update_command_result(answer).schedule
     assert schedule is not None
@@ -142,9 +140,8 @@ def test_arming_refuses_a_workspace_that_cannot_run_a_scheduled_update(
     staged = stage_update_workspace(
         tmp_path, monkeypatch, has_skill=has_skill, is_signed_in=is_signed_in, has_cron=has_cron
     )
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
+    answer = _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
     assert parse_update_command_result(answer).outcome is outcome
     assert staged.read_state("schedule.json") is None
@@ -155,13 +152,12 @@ def test_re_arming_keeps_the_chat_the_dispatcher_already_started_this_window(
 ) -> None:
     """A second arm inside the window must not let the dispatcher start a second run."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
+    _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     staged.write_state("schedule.json", {**schedule, "marked_chat": "update-to-minds-v0-9-0", "marked_at": _NOW - 60})
 
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
+    _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
     rearmed = staged.read_state("schedule.json")
     assert rearmed is not None
@@ -182,9 +178,8 @@ def test_a_mode_the_app_runs_keeps_its_warnings_in_the_dispatcher_log(
     """The app drops the stderr of a mode that answered, so a warning lives only if the log has it."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.set_agents([], is_services_agent_listed=False)
-    program = load_update_workspace_program(tmp_path)
 
-    _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
     assert any(
@@ -197,9 +192,8 @@ def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.CREATED
@@ -232,10 +226,9 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
     settings = UpdateWorkspaceSettings(ceiling_ref="minds-v0.9.0", window=_WINDOW, is_backup_configured=False)
 
-    _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
+    _run_mode(staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
     create = staged.chat_creates()[0]
     assert _flag(create, "--name") == "Update to upstream/main"
@@ -265,9 +258,8 @@ def test_a_messenger_whose_own_bare_create_refuses_the_title_hands_the_create_to
             )
         ],
     )
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert (result.outcome, result.chat_agent_name) == (UpdateArmOutcome.CREATED, "Update-to-v0-9-0")
@@ -286,9 +278,8 @@ def test_a_chat_app_and_a_bare_create_that_both_fail_read_as_the_chat_app_unreac
         [ScriptedToolAnswer(exit_code=1, stderr="Falling back to `mngr create`: could not connect to the chat app\n")],
     )
     monkeypatch.setenv("STUB_EXIT_CREATE", "1")
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert (result.outcome, result.detail) == (UpdateArmOutcome.CHAT_APP_UNREACHABLE, "mngr create exited 1")
@@ -312,9 +303,8 @@ def test_a_taken_chat_name_gets_the_next_free_suffix(
             ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
         ],
     )
-    program = load_update_workspace_program(tmp_path)
 
-    _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert [_flag(create, "--name") for create in staged.chat_creates()] == [
         "Update to v0.9.0 2",
@@ -328,9 +318,8 @@ def test_update_now_adopts_a_run_already_under_way(
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": "update-to-minds-v0-8-7", "started_at": _NOW - 600})
     staged.set_agents([{"name": "update-to-minds-v0-8-7", "id": "agent-" + "d" * 32, "state": "RUNNING"}])
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
@@ -358,9 +347,8 @@ def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_i
         },
     )
     staged.set_agents([{"name": "update-to-minds-v0-9-0", "id": chat_id, "state": "RUNNING"}])
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
@@ -411,9 +399,8 @@ def test_update_now_counts_a_chat_dispatched_moments_ago_only_while_it_can_still
         },
     )
     staged.set_agents(listed)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is outcome
     assert len(staged.chat_creates()) == (1 if outcome is UpdateArmOutcome.CREATED else 0)
@@ -446,9 +433,8 @@ def test_update_now_counts_a_stopped_lead_as_under_way_only_where_the_watchdog_r
     staged.set_agents(
         [{"name": _DISPATCHED_CHAT, "id": _DISPATCHED_CHAT_ID, "state": lead_state}] if lead_state is not None else []
     )
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is outcome
@@ -477,9 +463,8 @@ def test_a_create_the_chat_app_refused_reads_as_the_refusal_it_was(
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.script_tool("system/scripts/message_chat.py", [ScriptedToolAnswer(exit_code=1, stderr=stderr)])
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is outcome
@@ -491,9 +476,8 @@ def test_a_workspace_with_no_messenger_gets_a_bare_create_carrying_the_display_n
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch, has_message_chat=False)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
     creates = [call for call in staged.recorded_calls() if call[:1] == ["create"]]
@@ -511,9 +495,8 @@ def test_update_now_asks_an_older_templates_account_resolver_once_and_creates_on
     (scripts_dir / "require_create_account.py").unlink()
     (scripts_dir / "default_account_args.py").write_text("")
     staged.script_program_on_path("uv", [ScriptedToolAnswer(stdout="--env\nCLAUDE_CONFIG_DIR=/home/user/acc/a1\n")])
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
     assert staged.tool_calls("uv") == [["run", "python", "system/scripts/default_account_args.py", "claude"]]
@@ -527,8 +510,7 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys)
+    _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "minds-v0.9.1", is_auto_armed=False), capsys)
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     staged.write_state(
@@ -542,7 +524,7 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
         is_backup_configured=False,
     )
 
-    answer = _run_mode(program, staged, "read", build_read_arguments(moved, is_sign_in_checked=False), capsys)
+    answer = _run_mode(staged, "read", build_read_arguments(moved, is_sign_in_checked=False), capsys)
 
     facts = parse_update_workspace_facts(answer)
     assert facts.schedule is not None
@@ -561,9 +543,8 @@ def test_reading_a_workspace_with_nothing_armed_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+    answer = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
 
     facts = parse_update_workspace_facts(answer)
     assert (facts.schedule, facts.run_status, facts.last_dispatch) == (None, None, None)
@@ -575,10 +556,9 @@ def test_a_read_asked_about_the_account_says_whether_one_is_signed_in_with_nothi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], is_signed_in: bool
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch, is_signed_in=is_signed_in)
-    program = load_update_workspace_program(tmp_path)
 
-    asked = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=True), capsys)
-    unasked = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+    asked = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=True), capsys)
+    unasked = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
 
     assert parse_update_workspace_facts(asked).is_signed_in is is_signed_in
     assert parse_update_workspace_facts(unasked).is_signed_in is None
@@ -588,11 +568,10 @@ def test_cancelling_deletes_the_schedule_and_says_whether_one_was_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
-    _run_mode(program, staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
+    _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
 
-    first = _run_mode(program, staged, "cancel", [], capsys)
-    second = _run_mode(program, staged, "cancel", [], capsys)
+    first = _run_mode(staged, "cancel", [], capsys)
+    second = _run_mode(staged, "cancel", [], capsys)
 
     assert (first["is_cancelled"], second["is_cancelled"]) == (True, False)
     assert staged.read_state("schedule.json") is None
@@ -621,3 +600,55 @@ def test_the_shipped_command_runs_the_program_from_a_scratch_file_through_the_sh
     assert read_update_program_answer(completed.stdout)["is_cancelled"] is True
     assert staged.read_state("schedule.json") is None
     assert list(scratch_dir.iterdir()) == []
+
+
+def test_the_dispatcher_an_arm_installs_runs_its_tick_on_its_own_from_the_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cron runs the installed archive with nothing beside it, as its line says: ``python3 <archive> tick``."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    _run_mode(staged, "arm", build_arm_arguments(_SETTINGS, "", is_auto_armed=False), capsys)
+    lead_id = "agent-" + "f" * 32
+    staged.write_state("run.json", {"chat_agent_name": "Update-to-v090", "started_at": _NOW})
+    staged.set_agents([{"name": "Update-to-v090", "id": lead_id, "state": "STOPPED"}])
+
+    completed = subprocess.run(
+        ["python3", DISPATCHER_ARCHIVE_PATH, "tick"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        cwd=staged.root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    # The watchdog restarted the stopped lead; whether the tick also dispatched depends on the clock.
+    messages = [call for call in staged.tool_calls("message_chat.py") if call[:1] != ["--create"]]
+    assert [message[:2] for message in messages] == [[lead_id, "-m"]]
+
+
+def test_the_programs_outcome_skip_and_started_by_strings_are_the_apps_enum_values() -> None:
+    """They cross the process boundary as plain strings, so each must parse as the app's enum reads it."""
+    outcomes = (
+        update_protocol.OUTCOME_ARMED,
+        update_protocol.OUTCOME_CREATED,
+        update_protocol.OUTCOME_ALREADY_RUNNING,
+        update_protocol.OUTCOME_NEEDS_SIGN_IN,
+        update_protocol.OUTCOME_CHAT_APP_UNREACHABLE,
+        update_protocol.OUTCOME_CREATE_FAILED,
+        update_protocol.OUTCOME_NO_CRON,
+        update_protocol.OUTCOME_TOO_OLD_TO_UPDATE,
+    )
+    skip_reasons = (
+        update_protocol.SKIP_UPDATE_IN_FLIGHT,
+        update_protocol.SKIP_LEASE_HELD,
+        update_protocol.SKIP_NEEDS_SIGN_IN,
+        update_protocol.SKIP_DISPATCH_FAILED,
+        update_protocol.SKIP_WINDOW_CLOSED,
+    )
+    started_by = (update_protocol.STARTED_BY_SCHEDULED, update_protocol.STARTED_BY_IMMEDIATE)
+
+    assert sorted(outcomes) == sorted(outcome.value for outcome in UpdateArmOutcome)
+    assert sorted(skip_reasons) == sorted(reason.value for reason in UpdateSkipReason)
+    # The app upper-cases the stamp it reads from ``last-dispatch.json``.
+    assert sorted(value.upper() for value in started_by) == sorted(value.value for value in UpdateStartedBy)

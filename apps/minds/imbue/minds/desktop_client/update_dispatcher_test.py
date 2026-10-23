@@ -4,7 +4,6 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 from uuid import uuid4
 
@@ -13,10 +12,12 @@ import pytest
 from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
 from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
-from imbue.minds.desktop_client.testing import load_update_workspace_program
 from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
+from imbue.minds.workspace_programs import update_dispatcher
+from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
 
 _LEAD = STAGED_CREATED_CHAT["name"]
 _LEAD_ID = "agent-" + "1" * 32
@@ -31,11 +32,6 @@ def _utc(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
 
-@pytest.fixture
-def program(tmp_path: Path) -> ModuleType:
-    return load_update_workspace_program(tmp_path)
-
-
 @pytest.mark.parametrize(
     ("now", "start_minute_utc", "length_minutes", "opened_at_utc"),
     [
@@ -47,9 +43,9 @@ def program(tmp_path: Path) -> ModuleType:
     ],
 )
 def test_the_window_opens_daily_at_its_utc_start(
-    program: ModuleType, now: str, start_minute_utc: int, length_minutes: int, opened_at_utc: str
+    now: str, start_minute_utc: int, length_minutes: int, opened_at_utc: str
 ) -> None:
-    bounds = program.current_window(_epoch(now), start_minute_utc, length_minutes)
+    bounds = update_dispatcher.current_window(_epoch(now), start_minute_utc, length_minutes)
 
     assert bounds is not None
     assert _utc(bounds[0]) == opened_at_utc
@@ -65,10 +61,8 @@ def test_the_window_opens_daily_at_its_utc_start(
         ("2026-10-20T09:00:00+00:00", 9 * 60, 0),
     ],
 )
-def test_outside_the_window_there_is_no_window(
-    program: ModuleType, now: str, start_minute_utc: int, length_minutes: int
-) -> None:
-    assert program.current_window(_epoch(now), start_minute_utc, length_minutes) is None
+def test_outside_the_window_there_is_no_window(now: str, start_minute_utc: int, length_minutes: int) -> None:
+    assert update_dispatcher.current_window(_epoch(now), start_minute_utc, length_minutes) is None
 
 
 _IN_WINDOW = _epoch("2026-10-20T03:00:00-07:00")
@@ -171,9 +165,9 @@ def _never_gone() -> bool:
     "workspace-updates.stopped-workspace-not-updated", partial="the decision only; not the row once readable"
 )
 def test_one_tick_decides_from_the_window_and_the_run_record(
-    program: ModuleType, schedule: dict[str, Any], run: dict[str, Any] | None, now: float, is_gone: Any, action: str
+    schedule: dict[str, Any], run: dict[str, Any] | None, now: float, is_gone: Any, action: str
 ) -> None:
-    assert program.decide_schedule_action(schedule, run, now, is_gone) == action
+    assert update_dispatcher.decide_schedule_action(schedule, run, now, is_gone) == action
 
 
 def _agent(name: str, state: str, agent_id: str = "") -> dict[str, Any]:
@@ -231,29 +225,28 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
     ],
 )
 def test_the_watchdog_decides_from_the_lead_and_worker_states(
-    program: ModuleType,
     run: dict[str, Any],
     agents: list[dict[str, Any]] | None,
     busy: tuple[set[str], set[str], set[str]],
     state: dict[str, Any],
     action: str,
 ) -> None:
-    assert program.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) == action
+    assert update_dispatcher.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) == action
 
 
-def _tick(program: ModuleType, staged: StagedUpdateWorkspace, now: float) -> None:
-    program.mode_tick(update_program_context(program, staged, [], now))
+def _tick(staged: StagedUpdateWorkspace, now: float) -> None:
+    update_dispatcher.mode_tick(update_program_context(staged, [], now))
 
 
 @pytest.mark.witnesses("workspace-updates.runs-without-the-app")
 def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
     staged.set_agents([_agent(_LEAD, "RUNNING", "agent-" + "a" * 32)])
-    _tick(program, staged, _IN_WINDOW + 60)
+    _tick(staged, _IN_WINDOW + 60)
 
     creates = staged.chat_creates()
     assert len(creates) == 1
@@ -268,7 +261,7 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
 
 @pytest.mark.witnesses("workspace-updates.skipped-window", partial="the recorded reason; not the modal line")
 def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window_close(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
@@ -276,9 +269,9 @@ def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window
     tickets.mkdir(parents=True)
     (tickets / "w-1.md").write_text("---\nid: w-1\nstatus: in_progress\n---\n# updating workspace\n")
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
     in_window = staged.read_state("schedule.json")
-    _tick(program, staged, _AFTER_WINDOW)
+    _tick(staged, _AFTER_WINDOW)
 
     assert in_window is not None and in_window["pending_skip_reason"] == "LEASE_HELD"
     closed = staged.read_state("schedule.json")
@@ -289,7 +282,7 @@ def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window
 
 @pytest.mark.parametrize(("holder_state", "is_dispatched"), [("RUNNING", False), (None, True), ("STOPPED", True)])
 def test_a_lease_counts_as_held_only_while_its_holder_is_there(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, holder_state: str | None, is_dispatched: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holder_state: str | None, is_dispatched: bool
 ) -> None:
     """A lease whose holder is gone is abandoned: the update's lead takes it over, so it must not stop the start."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -301,7 +294,7 @@ def test_a_lease_counts_as_held_only_while_its_holder_is_there(
         "---\nid: w-1\nstatus: in_progress\n---\n# updating workspace\n\nHeld by old-lead across the update-self pass.\n"
     )
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
@@ -311,12 +304,12 @@ def test_a_lease_counts_as_held_only_while_its_holder_is_there(
 
 @pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the dispatcher's skip only")
 def test_a_sign_in_refusal_at_dispatch_time_is_the_windows_skip_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch, is_signed_in=False)
     staged.write_state("schedule.json", _schedule())
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["pending_skip_reason"] == "NEEDS_SIGN_IN"
@@ -324,13 +317,13 @@ def test_a_sign_in_refusal_at_dispatch_time_is_the_windows_skip_reason(
 
 @pytest.mark.witnesses("workspace-updates.failure-cancels-the-schedule")
 def test_a_tick_retires_the_schedule_once_its_run_has_a_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule(marked_chat=_LEAD, marked_at=_IN_WINDOW))
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW + 30, "verdict": "UPDATED"})
 
-    _tick(program, staged, _IN_WINDOW + 3600)
+    _tick(staged, _IN_WINDOW + 3600)
 
     assert staged.read_state("schedule.json") is None
 
@@ -347,27 +340,27 @@ def _messenger_that_first(staged: StagedUpdateWorkspace, change_to_schedule: str
 
 
 def test_a_cancel_that_lands_while_a_tick_creates_the_chat_stays_cancelled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failed create would otherwise put the cancelled schedule back, and retry it later in the window."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
     _messenger_that_first(staged, "os.remove(path)", exit_code=1)
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert staged.read_state("schedule.json") is None
 
 
 def test_a_refresh_that_lands_while_a_tick_creates_the_chat_keeps_the_apps_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
     refresh = "s = json.load(open(path)); s['ceiling'] = 'minds-v0.9.1'; json.dump(s, open(path, 'w'))"
     _messenger_that_first(staged, refresh, exit_code=0)
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
@@ -378,9 +371,7 @@ def test_a_refresh_that_lands_while_a_tick_creates_the_chat_keeps_the_apps_field
     "workspace-updates.gone-agent-closed-out",
     partial="the workspace's close-out; not the app's report or a fresh start",
 )
-def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
-) -> None:
+def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Recorded STUCK, the worker stopped (its branch kept), and only the gone lead's leases released."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
@@ -394,7 +385,7 @@ def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
         "---\nid: w-2\nstatus: in_progress\nagent: someone-else\n---\n# updating workspace\n"
     )
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert [call[:6] for call in staged.tool_calls("update_self.py")] == [
         ["run-status", "verdict", "STUCK", "--chat", _LEAD, "--detail"]
@@ -406,7 +397,7 @@ def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
 
 
 def test_a_run_whose_chat_was_renamed_is_neither_closed_out_nor_counted_as_over(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Renaming a chat renames its agent; the chat id the last dispatch recorded still names it."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -417,8 +408,8 @@ def test_a_run_whose_chat_was_renamed_is_neither_closed_out_nor_counted_as_over(
     )
     staged.set_agents([_agent("my-update", "WAITING", _LEAD_ID), _agent(_WORKER, "RUNNING")])
 
-    _tick(program, staged, _IN_WINDOW)
-    program.mode_now(update_program_context(program, staged, ["--ceiling", "minds-v0.9.0"], _IN_WINDOW))
+    _tick(staged, _IN_WINDOW)
+    update_workspace.mode_now(update_program_context(staged, ["--ceiling", "minds-v0.9.0"], _IN_WINDOW))
 
     assert staged.tool_calls("update_self.py") == []
     assert ["stop", _WORKER] not in staged.recorded_calls()
@@ -428,12 +419,12 @@ def test_a_run_whose_chat_was_renamed_is_neither_closed_out_nor_counted_as_over(
 
 
 def test_a_close_out_leaves_alone_a_record_a_new_lead_wrote_meanwhile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": "Update-to-v090-2", "started_at": _IN_WINDOW + 30})
 
-    program.close_out({**_OPEN_RUN, "verdict": None}, [_agent(_WORKER, "RUNNING")])
+    update_dispatcher.close_out_run({**_OPEN_RUN, "verdict": None}, [_agent(_WORKER, "RUNNING")], AgentEnvironment())
 
     assert staged.tool_calls("update_self.py") == []
     assert ["stop", _WORKER] not in staged.recorded_calls()
@@ -441,14 +432,14 @@ def test_a_close_out_leaves_alone_a_record_a_new_lead_wrote_meanwhile(
 
 @pytest.mark.witnesses("workspace-updates.idle-agent-reminded")
 def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
     staged.set_agents([_agent(_LEAD, "WAITING", _LEAD_ID)])
 
     for minute in range(5):
-        _tick(program, staged, _IN_WINDOW + 60 * minute)
+        _tick(staged, _IN_WINDOW + 60 * minute)
 
     messages = staged.tool_calls("message_chat.py")
     assert len(messages) == 1
@@ -461,7 +452,7 @@ def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     partial="the workspace's restart only; not the app's report or update now's answer",
 )
 def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it_has(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A workspace restart stops every chat, and the user wants the update to carry on; only the lead judges a loop."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -469,7 +460,7 @@ def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it
     staged.set_agents([_agent(_LEAD, "STOPPED", _LEAD_ID), _agent(_WORKER, "STOPPED")])
 
     for minute in range(3):
-        _tick(program, staged, _IN_WINDOW + 60 * minute)
+        _tick(staged, _IN_WINDOW + 60 * minute)
 
     messages = staged.tool_calls("message_chat.py")
     assert [message[:2] for message in messages] == [[_LEAD_ID, "-m"]] * 3
@@ -479,14 +470,14 @@ def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it
 
 
 def test_without_the_chat_messenger_a_revive_starts_the_stopped_lead_through_mngr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``mngr message`` only delivers to a running agent unless told to start it."""
     staged = stage_update_workspace(tmp_path, monkeypatch, has_message_chat=False)
     staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
     staged.set_agents([_agent(_LEAD, "STOPPED", _LEAD_ID)])
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     messages = [call for call in staged.recorded_calls() if call[:1] == ["message"]]
     assert [message[:4] for message in messages] == [["message", _LEAD, "--start", "-m"]]
@@ -494,19 +485,21 @@ def test_without_the_chat_messenger_a_revive_starts_the_stopped_lead_through_mng
 
 
 def test_a_revive_leaves_alone_a_lead_that_recorded_its_verdict_meanwhile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {**_OPEN_RUN, "verdict": "UPDATED"})
 
-    program.revive({**_OPEN_RUN, "verdict": None}, [_agent(_LEAD, "STOPPED", _LEAD_ID)], {})
+    update_dispatcher.revive_stopped_lead(
+        {**_OPEN_RUN, "verdict": None}, [_agent(_LEAD, "STOPPED", _LEAD_ID)], {}, AgentEnvironment()
+    )
 
     assert staged.tool_calls("message_chat.py") == []
 
 
 @pytest.mark.parametrize("wrapper_dir", ["system/libs/routines", "system/libs/automations"])
 def test_under_cron_the_agent_environment_is_restored_through_the_templates_wrapper_wherever_it_lives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, wrapper_dir: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper_dir: str
 ) -> None:
     """The routines rework moved the wrapper; a template from before it keeps it where it was."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -515,11 +508,11 @@ def test_under_cron_the_agent_environment_is_restored_through_the_templates_wrap
     wrapper.parent.mkdir(parents=True, exist_ok=True)
     wrapper.write_text('export MNGR_AGENT_ID=agent-services\nexec "$@"\n')
 
-    assert program.agent_env()["MNGR_AGENT_ID"] == "agent-services"
+    assert AgentEnvironment().variables()["MNGR_AGENT_ID"] == "agent-services"
 
 
 def test_a_failed_create_that_made_no_chat_is_tried_again_at_the_next_tick(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
@@ -531,8 +524,8 @@ def test_a_failed_create_that_made_no_chat_is_tried_again_at_the_next_tick(
         ],
     )
 
-    _tick(program, staged, _IN_WINDOW)
-    _tick(program, staged, _IN_WINDOW + 60)
+    _tick(staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW + 60)
 
     assert len(staged.chat_creates()) == 2
     schedule = staged.read_state("schedule.json")
@@ -540,7 +533,7 @@ def test_a_failed_create_that_made_no_chat_is_tried_again_at_the_next_tick(
 
 
 def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A create can fail or time out after its chat exists; the chat carries the attempt's label."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -549,13 +542,13 @@ def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
         "system/scripts/message_chat.py",
         [ScriptedToolAnswer(exit_code=1, stderr="The chat app did not create the chat: timed out\n")],
     )
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
     attempt = staged.read_state("dispatch-attempt.json")
     assert attempt is not None
     left_behind = {**_agent(_LEAD, "RUNNING", _LEAD_ID), "update_dispatch_attempt": attempt["attempt_id"]}
     staged.set_agents([left_behind])
 
-    _tick(program, staged, _IN_WINDOW + 60)
+    _tick(staged, _IN_WINDOW + 60)
 
     assert len(staged.chat_creates()) == 1
     assert f"update_dispatch_attempt={attempt['attempt_id']}" in _create_labels(staged.chat_creates()[0])
@@ -578,7 +571,6 @@ def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
 def test_a_left_behind_chat_from_another_target_an_old_attempt_or_ended_is_not_adopted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    program: ModuleType,
     attempt_target: str,
     attempt_age_seconds: int,
     leftover_state: str,
@@ -598,7 +590,7 @@ def test_a_left_behind_chat_from_another_target_an_old_attempt_or_ended_is_not_a
     left_behind = {**_agent("update-to-old", leftover_state), "update_dispatch_attempt": old_attempt_id}
     staged.set_agents([left_behind])
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     creates = staged.chat_creates()
     assert len(creates) == 1
@@ -612,7 +604,7 @@ def _create_labels(create_argv: list[str]) -> list[str]:
 
 
 def test_a_tick_leaves_alone_a_chat_update_now_made_moments_ago(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ "Update now instead" keeps the schedule armed, and the pressed chat records no run for minutes."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -626,7 +618,7 @@ def test_a_tick_leaves_alone_a_chat_update_now_made_moments_ago(
     )
     staged.set_agents([_agent(_LEAD, "RUNNING", _LEAD_ID)])
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert staged.chat_creates() == []
     schedule = staged.read_state("schedule.json")
@@ -634,23 +626,23 @@ def test_a_tick_leaves_alone_a_chat_update_now_made_moments_ago(
 
 
 def test_a_lead_that_ends_before_recording_a_start_is_not_replaced_every_minute(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
     staged.set_agents([_agent(_LEAD, "DONE")])
 
     for minute in range(1, 6):
-        _tick(program, staged, _IN_WINDOW + 60 * minute)
+        _tick(staged, _IN_WINDOW + 60 * minute)
     assert len(staged.chat_creates()) == 1
 
-    _tick(program, staged, _IN_WINDOW + 16 * 60)
+    _tick(staged, _IN_WINDOW + 16 * 60)
     assert len(staged.chat_creates()) == 2
 
 
 def test_a_chat_the_chat_app_is_still_creating_is_not_dispatched_again_before_it_is_listed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
@@ -665,30 +657,30 @@ def test_a_chat_the_chat_app_is_still_creating_is_not_dispatched_again_before_it
             ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
         ],
     )
-    _tick(program, staged, _IN_WINDOW)
-    _tick(program, staged, _IN_WINDOW + 60)
+    _tick(staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW + 60)
     assert len(staged.chat_creates()) == 1
 
     # Never listed long after its create was answered: that create came to nothing.
-    _tick(program, staged, _IN_WINDOW + 16 * 60)
+    _tick(staged, _IN_WINDOW + 16 * 60)
     assert len(staged.chat_creates()) == 2
 
 
 def test_a_listing_without_the_services_agent_never_closes_a_run_out(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Such a listing read the wrong host dir; it is no evidence that the run's agent is gone."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
     staged.set_agents([], is_services_agent_listed=False)
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert staged.tool_calls("update_self.py") == []
 
 
 def test_a_listing_that_exited_non_zero_still_counts_when_it_lists_the_services_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--on-error continue`` exits non-zero for one provider's failure while still listing every agent it could."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -696,13 +688,13 @@ def test_a_listing_that_exited_non_zero_still_counts_when_it_lists_the_services_
     staged.set_agents([_agent(_WORKER, "RUNNING")])
     monkeypatch.setenv("STUB_EXIT_LIST", "1")
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert [call[:3] for call in staged.tool_calls("update_self.py")] == [["run-status", "verdict", "STUCK"]]
 
 
 def test_the_watchdog_closes_nothing_out_until_the_verdict_is_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The template's recorder is the run record's one writer; while it fails, the worker and leases are left be."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
@@ -712,30 +704,28 @@ def test_the_watchdog_closes_nothing_out_until_the_verdict_is_recorded(
         ".agents/skills/update-self/scripts/update_self.py", [ScriptedToolAnswer(exit_code=1, stderr="broken\n")]
     )
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
     assert len(staged.tool_calls("update_self.py")) == 1
     assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
 def test_a_tick_keeps_the_log_bounded_even_when_it_logs_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cron appends each tick's stderr to the log, so a quiet tick has to keep the file bounded too."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     log_path = staged.root / "data" / ".state" / "update-apply" / "dispatcher.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("mngr list failed: something long\n" * (program.LOG_MAX_BYTES // 20))
+    log_path.write_text("mngr list failed: something long\n" * (update_dispatcher.DISPATCHER_LOG_MAX_BYTES // 20))
 
-    _tick(program, staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW)
 
-    assert log_path.stat().st_size <= program.LOG_MAX_BYTES
+    assert log_path.stat().st_size <= update_dispatcher.DISPATCHER_LOG_MAX_BYTES
     assert log_path.read_text().endswith("mngr list failed: something long\n")
 
 
-def test_a_lead_waiting_on_a_background_task_is_not_reminded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
-) -> None:
+def test_a_lead_waiting_on_a_background_task_is_not_reminded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
     staged.set_agents([_agent(_LEAD, "WAITING", _LEAD_ID)])
@@ -745,6 +735,6 @@ def test_a_lead_waiting_on_a_background_task_is_not_reminded(
     )
 
     for minute in range(5):
-        _tick(program, staged, _IN_WINDOW + 60 * minute)
+        _tick(staged, _IN_WINDOW + 60 * minute)
 
     assert staged.tool_calls("message_chat.py") == []
