@@ -46,4 +46,4 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - "Sign in" opens the sign-in chat on workspaces from before the workspace-layout command (minds-v0.7.0 through minds-v0.8.5) too.
 
-- The in-workspace update programs are now checked Python modules shipped as a zip application, like the backup programs, and the dispatcher a schedule installs in the workspace is that archive, `data/.state/update-apply/dispatcher.pyz` (it was `dispatcher.py`).
+- The in-workspace update programs are checked Python modules shipped as a zip application, like the backup programs, and the dispatcher a schedule installs in the workspace is that archive, `data/.state/update-apply/dispatcher.pyz`.
