@@ -21,6 +21,7 @@ It deliberately takes the workspace's system services down for longer than the a
 
 Every update ends with exactly one outcome, recorded by the agent that ran it, or by the workspace when that agent's chat was deleted.
 An agent that only stopped, as a workspace restart stops every chat, is started again by the workspace and carries on.
+A workspace with no scheduler of its own has nothing to start it again, so there the update is reported as no longer running, and its chat is where to resume it.
 Deleting the update's chat, or telling its agent to stop, is how the user cancels an update under way.
 Three of the ways an update can end without changing the workspace are told apart by why it stopped and what happens next.
 It is *stuck* when a fault stopped it and the agent running it could not recover from it, or when its chat was deleted before it finished; the update chat, while it exists, says what happened.

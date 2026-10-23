@@ -148,7 +148,7 @@ Feature: Running an update
   Scenario: An update whose agent stopped carries on
     A workspace restart stops every chat in it, and the user still wants the update that was under way.
     Only the agent can tell a loop from bad luck, so it is told how many times it has been restarted and decides when to give up.
-    Given a workspace with an update in flight
+    Given a workspace with a scheduler of its own and an update in flight
     And its agent stopped without recording a result
     Then the workspace starts the agent again, telling it how many times it has been restarted
     And the app still reports that workspace as updating
