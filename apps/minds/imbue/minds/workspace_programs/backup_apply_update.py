@@ -16,6 +16,9 @@ from collections.abc import Sequence
 from typing import Final
 from typing import NoReturn
 
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_RUNNING
+from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_support import GIT_IDENTITY
 from imbue.minds.workspace_programs.backup_support import SERVICE_VERIFY_TIMEOUT_SECONDS
@@ -72,9 +75,12 @@ def _restart_and_verify_service() -> str:
     if restarted.returncode != 0:
         return "supervisorctl restart failed: %s" % output_tail(restarted, 500)
     state, detail = poll_until(
-        service_state, lambda sample: sample[0] == "running", SERVICE_VERIFY_TIMEOUT_SECONDS, _SERVICE_POLL_SECONDS
+        service_state,
+        lambda sample: sample[0] == SERVICE_STATE_RUNNING,
+        SERVICE_VERIFY_TIMEOUT_SECONDS,
+        _SERVICE_POLL_SECONDS,
     )
-    if state == "running":
+    if state == SERVICE_STATE_RUNNING:
         return ""
     return "host-backup did not reach RUNNING: %s" % detail
 
@@ -102,7 +108,7 @@ def _fail_after_restoring_code(
     """Put the backup code back as HEAD has it, return the stash, and report ``step`` as failed."""
     _git(["checkout", "HEAD", "--", code_path])
     _pop_stash_into(result)
-    _finish(result, "failed", "%s failed: %s" % (step, output_tail(failed, 500)))
+    _finish(result, STATUS_FAILED, "%s failed: %s" % (step, output_tail(failed, 500)))
 
 
 def _check_out_tag_code(tag: str, code_path: str) -> subprocess.CompletedProcess[str]:
@@ -191,13 +197,13 @@ def main() -> None:
         agent_id, is_stop_chats, is_chat_gate_skipped=False
     )
     result.update(gate_extra)
-    if gate_status != "ok":
+    if gate_status != STATUS_OK:
         _finish(result, gate_status, gate_detail)
 
     # Resolve the target tag before touching anything.
     tag, tag_error = _resolve_target_tag(version)
     if not tag:
-        _finish(result, "failed", "cannot resolve target tag: %s" % tag_error)
+        _finish(result, STATUS_FAILED, "cannot resolve target tag: %s" % tag_error)
     result["tag"] = tag
 
     # Stash any uncommitted changes (tracked + untracked) out of the way.
@@ -205,7 +211,7 @@ def main() -> None:
     if dirty.stdout.strip():
         stashed = _git(["stash", "push", "--include-untracked", "-m", "minds-backup-update"])
         if stashed.returncode != 0:
-            _finish(result, "failed", "git stash failed: %s" % output_tail(stashed, 500))
+            _finish(result, STATUS_FAILED, "git stash failed: %s" % output_tail(stashed, 500))
         result["stashed"] = True
 
     # Converge the backup service to exactly the tag's content, then bring it
@@ -216,10 +222,10 @@ def main() -> None:
         if committed_sha:
             failure_detail = _roll_back(result, committed_sha, failure_detail)
         _pop_stash_into(result)
-        _finish(result, "failed", failure_detail)
+        _finish(result, STATUS_FAILED, failure_detail)
 
     _pop_stash_into(result)
-    _finish(result, "ok", "")
+    _finish(result, STATUS_OK, "")
 
 
 if __name__ == "__main__":

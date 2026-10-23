@@ -28,7 +28,8 @@ the rest of the app.
   argv, polling, printing the answer).
 - `backup_protocol.py`, `backup_support.py`: what the backup programs share.
   The `*_protocol.py` module holds the constants the app and the programs both
-  read (answer markers, the official remote), so each value has one source.
+  read (answer markers, the values an answer carries, the official remote), so
+  each value has one source.
 - `backup_check.py`, `backup_gate_probe.py`, `backup_apply_update.py`,
   `backup_restore.py`: the programs. Each module's docstring says what it does.
 - `update_protocol.py`: what the update program and the app share (state paths,
@@ -44,8 +45,9 @@ A program imports what it shares as an ordinary module of this package
 (`from imbue.minds.workspace_programs.backup_support import service_state`). A
 constant the app also needs goes in a module here, and the app imports it from
 there: the program and the app read one definition, and the type checker sees
-both reads. Enum values a program reports (an outcome, a reason) belong here as
-plain string constants, for the app's enum to take its values from.
+both reads. Enumerated values a program reports (an outcome, a state) belong
+here as plain string constants, which the program answers with and the app
+compares against.
 
 ## How a program ships
 

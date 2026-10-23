@@ -10,6 +10,12 @@ from typing import TypedDict
 
 from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
 from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_NOT_RUNNING
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_RUNNING
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_UNKNOWN
+from imbue.minds.workspace_programs.backup_protocol import STATUS_BLOCKED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.program_support import argv_value
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import as_json_object_list
@@ -176,10 +182,10 @@ def service_state() -> tuple[str, str]:
     status = run_command(["supervisorctl", "status", "host-backup"], SHORT_COMMAND_TIMEOUT_SECONDS)
     text = (status.stdout or "").strip()
     if text and "RUNNING" in text.split():
-        return "running", text
+        return SERVICE_STATE_RUNNING, text
     if text:
-        return "not_running", text
-    return "unknown", (status.stderr or "supervisorctl produced no output").strip()
+        return SERVICE_STATE_NOT_RUNNING, text
+    return SERVICE_STATE_UNKNOWN, (status.stderr or "supervisorctl produced no output").strip()
 
 
 def _read_background_chats() -> list[dict[str, object]]:
@@ -338,7 +344,7 @@ def is_backup_tick_in_flight(agent_id: str) -> bool:
     # be alive, and any started-but-unfinished journal entry is an orphan from
     # a killed tick (e.g. a restore's `stop all`), not live work to wait for.
     state, _ = service_state()
-    if state != "running":
+    if state != SERVICE_STATE_RUNNING:
         return False
     events_path = _backup_events_path(agent_id)
     if not events_path or not os.path.isfile(events_path):
@@ -400,16 +406,16 @@ def gate_chats_and_wait_for_tick(
     if not is_chat_gate_skipped:
         gate, gate_error = list_running_chats()
         if gate is None:
-            return "failed", {}, "cannot determine running chats: %s" % gate_error
+            return STATUS_FAILED, {}, "cannot determine running chats: %s" % gate_error
         if gate["chats"] and is_stop_chats:
             stop_error = _stop_running_chats(gate)
             if stop_error:
-                return "failed", {}, stop_error
+                return STATUS_FAILED, {}, stop_error
             gate, gate_error = list_running_chats()
             if gate is None:
-                return "failed", {}, "cannot re-check running chats: %s" % gate_error
+                return STATUS_FAILED, {}, "cannot re-check running chats: %s" % gate_error
         if gate["chats"]:
-            return "blocked", {"running_chats": gate["chats"]}, "chat agents are running"
+            return STATUS_BLOCKED, {"running_chats": gate["chats"]}, "chat agents are running"
     is_tick_still_in_flight = poll_until(
         lambda: is_backup_tick_in_flight(agent_id),
         lambda is_in_flight: not is_in_flight,
@@ -417,5 +423,5 @@ def gate_chats_and_wait_for_tick(
         _TICK_POLL_SECONDS,
     )
     if is_tick_still_in_flight:
-        return "failed", {}, "timed out waiting for the in-flight backup tick to finish"
-    return "ok", {}, ""
+        return STATUS_FAILED, {}, "timed out waiting for the in-flight backup tick to finish"
+    return STATUS_OK, {}, ""

@@ -14,6 +14,10 @@ import hashlib
 import os
 
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_MATCHES
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_NEWER
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_OUTDATED
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_UNVERIFIABLE
 from imbue.minds.workspace_programs.backup_support import RESTIC_ENV_PATH
 from imbue.minds.workspace_programs.backup_support import SHORT_COMMAND_TIMEOUT_SECONDS
 from imbue.minds.workspace_programs.backup_support import backup_code_path_in_tree
@@ -68,12 +72,12 @@ def _compare_code_to_tag_content(minimum_tag: str, code_path: str) -> tuple[str,
     if tag_path != code_path:
         # The tag lays the code out at a different layout era's path, so a
         # same-path `git diff` can never match.
-        return ("matches", "") if _is_cross_layout_content_match(minimum_tag, tag_path, code_path) else None
+        return (CODE_STATE_MATCHES, "") if _is_cross_layout_content_match(minimum_tag, tag_path, code_path) else None
     diffed = run_command(["git", "diff", "--quiet", minimum_tag, "--", code_path], SHORT_COMMAND_TIMEOUT_SECONDS)
     if diffed.returncode == 0:
-        return "matches", ""
+        return CODE_STATE_MATCHES, ""
     if diffed.returncode != 1:
-        return "unverifiable", "git diff failed: %s" % output_tail(diffed, 500)
+        return CODE_STATE_UNVERIFIABLE, "git diff failed: %s" % output_tail(diffed, 500)
     return None
 
 
@@ -94,10 +98,10 @@ def _compute_code_state(minimum_tag: str, installed_version: str, code_path: str
         return content_state
     ancestor = run_command(["git", "merge-base", "--is-ancestor", minimum_tag, "HEAD"], SHORT_COMMAND_TIMEOUT_SECONDS)
     if ancestor.returncode == 0:
-        return "newer", ""
+        return CODE_STATE_NEWER, ""
     if installed_version.startswith("minds-v") and tag_sort_key(installed_version) >= tag_sort_key(minimum_tag):
-        return "newer", ""
-    return "outdated", ""
+        return CODE_STATE_NEWER, ""
+    return CODE_STATE_OUTDATED, ""
 
 
 def _installed_backup_version() -> str:
@@ -165,7 +169,7 @@ def main() -> None:
     if tag:
         code_state, code_detail = _compute_code_state(tag, installed_version, code_path)
     else:
-        code_state, code_detail = "unverifiable", tag_error
+        code_state, code_detail = CODE_STATE_UNVERIFIABLE, tag_error
     result["code_state"] = code_state
     result["code_detail"] = code_detail
     state, state_detail = service_state()

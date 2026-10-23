@@ -53,6 +53,12 @@ from imbue.minds.desktop_client.workspace_program_command import build_workspace
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.workspace_programs import backup_check
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_MATCHES
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_NEWER
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_OUTDATED
+from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_UNVERIFIABLE
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_RUNNING
+from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_UNKNOWN
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -205,10 +211,10 @@ def classify_check_payload(
     problems: list[BackupServiceProblem] = []
     details: list[str] = []
 
-    code_state = str(payload.get("code_state", "unverifiable"))
-    if code_state == "outdated":
+    code_state = str(payload.get("code_state", CODE_STATE_UNVERIFIABLE))
+    if code_state == CODE_STATE_OUTDATED:
         problems.append(BackupServiceProblem.CODE_OUTDATED)
-    elif code_state in ("matches", "newer"):
+    elif code_state in (CODE_STATE_MATCHES, CODE_STATE_NEWER):
         pass
     else:
         problems.append(BackupServiceProblem.UNVERIFIABLE)
@@ -216,8 +222,8 @@ def classify_check_payload(
         if code_detail:
             details.append(code_detail)
 
-    service_state = str(payload.get("service_state", "unknown"))
-    if service_state != "running":
+    service_state = str(payload.get("service_state", SERVICE_STATE_UNKNOWN))
+    if service_state != SERVICE_STATE_RUNNING:
         problems.append(BackupServiceProblem.SERVICE_NOT_RUNNING)
         service_detail = str(payload.get("service_detail", ""))
         if service_detail:

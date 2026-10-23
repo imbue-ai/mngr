@@ -14,7 +14,7 @@ import pytest
 
 from imbue.minds.testing import DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO
 from imbue.minds.testing import fetch_default_workspace_template_file
-from imbue.minds.workspace_programs.backup_restore import DEFAULT_SNAPSHOT_EXCLUDES
+from imbue.minds.workspace_programs.backup_restore import _DEFAULT_SNAPSHOT_EXCLUDES
 
 _TEMPLATE_BACKUP_CONFIG_PATH = "system/services/host_backup/src/host_backup/config.py"
 
@@ -44,11 +44,11 @@ def test_restore_snapshot_default_excludes_match_host_backup_defaults() -> None:
         "Check template repo reachability."
     )
 
-    restore_defaults = DEFAULT_SNAPSHOT_EXCLUDES
+    restore_defaults = _DEFAULT_SNAPSHOT_EXCLUDES
     host_backup_defaults = _parse_backup_config_default_excludes(config_source)
 
     assert set(restore_defaults) == set(host_backup_defaults), (
-        "The restore program's DEFAULT_SNAPSHOT_EXCLUDES (workspace_programs/backup_restore.py) has drifted from "
+        "The restore program's _DEFAULT_SNAPSHOT_EXCLUDES (workspace_programs/backup_restore.py) has drifted from "
         f"host_backup's BackupConfig.excludes default in {DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}; "
         f"only in the restore program: {sorted(set(restore_defaults) - set(host_backup_defaults))}, "
         f"only in host_backup: {sorted(set(host_backup_defaults) - set(restore_defaults))}."

@@ -52,6 +52,8 @@ from typing import Final
 from typing import NoReturn
 
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.backup_support import RESTIC_ENV_PATH
 from imbue.minds.workspace_programs.backup_support import SERVICE_VERIFY_TIMEOUT_SECONDS
 from imbue.minds.workspace_programs.backup_support import SHORT_COMMAND_TIMEOUT_SECONDS
@@ -104,7 +106,7 @@ _PROGRESS_INTERVAL_SECONDS: Final[float] = 2.0
 # no readable backup.toml excludes. Matches host_backup's built-in
 # defaults so those snapshots look like every hourly snapshot; when the user
 # customized excludes in backup.toml, theirs are used instead (read below).
-DEFAULT_SNAPSHOT_EXCLUDES: Final[tuple[str, ...]] = (
+_DEFAULT_SNAPSHOT_EXCLUDES: Final[tuple[str, ...]] = (
     "**/.venv",
     "**/node_modules",
     "**/__pycache__",
@@ -374,7 +376,7 @@ def _read_snapshot_excludes(code_dir: str) -> list[str]:
     toml_path = os.path.join(code_dir, "data", "system", "backup.toml")
     if not os.path.isfile(toml_path):
         toml_path = os.path.join(code_dir, "runtime", "backup.toml")
-    excludes = list(DEFAULT_SNAPSHOT_EXCLUDES)
+    excludes = list(_DEFAULT_SNAPSHOT_EXCLUDES)
     if os.path.isfile(toml_path):
         try:
             with open(toml_path, "rb") as fh:
@@ -592,13 +594,15 @@ def _restore_snapshot_in_place(
             "the in-place restore failed (%s); the workspace may be mixed between versions -- "
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
-        _finish(result, "failed", detail)
+        _finish(result, STATUS_FAILED, detail)
     # Sanity-check the restored tree by its repo checkout: workspace/ in the
     # current layout, code/ in legacy snapshots.
     if not os.path.isdir(os.path.join(backup_root, "workspace")) and not os.path.isdir(
         os.path.join(backup_root, "code")
     ):
-        _finish(result, "failed", "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root)
+        _finish(
+            result, STATUS_FAILED, "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root
+        )
     result["restored"] = True
 
 
@@ -626,10 +630,10 @@ def _bring_services_back_and_verify(
             ", ".join("%s (%s)" % (name, post_states.get(name) or "absent") for name in critical_down),
             ("; %s said: %s" % (resume_command, resume_tail)) if resumed.returncode != 0 else "",
         )
-        _finish(result, "failed", detail)
+        _finish(result, STATUS_FAILED, detail)
     if other_down:
         result["services_down"] = other_down
-    _finish(result, "ok", "")
+    _finish(result, STATUS_OK, "")
 
 
 def main() -> None:
@@ -653,9 +657,9 @@ def main() -> None:
         "restic_downloaded": False,
     }
     if not snapshot_id:
-        _finish(result, "failed", "no --snapshot-id provided")
+        _finish(result, STATUS_FAILED, "no --snapshot-id provided")
     if not snapshot_subpath:
-        _finish(result, "failed", "no --snapshot-subpath provided")
+        _finish(result, STATUS_FAILED, "no --snapshot-subpath provided")
 
     # Gate before anything mutates. The chat half needs the current machine
     # code (`uv run mngr`); a forced restore skips only that half -- the tick
@@ -667,7 +671,7 @@ def main() -> None:
         agent_id, is_stop_chats, is_chat_gate_skipped=is_chat_gate_skipped
     )
     result.update(gate_extra)
-    if gate_status != "ok":
+    if gate_status != STATUS_OK:
         _finish(result, gate_status, gate_detail)
 
     # Read the current credentials, which the restore must keep working.
@@ -678,17 +682,17 @@ def main() -> None:
         with open(env_path, "rb") as env_file:
             env_content = env_file.read()
     except OSError as e:
-        _finish(result, "failed", "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
+        _finish(result, STATUS_FAILED, "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
     env_map = _parse_env_lines(env_content.decode("utf-8", "replace"))
     if not env_map.get("RESTIC_REPOSITORY"):
-        _finish(result, "failed", "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
+        _finish(result, STATUS_FAILED, "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
 
     # Resolve a usable restic (downloading the pinned build if the installed
     # one is too old) and the snapshot excludes before anything is stopped or
     # mutated, so these failures are cheap and leave the machine untouched.
     restic_binary, restic_error = _resolve_restic_binary(backup_root, result)
     if not restic_binary:
-        _finish(result, "failed", restic_error)
+        _finish(result, STATUS_FAILED, restic_error)
     excludes = _read_snapshot_excludes(code_dir)
 
     # Read before anything is stopped: the verdict is relative to this.
@@ -713,7 +717,7 @@ def main() -> None:
         backup_args = _snapshot_backup_args(backup_root, ["pre-restore"], excludes)
         backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
         if backed_up != 0:
-            _finish(result, "failed", "pre-restore safety snapshot failed: %s" % backup_output[-500:])
+            _finish(result, STATUS_FAILED, "pre-restore safety snapshot failed: %s" % backup_output[-500:])
         result["safety_snapshot_taken"] = True
 
     _restore_snapshot_in_place(result, snapshot_id, snapshot_subpath, backup_root, env_map, restic_binary)
@@ -725,7 +729,7 @@ def main() -> None:
         with open(env_path, "wb") as env_file:
             env_file.write(env_content)
     except OSError as e:
-        _finish(result, "failed", "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e))
+        _finish(result, STATUS_FAILED, "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e))
 
     # Append a snapshot of the restored state, tagged with its lineage, so the
     # backup timeline shows the restored version as a new entry ("Restored
@@ -751,7 +755,7 @@ def main() -> None:
     write_progress_line("Reinstalling dependencies (uv sync)...")
     synced = run_command(["uv", "sync", "--all-packages"], _UV_SYNC_TIMEOUT_SECONDS, cwd=code_dir)
     if synced.returncode != 0:
-        _finish(result, "failed", "restored, but uv sync failed: %s" % output_tail(synced, 800))
+        _finish(result, STATUS_FAILED, "restored, but uv sync failed: %s" % output_tail(synced, 800))
 
     _bring_services_back_and_verify(result, services_up_before, service_verify_timeout)
 

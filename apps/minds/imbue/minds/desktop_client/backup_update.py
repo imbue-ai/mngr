@@ -66,6 +66,9 @@ from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import STATUS_BLOCKED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
+from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.mngr.primitives import AgentId
 
@@ -317,12 +320,12 @@ def _apply_update_and_verify(
     if payload is None:
         detail = (apply_result.stderr or apply_result.stdout).strip()[-800:]
         return f"The update script produced no result: {detail}"
-    status = str(payload.get("status", "failed"))
-    if status == "blocked":
+    status = str(payload.get("status", STATUS_FAILED))
+    if status == STATUS_BLOCKED:
         running_chats = payload.get("running_chats")
         chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
         return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
-    if status != "ok":
+    if status != STATUS_OK:
         detail = str(payload.get("detail", "unknown failure"))
         rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
         stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
@@ -712,13 +715,13 @@ def _run_restore_phases(
             logger.warning("Post-failure service resume for {} failed: {}", agent_id, resume_detail)
         registry.fail(agent_id, f"The restore script produced no result: {detail}")
         return
-    status = str(payload.get("status", "failed"))
-    if status == "blocked":
+    status = str(payload.get("status", STATUS_FAILED))
+    if status == STATUS_BLOCKED:
         running_chats = payload.get("running_chats")
         chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
         registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
         return
-    if status != "ok":
+    if status != STATUS_OK:
         detail = str(payload.get("detail", "unknown failure"))
         safety_note = (
             " A safety backup of the pre-restore state was taken first."
