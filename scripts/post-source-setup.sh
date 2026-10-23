@@ -43,12 +43,17 @@ fi
 #   (b) .git is missing entirely (e.g. tarball produced by `git archive`,
 #       or offload's export_tree which does git init + fetch but
 #       skipped here): init a fresh repo and commit.
-#   (c) .git is already a directory: leave alone.
+#   (c) .git is already a directory: re-run `git init` to recreate the
+#       empty directories (e.g. refs/) that a files-only build context
+#       such as Modal's drops.
 if [ -f .git ]; then
     echo "Stripping worktree-style .git pointer"
     rm .git
 fi
-if [ ! -d .git ]; then
+if [ -d .git ]; then
+    echo "Existing .git directory -> re-init to restore dropped empty directories"
+    git init -q .
+else
     echo "No .git directory -> fresh in-image .git"
     git init -q .
     git add -A
