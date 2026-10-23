@@ -50,6 +50,8 @@ interface RenderTitlebarOptions {
   /** The shell's platform flags; a Mac by default, as the other cases assume. */
   isMac?: boolean;
   isTrafficLightsDrawn?: boolean;
+  /** The chrome control a workspace's tour asked to have ringed. */
+  highlightedChromeAnchor?: string | null;
 }
 
 /** Render the titlebar without a DOM. `window` is stubbed because the Electron
@@ -98,6 +100,7 @@ function renderTitlebar(
     displayedWorkspaceAnyId: WORKSPACE_ID,
     isNotificationsOpen: options.isNotificationsOpen ?? false,
     switchToNotifications: options.switchToNotifications ?? (() => undefined),
+    highlightedChromeAnchor: options.highlightedChromeAnchor ?? null,
   } as unknown as ShellState;
   const instance = Titlebar() as unknown as m.Component;
   const routePath =
@@ -402,6 +405,40 @@ describe("Titlebar workspace tab strip", () => {
       .mockImplementation(() => undefined);
     (attrsOf(tabButton(root, "ws-tab-permissions")).onclick as () => void)();
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
+  });
+});
+
+describe("Titlebar chrome ring", () => {
+  const ANCHOR_BUTTON_IDS: Record<string, string> = {
+    "workspace-switcher": "workspace-switcher-btn",
+    permissions: "ws-tab-permissions",
+    settings: "ws-tab-settings",
+    share: "ws-tab-share",
+    help: "help-toggle",
+  };
+
+  it("rings exactly the control a workspace's tour named, and none otherwise", () => {
+    for (const [anchor, buttonId] of Object.entries(ANCHOR_BUTTON_IDS)) {
+      const root = renderTitlebar("", { highlightedChromeAnchor: anchor });
+      for (const [otherAnchor, otherId] of Object.entries(ANCHOR_BUTTON_IDS)) {
+        const tokens = classTokensOf(
+          renderComponentVnode(tabButton(root, otherId)),
+        );
+        expect(
+          tokens.includes("animate-pulse"),
+          `${otherId} while ${anchor} is ringed`,
+        ).toBe(otherAnchor === anchor);
+      }
+      expect(
+        classTokensOf(renderComponentVnode(tabButton(root, buttonId))),
+      ).toEqual(expect.arrayContaining(["ring-2", "ring-accent"]));
+    }
+    const unringed = renderTitlebar("");
+    for (const buttonId of Object.values(ANCHOR_BUTTON_IDS)) {
+      expect(
+        classTokensOf(renderComponentVnode(tabButton(unringed, buttonId))),
+      ).not.toContain("animate-pulse");
+    }
   });
 });
 

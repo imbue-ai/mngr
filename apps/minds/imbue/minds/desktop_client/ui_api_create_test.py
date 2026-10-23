@@ -403,6 +403,7 @@ def _record(
     cpu_count: int | None = None,
     memory_gb: int | None = None,
     disk_gb: int | None = None,
+    is_onboarding_driven_by_agent: bool = False,
 ) -> PendingCreateAttemptRecord:
     now = datetime.now(timezone.utc)
     return PendingCreateAttemptRecord(
@@ -428,6 +429,7 @@ def _record(
             cpu_count=cpu_count,
             memory_gb=memory_gb,
             disk_gb=disk_gb,
+            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         ),
     )
 
@@ -487,6 +489,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
             cpu_count=6,
             memory_gb=12,
             disk_gb=250,
+            is_onboarding_driven_by_agent=True,
         )
     )
 
@@ -502,6 +505,8 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
     assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
+    # A retry keeps asking the onboarding questions when the attempt did.
+    assert prefill["is_onboarding_driven_by_agent"] is True
     # The ghost account is not offered, so it must not be pre-selected either.
     assert prefill["account_id"] == ""
     assert prefill["cloud_account"].startswith("gcp_")
@@ -643,6 +648,7 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
         "disk_gb": None,
         "repository": "file:///nonexistent-repo-for-request-summary-test",
         "branch": "v9.9.9-summary",
+        "is_onboarding_driven_by_agent": False,
     }
 
 
@@ -681,6 +687,7 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "disk_gb": 100,
         "repository": "https://example.com/some-repo.git",
         "branch": "feature-branch-7",
+        "is_onboarding_driven_by_agent": False,
     }
 
 

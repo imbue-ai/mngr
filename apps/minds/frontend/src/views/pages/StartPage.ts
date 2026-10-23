@@ -4,7 +4,7 @@
 // asked one at a time as a chat (see models/startFlow.ts for the transcript
 // and its transitions). The cloud answer submits the create form's remote
 // preset directly; the two quieter answers open the create form itself as a
-// modal, on their own preset; "I already have a workspace (log in)" signs in
+// modal, on their own preset; "I have an account (log in)" signs in
 // and leaves for the home page. A cloud create waits for the account's email to be
 // verified (the connector refuses it otherwise), polling and offering a resend
 // meanwhile. Submitting a create routes to the creation page, which renders
@@ -179,12 +179,16 @@ export function areDefaultsStale(defaults: CreateFormDefaults | null, accountId:
   return defaults === null || !defaults.accounts.some((account) => account.user_id === accountId);
 }
 
-/** The create form's remote preset under the flow's account, submitted without the form. */
+/**
+ * The create form's remote preset under the flow's account, submitted without the form. The first workspace's
+ * creation page asks the onboarding questions, as it does for the flow's form answers.
+ */
 export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
   model.accountId = accountId;
   model.applyPreset("remote");
+  model.isOnboardingDrivenByAgent = true;
   return { ...model.submitBody() };
 }
 
@@ -618,6 +622,7 @@ export const StartPage: m.ClosureComponent = () => {
             id: "start-create-form",
             onClose: closeCreateForm,
             initialPreset: formPreset,
+            isOnboardingDrivenByAgent: true,
             onSubmitted: (operationId: string) => {
               formPreset = null;
               flow.state = finishPendingModal(flow.state);

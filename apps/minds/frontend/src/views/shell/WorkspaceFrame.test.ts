@@ -121,8 +121,10 @@ function makeContract() {
     TEAR_OUT: "minds:tear-out",
     OPEN_LINK: "minds:open-link",
     OPEN_EXTERNAL: "minds:open-external",
+    HIGHLIGHT_CHROME: "minds:highlight-chrome",
+    CHROME_ANCHORS: ["workspace-switcher", "permissions", "settings", "share", "help"],
     REQUEST_ID_PATTERN,
-  } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
+  } as unknown as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
@@ -140,6 +142,7 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
   let frontCount = 0;
   const readyAnnouncements: boolean[] = [];
   const externalLinks: string[] = [];
+  const highlights: (string | null)[] = [];
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -162,6 +165,7 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
     openRequestPopup: (requestId) => popupOpens.push(requestId),
     onWorkspaceReady: (opensLinks) => readyAnnouncements.push(opensLinks),
     openExternalLink: options.opensExternalLinks === true ? (url) => externalLinks.push(url) : null,
+    highlightChrome: (anchor) => highlights.push(anchor),
     popout:
       options.canPopOut === true
         ? {
@@ -187,6 +191,7 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
     frontCount: () => frontCount,
     readyAnnouncements,
     externalLinks,
+    highlights,
   };
 }
 
@@ -358,6 +363,16 @@ describe("buildEmbedHandlers", () => {
         params: { tab: "share" },
       },
     ]);
+  });
+
+  it("rings the chrome control a tour names, and clears the ring on null or on an anchor it does not know", () => {
+    const { contract, handlers, highlights } = makeHandlers();
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "share" });
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "help" });
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: null });
+    // Unreachable through the real endpoint (the validator rejects it); pins the handler's own fallback.
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "sidebar" });
+    expect(highlights).toEqual(["share", "help", null, null]);
   });
 
   it("floats help over this workspace, without opening the popup", () => {

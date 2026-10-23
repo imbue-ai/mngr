@@ -20,7 +20,7 @@ import { TitlebarButton } from "../components/TitlebarButton";
 import { TrafficLights } from "./TrafficLights";
 import { electronBridge } from "../../electron-bridge";
 import type { OptionsTab } from "../../models/workspaceOptions";
-import type { ShellState } from "./shell-state";
+import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
 import { classifyRoute, isWorkspaceOverlayPath } from "./classify";
 import { defaultFetchJson } from "../../models/workspaceOptions";
@@ -36,6 +36,16 @@ export interface TitlebarAttrs {
  * the neutral surface. The workspace surface starts 38px below it. */
 export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-primary));";
 export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
+
+/** The ring a workspace's tour asks for around one chrome control (minds:highlight-chrome), as extra classes. */
+export function chromeAnchorRingClass(
+  shell: ShellState,
+  anchor: ChromeAnchor,
+): string {
+  return shell.highlightedChromeAnchor === anchor
+    ? " ring-2 ring-accent ring-offset-2 animate-pulse"
+    : "";
+}
 
 /** The room a bar leaves under the native traffic lights on macOS (main.js
  * places them at the bar's left edge). */
@@ -193,7 +203,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                       "aria-label": "Switch workspace",
                       "data-tooltip": "Switch workspace",
                       variant: "crumb",
-                      extra: "gap-1 min-w-0",
+                      extra:
+                        "gap-1 min-w-0" +
+                        chromeAnchorRingClass(shell, "workspace-switcher"),
                       onclick: (event: MouseEvent) => {
                         const button = (
                           event.currentTarget as HTMLElement
@@ -245,7 +257,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               ? "invisible"
                               : context.activeTab === "permissions"
                                 ? "bg-fill-active"
-                                : "") + " relative",
+                                : "") +
+                            " relative" +
+                            chromeAnchorRingClass(shell, "permissions"),
                           // Pointing at the key starts the read the pane makes
                           // on its first mount, so opening it usually lands on
                           // an answer instead of on "Loading permissions...".
@@ -296,11 +310,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             context.activeTab === "settings"
                               ? "default"
                               : "muted",
-                          extra: isTitlebarPopupOpen
-                            ? "invisible"
-                            : context.activeTab === "settings"
-                              ? "bg-fill-active"
-                              : "",
+                          extra:
+                            (isTitlebarPopupOpen
+                              ? "invisible"
+                              : context.activeTab === "settings"
+                                ? "bg-fill-active"
+                                : "") +
+                            chromeAnchorRingClass(shell, "settings"),
                           onclick: () => {
                             if (isCreating) notYetTab = "settings";
                             else toggleWorkspaceOptions(shell, routePath, context, "settings");
@@ -316,11 +332,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           "data-tooltip": "Sharing",
                           tone:
                             context.activeTab === "share" ? "default" : "muted",
-                          extra: isTitlebarPopupOpen
-                            ? "invisible"
-                            : context.activeTab === "share"
-                              ? "bg-fill-active"
-                              : "",
+                          extra:
+                            (isTitlebarPopupOpen
+                              ? "invisible"
+                              : context.activeTab === "share"
+                                ? "bg-fill-active"
+                                : "") + chromeAnchorRingClass(shell, "share"),
                           onclick: () => {
                             if (isCreating) notYetTab = "share";
                             else toggleWorkspaceOptions(shell, routePath, context, "share");
@@ -373,7 +390,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                 "aria-label": "Report a bug",
                 "data-tooltip": "Report a bug",
                 tone: "muted",
-                extra: popupHiddenClass,
+                extra: popupHiddenClass + chromeAnchorRingClass(shell, "help"),
                 onclick: () => shell.openHelp(),
               },
               m(Icon16, { name: "bug" }),

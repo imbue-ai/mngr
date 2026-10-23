@@ -29,6 +29,8 @@ describe("cloudCreateBody", () => {
       branch: "minds-v9.9.9",
       color: "#0b292b",
       host_name: "",
+      // The first workspace's creation page asks the onboarding questions.
+      is_onboarding_driven_by_agent: true,
     });
   });
 
@@ -68,7 +70,7 @@ describe("transcriptTurns", () => {
     const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true });
     const text = allText(turns);
     expect(text).toContain(REPORTING_ACCEPT_LABEL);
-    expect(text).toContain("Let's create your first workspace.");
+    expect(text).toContain("Let's set up your workspace.");
     expect(text).toContain("Recommended");
     expect(text).toContain("30 second setup");
     const answers = withAttr(turns, "data-answer");
@@ -83,12 +85,12 @@ describe("transcriptTurns", () => {
     const turns = transcriptTurns(answered.entries, { isInstant: true, isPressable: true, onUndo: () => undefined });
     const text = allText(turns);
     expect(text).toContain("Use Imbue Cloud");
-    expect(text).toContain("Imbue Cloud it is. A cloud workspace runs on our machines");
+    expect(text).toContain("Great. Imbue Cloud needs an Imbue account.");
     // The where-to-run buttons are gone; the account question's are up, with
     // sign-in as the emphasized answer at the row's right end.
     const answers = withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]);
     expect(answers).toEqual(["signup", "signin"]);
-    expect(text).toContain("Sign in with the account you downloaded Imbue Studio with.");
+    expect(text).toContain("Use the email you downloaded Imbue Studio with.");
     const undo = collectVnodes(turns).find((node) => node.attrs?.["aria-label"] === "Change answer");
     expect(undo).toBeDefined();
   });

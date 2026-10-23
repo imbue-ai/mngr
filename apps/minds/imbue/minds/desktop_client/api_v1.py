@@ -1193,6 +1193,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     is_web_access_enabled = bool(body.get("enable_web_access", False))
+    is_onboarding_driven_by_agent = bool(body.get("is_onboarding_driven_by_agent", False))
     if is_web_access_enabled and not account_id:
         # A share is registered under the owning account, so without one there
         # is nothing to publish.
@@ -1376,6 +1377,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             docker_runtime=docker_runtime,
             original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
             account_id=account_id,
+            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
     except WorkspaceNameInUseError as exc:
         # A live in-flight create attempt already holds this name on the same

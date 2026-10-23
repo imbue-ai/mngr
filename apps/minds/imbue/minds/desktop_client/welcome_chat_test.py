@@ -130,6 +130,22 @@ def test_a_conversation_handed_over_while_the_workspace_was_built_is_seeded_when
     assert _seeded_transcript(argv) == _request().model_dump(mode="json")
 
 
+def test_a_conversation_handed_over_again_before_the_attempt_finishes_replaces_the_one_held() -> None:
+    """A page left with an onboarding question open hands over the answers so far; answered on a later visit, it hands over again."""
+    caller = RecordingMngrCaller(result=_SEEDED)
+    seeder = _seeder(caller)
+    answered = WelcomeChatRequest(
+        title="Welcome", turns=(*_request().turns, WelcomeChatTurn(role=WelcomeChatRole.USER, text="Yes"))
+    )
+
+    seeder.hold(_ATTEMPT_ID, _request())
+    seeder.hold(_ATTEMPT_ID, answered)
+    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
+
+    (argv,) = caller.calls
+    assert _seeded_transcript(argv) == answered.model_dump(mode="json")
+
+
 def test_an_attempt_whose_page_handed_nothing_over_is_not_seeded() -> None:
     caller = RecordingMngrCaller(result=_SEEDED)
 

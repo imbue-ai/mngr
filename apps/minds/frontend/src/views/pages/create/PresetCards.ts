@@ -60,8 +60,8 @@ export function PresetCards(): m.Component<PresetCardsAttrs> {
             m("ul", { class: "grid grid-cols-2 gap-x-6 gap-y-1.5 mt-1" }, [
               featureItem("30 second setup"),
               featureItem("Runs even if your computer is off"),
-              featureItem("Accessible from mobile"),
-              featureItem("Shareable with other people"),
+              featureItem("Use it from your phone"),
+              featureItem("Easy to share with others"),
             ]),
           ],
         ),

@@ -863,6 +863,10 @@ def _attach_renderer_diagnostics(page: Page) -> None:
     """
     page.on("console", lambda message: logger.debug("[renderer console:{}] {}", message.type, message.text))
     page.on("pageerror", lambda error: logger.warning("[renderer pageerror] {}", error))
+    # A frame that navigates in place keeps its handle but loses its document, which a wait on it
+    # then never finds; naming each navigation is what tells that apart from a page that is slow.
+    page.on("framenavigated", lambda frame: logger.info("[renderer framenavigated] {}", frame.url))
+    page.on("framedetached", lambda frame: logger.info("[renderer framedetached] {}", frame.url))
     page.on(
         "requestfailed",
         lambda request: logger.warning("[renderer requestfailed] {} ({})", request.url, request.failure),
@@ -1352,9 +1356,10 @@ def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
     The shell shields every window but the focused one and makes the pages under the
     shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
     intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
-    that would raise it. A fresh workspace opens two windows -- the welcome chat and the
-    Getting Started app -- and which lands on top is a race, so take the shell's own
-    two-step: press the shield, then act on the page.
+    that would raise it. A fresh workspace opens on the welcome chat alone and focused, so
+    the chat is normally unshielded and this returns at once; the shell shields it when
+    another window is shown above it or a menu or the launcher is open, and then the
+    shell's own two-step raises it: press the shield, then act on the page.
     """
     shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
     if shield is None:
@@ -1364,13 +1369,30 @@ def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
     workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
 
 
+def _describe_chat_frame(chat: Frame) -> str:
+    """The chat frame's URL and the start of its document's text, for a failure that found nothing in it."""
+    try:
+        body = chat.evaluate(
+            "() => document.title + ' | ' + (document.body ? document.body.innerText : '').slice(0, 400)"
+        )
+    except PlaywrightError as exc:
+        body = f"<unreadable: {exc}>"
+    return f"url={chat.url} detached={chat.is_detached()} document={body!r}"
+
+
 def _click_in_chat(workspace: Page | Frame, chat: Frame, selector: str, *, label: str) -> None:
     """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
     try:
         chat.click(selector, timeout=10_000)
     except PlaywrightTimeoutError:
         _raise_chat_window(workspace, label=label)
-        chat.click(selector, timeout=20_000)
+        try:
+            chat.click(selector, timeout=20_000)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "[{}] could not click {} in the chat's page: {}", label, selector, _describe_chat_frame(chat)
+            )
+            raise
 
 
 def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
@@ -1379,8 +1401,9 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     A freshly created workspace has no provider accounts, so its welcome chat (the
     conversation the creation page seeded) disables its composer and opens the chooser in
     that chat's page -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, and enables the composer;
-    the chat's first send then launches its agent on that account.
+    holding the key rather than writing a shared settings block, launches the chat's agent on
+    that account, and enables the composer; a message sent before the chat app has reported
+    the chat creating waits for the chat and goes to it.
 
     Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
     tailwind class: this drives the template's dialog from the other repo, so it has to
@@ -1429,7 +1452,11 @@ def send_chat_message(chat: Frame, page: Page | Frame, token: str) -> None:
     logger.info("Sent chat message with token {}", token)
     # The user turn should render (optimistic pending bubble or a committed user
     # message) almost immediately -- proves the chat round-trips through the proxy.
-    chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=30_000)
+    try:
+        chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=30_000)
+    except PlaywrightTimeoutError:
+        logger.warning("The sent message never rendered in the chat's page: {}", _describe_chat_frame(chat))
+        raise
     _flow_screenshot(page, "03-message-sent")
 
 

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
+import type { BuildAnswerId } from "./creationTranscript";
 import {
+  BUILD_ASK,
+  PATH_ASK,
   SETUP_LINE,
-  SETUP_SECTIONS,
+  SHOWCASE_APP,
   readyTurnMarkdown,
+  showcaseMarkdown,
 } from "./creationTranscript";
 import {
   MANIFESTO_POINTS,
@@ -15,9 +19,11 @@ import {
 import type { TranscriptEntry } from "./startFlow";
 import { jsonResponse } from "../testing";
 import {
+  NO_ONBOARDING_ANSWERS,
   disclosureMarkdown,
   flowTurns,
   manifestoOpenerMarkdown,
+  onboardingQuestionTurns,
   postWelcomeChat,
   tableColumnMarkdown,
   welcomeChatBody,
@@ -37,6 +43,7 @@ const REQUEST: CreateAttemptRequestSummary = {
   disk_gb: null,
   repository: "https://github.com/imbue-ai/default-workspace-template.git",
   branch: "",
+  is_onboarding_driven_by_agent: false,
 };
 
 /** A cloud create by a returning user. */
@@ -50,8 +57,8 @@ const ENTRIES: TranscriptEntry[] = [
 ];
 
 describe("welcomeChatBody", () => {
-  it("opens with the manifesto, follows the flow, and closes with the settings, the setup line and the ready list", () => {
-    const body = welcomeChatBody(ENTRIES, REQUEST, false);
+  it("opens with the manifesto, follows the flow, and closes with the settings, the setup line and the welcome", () => {
+    const body = welcomeChatBody(ENTRIES, REQUEST, false, NO_ONBOARDING_ANSWERS);
 
     expect(body.title).toBe("Welcome");
     expect(body.turns.map((turn) => turn.role)).toEqual([
@@ -79,11 +86,54 @@ describe("welcomeChatBody", () => {
     expect(body.turns[6].text).toBe("Use Imbue Cloud");
     expect(body.turns[8].text).toContain("Name — workspace-1");
     expect(body.turns[8].text).toContain("Branch — latest");
-    expect(body.turns[9].text.startsWith(SETUP_LINE)).toBe(true);
-    for (const section of SETUP_SECTIONS) {
-      expect(body.turns[9].text).toContain(disclosureMarkdown(section));
-    }
-    expect(body.turns[10].text).toBe(readyTurnMarkdown());
+    expect(body.turns[9].text).toBe(SETUP_LINE);
+    expect(body.turns[10].text).toBe(readyTurnMarkdown("problem"));
+  });
+
+  it("carries the onboarding questions with their answers, and closes on the welcome the answers chose", () => {
+    const built = welcomeChatBody(ENTRIES, REQUEST, false, { isDriven: true, buildAnswer: "yes", pathAnswer: null });
+    const tail = built.turns.slice(9);
+    expect(tail.map((turn) => [turn.role, turn.text])).toEqual([
+      ["assistant", SETUP_LINE],
+      ["assistant", BUILD_ASK],
+      ["user", "Yes"],
+      ["assistant", readyTurnMarkdown("build")],
+    ]);
+
+    const examples = welcomeChatBody(ENTRIES, REQUEST, false, {
+      isDriven: true,
+      buildAnswer: "not-sure",
+      pathAnswer: "examples",
+    });
+    expect(examples.turns.slice(10).map((turn) => [turn.role, turn.text])).toEqual([
+      ["assistant", BUILD_ASK],
+      ["user", "I’m not sure"],
+      ["assistant", PATH_ASK],
+      ["user", "See examples"],
+      ["assistant", showcaseMarkdown(SHOWCASE_APP)],
+      ["assistant", readyTurnMarkdown("examples")],
+    ]);
+  });
+});
+
+describe("onboardingQuestionTurns", () => {
+  it("asks nothing for a page that asked nothing, and stops at the open question otherwise", () => {
+    expect(onboardingQuestionTurns(NO_ONBOARDING_ANSWERS)).toEqual([]);
+    expect(onboardingQuestionTurns({ isDriven: true, buildAnswer: null, pathAnswer: null })).toEqual([
+      { role: "assistant", text: BUILD_ASK },
+    ]);
+    expect(onboardingQuestionTurns({ isDriven: true, buildAnswer: "no", pathAnswer: null })).toEqual([
+      { role: "assistant", text: BUILD_ASK },
+      { role: "user", text: "No" },
+      { role: "assistant", text: PATH_ASK },
+    ]);
+  });
+
+  it("refuses an answer no question offers", () => {
+    const unlisted = "maybe" as unknown as BuildAnswerId;
+    expect(() => onboardingQuestionTurns({ isDriven: true, buildAnswer: unlisted, pathAnswer: null })).toThrow(
+      "No onboarding choice is called maybe",
+    );
   });
 });
 
@@ -94,12 +144,12 @@ describe("flowTurns", () => {
     ]);
     expect(ask.role).toBe("assistant");
     expect(
-      ask.text.startsWith("Welcome back. Let's create your first workspace."),
+      ask.text.startsWith("Welcome back. Let's set up your workspace."),
     ).toBe(true);
     expect(ask.text).toContain(
       "**Imbue Cloud** (Recommended)\n- 30 second setup",
     );
-    expect(ask.text.endsWith("- Shareable with other people")).toBe(true);
+    expect(ask.text.endsWith("- Easy to share with others")).toBe(true);
     expect(
       flowTurns([{ kind: "step", id: "run", ack: "", answer: null, said: "" }]),
     ).toHaveLength(1);

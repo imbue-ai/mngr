@@ -15,7 +15,13 @@ import {
 import type { CreateFormDefaults } from "../../models/create";
 import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
-import { CreatePage, createFormModal, signInOutcome } from "./CreatePage";
+import {
+  CreatePage,
+  ONBOARDING_QUESTIONS_LABEL,
+  ONBOARDING_QUESTIONS_SENTENCE,
+  createFormModal,
+  signInOutcome,
+} from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
@@ -144,6 +150,32 @@ describe("CreatePage", () => {
 
     expect(attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("false");
     expect(allText(byId(thrown, "web-access-word"))).toBe("No");
+  });
+
+  it("offers the onboarding questions in the advanced view, off from the form and on for the start flow's form", async () => {
+    const { page, vnode } = await loadedPage();
+    (attrsOf(byId(page.view.call(page, vnode), "toggle-advanced") as AnyVnode).onclick as () => void)();
+    const row = byId(page.view.call(page, vnode), "onboarding-questions-row");
+
+    expect(allText(row)).toContain(ONBOARDING_QUESTIONS_LABEL);
+    expect(allText(row)).toContain(ONBOARDING_QUESTIONS_SENTENCE);
+    const control = byId(row, "is_onboarding_driven_by_agent") as AnyVnode;
+    expect(attrsOf(control).role).toBe("switch");
+    expect(attrsOf(control)["aria-checked"]).toBe("false");
+    expect(allText(byId(row, "onboarding-questions-word"))).toBe("No");
+
+    (attrsOf(control).onclick as () => void)();
+    const thrown = byId(page.view.call(page, vnode), "onboarding-questions-row");
+    expect(attrsOf(byId(thrown, "is_onboarding_driven_by_agent") as AnyVnode)["aria-checked"]).toBe("true");
+
+    // The start flow's form answers open with it on: theirs is the first workspace.
+    const { page: flowPage, vnode: flowVnode } = await loadedPage({
+      mode: "embedded",
+      initialPreset: "local",
+      isOnboardingDrivenByAgent: true,
+    });
+    const flowRow = byId(flowPage.view.call(flowPage, flowVnode), "onboarding-questions-row");
+    expect(attrsOf(byId(flowRow, "is_onboarding_driven_by_agent") as AnyVnode)["aria-checked"]).toBe("true");
   });
 });
 
