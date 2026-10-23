@@ -62,6 +62,15 @@ def _provision_machine(latchkey: Latchkey, host_id: HostId) -> None:
     store_machine_encryption_key(latchkey.plugin_data_dir, host_id, SecretStr("machine-key-7c1d"))
 
 
+def _build_local_auto_register(
+    build: Callable[..., LatchkeyAutoRegister], resolver: MngrCliBackendResolver, latchkey: Latchkey
+) -> LatchkeyAutoRegister:
+    """An auto-register whose hosts have no machine of their own, for tests about the local edit."""
+    return build(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    )
+
+
 class _PushRecorder(MutableModel):
     """Records every workspace whose policy the auto-register asked to have pushed, in order."""
 
@@ -128,9 +137,7 @@ def test_registers_existing_agents_on_start(
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    ).start()
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
 
     any_of = _read_allowed_anyof(latchkey.plugin_data_dir, host_id)
     registered = {entry["pattern"] for entry in any_of}
@@ -149,9 +156,7 @@ def test_registers_newly_discovered_agents_on_change(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    ).start()
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
 
     later_agent = AgentId.generate()
     _push_agents(
@@ -181,9 +186,7 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    ).start()
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
 
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -207,9 +210,7 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    ).start()
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
     # Nothing to register against yet -- the deferral must not have written a file.
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -244,9 +245,7 @@ def test_idempotent_across_repeated_resolver_changes(
     register_agent_for_host(latchkey.plugin_data_dir, host_id, other_seed)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    )
+    auto = _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey)
     auto.start()
     # Two more resolver changes that leave the discovered agents as they are.
     resolver.notify_change()
@@ -279,9 +278,7 @@ def test_handles_multiple_hosts_independently(
         _make_discovered(host_b, agent_b),
     )
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    ).start()
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
 
     a_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_a)}
     b_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_b)}
@@ -317,9 +314,7 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
 
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
-    )
+    auto = _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey)
     # ``start()`` must not raise even though ``register_agent_for_host``
     # raises ``LatchkeyStoreError`` against the corrupted file.
     auto.start()
