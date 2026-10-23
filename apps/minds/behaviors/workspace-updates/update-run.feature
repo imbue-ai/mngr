@@ -165,6 +165,15 @@ Feature: Running an update
     And the app reports that the update didn't finish, without a button into its chat
     And an update of that workspace can be started again at once
 
+  @stalled-run-resumes
+  Scenario: An update reported as failed because its agent stopped is reported as updating once its agent is back
+    The app reports a run as failed when its agent stopped and nothing in the workspace would start it again.
+    Something can still bring that agent back (the workspace's scheduler returning, or the user starting the chat), and the update then carries on.
+    Given the app reports a workspace's update as failed because its agent stopped, with no result recorded
+    When the agent is running again, or stopped where the workspace's scheduler will start it again
+    Then the app reports that workspace as updating
+    But a workspace that cannot be reached leaves the report as it is
+
   @one-run-per-workspace
   Rule: A workspace runs at most one update at a time
     A second request to update a workspace that is already updating starts nothing.

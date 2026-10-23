@@ -78,6 +78,9 @@ _POLLED_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
     {UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
 )
 
+# A stalled run's lead rarely comes back, so its row is probed at about the detection sweep's pace, not every pass.
+_POLLS_BETWEEN_STALLED_PROBES: Final[int] = 15
+
 # A run's own record starts after the app's claim, give or take the gap between the laptop's
 # clock and the workspace's; one under the run's chat name that started earlier than this is an
 # earlier run's, whose chat had the same name (update chats are named for their target).
@@ -242,6 +245,16 @@ def _is_earlier_runs_record(status: UpdateRunStatus, run_started_at: datetime | 
     return status.started_at < run_started_at - _EARLIER_RUN_RECORD_MARGIN
 
 
+def _is_records_run(status: UpdateRunStatus | None, state: UiWorkspaceUpdate) -> bool:
+    """Whether the workspace's run record is the row's own run, not an earlier one under the same chat name."""
+    return (
+        status is not None
+        and bool(state.chat_agent_name)
+        and status.chat_agent_name == state.chat_agent_name
+        and not _is_earlier_runs_record(status, state.run_started_at)
+    )
+
+
 @pure
 def build_sign_in_chat_open_script() -> str:
     """The in-workspace bash that opens the sign-in chat, retried while the user's client connects."""
@@ -292,6 +305,8 @@ class WorkspaceUpdateService(MutableModel):
     )
     # agent_id_str -> consecutive WAITING polls; only the poll thread touches it.
     _waiting_streak_by_agent: dict[str, int] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> passes since a STALLED row was last probed; only the poll thread touches it.
+    _stalled_passes_by_agent: dict[str, int] = PrivateAttr(default_factory=dict)
     _poll_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_polling_started: bool = PrivateAttr(default=False)
     _on_update_landed_callbacks: list[OnUpdateLandedCallback] = PrivateAttr(default_factory=list)
@@ -585,29 +600,58 @@ class WorkspaceUpdateService(MutableModel):
         idle for consecutive polls is WAITING, moving again is RUNNING). An
         unanswered probe moves nothing.
 
-        STARTING is not probed: the chat may not exist yet, and STALLED is terminal.
+        STARTING is not probed: the chat may not exist yet. STALLED is probed
+        now and then, for a lead that came back.
         """
         snapshot = self.state_store.snapshot()
         for stale_id_str in set(self._waiting_streak_by_agent) - set(snapshot):
             del self._waiting_streak_by_agent[stale_id_str]
+        for stale_id_str in set(self._stalled_passes_by_agent) - set(snapshot):
+            del self._stalled_passes_by_agent[stale_id_str]
         # Every write below is an ``only_from`` transition: a verdict landing
         # during the probe postdates this pass's reading.
         for agent_id_str, state in snapshot.items():
+            if state.activity is UpdateActivity.STALLED:
+                self._waiting_streak_by_agent.pop(agent_id_str, None)
+                self._poll_stalled_run(AgentId(agent_id_str), state)
+                continue
+            self._stalled_passes_by_agent.pop(agent_id_str, None)
             if state.activity not in _POLLED_ACTIVITIES:
                 self._waiting_streak_by_agent.pop(agent_id_str, None)
                 continue
             self._poll_one_run(AgentId(agent_id_str), state)
 
+    def _poll_stalled_run(self, agent_id: AgentId, state: UiWorkspaceUpdate) -> None:
+        """Report a stalled run as running again once its lead is back, with no verdict recorded.
+
+        Only an answered probe moves it, and only for a lead listed running, or stopped where the
+        workspace's watchdog restarts it. A verdict landing meanwhile is the sweep's to observe.
+        """
+        aid_str = str(agent_id)
+        passes = self._stalled_passes_by_agent.get(aid_str, 0) + 1
+        if passes < _POLLS_BETWEEN_STALLED_PROBES:
+            self._stalled_passes_by_agent[aid_str] = passes
+            return
+        self._stalled_passes_by_agent[aid_str] = 0
+        probe = self.apply_window.probe_run(agent_id)
+        status = probe.run_status
+        if not probe.is_probe_answered or status is None or not _is_records_run(status, state):
+            return
+        if status.verdict is not None:
+            return
+        is_lead_back = probe.agent_liveness is UpdateAgentLiveness.ALIVE or (
+            probe.agent_liveness is UpdateAgentLiveness.STOPPED and probe.is_watchdog_installed
+        )
+        if is_lead_back and self.state_store.set_activity(
+            agent_id, UpdateActivity.RUNNING, only_from=frozenset({UpdateActivity.STALLED})
+        ):
+            logger.info("The stalled update run in machine {} is under way again; reporting it as running", agent_id)
+
     def _poll_one_run(self, agent_id: AgentId, state: UiWorkspaceUpdate) -> None:
         aid_str = str(agent_id)
         probe = self.apply_window.probe_run(agent_id)
         status = probe.run_status
-        is_records_run = (
-            status is not None
-            and bool(state.chat_agent_name)
-            and status.chat_agent_name == state.chat_agent_name
-            and not _is_earlier_runs_record(status, state.run_started_at)
-        )
+        is_records_run = _is_records_run(status, state)
         self.state_store.note_chat_agent_id(agent_id, probe.chat_agent_id)
         # Unlisted means deleted only for a chat the create named: one it did not may still be landing.
         if probe.is_probe_answered and probe.agent_liveness is UpdateAgentLiveness.GONE and state.chat_agent_id:
