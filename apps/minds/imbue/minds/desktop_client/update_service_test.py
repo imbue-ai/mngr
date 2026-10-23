@@ -211,10 +211,8 @@ def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_ba
     assert landings_told == []
 
 
-_STALLED_RUN_STARTED_AT = time.time()
-_STALLED_LEADS_RUN = json.dumps({"chat_agent_name": "update-old", "started_at": _STALLED_RUN_STARTED_AT}) + "\n"
 _STALLING_PROBE = MngrCallResult(
-    returncode=0, stdout=update_run_probe_stdout(run=_STALLED_LEADS_RUN, agents=_STOPPED_LEAD_LINE)
+    returncode=0, stdout=update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE)
 )
 _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
 
@@ -227,7 +225,7 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
             MngrCallResult(
                 returncode=0,
                 stdout=update_run_probe_stdout(
-                    run=_STALLED_LEADS_RUN, agents=f"update-old\tRUNNING\t{_RUN_CHAT_ID}\t\n"
+                    run=_STOPPED_LEADS_RUN, agents=f"update-old\tRUNNING\t{_RUN_CHAT_ID}\t\n"
                 ),
             ),
             UpdateActivity.RUNNING,
@@ -237,7 +235,7 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
             MngrCallResult(
                 returncode=0,
                 stdout=update_run_probe_stdout(
-                    run=_STALLED_LEADS_RUN, agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True
+                    run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True
                 ),
             ),
             UpdateActivity.RUNNING,
@@ -246,7 +244,7 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
         (_STALLING_PROBE, UpdateActivity.STALLED),
         # Its chat was deleted.
         (
-            MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=_STALLED_LEADS_RUN, agents="")),
+            MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents="")),
             UpdateActivity.STALLED,
         ),
         # The workspace could not be reached: no evidence either way.
