@@ -181,6 +181,7 @@ _STOPPED_LEADS_RUN = json.dumps({"chat_agent_name": "update-old"}) + "\n"
     ],
     ids=["deleted", "unlisted-without-id", "stopped-no-watchdog", "stopped-watchdog", "stopped-watchdog-unrecorded"],
 )
+@pytest.mark.witnesses("workspace-updates.stopped-agent-revived", partial="the app's report only")
 @pytest.mark.witnesses("workspace-updates.gone-agent-closed-out", partial="the app's report only")
 def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_back(
     tmp_path: Path,
