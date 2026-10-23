@@ -459,7 +459,10 @@ def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     assert "no recorded result yet" in messages[0][2]
 
 
-@pytest.mark.witnesses("workspace-updates.stopped-agent-revived")
+@pytest.mark.witnesses(
+    "workspace-updates.stopped-agent-revived",
+    partial="the workspace's restart only; not the app's report or update now's answer",
+)
 def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it_has(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
