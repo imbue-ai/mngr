@@ -1122,18 +1122,25 @@ def release_leases_of(lead):
         log("released lease %s (%s): exit %d" % (lease_id, title, closed.returncode))
 
 
-def close_out(run, agents):
-    """End a run whose lead is gone: record STUCK, stop its worker keeping its branch, release its leases."""
-    lead_name = str(run.get("chat_agent_name"))
-    # The listing can take minutes; a lead that recorded a new run meanwhile must keep its record.
+def is_run_still_open(run):
+    """Whether the run record still names ``run`` with no verdict.
+
+    The agents listing can take minutes, so a tick re-reads the record before it acts on what the
+    listing said: a lead may have recorded its verdict, or a new run, meanwhile.
+    """
     current = read_json(RUN_PATH)
-    is_same_run = (
+    return (
         isinstance(current, dict)
         and run_verdict(current) is None
         and current.get("chat_agent_name") == run.get("chat_agent_name")
         and run_started_at(current) == run_started_at(run)
     )
-    if not is_same_run:
+
+
+def close_out(run, agents):
+    """End a run whose lead is gone: record STUCK, stop its worker keeping its branch, release its leases."""
+    lead_name = str(run.get("chat_agent_name"))
+    if not is_run_still_open(run):
         log("the run record changed while this tick listed the agents; leaving %s's close-out" % lead_name)
         return
     lead = find_run_lead(agents, run) or {"name": lead_name}
@@ -1146,6 +1153,19 @@ def close_out(run, agents):
         log("stopped worker %s, keeping its branch: exit %d" % (worker_name, stopped.returncode))
     release_leases_of(lead)
     log("closed out run %s: its lead is gone" % lead_name)
+
+
+def revive(run, agents, state):
+    """Message a stopped lead, which starts it again, counting the restarts in the watchdog's ``state``."""
+    lead_name = str(run.get("chat_agent_name"))
+    if not is_run_still_open(run):
+        log("the run record changed while this tick listed the agents; leaving %s stopped" % lead_name)
+        return
+    revivals = int(state.get("revivals") or 0) + 1
+    if send_to_chat(find_run_lead(agents, run), MESSAGE_PARTS["revive"].format(count=revivals)):
+        state.update({"revivals": revivals, "idle_ticks": 0})
+        write_json(WATCHDOG_PATH, state)
+        log("restarted stopped lead %s (restart %d)" % (lead_name, revivals))
 
 
 def tick_watchdog(now):
@@ -1161,11 +1181,7 @@ def tick_watchdog(now):
         close_out(run, agents)
         return
     if action == "revive":
-        revivals = int(state.get("revivals") or 0) + 1
-        if send_to_chat(find_run_lead(agents, run), MESSAGE_PARTS["revive"].format(count=revivals)):
-            state.update({"revivals": revivals, "idle_ticks": 0})
-            write_json(WATCHDOG_PATH, state)
-            log("restarted stopped lead %s (restart %d)" % (run["chat_agent_name"], revivals))
+        revive(run, agents, state)
         return
     if action == "reset":
         if state.get("idle_ticks"):

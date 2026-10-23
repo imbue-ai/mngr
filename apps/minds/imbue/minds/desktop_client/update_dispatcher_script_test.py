@@ -481,6 +481,17 @@ def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it
     assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
+def test_a_revive_leaves_alone_a_lead_that_recorded_its_verdict_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": "UPDATED"})
+
+    program.revive({**_OPEN_RUN, "verdict": None}, [_agent(_LEAD, "STOPPED", _LEAD_ID)], {})
+
+    assert staged.tool_calls("message_chat.py") == []
+
+
 @pytest.mark.parametrize("wrapper_dir", ["system/libs/routines", "system/libs/automations"])
 def test_under_cron_the_agent_environment_is_restored_through_the_templates_wrapper_wherever_it_lives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, wrapper_dir: str
