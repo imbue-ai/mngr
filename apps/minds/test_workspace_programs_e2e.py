@@ -38,6 +38,7 @@ from imbue.minds.workspace_programs.update_protocol import DURABLE_CRON_PATH
 from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
 from imbue.minds.workspace_programs.update_protocol import SCHEDULE_FILE_PATH
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
+from imbue.minds.workspace_programs.update_protocol import UPDATE_STATE_DIR
 
 _LIVE_CRON_PATH = f"{LIVE_CRON_DIRECTORY}/{DISPATCHER_CRON_NAME}"
 
@@ -92,7 +93,7 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
     )
     _run_in_workspace_root(
         running_workspace,
-        f"mkdir -p {shlex.quote(SCHEDULE_FILE_PATH.rsplit('/', 1)[0])} && "
+        f"mkdir -p {shlex.quote(UPDATE_STATE_DIR)} && "
         f"printf %s {shlex.quote(json.dumps(armed_schedule))} > {shlex.quote(SCHEDULE_FILE_PATH)}",
     )
     try:
