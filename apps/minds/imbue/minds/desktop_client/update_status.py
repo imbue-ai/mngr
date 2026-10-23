@@ -102,7 +102,9 @@ class UpdateActivity(UpperCaseStrEnum):
     APPLYING = auto()
     """The merge-and-reveal is landing. The system-interface outage this causes is expected."""
     STALLED = auto()
-    """A probe found no live update agent and no apply under way: the run is gone without a verdict."""
+    """A probe found no live update agent and no apply under way: the run is gone without a verdict.
+
+    Not final: a later probe that finds the run's lead back, with no verdict recorded, reports it RUNNING again."""
 
 
 # Named once so the surfaces' read and the store's run-slot claim cannot disagree about what "in flight" means.
