@@ -247,10 +247,21 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
             MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents="")),
             UpdateActivity.STALLED,
         ),
+        # Its agent is back but its run already has a result: the sweep reports that, not the poll.
+        (
+            MngrCallResult(
+                returncode=0,
+                stdout=update_run_probe_stdout(
+                    run=json.dumps({"chat_agent_name": "update-old", "verdict": "STUCK"}) + "\n",
+                    agents=f"update-old\tRUNNING\t{_RUN_CHAT_ID}\t\n",
+                ),
+            ),
+            UpdateActivity.STALLED,
+        ),
         # The workspace could not be reached: no evidence either way.
         (_HOST_OFFLINE, UpdateActivity.STALLED),
     ],
-    ids=["running-again", "stopped-watchdog-back", "still-stopped", "deleted", "unreachable"],
+    ids=["running-again", "stopped-watchdog-back", "still-stopped", "deleted", "verdict-recorded", "unreachable"],
 )
 @pytest.mark.witnesses("workspace-updates.stalled-run-resumes")
 def test_a_stalled_run_is_reported_as_updating_again_only_once_its_lead_is_back(
