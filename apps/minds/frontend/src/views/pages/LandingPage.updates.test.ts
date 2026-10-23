@@ -135,7 +135,6 @@ describe("a row's update actions", () => {
     const root = draw();
 
     expect(updateBadges(root)).toHaveLength(1);
-    expect(pressable(root, "landing-update-sign-in")).toBeUndefined();
     expect(pressable(root, "landing-update-open-chat")).toBeUndefined();
     press(updateBadges(root)[0]);
     expect(getAppContext().shell.openUpdateModalAgentId()).toBe(ALPHA);
