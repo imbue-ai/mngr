@@ -159,6 +159,20 @@ def _labels(argv: list[str]) -> list[str]:
     return [argv[index + 1] for index, token in enumerate(argv) if token == "--label"]
 
 
+def test_a_mode_the_app_runs_keeps_its_warnings_in_the_dispatcher_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The app drops the stderr of a mode that answered, so a warning lives only if the log has it."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.set_agents([], is_services_agent_listed=False)
+    program = load_update_workspace_program(tmp_path)
+
+    _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
+    assert any(line.endswith("mngr list did not list this workspace's services agent; ignoring it") for line in log_lines)
+
+
 @pytest.mark.witnesses("workspace-updates.one-seed-message")
 def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pinned_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -212,7 +212,7 @@ def read_json(path):
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        sys.stderr.write("could not read %s (%s); treating it as absent\n" % (path, exc))
+        log("could not read %s (%s); treating it as absent" % (path, exc))
         return None
     return raw if isinstance(raw, dict) else None
 
@@ -328,7 +328,7 @@ def agent_env():
                 if separator and key:
                     env[key] = value
         else:
-            sys.stderr.write("could not restore the agent environment: %s\n" % bounded(listed.stderr))
+            log("could not restore the agent environment: %s" % bounded(listed.stderr))
     env["MNGR_ALLOW_UNKNOWN_CONFIG"] = "1"
     env.setdefault("TICKETS_DIR", os.path.abspath(TICKETS_DIR_DEFAULT))
     _AGENT_ENV_CACHE.append(env)
@@ -344,7 +344,7 @@ def list_agents():
     listed = run_command(list(MNGR_LIST_ARGV), MNGR_LIST_TIMEOUT_SECONDS, agent_env())
     if listed.returncode != 0:
         # ``--on-error continue`` still lists every agent it could; the services-agent check below decides.
-        sys.stderr.write("mngr list exited %d: %s\n" % (listed.returncode, bounded(listed.stderr)))
+        log("mngr list exited %d: %s" % (listed.returncode, bounded(listed.stderr)))
     agents = []
     for line in listed.stdout.splitlines():
         fields = line.split(MNGR_LIST_FIELD_SEPARATOR)
@@ -354,7 +354,7 @@ def list_agents():
     # A listing without the workspace's own services agent read the wrong host dir (a cron
     # environment that did not restore), and would make every agent read as gone.
     if not any(agent.get("labels.is_primary") == "true" for agent in agents):
-        sys.stderr.write("mngr list did not list this workspace's services agent; ignoring it\n")
+        log("mngr list did not list this workspace's services agent; ignoring it")
         return None
     return agents
 
@@ -473,12 +473,16 @@ def resolve_account():
         return False, []
     if not os.path.isfile(ACCOUNT_RESOLVER_SCRIPT):
         return True, []
+    # CLEANUP: drop the resolver and shared-config-dir paths once update-self's floor, the oldest
+    # release the app updates from, reaches minds-v0.6.0, the first to write the local settings
+    # file. On older templates a bare create launches claude, so the resolver is asked for a
+    # claude account; a default account on another harness reads as no account.
     resolved = run_command(
         ["uv", "run", "python", ACCOUNT_RESOLVER_SCRIPT, "claude"], RESOLVER_TIMEOUT_SECONDS, agent_env()
     )
     if resolved.returncode != 0:
         # A resolver that fell over says nothing about the account; the create decides.
-        sys.stderr.write("the account resolver failed: %s\n" % bounded(resolved.stderr))
+        log("the account resolver failed: %s" % bounded(resolved.stderr))
         return True, []
     args = [line.strip() for line in resolved.stdout.splitlines() if line.strip()]
     return bool(args), args

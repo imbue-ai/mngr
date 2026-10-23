@@ -324,7 +324,7 @@ def install_cron_entry(context):
     try:
         write_text_if_changed(os.path.join(context["live_cron_dir"], CRON_NAME), line, mode=0o644)
     except OSError as exc:
-        sys.stderr.write("could not install the live cron entry: %s\n" % exc)
+        log("could not install the live cron entry: %s" % exc)
         return False
     return True
 
