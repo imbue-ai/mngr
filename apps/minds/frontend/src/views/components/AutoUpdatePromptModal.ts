@@ -31,8 +31,8 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
           m(
             "p",
             { class: "type-body text-secondary" },
-            "Studio is up to date, but your workspaces aren't. Updating them may use tokens, " +
-              "so Studio won't do it without your OK.",
+            "Studio keeps itself up to date, but your workspaces don't update on their own. " +
+              "Updating them may use tokens, so Studio won't do it without your OK.",
           ),
           m(
             "p",
