@@ -32,7 +32,7 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
           m("div", { class: "flex flex-col gap-4", id: "auto-update-prompt" }, [
             m(
               "h2",
-              { class: "type-heading text-primary" },
+              { class: "type-heading text-primary pr-8" },
               "Turn on auto-updates?",
             ),
             m(
