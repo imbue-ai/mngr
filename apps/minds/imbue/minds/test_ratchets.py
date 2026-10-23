@@ -235,7 +235,7 @@ def test_prevent_pytest_mark_integration() -> None:
 
 
 def test_prevent_raw_start_new_thread() -> None:
-    rc.check_raw_start_new_thread(_DIR, snapshot(44))
+    rc.check_raw_start_new_thread(_DIR, snapshot(43))
 
 
 def test_prevent_os_fork() -> None:

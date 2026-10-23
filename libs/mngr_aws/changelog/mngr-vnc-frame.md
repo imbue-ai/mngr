@@ -1,0 +1,2 @@
+`mngr aws prepare` opens the published ports listed in the provider config's `firewall_published_ports` (or passed as `--publish PORT[/PROTOCOL]`) from every source in the security group it manages, beside the SSH ports, and its read-only-first check treats them like the SSH rules.
+A `mngr create --publish` on this provider must declare only ports in that list; any other declaration fails before any resource is created (`specs/published-ports/spec.md`).

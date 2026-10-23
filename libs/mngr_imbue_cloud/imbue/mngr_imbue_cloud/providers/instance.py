@@ -63,6 +63,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -105,6 +106,8 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -148,6 +151,7 @@ from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartTimeoutError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.interfaces import LeasePublishedEndpointsInterface
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_CLIENT_KEY_NAME
@@ -172,6 +176,8 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provide
 from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_imbue_cloud.slices.published_ports import declarations_missing_from_wire
+from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_wire
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
@@ -387,24 +393,30 @@ def _synthesize_services_agent_for_lifecycle_entry(
 
 
 @pure
-def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
-    """Project a running workspace into the LeasedHostInfo shape the lease paths use."""
-    if workspace.vps_address is None or workspace.ssh_port is None or workspace.container_ssh_port is None:
-        raise ImbueCloudConnectorError(f"running workspace {workspace.host_db_id} is missing placement coordinates")
+def leased_info_from_workspace(record: WorkspaceInfo) -> LeasedHostInfo:
+    """Project a running host's sync record into the LeasedHostInfo shape the lease paths use."""
+    if record.vps_address is None or record.ssh_port is None or record.container_ssh_port is None:
+        raise ImbueCloudConnectorError(f"running host record {record.host_db_id} is missing placement coordinates")
     return LeasedHostInfo(
-        host_db_id=workspace.host_db_id,
-        vps_address=workspace.vps_address,
-        ssh_port=workspace.ssh_port,
-        ssh_user=workspace.ssh_user,
-        container_ssh_port=workspace.container_ssh_port,
-        agent_id=workspace.agent_id,
-        host_id=workspace.host_id,
-        host_name=workspace.host_name,
-        attributes=workspace.attributes,
-        leased_at=workspace.leased_at,
-        outer_host_public_key=workspace.outer_host_public_key,
-        container_host_public_key=workspace.container_host_public_key,
+        host_db_id=record.host_db_id,
+        vps_address=record.vps_address,
+        ssh_port=record.ssh_port,
+        ssh_user=record.ssh_user,
+        container_ssh_port=record.container_ssh_port,
+        agent_id=record.agent_id,
+        host_id=record.host_id,
+        host_name=record.host_name,
+        attributes=record.attributes,
+        leased_at=record.leased_at,
+        outer_host_public_key=record.outer_host_public_key,
+        container_host_public_key=record.container_host_public_key,
+        published_ports=record.published_ports,
     )
+
+
+def _published_endpoints_of_lease(lease: LeasedHostInfo) -> list[PublishedEndpoint]:
+    """The lease's published ports as endpoints at the box's address (specs/published-ports)."""
+    return published_endpoints_from_wire(lease.published_ports, lease.vps_address)
 
 
 @pure
@@ -557,7 +569,7 @@ _LEASE_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.lease")
 _REBUILD_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.rebuild")
 
 
-class ImbueCloudProvider(BaseProviderInstance):
+class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface):
     """Provider that surfaces a single account's imbue-cloud leases as mngr hosts."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -1035,6 +1047,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             host=host_ref,
             agents=tuple(agent_refs),
             ssh_info=self._build_lease_ssh_info(host_ref.host_id, lease),
+            published_endpoints=tuple(_published_endpoints_of_lease(lease)),
         )
 
     def read_host_for_incremental_discovery(self, host_ref: DiscoveredHost, timeout_seconds: float) -> BoundedHostRead:
@@ -1081,6 +1094,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             host=listed_host_ref,
             agents=tuple(agent_refs),
             ssh_info=self._build_lease_ssh_info(host_id, lease),
+            published_endpoints=tuple(_published_endpoints_of_lease(lease)),
         )
 
     def _find_leased_in_fetched_list(self, host_id: HostId) -> LeasedHostInfo | None:
@@ -1491,6 +1505,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             lease.vps_address,
             lease.ssh_port,
             lease.container_ssh_port,
+            published_endpoints=_published_endpoints_of_lease(lease),
         )
 
     def _ensure_lease_endpoint_known(
@@ -1558,6 +1573,12 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
 
+    def published_endpoints_for(self, host_id: HostId) -> list[PublishedEndpoint]:
+        leased = self._find_leased(host_id)
+        if leased is None:
+            return []
+        return _published_endpoints_of_lease(leased)
+
     def _build_lease_ssh_info(self, host_id: HostId, lease: LeasedHostInfo) -> SSHInfo:
         """Build the SSHInfo that points at a leased container's inner sshd.
 
@@ -1597,6 +1618,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             provider_name=self.name,
             state=WORKSPACE_HOST_STATE_BY_STATUS[machine.status],
             resource=host_resources_for_machine(machine.attributes, machine),
+            # A just-stopped machine keeps its placement (and so its ports)
+            # through the retention window; a fully stopped one reports none.
+            published_endpoints=(
+                published_endpoints_from_wire(machine.published_ports, machine.vps_address)
+                if machine.vps_address is not None
+                else []
+            ),
             failure_reason=machine.transition_error,
         )
         agent_details_list = [
@@ -1631,6 +1659,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             state=host_ref.host_state or HostState.UNKNOWN,
             resource=host_resources_for_machine(lease.attributes, self._find_workspace(host_ref.host_id)),
             ssh=ssh_info,
+            published_endpoints=_published_endpoints_of_lease(lease),
             failure_reason=failure_message,
         )
         agent_details_list = [
@@ -1693,6 +1722,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             uptime_seconds=uptime_seconds,
             resource=resource,
             ssh=ssh_info,
+            published_endpoints=_published_endpoints_of_lease(lease),
             snapshots=[],
             is_locked=is_locked,
             locked_time=locked_time,
@@ -1843,6 +1873,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             pre_baked_agent_id=agent_id,
             lease_db_id=host_db_id,
             host_dir_override=self._load_resolved_host_dir(host_id),
+            published_endpoint_source=self,
         )
         self._evict_cached_host(host_id, replacement=host)
         return host
@@ -1876,6 +1907,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_state_dir=self._host_state_dir(host_id),
             known_hosts_path=self._host_known_hosts_path(host_id),
             client_public_key=public_key_path.read_text().strip(),
+            published_endpoints=tuple(_published_endpoints_of_lease(lease)),
         )
         access = ParamikoSliceVmAccess(
             host_id=host_id,
@@ -2020,6 +2052,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Lease a pool host and return it, via the fast (adopt) or slow (rebuild) path.
 
@@ -2056,6 +2089,11 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         account = self._require_account(parsed.account_override)
         token = self._get_access_token(account)
+        # The declared ports (specs/published-ports) travel with the lease on
+        # both paths: a slice's DNAT rules are fixed at carve, so only a host
+        # baked with exactly this set can serve them, and the connector
+        # answers no capacity otherwise.
+        declared_ports = tuple(published_ports or ())
 
         match parsed.fast_mode:
             case FastMode.REQUIRE:
@@ -2086,6 +2124,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     attributes=_resolve_fast_path_attributes(parsed.attributes),
                     token=token,
                     region=parsed.region,
+                    published_ports=declared_ports,
                 )
             case FastMode.PREVENT:
                 return self._create_host_slow_path(
@@ -2100,6 +2139,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     authorized_keys=authorized_keys,
                     passthrough_build_args=parsed.passthrough_build_args,
                     region=parsed.region,
+                    published_ports=declared_ports,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -2111,6 +2151,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         attributes: LeaseAttributes,
         token: SecretStr,
         region: str | None,
+        published_ports: Sequence[PublishedPortDeclaration],
     ) -> Host:
         """Lease an exact-attribute pool host and adopt its pre-baked agent.
 
@@ -2130,6 +2171,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 public_key_text,
                 str(name),
                 region=region,
+                published_ports=published_ports,
             )
         except ImbueCloudLeaseUnavailableError as exc:
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
@@ -2144,12 +2186,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"),
             progress.step(ProgressStepId("imbue_cloud.adopt"), "Connecting to the machine", creating_host),
         ):
-            # Install the keypair inside the guard: the connector has already
-            # marked the host leased, so a failure here (e.g. an OSError while
-            # moving the key files) must still release the lease.
+            # Install the keypair inside the guard, before any check that can
+            # refuse the lease: the connector has already marked the host
+            # leased, so a failure here (e.g. an OSError while moving the key
+            # files) must still release the lease, and once the keypair sits
+            # under the host's state dir the guard's cleanup removes it too.
             final_private_key, _final_public_key = self._install_leased_keypair(
                 host_id, tmp_private_key, tmp_public_key
             )
+            self._ensure_lease_publishes_declared_ports(lease_result, published_ports)
             self._persist_lease_meta(host_id, lease_result)
             # Wait for the leased container's sshd to be ready before we hand the
             # host back to mngr's create pipeline (which SSHes in immediately).
@@ -2212,6 +2257,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         authorized_keys: Sequence[str] | None,
         passthrough_build_args: tuple[str, ...],
         region: str | None,
+        published_ports: Sequence[PublishedPortDeclaration],
     ) -> Host:
         """Lease any available host (relaxed attributes), nuke its container, and rebuild it.
 
@@ -2234,14 +2280,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
         try:
-            # The region constraint is NOT relaxed: the hard requirement still
-            # applies to the rebuilt host.
+            # The region constraint and the declared ports are NOT relaxed: the
+            # rebuilt container can only republish ports the box already DNATs.
             lease_result = self.client.lease_host(
                 token,
                 relaxed_attributes,
                 public_key_text,
                 str(name),
                 region=region,
+                published_ports=published_ports,
             )
         except ImbueCloudLeaseUnavailableError:
             # Genuinely no available host in the pool -- nothing was leased, so
@@ -2256,12 +2303,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"),
             progress.step(_REBUILD_STEP, "Rebuilding the machine", creating_host),
         ):
-            # Install the keypair inside the guard: the connector has already
-            # marked the host leased, so a failure here (e.g. an OSError while
-            # moving the key files) must still release the lease.
+            # Install the keypair inside the guard, before any check that can
+            # refuse the lease: the connector has already marked the host
+            # leased, so a failure here (e.g. an OSError while moving the key
+            # files) must still release the lease, and once the keypair sits
+            # under the host's state dir the guard's cleanup removes it too.
             _final_private_key, final_public_key = self._install_leased_keypair(
                 host_id, tmp_private_key, tmp_public_key
             )
+            self._ensure_lease_publishes_declared_ports(lease_result, published_ports)
             self._persist_lease_meta(host_id, lease_result)
             per_host_public_key = final_public_key.read_text().strip()
             rebuilt_container_public_key = self._rebuild_leased_container(
@@ -2457,6 +2507,25 @@ class ImbueCloudProvider(BaseProviderInstance):
         finally:
             outer.disconnect()
 
+    def _ensure_lease_publishes_declared_ports(
+        self, lease_result: LeaseResult, published_ports: Sequence[PublishedPortDeclaration]
+    ) -> None:
+        """Refuse a lease that does not carry every declared port; raises PublishedPortUnsupportedError.
+
+        The exact match lives in the connector's lease query, and a connector from before
+        published ports ignores the request's declarations and leases any host; checking the
+        answer keeps such a lease from becoming a host that quietly publishes nothing
+        (specs/published-ports/spec.md, D3). Called inside the release guard, so the lease
+        goes back to the pool.
+        """
+        missing = declarations_missing_from_wire(published_ports, lease_result.published_ports)
+        if missing:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(missing[0]),
+                "the connector leased a host that does not publish it; upgrade the connector or rebake the pool",
+            )
+
     @contextmanager
     def _release_lease_on_failure(
         self,
@@ -2561,6 +2630,9 @@ class ImbueCloudProvider(BaseProviderInstance):
                 vps_address=lease_result.vps_address,
                 ssh_port=lease_result.ssh_port,
                 container_ssh_port=lease_result.container_ssh_port,
+                published_endpoints=tuple(
+                    published_endpoints_from_wire(lease_result.published_ports, lease_result.vps_address)
+                ),
             ),
         )
 
@@ -2637,6 +2709,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             leased_at="",
             outer_host_public_key=lease_result.outer_host_public_key,
             container_host_public_key=lease_result.container_host_public_key,
+            published_ports=lease_result.published_ports,
         )
 
     def _resolve_container_id_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> str | None:

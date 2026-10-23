@@ -831,6 +831,7 @@ class CreateCliOptions(CommonCliOptions):
     snapshot: str | None
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
+    publish: tuple[str, ...]
     post_host_create_command: tuple[str, ...]
     post_host_create_outer_command: tuple[str, ...]
     reconnect: bool
@@ -851,3 +852,12 @@ class CreateCliOptions(CommonCliOptions):
     tmux_width: int | None
     tmux_height: int | None
     tmux_window_size: str | None
+
+    @field_validator("publish", mode="before")
+    @classmethod
+    def _normalize_publish(cls, value: object) -> object:
+        # A template's TOML naturally writes a bare port as an integer (``publish = [59000]``);
+        # the declaration parser reads strings, so each value is spelled out before validation.
+        if isinstance(value, (list, tuple)):
+            return tuple(str(item) for item in value)
+        return value

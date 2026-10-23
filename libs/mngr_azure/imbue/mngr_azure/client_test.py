@@ -9,7 +9,9 @@ import pytest
 from azure.core.exceptions import ODataV4Format
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_azure.client import AzureVmName
 from imbue.mngr_azure.client import LinuxHostname
 from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_ID
@@ -845,3 +847,33 @@ def test_get_instance_shape_translates_a_catalog_error_into_a_vps_api_error() ->
 
     with pytest.raises(VpsApiError):
         client.get_instance_shape(VpsInstanceId("mngr-vm"), "Standard_B2s")
+
+
+def test_ensure_network_allows_published_ports_from_every_source() -> None:
+    """Each published port gets an inbound allow rule with Azure's wildcard source, after the SSH rules."""
+    network = FakeNetworkClient()
+    client = _StubbedAzureVpsClient(
+        credential=object(),
+        subscription_id=_SUBSCRIPTION,
+        region=_REGION,
+        allowed_ssh_cidrs=("203.0.113.4/32",),
+        published_ports=(
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+            PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+        ),
+        stubbed_compute_client=FakeComputeClient(),
+        stubbed_network_client=network,
+        stubbed_resource_client=FakeResourceClient(),
+        stubbed_authorization_client=FakeAuthorizationClient(),
+    )
+
+    client.ensure_network()
+
+    nsg = network.network_security_groups.created[0][1]
+    published_rules = [rule for rule in nsg.security_rules if rule.name.startswith("mngr-allow-published-")]
+    assert [(rule.protocol, rule.destination_port_range, rule.source_address_prefix) for rule in published_rules] == [
+        ("Udp", "59000", "*"),
+        ("Tcp", "8080", "*"),
+    ]
+    assert len(nsg.security_rules) == 4
+    assert len({rule.priority for rule in nsg.security_rules}) == 4

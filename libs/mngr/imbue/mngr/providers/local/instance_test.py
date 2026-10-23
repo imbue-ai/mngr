@@ -21,8 +21,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
@@ -382,9 +385,7 @@ def test_get_host_tags_returns_empty_when_labels_file_is_empty(temp_host_dir: Pa
     assert tags == {}
 
 
-# =============================================================================
 # Tests for get_max_destroyed_host_persisted_seconds (BaseProviderInstance)
-# =============================================================================
 
 
 def test_get_max_destroyed_host_persisted_seconds_uses_global_default(
@@ -460,9 +461,7 @@ def test_get_max_destroyed_host_persisted_seconds_provider_override_takes_preced
     assert result == provider_seconds
 
 
-# =============================================================================
 # Tests for LocalProviderInstance properties and methods
-# =============================================================================
 
 
 def test_get_host_name_returns_localhost(local_provider: LocalProviderInstance) -> None:
@@ -535,3 +534,41 @@ def test_renaming_the_local_host_persists_and_keeps_the_alias(local_provider: Lo
     assert local_provider.get_host(host.id).get_certified_data().host_name == "workspace-2"
     assert local_provider.get_host(HostName("workspace-2")).id == host.id
     assert local_provider.get_host(HostName(LOCAL_HOST_NAME)).id == host.id
+
+
+def test_create_host_with_published_ports_records_identity_endpoints(local_provider: LocalProviderInstance) -> None:
+    """The local host's workload binds the port itself, so each endpoint is that port on loopback."""
+    host = local_provider.create_host(
+        HostName(LOCAL_HOST_NAME),
+        published_ports=[
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP),
+        ],
+    )
+
+    assert host.get_published_endpoints() == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=59000),
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.TCP, host="127.0.0.1", host_port=59000),
+    ]
+    assert local_provider.get_host(host.id).get_published_endpoints() == host.get_published_endpoints()
+
+
+def test_create_host_merges_published_ports_declared_by_a_later_create(local_provider: LocalProviderInstance) -> None:
+    """The one local host serves every agent on it, so later declarations add to the recorded endpoints."""
+    local_provider.create_host(
+        HostName(LOCAL_HOST_NAME),
+        published_ports=[PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)],
+    )
+    host = local_provider.create_host(
+        HostName(LOCAL_HOST_NAME),
+        published_ports=[
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+            PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+        ],
+    )
+
+    assert {(endpoint.guest_port, endpoint.protocol) for endpoint in host.get_published_endpoints()} == {
+        (59000, PortProtocol.UDP),
+        (8080, PortProtocol.TCP),
+    }
+    assert len(host.get_published_endpoints()) == 2

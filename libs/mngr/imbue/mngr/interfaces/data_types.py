@@ -40,6 +40,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -354,6 +355,9 @@ class CertifiedHostData(FrozenModel):
         """
         if isinstance(data, dict):
             data.pop("idle_mode", None)
+            # CLEANUP: remove once no host created by a mngr/vnc-frame build of 2026-10-17 remains;
+            # those builds wrote this key into data.json.
+            data.pop("is_published_endpoints_repicked_on_start", None)
             now = datetime.now(timezone.utc)
             if "created_at" not in data:
                 data["created_at"] = now - timedelta(weeks=1)
@@ -414,6 +418,13 @@ class CertifiedHostData(FrozenModel):
     build_log: str | None = Field(
         default=None,
         description="Build log output if the host failed during creation",
+    )
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(),
+        description=(
+            "Where each port the host was created with --publish is reachable from the mngr client that "
+            "created it; kept beside the SSH info so a stopped host still reports what it publishes once started"
+        ),
     )
 
 
@@ -592,6 +603,10 @@ class HostDetails(FrozenModel):
     uptime_seconds: float | None = Field(default=None, description="How long the host has been running")
     resource: HostResources | None = Field(default=None, description="Resource limits for the host")
     ssh: SSHInfo | None = Field(default=None, description="SSH access details (remote hosts only)")
+    published_endpoints: list[PublishedEndpoint] = Field(
+        default_factory=list,
+        description="Where each port the host was created with --publish is reachable from this client",
+    )
     snapshots: list[SnapshotInfo] = Field(default_factory=list, description="List of available snapshots")
     is_locked: bool | None = Field(
         default=None,
@@ -782,12 +797,25 @@ class HostLifecycleOptions(FrozenModel):
         )
 
 
+class HostAgentsRead(FrozenModel):
+    """What one live (or offline-fallback) read of a host answers: its agents and how to reach it."""
+
+    agents: tuple[DiscoveredAgent, ...] = Field(description="The host's agents")
+    ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, or None when it has none to offer")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="Where the host's published ports are reachable; empty when it has none"
+    )
+
+
 class BoundedHostRead(FrozenModel):
     """One host's read in a per-host-bounded discovery poll."""
 
     host: DiscoveredHost = Field(description="The host as this read found it")
     agents: tuple[DiscoveredAgent, ...] = Field(description="The host's agents")
     ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, or None when it has none to offer")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="Where the host's published ports are reachable; empty when it has none"
+    )
 
 
 class BoundedProviderDiscoveryResult(FrozenModel):
@@ -810,6 +838,10 @@ class BoundedProviderDiscoveryResult(FrozenModel):
     # for providers that surface no SSH info (local hosts, or providers that don't populate it).
     host_ssh_infos: tuple[tuple[HostId, SSHInfo], ...] = Field(
         default=(), description="Per-host SSH info to emit as HOST_SSH_INFO events"
+    )
+    host_published_endpoints: tuple[tuple[HostId, tuple[PublishedEndpoint, ...]], ...] = Field(
+        default=(),
+        description="Per-host published endpoints, emitted beside the host's SSH info in its HOST_SSH_INFO event",
     )
     unknown_host_ids: tuple[HostId, ...] = Field(
         default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"

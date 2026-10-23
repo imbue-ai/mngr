@@ -609,6 +609,15 @@ class ResourceAllocationError(HostCreationError):
     """Failed to allocate resources for the host."""
 
 
+class PublishedPortUnsupportedError(HostCreationError):
+    """A provider cannot honour a published-port declaration; raised before any resource is created."""
+
+    def __init__(self, provider_name: ProviderInstanceName, declaration: str, reason: str) -> None:
+        self.declaration = declaration
+        self.reason = reason
+        super().__init__(provider_name, f"Provider '{provider_name}' cannot publish port {declaration}: {reason}")
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 

@@ -1,11 +1,18 @@
 import ipaddress
+import json
+import re
+from collections.abc import Sequence
+from enum import auto
 from typing import Final
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import InvalidSliceOrdinalError
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import MalformedBoxOutputError
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import MalformedPublishedPortsError
 
 # The first slice-fleet generation that carves raw-qemu VMs under systemd
 # instead of lima VMs (specs/slice-fleet-gen2). A box only ever runs one
@@ -180,6 +187,206 @@ GEN2_ORDINAL_PLACEHOLDER: Final[str] = "__MNGR_SLICE_ORDINAL__"
 GEN2_MAC_PLACEHOLDER: Final[str] = "__MNGR_SLICE_MAC__"
 GEN2_VM_IP_PLACEHOLDER: Final[str] = "__MNGR_SLICE_VM_IP__"
 GEN2_GATEWAY_IP_PLACEHOLDER: Final[str] = "__MNGR_SLICE_GATEWAY_IP__"
+
+# Published ports (specs/published-ports): the box ports a slice forwards to
+# its workload's declared guest ports, beside the two sshd ports.
+
+# The env-file key holding the slice's published ports: a compact JSON list
+# of ``{"guest_port", "protocol", "host_port"}`` objects (no whitespace), so
+# the root helper can validate it with one strict regex and read it without
+# a JSON parser. A slice carved before published ports existed has no such
+# key, which every reader treats as the empty list.
+GEN2_PUBLISHED_PORTS_ENV_KEY: Final[str] = "MNGR_SLICE_PUBLISHED_PORTS"
+# Whole-value placeholder for the env-file *template* of a script that
+# preserves a slice's recorded published ports verbatim (the in-place resize).
+GEN2_PUBLISHED_PORTS_PLACEHOLDER: Final[str] = "__MNGR_PUBLISHED_PORTS__"
+# Per-entry host-port placeholder prefix for the env-file template of a
+# script that picks the box ports itself under the reservation lock (the
+# carve and restore reserves); ``published_port_placeholder(index)`` renders
+# the token of the index-th distinct guest port.
+_GEN2_PUBLISHED_PORT_PLACEHOLDER_PREFIX: Final[str] = "__MNGR_PUBLISHED_PORT_"
+# The bash ERE matching exactly one rendered entry (``{``/``}`` are literal in
+# a bash ERE only when escaped, hence the backslashes).
+GEN2_PUBLISHED_PORT_ENTRY_BASH_RE: Final[str] = '\\{"guest_port":[0-9]+,"protocol":"(tcp|udp)","host_port":[0-9]+\\}'
+_PUBLISHED_PORT_ENTRY_RE: Final[re.Pattern[str]] = re.compile(
+    r'^\{"guest_port":(\d+),"protocol":"(tcp|udp)","host_port":(\d+)\}$'
+)
+
+
+class SlicePortProtocol(LowerCaseStrEnum):
+    """The transport protocol of one published slice port, in its wire and env-file spelling."""
+
+    TCP = auto()
+    UDP = auto()
+
+
+class SlicePortDeclaration(FrozenModel):
+    """A guest port and protocol a slice's workload listens on; the box port is picked at reserve."""
+
+    guest_port: int = Field(ge=1, le=65535, description="The port the workload binds inside the container")
+    protocol: SlicePortProtocol = Field(description="The transport protocol")
+
+
+class SlicePublishedPort(FrozenModel):
+    """One declared guest port with the box port the reserve forwarded to it (the connector's row entry)."""
+
+    guest_port: int = Field(ge=1, le=65535, description="The declared port inside the container")
+    protocol: SlicePortProtocol = Field(description="The declared transport protocol")
+    host_port: int = Field(ge=1, le=65535, description="The box port DNAT'd to the guest port")
+
+    @property
+    def declaration(self) -> SlicePortDeclaration:
+        return SlicePortDeclaration(guest_port=self.guest_port, protocol=self.protocol)
+
+
+class Gen2Reservation(FrozenModel):
+    """What a reserve script printed on its marker line: the sshd ports, the ordinal, and the published box ports."""
+
+    vm_ssh_host_port: int = Field(description="Box port forwarded to the VM's root sshd")
+    container_ssh_host_port: int = Field(description="Box port forwarded to the inner container sshd")
+    ordinal: int = Field(description="The slice's chosen box-local ordinal")
+    published_host_ports: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "One box port per distinct declared guest port, in the order of ``distinct_guest_ports``; a "
+            "reserve rendered before published ports existed prints none"
+        ),
+    )
+
+
+@pure
+def distinct_guest_ports(declarations: Sequence[SlicePortDeclaration]) -> tuple[int, ...]:
+    """The declared guest ports without duplicates, in first-appearance order.
+
+    A guest port declared for both protocols gets ONE box port serving both
+    (one DNAT rule per protocol), so the reserve picks one port per distinct
+    guest port rather than per declaration.
+    """
+    ordered: list[int] = []
+    for declaration in declarations:
+        if declaration.guest_port not in ordered:
+            ordered.append(declaration.guest_port)
+    return tuple(ordered)
+
+
+@pure
+def published_port_placeholder(index: int) -> str:
+    """The env-template token the reserve substitutes with the box port of the index-th distinct guest port."""
+    return f"{_GEN2_PUBLISHED_PORT_PLACEHOLDER_PREFIX}{index}__"
+
+
+@pure
+def assign_published_host_ports(
+    declarations: Sequence[SlicePortDeclaration], host_ports: Sequence[int]
+) -> tuple[SlicePublishedPort, ...]:
+    """Pair every declaration with the box port the reserve picked for its guest port.
+
+    ``host_ports`` is the reserve's marker-line list, one per distinct guest
+    port in ``distinct_guest_ports`` order; a count mismatch means the reserve
+    script and the declarations it was rendered from disagree.
+    """
+    guest_ports = distinct_guest_ports(declarations)
+    if len(guest_ports) != len(host_ports):
+        raise MalformedBoxOutputError(
+            f"the reserve printed {len(host_ports)} published box port(s) for {len(guest_ports)} declared guest port(s)"
+        )
+    host_port_by_guest_port = dict(zip(guest_ports, host_ports, strict=True))
+    return tuple(
+        SlicePublishedPort(
+            guest_port=declaration.guest_port,
+            protocol=declaration.protocol,
+            host_port=host_port_by_guest_port[declaration.guest_port],
+        )
+        for declaration in declarations
+    )
+
+
+@pure
+def _render_published_port_entry(guest_port: int, protocol: SlicePortProtocol, host_port: int | str) -> str:
+    return f'{{"guest_port":{guest_port},"protocol":"{protocol.value}","host_port":{host_port}}}'
+
+
+@pure
+def render_published_ports_env_value(entries: Sequence[SlicePublishedPort]) -> str:
+    """The compact JSON list the env file and the connector row hold for a slice's published ports."""
+    return "[" + ",".join(_render_published_port_entry(e.guest_port, e.protocol, e.host_port) for e in entries) + "]"
+
+
+@pure
+def render_published_ports_env_template_value(declarations: Sequence[SlicePortDeclaration]) -> str:
+    """The env-template form of the published ports: each host port is its per-guest-port placeholder token.
+
+    Not valid JSON until the reserve substitutes the tokens with the box ports
+    it picked (``sed`` on the box, like the two sshd-port tokens).
+    """
+    guest_ports = distinct_guest_ports(declarations)
+    return (
+        "["
+        + ",".join(
+            _render_published_port_entry(
+                d.guest_port, d.protocol, published_port_placeholder(guest_ports.index(d.guest_port))
+            )
+            for d in declarations
+        )
+        + "]"
+    )
+
+
+@pure
+def parse_published_ports_env_value(value: str) -> tuple[SlicePublishedPort, ...]:
+    """Parse the env-file (or connector row) JSON list back into entries; the empty string reads as none.
+
+    Raises :class:`MalformedPublishedPortsError` when the value is not a JSON
+    list of ``{"guest_port", "protocol", "host_port"}`` objects.
+    """
+    if not value.strip():
+        return ()
+    try:
+        parsed = json.loads(value)
+    except ValueError as e:
+        raise MalformedPublishedPortsError(f"published ports value is not JSON: {value!r}") from e
+    if not isinstance(parsed, list):
+        raise MalformedPublishedPortsError(f"published ports value is not a JSON list: {value!r}")
+    entries: list[SlicePublishedPort] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise MalformedPublishedPortsError(f"published ports entry is not an object: {item!r}")
+        try:
+            entries.append(SlicePublishedPort.model_validate(item))
+        except ValueError as e:
+            raise MalformedPublishedPortsError(f"malformed published ports entry {item!r}: {e}") from e
+    return tuple(entries)
+
+
+@pure
+def is_rendered_published_port_entry(text: str) -> bool:
+    """Whether ``text`` is exactly one entry as :func:`render_published_ports_env_value` spells it."""
+    return _PUBLISHED_PORT_ENTRY_RE.match(text) is not None
+
+
+@pure
+def parse_reservation_marker_line(stdout: str, marker: str) -> Gen2Reservation | None:
+    """Parse ``<marker> <vm_port> <container_port> <ordinal> [<published_port>...]`` out of a reserve's stdout.
+
+    None when no marker line is present or the line is malformed. The
+    published ports follow the ordinal so the three-field line an older
+    reserve script prints still parses (with no published ports).
+    """
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(marker):
+            continue
+        parts = stripped.split()
+        if parts[0] != marker or len(parts) < 4 or not all(part.isdigit() for part in parts[1:]):
+            return None
+        return Gen2Reservation(
+            vm_ssh_host_port=int(parts[1]),
+            container_ssh_host_port=int(parts[2]),
+            ordinal=int(parts[3]),
+            published_host_ports=tuple(int(part) for part in parts[4:]),
+        )
+    return None
+
 
 # Guest layout (inside the slice VM)
 

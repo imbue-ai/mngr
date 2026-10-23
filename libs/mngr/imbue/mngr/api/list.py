@@ -393,8 +393,10 @@ def _maybe_write_provider_discovery_snapshots(
                 provider=provider_by_name.get(provider_name),
                 error=error_by_provider_name.get(provider_name),
             )
-        for host_id, ssh_info in host_ssh_infos:
-            emit_host_ssh_info(mngr_ctx.config, host_id, ssh_info)
+        for emission in host_ssh_infos:
+            emit_host_ssh_info(
+                mngr_ctx.config, emission.host_id, emission.ssh, published_endpoints=emission.published_endpoints
+            )
     except (MngrError, OSError) as e:
         logger.warning("Failed to write per-provider discovery snapshots: {}", e)
 

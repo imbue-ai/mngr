@@ -14,11 +14,14 @@ documented contract and the enforced contract can never drift.
 """
 
 from typing import Annotated
+from typing import Any
 from typing import Literal
 
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import RootModel
+from pydantic import SerializerFunctionWrapHandler
+from pydantic import model_serializer
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
@@ -31,6 +34,7 @@ from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
+from imbue.mngr.primitives import PortProtocol
 
 
 class ApiRequestModel(FrozenModel):
@@ -934,6 +938,53 @@ class OkResponse(FrozenModel):
     """A minimal ``{"ok": true}`` acknowledgement."""
 
     ok: bool = Field(description="Whether the operation succeeded")
+
+
+class MediaEndpointCandidate(FrozenModel):
+    """One published port of the workspace's host, as reachable from this desktop."""
+
+    host: str = Field(
+        description="IP address or hostname reachable from this desktop (127.0.0.1 for a workspace on this machine)"
+    )
+    port: int = Field(description="The host-side port the provider chose")
+    protocol: PortProtocol = Field(description="The declared transport protocol: TCP or UDP")
+    guest_port: int = Field(description="The port the workload binds inside the workspace")
+
+
+class MediaEndpointsResponse(FrozenModel):
+    """Where the workspace's published ports are reachable from this desktop; empty for a host with none."""
+
+    candidates: list[MediaEndpointCandidate] = Field(description="Every published endpoint of the workspace's host")
+
+
+class IceServer(FrozenModel):
+    """One RTCIceServer entry as the connector answers it; Cloudflare decides the shape, so unknown fields pass unread."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    urls: list[str] | str = Field(description="The server's STUN or TURN URLs")
+    username: str | None = Field(default=None, description="The TURN username, absent on a STUN entry")
+    credential: str | None = Field(default=None, description="The TURN credential, absent on a STUN entry")
+
+    @model_serializer(mode="wrap")
+    def _without_absent_turn_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A STUN entry arrives without the two TURN fields and leaves the same way, so the list
+        # reaches the viewer as the connector answered it.
+        serialized = handler(self)
+        return {
+            key: value
+            for key, value in serialized.items()
+            if key not in ("username", "credential") or value is not None
+        }
+
+
+class IceServersResponse(FrozenModel):
+    """Relay servers for the workspace Screen's viewer, or an empty list when none can be issued."""
+
+    ice_servers: list[IceServer] = Field(description="The connector's RTCIceServer list, unchanged; empty when none")
+    expires_at: str | None = Field(
+        description="RFC 3339 expiry of the credential the list carries; null when the list is empty"
+    )
 
 
 class WorkspaceLifecycleResponse(FrozenModel):

@@ -84,9 +84,7 @@ def test_relative_path_works_with_path_division() -> None:
     assert result == Path("/home/user/work/.claude/config.json")
 
 
-# =============================================================================
-# SSHInfo Tests
-# =============================================================================
+# SSHInfo tests
 
 
 def test_ssh_info_basic_creation() -> None:
@@ -134,9 +132,7 @@ def test_ssh_info_serialization() -> None:
     assert data["command"] == "ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com"
 
 
-# =============================================================================
-# HostDetails Extended Fields Tests
-# =============================================================================
+# HostDetails extended fields tests
 
 
 def test_host_details_minimal_creation() -> None:
@@ -231,9 +227,7 @@ def test_host_details_serialization_with_extended_fields() -> None:
     assert data["ssh"]["port"] == 22
 
 
-# =============================================================================
-# CertifiedHostData Tests
-# =============================================================================
+# CertifiedHostData tests
 
 
 def test_certified_host_data_tmux_session_prefix_defaults_to_none() -> None:
@@ -281,9 +275,14 @@ def test_certified_host_data_backward_compatible_without_prefix() -> None:
     assert data.tmux_session_prefix is None
 
 
-# =============================================================================
+def test_certified_host_data_drops_the_retired_repicked_on_start_key() -> None:
+    data = CertifiedHostData.model_validate(
+        {"host_id": "host-123", "host_name": "test-host", "is_published_endpoints_repicked_on_start": True}
+    )
+    assert data.published_endpoints == ()
+
+
 # IdleMode derivation consistency tests
-# =============================================================================
 
 
 _IDLE_MODES_WITH_KNOWN_SOURCES = [m for m in IdleMode if m != IdleMode.CUSTOM]
@@ -361,9 +360,7 @@ def test_certified_host_data_preserves_non_local_host_name() -> None:
     assert data.host_name == "my-remote-host"
 
 
-# =============================================================================
-# CertifiedHostData created_at / updated_at Tests
-# =============================================================================
+# CertifiedHostData created_at / updated_at tests
 
 
 def test_certified_host_data_created_at_and_updated_at_explicit() -> None:
@@ -427,9 +424,7 @@ def test_certified_host_data_timestamps_are_utc() -> None:
     assert data.updated_at.tzinfo is not None
 
 
-# =============================================================================
-# HostLifecycleOptions.to_activity_config Tests
-# =============================================================================
+# HostLifecycleOptions.to_activity_config tests
 
 
 def test_to_activity_config_disabled_idle_mode_produces_empty_activity_sources() -> None:

@@ -311,5 +311,7 @@ layers = [
 # ``slices.gen2_scripts`` is a leaf package that lower layers may import.
 ignore_imports = [
     "imbue.mngr_imbue_cloud.interfaces -> imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands",
+    "imbue.mngr_imbue_cloud.interfaces -> imbue.mngr_imbue_cloud.slices.gen2_scripts.layout",
+    "imbue.mngr_imbue_cloud.data_types -> imbue.mngr_imbue_cloud.slices.gen2_scripts.layout",
     "imbue.mngr_imbue_cloud.primitives -> imbue.mngr_imbue_cloud.slices.gen2_scripts.regions",
 ]

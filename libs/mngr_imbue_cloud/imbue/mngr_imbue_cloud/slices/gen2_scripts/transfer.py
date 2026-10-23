@@ -1,6 +1,7 @@
 import base64
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Final
 
 from pydantic import Field
@@ -10,6 +11,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import build_qemu_slice_env_file
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_budget_guard_lines
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_ordinal_derivation_lines
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_port_pick_lines
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import GEN2_CIDATA_FILE_NAMES
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import Gen2SliceCidata
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import DEFAULT_SLICE_PORT_RANGE_END
@@ -20,7 +22,12 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_SSH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_INSTANCES_DIR
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_MAX_SLICE_COUNT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_ENV_KEY
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_PLACEHOLDER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_PORT_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import Gen2Reservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import parse_reservation_marker_line
 
 # The transfer conventions every stop/start box script shares:
 # a per-instance transfer dir in the slice service user's home holding the
@@ -43,8 +50,7 @@ DATADISK_OBJECT: Final[str] = "datadisk.zst.age"
 META_OBJECT: Final[str] = "meta.tar.zst.age"
 
 # Marker printed by a restore-reserve script on success, followed by the two
-# chosen host ports (and, on gen-2, the ordinal). Failure markers mirror the
-# bake reserve script's.
+# chosen sshd host ports, the ordinal, and the published box ports.
 RESTORE_RESERVED_MARKER: Final[str] = "MNGR_RESTORE_RESERVED"
 RESTORE_NO_PORTS_MARKER: Final[str] = "MNGR_RESTORE_NO_PORTS"
 # Marker the gen-2 restore-reserve prints when the budget math says there is
@@ -226,12 +232,17 @@ def render_gen2_restore_reserve_script(
     # instead of fetching them from the artifact's meta tar; the meta object
     # and ``expected_meta_sha`` are then not consulted at all.
     cidata: Gen2SliceCidata | None = None,
+    # The workload's declared guest ports (specs/published-ports), re-picked
+    # on the new placement like the sshd ports; the env template carries
+    # their ``published_port_placeholder`` tokens.
+    published_port_declarations: Sequence[SlicePortDeclaration] = (),
 ) -> str:
     """The synchronous gen-2 restore-reserve: claim the budgets + ports + an ordinal under the box lock.
 
     Mirrors the gen-2 bake reserve's guarantees: under the box-wide allocation
     flock it enforces the two-budget capacity accounting against the recorded
-    env files, picks the lowest free ordinal and two free host ports, runs the
+    env files, picks the lowest free ordinal, the two sshd host ports and one
+    box port per declared guest port, runs the
     df guard, then durably claims the slot by materializing the slice dir
     (the cidata ISO rebuilt from the artifact's own user-data, meta-data and
     network-config, copied verbatim -- the instance-id stays stable and the
@@ -247,7 +258,9 @@ def render_gen2_restore_reserve_script(
     capacity guard, so the re-drive claims a fresh slot instead of wedging on
     the stale one.
 
-    Prints ``MNGR_RESTORE_RESERVED <vm_port> <container_port> <ordinal>``.
+    Prints ``MNGR_RESTORE_RESERVED <vm_port> <container_port> <ordinal>
+    [<published_port>...]``, the published box ports in ``distinct_guest_ports``
+    order.
     """
     budget_guard_lines = render_gen2_budget_guard_lines(
         units=units,
@@ -286,21 +299,12 @@ rm -f "$IDF" "$TD/meta.enc"
         )
         meta_fetch_block = "umask 077\n"
         meta_cleanup_line = ""
-    port_block = f"""\
-pick_port() {{
-    local p
-    for ((p={DEFAULT_SLICE_PORT_RANGE_START}; p<{DEFAULT_SLICE_PORT_RANGE_END}; p++)); do
-        if ! grep -qx "$p" "$used_ports_file"; then
-            echo "$p"
-            return 0
-        fi
-    done
-    return 1
-}}
-vm_port=$(pick_port) || {{ echo "{RESTORE_NO_PORTS_MARKER}" >&2; exit 3; }}
-echo "$vm_port" >> "$used_ports_file"
-container_port=$(pick_port) || {{ echo "{RESTORE_NO_PORTS_MARKER}" >&2; exit 3; }}
-"""
+    port_pick_lines = render_gen2_port_pick_lines(
+        port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+        port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
+        no_ports_marker=RESTORE_NO_PORTS_MARKER,
+        published_port_declarations=published_port_declarations,
+    )
     return (
         script_prelude(instance_name)
         + f"""\
@@ -343,13 +347,7 @@ if [ -z "$ordinal" ]; then
     exit 4
 fi
 
-# Free host ports: bound TCP ports + every recorded env file's ports.
-used_ports_file=$(mktemp)
-trap 'rm -f "$used_ports_file"' EXIT
-ss -Htln 2>/dev/null | awk '{{print $4}}' | sed 's/.*://' | grep -E '^[0-9]+$' >> "$used_ports_file" || true
-grep -sh '_SSH_HOST_PORT=' "$INSTANCES_DIR"/*/env 2>/dev/null | cut -d= -f2 \\
-    | grep -E '^[0-9]+$' >> "$used_ports_file" || true
-{port_block}
+{port_pick_lines}
 # The df guard: real free space must cover the incoming slice, whatever the
 # slot math says (leaks and staging consume space outside its model).
 if [ {required_free_bytes} -gt 0 ]; then
@@ -369,12 +367,13 @@ mkdir "$slice_dir"
 {cidata_block}\
 echo {shlex.quote(env_template_b64)} | base64 -d | substitute_ordinal_tokens \\
     | sed "s/{GEN2_VM_SSH_PORT_PLACEHOLDER}/$vm_port/g; s/{GEN2_CONTAINER_SSH_PORT_PLACEHOLDER}/$container_port/g" \\
+    | substitute_published_port_tokens \\
     > "$slice_dir/env"
 genisoimage -quiet -output "$slice_dir/cidata.iso" -volid cidata -joliet -rock \\
     "$slice_dir/user-data" "$slice_dir/meta-data" "$slice_dir/network-config"
 ln -sfn "$slice_dir" "$BY_ORDINAL_DIR/$ordinal"
 {meta_cleanup_line}
-echo "{RESTORE_RESERVED_MARKER} $vm_port $container_port $ordinal"
+echo "{RESTORE_RESERVED_MARKER} $vm_port $container_port $ordinal$published_ports_suffix"
 """
     )
 
@@ -501,6 +500,7 @@ def render_gen2_resize_in_place_script(
         vm_ssh_host_port=GEN2_VM_SSH_PORT_PLACEHOLDER,
         container_ssh_host_port=GEN2_CONTAINER_SSH_PORT_PLACEHOLDER,
         uplink_mbps=uplink_mbps,
+        published_ports_value=GEN2_PUBLISHED_PORTS_PLACEHOLDER,
     )
     env_template_b64 = base64.b64encode(env_template.encode()).decode()
     budget_guard_lines = render_gen2_budget_guard_lines(
@@ -526,6 +526,9 @@ vm_port=$(grep -s '^MNGR_SLICE_VM_SSH_HOST_PORT=' "$slice_dir/env" | cut -d= -f2
 container_port=$(grep -s '^MNGR_SLICE_CONTAINER_SSH_HOST_PORT=' "$slice_dir/env" | cut -d= -f2 || true)
 case "$vm_port" in ''|*[!0-9]*) fail "recorded env file has no usable VM port" ;; esac
 case "$container_port" in ''|*[!0-9]*) fail "recorded env file has no usable container port" ;; esac
+# The published ports stay exactly as recorded (a slice carved before they
+# existed has none); the value is JSON with no sed-special characters.
+published_ports=$(grep -s '^{GEN2_PUBLISHED_PORTS_ENV_KEY}=' "$slice_dir/env" | cut -d= -f2- || true)
 
 # Two-budget re-check, excluding this machine's own current footprint (it
 # already holds a slot; only the TARGET size must fit).
@@ -536,6 +539,7 @@ case "$container_port" in ''|*[!0-9]*) fail "recorded env file has no usable con
 umask 077
 echo {shlex.quote(env_template_b64)} | base64 -d | substitute_ordinal_tokens \\
     | sed "s/{GEN2_VM_SSH_PORT_PLACEHOLDER}/$vm_port/g; s/{GEN2_CONTAINER_SSH_PORT_PLACEHOLDER}/$container_port/g" \\
+    | sed "s|{GEN2_PUBLISHED_PORTS_PLACEHOLDER}|$published_ports|g" \\
     > "$slice_dir/env.tmp"
 mv "$slice_dir/env.tmp" "$slice_dir/env"
 
@@ -555,24 +559,12 @@ echo "{GEN2_RESIZE_APPLIED_MARKER} $vm_port $container_port $ordinal"
 
 
 @pure
-def _parse_marker_line_with_ports_and_ordinal(stdout: str, marker: str) -> tuple[int, int, int] | None:
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(marker):
-            parts = stripped.split()
-            if len(parts) == 4 and all(part.isdigit() for part in parts[1:]):
-                return int(parts[1]), int(parts[2]), int(parts[3])
-            return None
-    return None
-
-
-@pure
-def parse_gen2_resize_applied_line(stdout: str) -> tuple[int, int, int] | None:
+def parse_gen2_resize_applied_line(stdout: str) -> Gen2Reservation | None:
     """Parse ``MNGR_RESIZE_APPLIED <vm> <container> <ordinal>`` from the resize script's stdout."""
-    return _parse_marker_line_with_ports_and_ordinal(stdout, GEN2_RESIZE_APPLIED_MARKER)
+    return parse_reservation_marker_line(stdout, GEN2_RESIZE_APPLIED_MARKER)
 
 
 @pure
-def parse_gen2_restore_reserved_line(stdout: str) -> tuple[int, int, int] | None:
-    """Parse ``MNGR_RESTORE_RESERVED <vm> <container> <ordinal>`` from a gen-2 reserve's stdout."""
-    return _parse_marker_line_with_ports_and_ordinal(stdout, RESTORE_RESERVED_MARKER)
+def parse_gen2_restore_reserved_line(stdout: str) -> Gen2Reservation | None:
+    """Parse ``MNGR_RESTORE_RESERVED <vm> <container> <ordinal> [<published>...]`` from a gen-2 reserve's stdout."""
+    return parse_reservation_marker_line(stdout, RESTORE_RESERVED_MARKER)

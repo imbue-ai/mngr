@@ -161,7 +161,12 @@ interface MindsNativeSurface {
   // A workspace title-bar drag main watches from here (the pull-out-window
   // spec, section 5.1); it reports each step of the tear-out through onTearOut.
   beginWorkspaceWindowDrag?(request: WorkspaceWindowDragRequest): void;
-  endWorkspaceWindowDrag?(workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null): void;
+  endWorkspaceWindowDrag?(
+    workspaceId: string,
+    windowId: string,
+    isDetached: boolean,
+    isCancelled: boolean | null,
+  ): void;
   onTearOut?(callback: (report: TearOutReport) => void): void;
   // The popout's own bar was pressed; main follows the cursor until the release.
   beginPopoutDrag?(grab: PopoutGrab): void;
@@ -181,9 +186,16 @@ interface MindsNativeSurface {
   onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
   // Link routing (electron/link-routing.js). Optional: a preload from before
   // it lacks them, and the browser build opens popups itself.
-  reportWorkspaceLinkHandling?(report: WorkspaceLinkHandlingReport | null): void;
+  reportWorkspaceLinkHandling?(
+    report: WorkspaceLinkHandlingReport | null,
+  ): void;
   onOpenLink?(callback: (url: string) => void): void;
   openExternalLink?(url: string): void;
+  // Immersive mode (the Screen integration spec, section 5.2 step 3): the
+  // window's menu shortcuts go off and its key relays pause while on.
+  // Optional: a preload from before immersive mode lacks it, and the browser
+  // build has no accelerators or relays to silence.
+  setImmersive?(on: boolean): void;
 }
 
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
@@ -326,9 +338,14 @@ export const electronBridge = {
    * main raised the workspace's own main window instead (this window stays
    * put), false when this window may go ahead. Null outside the desktop app,
    * where windows and tabs are not deduplicated. */
-  claimWorkspaceWindow(workspaceId: string, route: string): Promise<boolean> | null {
+  claimWorkspaceWindow(
+    workspaceId: string,
+    route: string,
+  ): Promise<boolean> | null {
     const claim = native()?.claimWorkspaceWindow?.(workspaceId, route);
-    return claim === undefined ? null : claim.then((answer) => answer.opened_elsewhere);
+    return claim === undefined
+      ? null
+      : claim.then((answer) => answer.opened_elsewhere);
   },
   /** Null when unavailable; false when this window should handle the click. */
   openNotificationInExistingWindow(
@@ -414,8 +431,18 @@ export const electronBridge = {
   beginWorkspaceWindowDrag(request: WorkspaceWindowDragRequest): void {
     native()?.beginWorkspaceWindowDrag?.(request);
   },
-  endWorkspaceWindowDrag(workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null): void {
-    native()?.endWorkspaceWindowDrag?.(workspaceId, windowId, isDetached, isCancelled);
+  endWorkspaceWindowDrag(
+    workspaceId: string,
+    windowId: string,
+    isDetached: boolean,
+    isCancelled: boolean | null,
+  ): void {
+    native()?.endWorkspaceWindowDrag?.(
+      workspaceId,
+      windowId,
+      isDetached,
+      isCancelled,
+    );
   },
   onTearOut(callback: (report: TearOutReport) => void): void {
     native()?.onTearOut?.(callback);
@@ -450,7 +477,9 @@ export const electronBridge = {
 
   /** Tell main which workspace this window's frame shows and whether it opens
    * links, or null when no frame is mounted. */
-  reportWorkspaceLinkHandling(report: WorkspaceLinkHandlingReport | null): void {
+  reportWorkspaceLinkHandling(
+    report: WorkspaceLinkHandlingReport | null,
+  ): void {
     native()?.reportWorkspaceLinkHandling?.(report);
   },
   /** Main caught a popup or frame navigation the mounted workspace asked for
@@ -466,5 +495,10 @@ export const electronBridge = {
    * tel: link asks the user first. */
   openExternalLink(url: string): void {
     native()?.openExternalLink?.(url);
+  },
+  /** Tell main this window's frame entered or left immersive mode, so its
+   * menu shortcuts and key relays stay out of the way while it lasts. */
+  setImmersive(on: boolean): void {
+    native()?.setImmersive?.(on);
   },
 };

@@ -29,6 +29,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -47,6 +49,9 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PRINCIPAL_C
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PUBLIC_KEY_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_ROOT_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import ssh_ca_trust_files
+from imbue.mngr_imbue_cloud.slices.published_ports import build_slice_container_publish_start_args
+from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_slice_ports
+from imbue.mngr_imbue_cloud.slices.published_ports import to_slice_declarations
 from imbue.mngr_imbue_cloud.slices.ssh_box_image_cache import SshBoxImageCache
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
@@ -61,6 +66,7 @@ from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.published_ports import reject_vm_port_collisions
 from imbue.mngr_vps.sizing import VpsInstanceShape
 
 # region/plan are meaningless for a box-carved slice VM, but the shared
@@ -327,6 +333,19 @@ def render_remove_authorized_key_command(public_key: str, authorized_keys_path: 
     )
 
 
+class SliceHost(Host):
+    """The host a slice carve returns: a plain VPS-docker host that also reports the carve's published endpoints."""
+
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(),
+        frozen=True,
+        description="Where each declared guest port is reachable on the box (specs/published-ports)",
+    )
+
+    def get_published_endpoints(self) -> list[PublishedEndpoint]:
+        return list(self.published_endpoints)
+
+
 class SliceVpsDockerProvider(VpsProvider):
     """A VpsProvider whose 'VPS' is a slice VM we run on a bare-metal box.
 
@@ -360,6 +379,10 @@ class SliceVpsDockerProvider(VpsProvider):
     # ``get_outer_ssh_port`` can surface it through ``mngr create --format json``
     # (the row's ``ssh_port``; the agent connection uses the container port).
     _outer_port_by_host_id: dict[HostId, int] = PrivateAttr(default_factory=dict)
+    # Per-host published endpoints the carve reserved (specs/published-ports),
+    # surfaced the same way as ``host.published_endpoints`` so the pool bake
+    # can record them on the row.
+    _published_endpoints_by_host_id: dict[HostId, tuple[PublishedEndpoint, ...]] = PrivateAttr(default_factory=dict)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -422,13 +445,22 @@ class SliceVpsDockerProvider(VpsProvider):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Provision a slice VM and bake the shared vps_docker container onto it.
 
         Mirrors ``VpsProvider.create_host`` but, instead of ordering a VPS
         and uploading an SSH key, carves a slice VM on the box (no slice client
         supports cloud ordering) and reaches it via box-forwarded ports.
+
+        ``published_ports`` (specs/published-ports) are reserved on the box
+        with the sshd ports (one DNAT'd box port per distinct guest port) and
+        published inside the VM by the container on the same guest numbers;
+        the resulting endpoints are what the returned host reports.
         """
+        declarations = tuple(published_ports or ())
+        reject_vm_port_collisions(self.name, declarations, self.config.container_ssh_port)
+        slice_declarations = to_slice_declarations(declarations)
         host_id = (
             HostId(self.slice_config.slice_host_id)
             if self.slice_config.slice_host_id is not None
@@ -500,12 +532,16 @@ class SliceVpsDockerProvider(VpsProvider):
                 box_total_units=box_total_units,
                 box_disk_budget_gib=box_disk_budget_gib,
                 uplink_mbps=self.slice_config.slice_uplink_mbps,
+                published_port_declarations=slice_declarations,
             )
             vm_ssh_port = provision_result.vm_ssh_host_port
             container_ssh_port = provision_result.container_ssh_host_port
             self._current_outer_port = vm_ssh_port
             self._current_container_port = container_ssh_port
             self._outer_port_by_host_id[host_id] = vm_ssh_port
+            self._published_endpoints_by_host_id[host_id] = tuple(
+                published_endpoints_from_slice_ports(provision_result.published_ports, box)
+            )
             # Pin the VM's (pre-injected) host key for the forwarded outer port.
             add_host_to_known_hosts(
                 known_hosts_path=self._vps_known_hosts_path(),
@@ -562,7 +598,13 @@ class SliceVpsDockerProvider(VpsProvider):
                     image=create_image,
                     tags=tags,
                     build_args=create_build_args,
-                    start_args=start_args,
+                    # The container publishes each declared guest port inside
+                    # the VM on the same number, which is where the box's DNAT
+                    # for that port lands.
+                    start_args=(
+                        *build_slice_container_publish_start_args(slice_declarations),
+                        *(start_args or ()),
+                    ),
                     lifecycle=lifecycle,
                     known_hosts=known_hosts,
                     authorized_keys=effective_authorized_keys,
@@ -843,7 +885,7 @@ class SliceVpsDockerProvider(VpsProvider):
             private_key_path=container_key_path,
             known_hosts_path=self._container_known_hosts_path(),
         )
-        host = Host(
+        host = SliceHost(
             id=host_id,
             host_name=host_name,
             connector=PyinfraConnector(pyinfra_host),
@@ -852,6 +894,7 @@ class SliceVpsDockerProvider(VpsProvider):
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data, vps_ip, realizer
             ),
+            published_endpoints=self._published_endpoints_by_host_id.get(host_id, ()),
         )
         self._evict_cached_host(host_id, replacement=host)
         return host

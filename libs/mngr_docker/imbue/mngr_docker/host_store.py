@@ -21,6 +21,7 @@ from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import PublishedPortDeclaration
 
 
 class ContainerConfig(HostConfig):
@@ -32,6 +33,10 @@ class ContainerConfig(HostConfig):
 
     start_args: tuple[str, ...] = Field(
         default=(), description="Raw docker run arguments for replay on snapshot restore"
+    )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="The --publish declarations, replayed as fresh -p specs on snapshot restore",
     )
     image: str | None = Field(default=None, description="Base Docker image name")
     # Sticky per-host mount-strategy choice. Defaults to False so records

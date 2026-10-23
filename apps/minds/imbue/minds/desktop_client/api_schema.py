@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import IceServersResponse
 from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
 from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
@@ -76,6 +77,7 @@ from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
 from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
+from imbue.minds.desktop_client.api_models import MediaEndpointsResponse
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -166,6 +168,8 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/agents/{agent_id}/notifications/read"): _RouteModels(
         request_model=AgentNotificationReadRequest, response_model=OkResponse
     ),
+    ("GET", "/api/v1/agents/{agent_id}/media-endpoints"): _RouteModels(response_model=MediaEndpointsResponse),
+    ("GET", "/api/v1/agents/{agent_id}/ice-servers"): _RouteModels(response_model=IceServersResponse),
     ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(
         request_model=BugReportRequest, response_model=OkResponse
     ),

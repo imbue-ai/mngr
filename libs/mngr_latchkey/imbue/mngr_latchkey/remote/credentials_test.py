@@ -48,6 +48,7 @@ from imbue.mngr_latchkey.testing import MIGRATION_CONTEXT
 from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
+_EMPTY_POLICY = '{"rules": []}'
 
 
 def _credentials_of(
@@ -446,6 +447,67 @@ def test_a_read_seeds_a_machine_that_has_no_policy_of_its_own(tmp_path: Path) ->
     MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
 
     assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+
+
+def test_a_read_seeds_a_machine_holding_only_the_rule_less_default_from_this_computers_copy(tmp_path: Path) -> None:
+    """A policy with no rules is what provisioning hands a machine before this computer has one for it.
+
+    It denies everything, the workspace's own agent included, so it is no more
+    the machine's policy than no file is: the copy here goes over it, and is
+    not erased by it the way the one grant handler read of the Permissions tab
+    used to.
+    """
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    register_agent_for_host(data_dir, host_id, AgentId.generate())
+    policy = permissions_path_for_host(data_dir, host_id).read_text()
+    outer = fake_vps(tmp_path, machine_permissions=_EMPTY_POLICY)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+
+    fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
+
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(policy)
+    assert permissions_path_for_host(data_dir, host_id).read_text() == policy
+    assert fetched.permissions_json == policy
+    assert len(as_vps(outer).recorded) == 2
+
+
+def test_a_seed_carries_this_computers_desktop_egress_rules_when_it_has_them(tmp_path: Path) -> None:
+    """A policy that allows forwarding must land with the rules that route to it, so both go in one push."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+    write_permissions_format_version(data_dir, host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
+    desktop_egress_rules_path_for_host(data_dir, host_id).write_text(_SLACK_ROUTED)
+    outer = fake_vps(tmp_path, machine_permissions=_EMPTY_POLICY)
+    as_vps(outer).hold_desktop_egress_rules("{}")
+
+    fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
+
+    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
+    assert read_host_desktop_egress_rules(data_dir, host_id) == _SLACK_ROUTED
+    assert fetched.desktop_egress_rules_json == _SLACK_ROUTED
+    assert len(as_vps(outer).recorded) == 2
+
+
+def test_a_read_leaves_a_rule_less_machine_alone_when_this_computer_has_nothing_to_seed_it_with(
+    tmp_path: Path,
+) -> None:
+    """Neither side has a policy: nothing is pushed, and the rule-less default is not taken as a copy here either."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    outer = fake_vps(tmp_path, machine_permissions=_EMPTY_POLICY)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+
+    MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
+
+    assert as_vps(outer).machine_permissions() == _EMPTY_POLICY
+    assert not permissions_path_for_host(data_dir, host_id).exists()
+    assert len(as_vps(outer).recorded) == 1
 
 
 def test_a_read_of_a_machine_at_this_builds_format_pushes_nothing_back(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostAgentsRead
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
@@ -33,8 +34,8 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import _build_agent_details_from_online_agent
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_cached_hosts
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
-from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_host_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -47,7 +48,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.testing import capture_loguru
@@ -462,7 +465,7 @@ def test_discover_agents_on_host_disconnects(host_id: HostId, provider: MockProv
     result = _discover_agents_on_host(provider, host_id)
 
     # A plain HostInterface (not online) has no SSH endpoint to report.
-    assert result == ([], None)
+    assert result == HostAgentsRead(agents=(), ssh_info=None)
     mock_host.disconnect.assert_called_once()
 
 
@@ -681,12 +684,15 @@ class _PerHostGatedProvider(MockProviderInstance):
         self,
         host_ref: DiscoveredHost,
         timeout_seconds: float,
-    ) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    ) -> HostAgentsRead:
         with self._record_lock:
             self._read_timeouts_by_host_id.setdefault(str(host_ref.host_id), []).append(timeout_seconds)
         if self.gated_host_id is not None and host_ref.host_id == self.gated_host_id:
             self._gate.wait()
-        return list(self.agents_by_host_id.get(str(host_ref.host_id), [])), self.mock_host_ssh_info
+        return HostAgentsRead(
+            agents=tuple(self.agents_by_host_id.get(str(host_ref.host_id), [])),
+            ssh_info=self.mock_host_ssh_info,
+        )
 
     def read_count_for_host(self, host_id: HostId) -> int:
         with self._record_lock:
@@ -832,15 +838,17 @@ def test_discover_within_timeouts_omits_ssh_info_for_local_host(
     assert result.host_ssh_infos == ()
 
 
-def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
+def test_bounded_result_from_cached_hosts_reads_only_running_hosts(
     host_id: HostId, provider: MockProviderInstance
 ) -> None:
-    """The batch-provider SSH helper (used by vps/modal) reads the SSH endpoint off each RUNNING
-    host's cached object and skips non-running hosts (whose tunnel would fail anyway)."""
+    """The batch-provider helper (used by vps/modal) reads the SSH endpoint and the published endpoints
+    off each RUNNING host's cached object and skips non-running hosts (whose tunnel would fail anyway)."""
     online_host = MagicMock(spec=OnlineHostInterface)
     online_host.id = host_id
     online_host.get_ssh_connection_info.return_value = ("root", "203.0.113.5", 2222, Path("/keys/id"))
     online_host.get_ssh_known_hosts_path.return_value = None
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.5", host_port=59000)
+    online_host.get_published_endpoints.return_value = [endpoint]
     provider.mock_hosts = [online_host]
 
     running = DiscoveredHost(
@@ -856,9 +864,10 @@ def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
         host_state=HostState.STOPPED,
     )
 
-    result = collect_cached_host_ssh_infos(provider, [running, stopped])
+    result = bounded_result_from_cached_hosts(provider, {running: [], stopped: []})
 
-    assert result == [
+    assert result.hosts == (running, stopped)
+    assert result.host_ssh_infos == (
         (
             host_id,
             SSHInfo(
@@ -868,8 +877,9 @@ def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
                 key_path=Path("/keys/id"),
                 command="ssh -i /keys/id -p 2222 root@203.0.113.5",
             ),
-        )
-    ]
+        ),
+    )
+    assert result.host_published_endpoints == ((host_id, (endpoint,)),)
     # The stopped host was skipped before any get_host connection attempt.
     online_host.get_ssh_connection_info.assert_called_once()
 
@@ -1324,10 +1334,10 @@ def test_discover_agents_on_host_triggers_healing_for_online_hosts(
     mock_host.discover_agents.return_value = [live_agent]
     provider.mock_hosts = [mock_host]
 
-    agents, ssh_info = _discover_agents_on_host(provider, host_id)
+    host_read = _discover_agents_on_host(provider, host_id)
 
-    assert agents == [live_agent]
-    assert ssh_info is None
+    assert host_read.agents == (live_agent,)
+    assert host_read.ssh_info is None
     assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]
 
 
@@ -1356,6 +1366,30 @@ def test_get_host_and_agent_details_populates_boot_time_and_uptime_from_one_prob
     assert host_details.uptime_seconds == 3 * 60 * 60
     # A single probe answers both -- not one shell-out per value.
     online_host.read_boot_info.assert_called_once()
+
+
+def test_get_host_and_agent_details_reports_the_host_objects_published_endpoints(
+    host_id: HostId, provider: MockProviderInstance
+) -> None:
+    """HostDetails.published_endpoints is the host's get_published_endpoints answer, not the certified record's,
+    so a provider whose host answers from a live source (Imbue Cloud's lease) lists the same endpoints everywhere.
+    """
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.return_value = []
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.5", host_port=22012)
+    online_host.get_published_endpoints.return_value = [endpoint]
+    provider.mock_hosts = [online_host]
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    host_details, _agent_details_list = provider.get_host_and_agent_details(host_ref, [])
+
+    assert online_host.get_certified_data.return_value.published_endpoints == ()
+    assert host_details.published_endpoints == [endpoint]
 
 
 def test_discover_within_timeouts_adopts_a_young_in_flight_read_instead_of_skipping_it(

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -37,9 +38,11 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -49,12 +52,17 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
+from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.data_types import AuthSession
@@ -90,6 +98,8 @@ from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
 from imbue.mngr_imbue_cloud.providers.testing import make_workspace_info
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
@@ -176,6 +186,10 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         host_name="unreachable-host",
         attributes={"cpus": 2, "memory_gb": 8},
         leased_at="2025-01-01T00:00:00Z",
+        published_ports=(
+            PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012),
+            PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UNKNOWN, host_port=22012),
+        ),
     )
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -220,6 +234,11 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert host_details.resource is not None
     assert host_details.resource.cpu.count == 2
     assert host_details.resource.memory_gb == 8.0
+    # The lease's published ports are reported at the box's address; an entry
+    # whose protocol this client does not know is left out, never guessed.
+    assert host_details.published_endpoints == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.42", host_port=22012)
+    ]
     # One agent_details per agent_ref, all attached to the offline host.
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id
@@ -260,6 +279,88 @@ def _make_release_guard_provider() -> tuple[_ReleaseGuardProvider, _RecordingRel
         _cleanup_calls=[],
     )
     return provider, client
+
+
+def _make_lease_result(published_ports: list[PublishedPortInfo]) -> LeaseResult:
+    return LeaseResult(
+        host_db_id=LeaseDbId("lease-db-id"),
+        vps_address="203.0.113.99",
+        ssh_port=23010,
+        ssh_user="root",
+        container_ssh_port=23011,
+        agent_id=str(AgentId.generate()),
+        host_id=str(HostId.generate()),
+        host_name="fresh-host",
+        published_ports=tuple(published_ports),
+    )
+
+
+def test_ensure_lease_publishes_declared_ports_refuses_a_lease_lacking_a_declared_port() -> None:
+    """A connector from before published ports ignores the declarations and leases any host; the
+    client refuses such a lease rather than creating a host that publishes nothing."""
+    provider, _client = _make_release_guard_provider()
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp"])
+    lease_result = _make_lease_result(
+        published_ports=[PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)]
+    )
+
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/tcp"):
+        provider._ensure_lease_publishes_declared_ports(lease_result, declarations)
+
+    provider._ensure_lease_publishes_declared_ports(lease_result, declarations[:1])
+    provider._ensure_lease_publishes_declared_ports(_make_lease_result(published_ports=[]), ())
+
+
+class _RefusableLeaseClient(_RecordingReleaseClient):
+    """Stub connector client that leases a fixed host and records its release."""
+
+    def __init__(self, lease_result: LeaseResult) -> None:
+        super().__init__()
+        self.lease_result = lease_result
+
+    def lease_host(
+        self,
+        access_token: SecretStr,
+        attributes: LeaseAttributes,
+        ssh_public_key: str,
+        host_name: str,
+        region: str | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] = (),
+    ) -> LeaseResult:
+        return self.lease_result
+
+
+class _OnDiskLeaseProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Provider stub that keeps its real on-disk lease state but holds no host cache to reset."""
+
+    def reset_caches(self) -> None:
+        pass
+
+    def _evict_cached_host(self, host_id: HostId, replacement: HostInterface | None = None) -> None:
+        pass
+
+
+def test_fast_path_refusing_a_lease_releases_it_and_removes_its_keypair(temp_mngr_ctx: MngrContext) -> None:
+    """A lease refused for a missing declared port goes back to the pool and leaves no key material behind."""
+    lease_result = _make_lease_result(published_ports=[])
+    client = _RefusableLeaseClient(lease_result)
+    provider = _OnDiskLeaseProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx, client=client
+    )
+
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/udp"):
+        provider._create_host_fast_path(
+            name=HostName("fresh-host"),
+            attributes=LeaseAttributes(),
+            token=SecretStr("tok"),
+            region=None,
+            published_ports=parse_published_port_declarations(["59000/udp"]),
+        )
+
+    assert client.release_calls == ["lease-db-id"]
+    data_dir = get_provider_data_dir(temp_mngr_ctx.profile_dir, "imbue-cloud-test")
+    assert list((data_dir / "leases").iterdir()) == []
+    assert not (data_dir / "hosts" / lease_result.host_id).exists()
 
 
 def test_release_lease_on_failure_releases_once_and_propagates() -> None:
@@ -801,7 +902,13 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     """The streaming discovery result carries each discovered host's SSH endpoint (built from
     its lease, pointing at the container's inner sshd), so the poller can emit HOST_SSH_INFO."""
     host_id = HostId.generate()
-    lease = _make_lease(host_id)
+    base_lease = _make_lease(host_id)
+    lease = base_lease.model_copy_update(
+        to_update(
+            base_lease.field_ref().published_ports,
+            [PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)],
+        ),
+    )
     provider = _LeasedHostListingProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         mngr_ctx=temp_mngr_ctx,
@@ -821,6 +928,13 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     assert ssh_info.host == lease.vps_address
     assert ssh_info.port == lease.container_ssh_port
     assert ssh_info.user == lease.ssh_user
+    # The lease's published ports ride beside the SSH info, so the poller emits them with it.
+    assert result.host_published_endpoints == (
+        (
+            host_id,
+            (PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host=lease.vps_address, host_port=22012),),
+        ),
+    )
 
 
 def test_discover_within_timeouts_pins_container_host_key(temp_mngr_ctx: MngrContext) -> None:
@@ -1303,6 +1417,7 @@ class _FastPathGuardProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     """Reaches the ``fast_mode=require`` start-arg guard without real account/lease I/O."""
 
     _did_reach_fast_path: bool = False
+    _fast_path_published_ports: tuple[PublishedPortDeclaration, ...] = ()
 
     def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
         return ImbueCloudAccount("tester@imbue.com")
@@ -1317,8 +1432,10 @@ class _FastPathGuardProvider(_NoWorkspacesMixin, ImbueCloudProvider):
         attributes: LeaseAttributes,
         token: SecretStr,
         region: str | None,
+        published_ports: Sequence[PublishedPortDeclaration],
     ) -> Host:
         self._did_reach_fast_path = True
+        self._fast_path_published_ports = tuple(published_ports)
         return cast(Host, OfflineHost.model_construct())
 
 
@@ -1353,6 +1470,15 @@ def test_fast_path_allows_start_args_the_baked_container_already_carries(temp_mn
     )
     assert provider._did_reach_fast_path
     assert isinstance(host, OfflineHost)
+
+
+def test_create_host_carries_the_declared_ports_into_the_lease(temp_mngr_ctx: MngrContext) -> None:
+    """The declared ports travel with the lease request (specs/published-ports): the
+    connector only leases a host baked with exactly this set."""
+    provider = _make_fast_path_guard_provider(temp_mngr_ctx)
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp"])
+    provider.create_host(HostName("mind-test"), build_args=list(_FAST_PATH_BUILD_ARGS), published_ports=declarations)
+    assert provider._fast_path_published_ports == declarations
 
 
 def test_fast_path_rejects_start_args_the_baked_container_cannot_honor(temp_mngr_ctx: MngrContext) -> None:
@@ -2229,13 +2355,21 @@ def test_persist_lease_meta_records_the_lease_endpoints(tmp_path: Path, temp_mng
         agent_id=str(AgentId.generate()),
         host_id=str(host_id),
         host_name="fresh-host",
+        published_ports=(PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=23012),),
     )
 
     provider._persist_lease_meta(host_id, lease_result)
 
     assert json.loads((tmp_path / "lease.json").read_text())["host_db_id"] == "lease-db-id"
+    # The published endpoints are recorded beside the two sshd endpoints: a
+    # restore re-picks all of them together.
     assert load_bound_endpoints(tmp_path) == BoundEndpoints(
-        vps_address="203.0.113.99", ssh_port=23010, container_ssh_port=23011
+        vps_address="203.0.113.99",
+        ssh_port=23010,
+        container_ssh_port=23011,
+        published_endpoints=(
+            PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.99", host_port=23012),
+        ),
     )
 
 
@@ -2848,7 +2982,13 @@ def _running_host_ref(lease: LeasedHostInfo) -> DiscoveredHost:
 
 
 def test_reread_lists_a_fetched_lease_live_with_its_container_endpoint(temp_mngr_ctx: MngrContext) -> None:
-    lease = _make_lease(HostId.generate())
+    base_lease = _make_lease(HostId.generate())
+    lease = base_lease.model_copy_update(
+        to_update(
+            base_lease.field_ref().published_ports,
+            [PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)],
+        ),
+    )
     services = _services_agent_data()
     chat = _agent_data("chat", {}, "claude")
     raw = {
@@ -2865,6 +3005,9 @@ def test_reread_lists_a_fetched_lease_live_with_its_container_endpoint(temp_mngr
     assert read.agents[1].certified_data == chat
     assert read.ssh_info is not None
     assert (read.ssh_info.host, read.ssh_info.port) == (lease.vps_address, lease.container_ssh_port)
+    assert read.published_endpoints == (
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host=lease.vps_address, host_port=22012),
+    )
 
 
 @pytest.mark.parametrize("fetched_leases", [None, []], ids=["no list fetched", "host not in the fetched list"])

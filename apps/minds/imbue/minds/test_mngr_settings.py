@@ -705,7 +705,6 @@ def _streaming_discovery(
             reader.join(timeout=5.0)
 
 
-@pytest.mark.flaky
 @pytest.mark.timeout(120)
 def test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_stream(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

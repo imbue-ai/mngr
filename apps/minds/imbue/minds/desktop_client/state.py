@@ -59,6 +59,7 @@ from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
@@ -106,6 +107,11 @@ class DesktopClientState(MutableModel):
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"
+    )
+    turn_credential_broker: TurnCredentialBroker | None = Field(
+        default=None,
+        frozen=True,
+        description="Mints and caches relay credentials for the Screen's ice-servers route; None answers none",
     )
     notification_dispatcher: NotificationDispatcher | None = Field(
         default=None, frozen=True, description="OS notification dispatcher"

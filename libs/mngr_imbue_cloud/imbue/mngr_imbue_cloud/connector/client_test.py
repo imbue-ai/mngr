@@ -15,6 +15,7 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr_imbue_cloud.connector import client as connector_client_module
 from imbue.mngr_imbue_cloud.connector.client import CLIENT_ID_HEADER
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
@@ -56,6 +57,8 @@ from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcome
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
@@ -1978,6 +1981,27 @@ def test_get_share_status_parses_status_document(monkeypatch: pytest.MonkeyPatch
     assert info.needs_reshare is False
 
 
+def test_get_share_status_parses_the_media_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "host_id": _SHARE_HOST_ID,
+                "workspace_domain": _SHARE_DOMAIN,
+                "region": "us1",
+                "state": "active",
+                "media_port": 40123,
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    info = client.get_share_status(SecretStr("tok"), _SHARE_HOST_ID)
+
+    assert info is not None
+    assert info.media_port == 40123
+
+
 def test_get_share_status_parses_the_needs_reshare_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -3138,3 +3162,45 @@ def test_notification_preferences_round_trip(monkeypatch: pytest.MonkeyPatch) ->
         ("GET", "/accounts/me/notification-preferences"),
         ("PUT", "/accounts/me/notification-preferences"),
     ]
+
+
+def test_lease_host_sends_the_declared_ports_only_when_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The create's declarations ride the lease body as ``{guest_port, protocol}`` entries
+    (specs/published-ports); a create without declarations keeps the old body shape."""
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "host_db_id": "00000000-0000-0000-0000-000000000001",
+                "vps_address": "10.0.0.1",
+                "ssh_port": 22,
+                "ssh_user": "root",
+                "container_ssh_port": 2222,
+                "agent_id": "agent-abc",
+                "host_id": "host-xyz",
+                "host_name": "my-host",
+                "published_ports": [{"guest_port": 59000, "protocol": "udp", "host_port": 22012}],
+            },
+        )
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    result = client.lease_host(
+        SecretStr("tok"),
+        LeaseAttributes(cpus=2),
+        "ssh-ed25519 AAAA",
+        "my-host",
+        published_ports=parse_published_port_declarations(["59000/udp", "59000/tcp"]),
+    )
+    assert bodies[-1]["published_ports"] == [
+        {"guest_port": 59000, "protocol": "udp"},
+        {"guest_port": 59000, "protocol": "tcp"},
+    ]
+    assert result.published_ports == (
+        PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012),
+    )
+    client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
+    assert "published_ports" not in bodies[-1]

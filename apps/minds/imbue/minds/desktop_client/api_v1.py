@@ -109,6 +109,7 @@ from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import IceServersResponse
 from imbue.minds.desktop_client.api_models import IdentityRecordResponse
 from imbue.minds.desktop_client.api_models import InvitationOutcomeEntryResponse
 from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
@@ -120,6 +121,8 @@ from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
 from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
+from imbue.minds.desktop_client.api_models import MediaEndpointCandidate
+from imbue.minds.desktop_client.api_models import MediaEndpointsResponse
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -148,6 +151,7 @@ from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
@@ -244,6 +248,7 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
+from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
@@ -364,6 +369,104 @@ def _handle_notification_read(agent_id: str) -> OkResponse | Response:
         return _json_error("Notification feed not configured", 501)
     feed.mark_chat_read(resolve_chat_agent_id(AgentId(agent_id), get_state().backend_resolver))
     return OkResponse(ok=True)
+
+
+# Screen routes (specs/screen-studio-integration/spec.md section 4, specs/turn-relay/spec.md section 6):
+# the workspace Screen's service asks where its viewer may connect. Per-agent like the notification
+# routes, so the gateway's per-host permission file confines each caller to its own agent ids; no
+# X-Imbue-Identity is involved (the proxy's injected key is the authentication).
+
+
+def _is_known_agent(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> bool:
+    """Whether discovery knows the agent (by id or alias); an unknown one is a caller error, not an empty answer."""
+    return backend_resolver.resolve_agent_id(agent_id) in backend_resolver.list_known_agent_ids()
+
+
+def _workspace_agent_id_for_agent(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> AgentId:
+    """The primary agent of the workspace ``agent_id`` belongs to, which is what the desktop keys accounts by."""
+    workspace_name = backend_resolver.get_workspace_name(agent_id)
+    primary = (
+        None if workspace_name is None else primary_agent_ids_by_workspace_name(backend_resolver).get(workspace_name)
+    )
+    return agent_id if primary is None else AgentId(primary)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(MediaEndpointsResponse))
+def _handle_agent_media_endpoints(agent_id: str) -> MediaEndpointsResponse | Response:
+    """Where the workspace's published ports are reachable from this desktop, for the Screen's viewer.
+
+    Read from the host record discovery keeps current (on Imbue Cloud, the connector's ports after the
+    re-resolution a reconnect does), so a port re-picked on a restore is reported on the next read. An
+    empty list is a host with nothing published, not an error.
+    """
+    backend_resolver = get_state().backend_resolver
+    parsed_id = AgentId(agent_id)
+    if not _is_known_agent(parsed_id, backend_resolver):
+        return _json_error(f"Unknown agent {agent_id}", 404)
+    return MediaEndpointsResponse(
+        candidates=[
+            MediaEndpointCandidate(
+                host=endpoint.host,
+                port=endpoint.host_port,
+                protocol=endpoint.protocol,
+                guest_port=endpoint.guest_port,
+            )
+            for endpoint in backend_resolver.get_published_endpoints(parsed_id)
+        ]
+    )
+
+
+def _is_workspace_network_restricted(workspace_agent_id: AgentId, backend_resolver: BackendResolverInterface) -> bool:
+    """Whether the workspace's create restricted its host's outbound network (the ``network_restricted`` label)."""
+    return backend_resolver.get_agent_label(workspace_agent_id, NETWORK_RESTRICTED_LABEL) == "true"
+
+
+def _attributable_host_id(workspace_agent_id: AgentId, backend_resolver: BackendResolverInterface) -> str | None:
+    """The workspace host's real ``host-<hex>`` id for the connector's ledger; None for a placeholder or unknown host."""
+    info = backend_resolver.get_agent_display_info(workspace_agent_id)
+    if info is None:
+        return None
+    try:
+        return str(HostId(info.host_id))
+    except ValueError:
+        return None
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(IceServersResponse))
+def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
+    """Relay (TURN) servers for the Screen's viewer, minted for the signed-in account that owns the workspace.
+
+    An empty list with status 200 when the workspace's host was created with a restricted outbound
+    network (a relay credential would be an egress tunnel around that restriction; spec section 3),
+    when no account is signed in for the workspace, when the connector refuses (plan, quota, rate
+    limit) or cannot answer, or in an app built without the broker; the viewer then proceeds with
+    host candidates alone. A mint names the workspace's host so the connector's ledger attributes it.
+    """
+    state = get_state()
+    parsed_id = AgentId(agent_id)
+    if not _is_known_agent(parsed_id, state.backend_resolver):
+        return _json_error(f"Unknown agent {agent_id}", 404)
+    empty = IceServersResponse(ice_servers=[], expires_at=None)
+    if state.turn_credential_broker is None or state.session_store is None:
+        logger.debug("Answering no relay servers for {}: this app has no relay broker", agent_id)
+        return empty
+    workspace_agent_id = _workspace_agent_id_for_agent(parsed_id, state.backend_resolver)
+    if _is_workspace_network_restricted(workspace_agent_id, state.backend_resolver):
+        logger.debug("Answering no relay servers for {}: the workspace's network is restricted", agent_id)
+        return empty
+    account = state.session_store.get_account_for_workspace(str(workspace_agent_id))
+    if account is None:
+        logger.debug("Answering no relay servers for {}: no signed-in account owns the workspace", agent_id)
+        return empty
+    credential = state.turn_credential_broker.credential_for_account(
+        str(account.user_id), _attributable_host_id(workspace_agent_id, state.backend_resolver)
+    )
+    if credential is None:
+        logger.debug("Answering no relay servers for {}: the broker has no credential for the account", agent_id)
+        return empty
+    return IceServersResponse(ice_servers=list(credential.ice_servers), expires_at=credential.expires_at.isoformat())
 
 
 # Machine-size allowlists per compute mode (the create form's picker values).
@@ -4939,6 +5042,11 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule(
         "/agents/<agent_id>/notifications/read", view_func=_handle_notification_read, methods=["POST"]
     )
+    # The workspace Screen's connect-info (per-agent for the same reason).
+    blueprint.add_url_rule(
+        "/agents/<agent_id>/media-endpoints", view_func=_handle_agent_media_endpoints, methods=["GET"]
+    )
+    blueprint.add_url_rule("/agents/<agent_id>/ice-servers", view_func=_handle_agent_ice_servers, methods=["GET"])
 
     # This app's version. Baseline-granted to every agent (see
     # ``minds-app-version-read`` in ``mngr_latchkey.baseline_permissions``).

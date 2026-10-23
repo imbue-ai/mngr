@@ -1,0 +1,2 @@
+The modal provider publishes the TCP ports declared with `mngr create --publish <port>` (`specs/published-ports/spec.md`): each becomes a sandbox tunnel beside the SSH one, the tunnel's host and port are read back after every sandbox start (a snapshot restore allocates fresh tunnels) and recorded on the host for `mngr list --format json`.
+A `udp` declaration fails the create before any sandbox is created, since Modal tunnels carry TCP only, and declaring port 22 is refused since it is the SSH tunnel.

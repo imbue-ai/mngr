@@ -6,6 +6,10 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.wire import WireModel
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
+from imbue.mngr_imbue_cloud.wire_types import LeaseResult
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import R2BucketAccess
 from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
@@ -91,6 +95,42 @@ def test_parse_wire_entries_raises_on_non_list_body() -> None:
 
 def test_parse_wire_entries_accepts_empty_list() -> None:
     assert parse_wire_entries(_ExampleWireModel, [], "GET /example", ImbueCloudConnectorError) == []
+
+
+def test_lease_result_published_ports_are_additive_and_coerce_unknown_protocols() -> None:
+    # The field is absent from a connector that predates published ports and
+    # from a row baked without them; both read as none.
+    base = {
+        "host_db_id": "11111111-2222-3333-4444-555555555555",
+        "vps_address": "10.0.0.1",
+        "ssh_port": 22000,
+        "ssh_user": "root",
+        "container_ssh_port": 22001,
+        "agent_id": "a",
+        "host_id": "h",
+        "host_name": "n",
+    }
+    assert validate_wire(LeaseResult, base).published_ports == ()
+    with_ports = validate_wire(
+        LeaseResult,
+        {
+            **base,
+            "published_ports": [
+                {"guest_port": 59000, "protocol": "udp", "host_port": 22002},
+                {"guest_port": 59000, "protocol": "sctp", "host_port": 22002},
+            ],
+        },
+    )
+    assert with_ports.published_ports == (
+        PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22002),
+        PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UNKNOWN, host_port=22002),
+    )
+    info = validate_wire(
+        WorkspaceInfo,
+        {"host_db_id": base["host_db_id"], "status": "running", "agent_id": "a", "host_id": "h", "host_name": "n"},
+    )
+    assert info.published_ports == ()
+    assert validate_wire(LeasedHostInfo, {**base, "leased_at": "2026-01-01T00:00:00Z"}).published_ports == ()
 
 
 def test_sync_document_requires_metadata() -> None:

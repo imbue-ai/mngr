@@ -14,6 +14,8 @@ keeps the bake's name (a constant such as ``system-services``) verbatim.
 
 Overrides:
 
+- ``get_published_endpoints`` asks the provider for the lease's current
+  published ports (specs/published-ports), which a restore re-picks.
 - ``set_env_vars`` always merges into the pre-baked ``/mngr/env``
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
@@ -39,6 +41,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -53,8 +56,10 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr_imbue_cloud.errors import ClaudeConfigPatchError
 from imbue.mngr_imbue_cloud.errors import FixedAgentIdError
+from imbue.mngr_imbue_cloud.interfaces import LeasePublishedEndpointsInterface
 
 
 def _parse_create_time(value: Any) -> datetime:
@@ -83,6 +88,8 @@ class ImbueCloudHost(Host):
     wrote (typically a constant such as ``system-services``).
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     # ``pre_baked_agent_id`` is inherited from the base ``Host`` class
     # (default None on every other provider's hosts; this provider's
     # ``create_host`` populates it from the lease). Keeping it on the base
@@ -93,6 +100,12 @@ class ImbueCloudHost(Host):
         frozen=True,
         description="Database id of this lease (UUID returned by /hosts/lease).",
     )
+    # The provider, under the one interface this host needs of it beyond the
+    # generic ``provider_instance``: the lease record's published endpoints.
+    published_endpoint_source: LeasePublishedEndpointsInterface = Field(
+        frozen=True,
+        description="Answers the lease's current published endpoints (specs/published-ports); the provider itself",
+    )
 
     # Set by ``create_agent_state`` when it found no baked agent state and ran
     # the full create at the pinned id. ``provision_agent`` needs it because
@@ -100,6 +113,15 @@ class ImbueCloudHost(Host):
     # provisioning runs the on-disk check alone would mistake the fresh state
     # for the bake's and skip the full provisioning the container still needs.
     _is_agent_created_without_baked_state: bool = PrivateAttr(default=False)
+
+    def get_published_endpoints(self) -> list[PublishedEndpoint]:
+        """The slice's published ports at its current placement, read from the provider's lease record.
+
+        Re-read on every call rather than captured at construction: a restore
+        re-picks the box ports, and the provider's lease listing is what moves
+        with the host (as the SSH ports do).
+        """
+        return self.published_endpoint_source.published_endpoints_for(self.id)
 
     def set_env_vars(self, env: Mapping[str, str]) -> None:
         """Merge ``env`` into the pre-baked ``/mngr/env`` instead of overwriting.

@@ -107,6 +107,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `idle_seconds < 300` - Agents active in the last 5 minutes
 - `host.resource.memory_gb >= 8` - Agents on hosts with 8GB+ memory
 - `host.uptime_seconds > 86400` - Agents on hosts running for more than a day
+- `size(host.published_endpoints) > 0` - Agents on hosts created with `--publish` (each endpoint has `guest_port`, `protocol`, `host` and `host_port`)
 
 **Existence checks:**
 - `has(url)` - Agents that have a URL set
@@ -171,6 +172,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `host.ssh.key_path` - Path to SSH private key
 - `host.ssh.known_hosts_path` - Path to the known_hosts file pinning this host's SSH host key, when the provider configured strict host-key checking. Consumers should prefer this over deriving the file's location from key_path.
 - `host.ssh.command` - Full SSH command to connect
+- `host.published_endpoints` - Where each port the host was created with --publish is reachable from this client
 - `host.snapshots` - List of available snapshots
 - `host.is_locked` - Whether the host is currently locked for an operation
 - `host.locked_time` - When the host was locked

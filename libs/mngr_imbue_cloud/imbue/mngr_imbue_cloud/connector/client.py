@@ -15,6 +15,7 @@ Authentication semantics:
 
 import os
 from collections.abc import Mapping
+from collections.abc import Sequence
 from functools import cache
 from importlib import metadata
 from typing import Any
@@ -36,6 +37,7 @@ from tenacity import wait_random_exponential
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
@@ -684,6 +686,9 @@ class ImbueCloudConnectorClient(MutableModel):
         host_name: str,
         # Hard datacenter requirement: only a host in this region is eligible.
         region: str | None = None,
+        # The create's declared ports (specs/published-ports): the connector
+        # leases only a host baked with exactly this set.
+        published_ports: Sequence[PublishedPortDeclaration] = (),
     ) -> LeaseResult:
         body: dict[str, object] = {
             "attributes": attributes.to_request_dict(),
@@ -699,6 +704,13 @@ class ImbueCloudConnectorClient(MutableModel):
         # unconstrained.
         if region is not None:
             body["region"] = region
+        # Only sent when declared, so a create without declarations keeps the
+        # body an older connector already accepts.
+        if published_ports:
+            body["published_ports"] = [
+                {"guest_port": declaration.guest_port, "protocol": declaration.protocol.value.lower()}
+                for declaration in published_ports
+            ]
         # A post-send retry could double-lease the pool host.
         response = self._send(
             "POST",
@@ -2321,6 +2333,7 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
     )
     raw_chrome_origin = body.get("chrome_origin")
     raw_workspace_id = body.get("workspace_id")
+    raw_media_port = body.get("media_port")
     return ShareInfo(
         host_id=str(body.get("host_id", "")),
         workspace_id=str(raw_workspace_id) if raw_workspace_id else None,
@@ -2339,4 +2352,5 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         cert_not_after=body.get("cert_not_after"),
         chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
         needs_reshare=body.get("needs_reshare") is True,
+        media_port=raw_media_port if isinstance(raw_media_port, int) else None,
     )

@@ -752,6 +752,27 @@ def test_provisioning_seeds_a_machine_with_no_policy_from_the_local_file(tmp_pat
     assert as_vps(outer).machine_permissions() == _GRANTED_HERE
 
 
+def test_provisioning_seeds_a_machine_holding_only_the_rule_less_default_from_the_local_file(tmp_path: Path) -> None:
+    """The deny-all default an earlier pass seeded is no policy: a later pass with a local file replaces it.
+
+    This is the order a new remote workspace provisions in: the first pass
+    runs before ``mngr create`` has returned the host id the local file is
+    keyed by, so it seeds the default; the policy this computer then writes
+    has to reach the machine, not be adopted away by the default.
+    """
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+    local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
+    write_permissions_format_version(plugin_data_dir(latchkey_directory), host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
+    outer = fake_vps(tmp_path, machine_permissions='{\n  "rules": []\n}')
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+
+    _provision(outer, latchkey_directory, host_id)
+
+    assert as_vps(outer).machine_permissions() == _GRANTED_HERE
+    assert local_path.read_text() == _GRANTED_HERE
+
+
 def test_provisioning_adopts_the_policy_the_machine_holds(tmp_path: Path) -> None:
     """The machine's file is the rendezvous: it is how a second computer sees what the first granted.
 

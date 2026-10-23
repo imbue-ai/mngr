@@ -75,6 +75,7 @@ from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
+from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
 from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
@@ -89,6 +90,16 @@ from imbue.mngr_latchkey.store import read_permissions_format_version
 
 class MachineCredentialsError(RemoteGatewayError):
     """Raised when a credential change could not be carried to the machine."""
+
+
+class SeededPolicy(FrozenModel):
+    """What a read handed a machine that held no provisioned policy: this computer's copies, as pushed."""
+
+    permissions_json: str = Field(description="The policy the machine now enforces: this computer's copy of it.")
+    permissions_format_version: PermissionsFormatVersion = Field(description="The format that copy is stamped with.")
+    desktop_egress_rules_json: str | None = Field(
+        description="The desktop egress rules pushed with it, or ``None`` when this computer had no copy to push."
+    )
 
 
 class MachineCredentials(FrozenModel):
@@ -125,16 +136,22 @@ class MachineCredentials(FrozenModel):
         may have several computers, and any of them can push a grant to it. A
         computer that treated its own copy as the truth would revert what
         another one granted, every time this ran. So the machine's answer is
-        adopted here as well, and the copy here stays a cache.
+        adopted here as well, and the copy here stays a cache -- unless the
+        machine has no provisioned policy (none, or one with no rules; see
+        :func:`~imbue.mngr_latchkey.remote._transfer.is_policy_provisioned`),
+        in which case the copy here is what seeds it (see
+        :meth:`_reconcile_permissions`).
 
         That is only safe because the copy here is never edited without being
         pushed (see :func:`read_host_permissions`), which leaves nothing local
         for an adopt to lose.
 
         The **desktop egress rules are the machine's** for the same reason the
-        policy is, and are adopted the same way. Unlike the policy they are
-        never seeded from here: the machine's gateway run script creates the
-        file, and a machine without one routes nothing.
+        policy is, and are adopted the same way. They are seeded from here only
+        alongside a policy seed, when this computer holds a copy of them: a
+        policy that allows forwarding needs the rules that route to it. The
+        machine's gateway run script creates the file otherwise, and a machine
+        without one routes nothing.
 
         The **format version is the machine's** because it describes the
         machine's policy. Once everything is adopted, a policy in a format older
@@ -153,10 +170,22 @@ class MachineCredentials(FrozenModel):
         """
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
-        self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
-        adopt_machine_desktop_egress_rules(
-            self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
-        )
+        seeded = self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
+        if seeded is None or seeded.desktop_egress_rules_json is None:
+            adopt_machine_desktop_egress_rules(
+                self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
+            )
+        if seeded is not None:
+            fetched = fetched.model_copy_update(
+                to_update(fetched.field_ref().permissions_json, seeded.permissions_json),
+                to_update(fetched.field_ref().permissions_format_version, seeded.permissions_format_version),
+                to_update(
+                    fetched.field_ref().desktop_egress_rules_json,
+                    fetched.desktop_egress_rules_json
+                    if seeded.desktop_egress_rules_json is None
+                    else seeded.desktop_egress_rules_json,
+                ),
+            )
         migrated = migrate_permissions_and_push(self.host, self.latchkey, self.host_id, migration_context)
         if migrated is None:
             return fetched
@@ -166,26 +195,55 @@ class MachineCredentials(FrozenModel):
         )
 
     def _reconcile_permissions(
-        self, machine_permissions_json: str | None, machine_permissions_format_version: PermissionsFormatVersion
-    ) -> None:
+        self,
+        machine_permissions_json: str | None,
+        machine_permissions_format_version: PermissionsFormatVersion,
+        # what the machine was seeded with from here, or ``None`` when its own policy was adopted (or it has
+        # none and neither does this computer)
+    ) -> SeededPolicy | None:
         """Settle the one policy the machine and this computer should both hold (see :meth:`refresh`).
 
-        The machine wins whenever it has one, because another of the user's
-        computers may have granted something this one has never seen; the
-        format version it stamps that policy with comes along, since it
-        describes it. The only write toward the machine is the seed: a machine
-        with no policy at all permits everything, so it is handed this
-        computer's copy rather than left open.
+        The machine wins whenever it has a provisioned policy, because another
+        of the user's computers may have granted something this one has never
+        seen; the format version it stamps that policy with comes along, since
+        it describes it. The only write toward the machine is the seed: a
+        machine with no policy at all permits everything, and one holding only
+        the rule-less default a provisioning pass handed it denies everything
+        -- including the agents registered here -- so either is handed this
+        computer's copy (when there is one with rules in it) rather than
+        adopted over it. The seed carries this computer's copy of the desktop
+        egress rules too, when it has one, so the machine never holds a policy
+        that allows forwarding without the rules that route to it.
+
+        Raises:
+            RemoteGatewayError: when either policy cannot be read, or the
+                machine does not take the seed.
+            LatchkeyStoreError: when a copy here cannot be read.
         """
-        if machine_permissions_json is not None:
+        if machine_permissions_json is not None and is_policy_provisioned(self.host_id, machine_permissions_json):
             adopt_machine_permissions(self.latchkey.latchkey_directory, self.host_id, machine_permissions_json)
             adopt_machine_permissions_format_version(
                 self.latchkey.latchkey_directory, self.host_id, machine_permissions_format_version
             )
-            return
-        local_permissions_json = read_host_permissions(plugin_data_dir(self.latchkey.latchkey_directory), self.host_id)
-        if local_permissions_json is not None:
+            return None
+        data_dir = plugin_data_dir(self.latchkey.latchkey_directory)
+        local_permissions_json = read_host_permissions(data_dir, self.host_id)
+        if local_permissions_json is None or not is_policy_provisioned(self.host_id, local_permissions_json):
+            return None
+        local_desktop_egress_rules_json = read_host_desktop_egress_rules(data_dir, self.host_id)
+        logger.info(
+            "The machine of host {} holds no provisioned permissions; seeding it with this computer's copy",
+            self.host_id,
+        )
+        if local_desktop_egress_rules_json is None:
             self.set_permissions(local_permissions_json)
+        else:
+            self.set_permissions_and_desktop_egress_rules(local_permissions_json, local_desktop_egress_rules_json)
+        return SeededPolicy(
+            permissions_json=local_permissions_json,
+            permissions_format_version=self._permissions_format_version(),
+            desktop_egress_rules_json=local_desktop_egress_rules_json,
+        )
 
     def connect_service(self, service_name: str, account: str) -> None:
         """Carry an account of a service just connected here onto the machine.

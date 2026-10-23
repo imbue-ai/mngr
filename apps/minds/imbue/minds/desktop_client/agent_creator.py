@@ -12,6 +12,7 @@ via get_log_sink().
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -19,6 +20,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -53,6 +55,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
@@ -1123,6 +1126,44 @@ def _build_arg_flag(value: str) -> list[str]:
     return shell_quoted_create_flag("-b", value)
 
 
+# The Modal provider's build options that restrict the sandbox's outbound network
+# (``SandboxConfig.offline`` / ``cidr_allowlist``), in the flag and bare spellings
+# ``-b`` accepts.
+_NETWORK_RESTRICTING_BUILD_OPTIONS: Final[frozenset[str]] = frozenset(
+    {"--offline", "offline", "--cidr-allowlist", "cidr_allowlist"}
+)
+
+
+@pure
+def is_network_restricting_build_arg(value: str) -> bool:
+    """Whether one shell-quoted ``-b`` value restricts the new host's outbound network.
+
+    The value arrives as ``_build_arg_flag`` quoted it, whole; ``mngr create`` tokenizes it again,
+    so the option name is the first word of the unquoted value (a value such as ``repo_url=...`` may
+    hold a stray quote, so the inner split is on whitespace rather than a second shell parse).
+    """
+    unquoted = shlex.split(value)
+    words = unquoted[0].split() if unquoted else []
+    if not words:
+        return False
+    option = words[0].split("=", 1)[0]
+    return option in _NETWORK_RESTRICTING_BUILD_OPTIONS
+
+
+@pure
+def network_restricted_label_args(mngr_command: Sequence[str]) -> list[str]:
+    """The ``--label network_restricted=true`` to append when the create's ``-b`` values restrict the network.
+
+    The label is the desktop's record of the restriction: its relay broker refuses such a workspace
+    a TURN credential (``specs/turn-relay/spec.md``, section 3), which would otherwise be an egress
+    tunnel around the allowlist. Empty for a create that restricts nothing.
+    """
+    build_arg_values = [value for flag, value in zip(mngr_command, mngr_command[1:], strict=False) if flag == "-b"]
+    if any(is_network_restricting_build_arg(value) for value in build_arg_values):
+        return ["--label", f"{NETWORK_RESTRICTED_LABEL}=true"]
+    return []
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
@@ -1440,6 +1481,7 @@ def _build_mngr_create_command(
         case _ as unreachable:
             assert_never(unreachable)
 
+    mngr_command.extend(network_restricted_label_args(mngr_command))
     return mngr_command
 
 

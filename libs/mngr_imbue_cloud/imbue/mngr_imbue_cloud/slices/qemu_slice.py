@@ -28,12 +28,14 @@ connector container. The SSH driving lives in
 import base64
 import ipaddress
 import shlex
+from collections.abc import Sequence
 from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_budget_guard_lines
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_ordinal_derivation_lines
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import render_gen2_port_pick_lines
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_ALLOC_LOCK_RELPATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_BASE_IMAGE_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_BY_ORDINAL_DIR
@@ -59,6 +61,8 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_PORTS_MARK
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_SPACE_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_OVMF_CODE_PATH
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_ENV_KEY
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORT_ENTRY_BASH_RE
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_RESERVED_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SERVICE_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SUBNET_BASE
@@ -66,8 +70,11 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_STORAGE_ROOT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_TC_MARK_BASE
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_GUEST_PORT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_PORT_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import Gen2Reservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import derive_slice_network
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import gen2_instance_dir
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import parse_reservation_marker_line
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_unit_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DEFAULT_MACHINE_UNITS
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_UPLINK_SHAPING_PERCENT
@@ -240,6 +247,33 @@ WantedBy=multi-user.target
 
 
 @pure
+def render_published_ports_dnat_lines() -> str:
+    """The helper's bash block that DNATs every published port into the VM (one rule per entry, protocol and NAT chain).
+
+    Reads ``$MNGR_SLICE_PUBLISHED_PORTS`` (already validated against the
+    entry regex in ``$PUBLISHED_PORT_ENTRY_RE``), ``$NFT_TABLE``,
+    ``$MNGR_SLICE_VM_IP`` and ``$RULE_TAG``. The container publishes each
+    guest port on the same number inside the VM, so the DNAT target needs no
+    second mapping; the entries carry no whitespace, so word-splitting the
+    ``grep -o`` output yields exactly one entry per word. Indented for its
+    place inside the helper's ``setup`` case arm.
+    """
+    return """\
+    # The workload's published ports (specs/published-ports), beside the sshd
+    # ports above: the same two NAT hooks, the declared protocol instead of tcp.
+    for ENTRY in $(grep -oE "$PUBLISHED_PORT_ENTRY_RE" <<< "$MNGR_SLICE_PUBLISHED_PORTS" || true); do
+        GUEST_PORT=$(sed -E 's/.*"guest_port":([0-9]+).*/\\1/' <<< "$ENTRY")
+        PROTOCOL=$(sed -E 's/.*"protocol":"([a-z]+)".*/\\1/' <<< "$ENTRY")
+        HOST_PORT=$(sed -E 's/.*"host_port":([0-9]+).*/\\1/' <<< "$ENTRY")
+        for CHAIN in prerouting output; do
+            nft add rule inet "$NFT_TABLE" "$CHAIN" fib daddr type local \\
+                "$PROTOCOL" dport "$HOST_PORT" \\
+                counter dnat ip to "$MNGR_SLICE_VM_IP:$GUEST_PORT" comment "\\"$RULE_TAG\\""
+        done
+    done"""
+
+
+@pure
 def render_slice_helper_script() -> str:
     """The root helper (``mngr-slice-helper``) the unit runs around each VM.
 
@@ -250,10 +284,11 @@ def render_slice_helper_script() -> str:
       see below -- pin the unit's cgroup resource limits from the machine's
       size, create its tap + addressing + per-interface forwarding, install
       its nftables rules, and add its HTB class when an uplink rate is
-      declared. The rules: DNAT in prerouting AND output (plus
-      ``route_localnet`` on the tap and a local-source masquerade, so box-local
-      connections to the forwarded ports -- loopback-addressed ones included --
-      reach the VM), masquerade, the guest->box input drop (which exempts
+      declared. The rules: DNAT in prerouting AND output for the two sshd
+      ports and every published port (plus ``route_localnet`` on the tap and
+      a local-source masquerade, so box-local connections to the forwarded
+      ports -- loopback-addressed ones included -- reach the VM), masquerade,
+      the guest->box input drop (which exempts
       established/related replies to box-initiated connections, the guest's
       DHCP requests to the box's DHCP server on its tap, and ICMP to the
       gateway), the anti-spoofing drop and the direct-to-MX SMTP block, the
@@ -332,6 +367,12 @@ setup)
     MNGR_SLICE_UNITS=$(env_get MNGR_SLICE_UNITS '[0-9]+')
     MNGR_SLICE_TOTAL_UNITS=$(env_get MNGR_SLICE_TOTAL_UNITS '[0-9]+')
     MNGR_SLICE_UPLINK_MBPS=$(env_get MNGR_SLICE_UPLINK_MBPS '[0-9]*')
+    # The published ports ride as one compact JSON list; an empty value (or a
+    # slice carved before published ports existed, whose env has no such key)
+    # publishes nothing.
+    PUBLISHED_PORT_ENTRY_RE='{GEN2_PUBLISHED_PORT_ENTRY_BASH_RE}'
+    MNGR_SLICE_PUBLISHED_PORTS=$(env_get {GEN2_PUBLISHED_PORTS_ENV_KEY} \\
+        "(\\[\\]|\\[$PUBLISHED_PORT_ENTRY_RE(,$PUBLISHED_PORT_ENTRY_RE)*\\])?")
     SLICE_DIR="{GEN2_BY_ORDINAL_DIR}/$ORDINAL"
 
     # Ownership: the slice dir and the env file stay the service user's -- the VM's own
@@ -430,6 +471,7 @@ setup)
             tcp dport "$MNGR_SLICE_CONTAINER_SSH_HOST_PORT" \\
             counter dnat ip to "$MNGR_SLICE_VM_IP:{GEN2_CONTAINER_SSH_GUEST_PORT}" comment "\\"$RULE_TAG\\""
     done
+{render_published_ports_dnat_lines()}
     # Outbound: masquerade guest egress to the box's address.
     nft add rule inet "$NFT_TABLE" postrouting ip saddr "$MNGR_SLICE_VM_IP" oifname != "$MNGR_SLICE_TAP" \\
         counter masquerade comment "\\"$RULE_TAG\\""
@@ -778,6 +820,10 @@ def build_qemu_reserve_script(
     meta_data_text: str,
     network_config_text: str,
     env_file_template_text: str,
+    # The workload's declared guest ports (specs/published-ports): the reserve
+    # picks one box port per distinct guest port and substitutes the env
+    # template's ``published_port_placeholder`` tokens with them.
+    published_port_declarations: Sequence[SlicePortDeclaration] = (),
 ) -> str:
     """Render the bash that atomically reserves one gen-2 slice's budgets, ports, and ordinal.
 
@@ -788,8 +834,8 @@ def build_qemu_reserve_script(
        against the recorded per-slice env files (the authoritative
        over-allocation guard);
     2. picks the lowest free ordinal from the recorded env files;
-    3. picks two free host ports (bound TCP ports plus every recorded env
-       file's ports);
+    3. picks the two sshd host ports and one box port per declared guest port
+       (bound TCP and UDP ports plus every recorded env file's ports);
     4. runs the carve-time df guard: refuses unless the storage filesystem's
        real free space covers the slice's full virtual size plus a margin;
     5. materializes the slice dir: reflink-copies the staged base image and
@@ -801,10 +847,11 @@ def build_qemu_reserve_script(
     they are written as given; the one ordinal-dependent payload, the env
     file, ships as a single template whose MAC and /30 tokens the box-side
     script derives from the chosen ordinal with shell arithmetic and
-    substitutes (plus the two chosen ports).
+    substitutes (plus the chosen ports).
 
-    Prints ``MNGR_SLICE_RESERVED <vm_port> <container_port> <ordinal>`` on
-    success.
+    Prints ``MNGR_SLICE_RESERVED <vm_port> <container_port> <ordinal>
+    [<published_port>...]`` on success, the published box ports in
+    ``distinct_guest_ports`` order.
     """
     encoded_user_data = base64.b64encode(user_data_text.encode()).decode()
     encoded_meta_data = base64.b64encode(meta_data_text.encode()).decode()
@@ -817,6 +864,12 @@ def build_qemu_reserve_script(
         unit_budget_mib=unit_budget_mib,
         disk_budget_gib=disk_budget_gib,
         excluded_instance_name="",
+    )
+    port_pick_lines = render_gen2_port_pick_lines(
+        port_range_start=port_range_start,
+        port_range_end=port_range_end,
+        no_ports_marker=GEN2_NO_PORTS_MARKER,
+        published_port_declarations=published_port_declarations,
     )
     return f"""\
 #!/bin/bash
@@ -852,26 +905,8 @@ if [ -z "$ordinal" ]; then
     exit 4
 fi
 
-# 3. Free host ports: bound TCP ports + every recorded env file's ports.
-used_ports_file=$(mktemp)
-trap 'rm -f "$used_ports_file"' EXIT
-ss -Htln 2>/dev/null | awk '{{print $4}}' | sed 's/.*://' | grep -E '^[0-9]+$' >> "$used_ports_file" || true
-grep -sh '_SSH_HOST_PORT=' "$INSTANCES_DIR"/*/env 2>/dev/null | cut -d= -f2 \\
-    | grep -E '^[0-9]+$' >> "$used_ports_file" || true
-pick_port() {{
-    local p
-    for ((p={port_range_start}; p<{port_range_end}; p++)); do
-        if ! grep -qx "$p" "$used_ports_file"; then
-            echo "$p"
-            return 0
-        fi
-    done
-    return 1
-}}
-vm_port=$(pick_port) || {{ echo "{GEN2_NO_PORTS_MARKER}" >&2; exit 3; }}
-echo "$vm_port" >> "$used_ports_file"
-container_port=$(pick_port) || {{ echo "{GEN2_NO_PORTS_MARKER}" >&2; exit 3; }}
-
+# 3. The two sshd ports plus one box port per declared guest port.
+{port_pick_lines}
 # 4. The carve-time df guard: the budget math is the primary no-overcommit
 # guarantee, but consumption outside its model (bases, transfer staging, leaks)
 # must surface as a refusal here, never as a running VM's ENOSPC later.
@@ -893,6 +928,7 @@ echo {shlex.quote(encoded_meta_data)} | base64 -d > "$slice_dir/meta-data"
 echo {shlex.quote(encoded_network_config)} | base64 -d > "$slice_dir/network-config"
 echo {shlex.quote(encoded_env_file_template)} | base64 -d | substitute_ordinal_tokens \\
     | sed "s/{GEN2_VM_SSH_PORT_PLACEHOLDER}/$vm_port/g; s/{GEN2_CONTAINER_SSH_PORT_PLACEHOLDER}/$container_port/g" \\
+    | substitute_published_port_tokens \\
     > "$slice_dir/env"
 genisoimage -quiet -output "$slice_dir/cidata.iso" -volid cidata -joliet -rock \\
     "$slice_dir/user-data" "$slice_dir/meta-data" "$slice_dir/network-config"
@@ -902,24 +938,22 @@ qemu-img create -q -f qcow2 "$slice_dir/datadisk.qcow2" {data_disk_gib}G
 ln -sfn "$slice_dir" "$BY_ORDINAL_DIR/$ordinal"
 sudo /usr/bin/systemctl enable "mngr-slice@$ordinal"
 
-echo "{GEN2_RESERVED_MARKER} $vm_port $container_port $ordinal"
+echo "{GEN2_RESERVED_MARKER} $vm_port $container_port $ordinal$published_ports_suffix"
 """
 
 
 @pure
-def parse_gen2_reserved_line(stdout: str) -> tuple[int, int, int]:
-    """Parse ``MNGR_SLICE_RESERVED <vm> <container> <ordinal>`` from a reserve run's stdout.
+def parse_gen2_reserved_line(stdout: str) -> Gen2Reservation:
+    """Parse ``MNGR_SLICE_RESERVED <vm> <container> <ordinal> [<published>...]`` from a reserve run's stdout.
 
     Raises ``SliceReserveOutputError`` if the marker line is missing or malformed.
     """
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(GEN2_RESERVED_MARKER):
-            parts = stripped.split()
-            if len(parts) == 4 and all(part.isdigit() for part in parts[1:]):
-                return int(parts[1]), int(parts[2]), int(parts[3])
-            raise SliceReserveOutputError(f"malformed {GEN2_RESERVED_MARKER} line: {stripped!r}")
-    raise SliceReserveOutputError(f"no {GEN2_RESERVED_MARKER} line in reserve output: {stdout[-500:]!r}")
+    reservation = parse_reservation_marker_line(stdout, GEN2_RESERVED_MARKER)
+    if reservation is None:
+        raise SliceReserveOutputError(
+            f"no well-formed {GEN2_RESERVED_MARKER} line in reserve output: {stdout[-500:]!r}"
+        )
+    return reservation
 
 
 @pure

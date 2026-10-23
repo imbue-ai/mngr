@@ -15,6 +15,8 @@ from botocore.stub import ANY
 from botocore.stub import Stubber
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PortProtocol
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_aws.client import AwsAmiResolutionError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -1301,3 +1303,113 @@ def test_get_instance_shape_is_none_when_ec2_describes_no_such_instance_type(
     )
 
     assert client.get_instance_shape(VpsInstanceId("i-0123"), "t9.nonexistent") is None
+
+
+# ensure_security_group with published ports
+
+_UDP_59000 = PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)
+_PUBLISHED_SG_FILTER = {"Filters": [{"Name": "group-name", "Values": ["mngr-aws-published"]}]}
+
+
+def _published_ports_client(
+    allowed_ssh_cidrs: tuple[str, ...], published_ports: tuple[PublishedPortDeclaration, ...]
+) -> tuple[AwsVpsClient, Stubber]:
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test",
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-published"),
+        allowed_ssh_cidrs=allowed_ssh_cidrs,
+        published_ports=published_ports,
+        stubbed_ec2_client=ec2,
+    )
+    return client, Stubber(ec2)
+
+
+def _every_source_permission(protocol: str, port: int) -> dict[str, Any]:
+    return {"IpProtocol": protocol, "FromPort": port, "ToPort": port, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
+
+
+def test_ensure_security_group_opens_published_ports_from_every_source() -> None:
+    """A published port is authorized from every source for its own protocol, beside the SSH rules."""
+    client, stubber = _published_ports_client(("203.0.113.4/32",), (_UDP_59000,))
+    stubber.add_response("describe_security_groups", {"SecurityGroups": []}, expected_params=_PUBLISHED_SG_FILTER)
+    stubber.add_response(
+        "create_security_group",
+        {"GroupId": "sg-published"},
+        expected_params={"GroupName": "mngr-aws-published", "Description": ANY},
+    )
+    for _ in range(2):
+        stubber.add_response(
+            "authorize_security_group_ingress", {}, expected_params={"GroupId": "sg-published", "IpPermissions": ANY}
+        )
+    stubber.add_response(
+        "authorize_security_group_ingress",
+        {},
+        expected_params={"GroupId": "sg-published", "IpPermissions": [_every_source_permission("udp", 59000)]},
+    )
+    stubber.activate()
+    try:
+        result = client.ensure_security_group()
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+    assert result.was_created is True
+
+
+def test_ensure_security_group_authorizes_a_missing_published_port_on_an_otherwise_ready_group() -> None:
+    """The read-only-first check treats a published port like the SSH ports: absent means authorize."""
+    client, stubber = _published_ports_client(("203.0.113.4/32",), (_UDP_59000,))
+    ssh_permissions = [
+        {"IpProtocol": "tcp", "FromPort": port, "ToPort": port, "IpRanges": [{"CidrIp": "203.0.113.4/32"}]}
+        for port in (22, 2222)
+    ]
+    stubber.add_response(
+        "describe_security_groups",
+        {
+            "SecurityGroups": [
+                {"GroupId": "sg-ssh-only", "GroupName": "mngr-aws-published", "IpPermissions": ssh_permissions}
+            ]
+        },
+        expected_params=_PUBLISHED_SG_FILTER,
+    )
+    for _ in range(3):
+        stubber.add_response(
+            "authorize_security_group_ingress", {}, expected_params={"GroupId": "sg-ssh-only", "IpPermissions": ANY}
+        )
+    stubber.activate()
+    try:
+        result = client.ensure_security_group()
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+    assert result.security_group_id == "sg-ssh-only"
+    assert result.was_created is False
+
+
+def test_ensure_security_group_opens_published_ports_even_with_no_ssh_cidrs() -> None:
+    """Published ports are independent of the SSH allow-list, so an empty one still authorizes them."""
+    tcp_8080 = PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP)
+    client, stubber = _published_ports_client((), (tcp_8080,))
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-nossh", "GroupName": "mngr-aws-published", "IpPermissions": []}]},
+        expected_params=_PUBLISHED_SG_FILTER,
+    )
+    stubber.add_response(
+        "authorize_security_group_ingress",
+        {},
+        expected_params={"GroupId": "sg-nossh", "IpPermissions": [_every_source_permission("tcp", 8080)]},
+    )
+    stubber.activate()
+    try:
+        client.ensure_security_group()
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()

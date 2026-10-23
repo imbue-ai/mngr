@@ -7,10 +7,12 @@ from typing import Final
 import pytest
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
@@ -19,12 +21,15 @@ from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_lima.config import LimaProviderConfig
+from imbue.mngr_lima.data_types import LimaPortForward
 from imbue.mngr_lima.data_types import LimaSizeRequest
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
@@ -992,6 +997,42 @@ def test_resize_host_reconfigures_a_stopped_vm_and_grows_its_disk_before_recordi
     assert rewritten.config.start_args == ("--disk=20", "--cpus=4", "--memory=8")
     assert rewritten.config.host_data_disk_size == "200GiB"
     assert rewritten.resources == outcome.resources
+
+
+def test_resized_host_record_keeps_the_published_port_forwards(lima_provider: LimaProviderInstance) -> None:
+    """A resize rewrites the size fields only, so the host ports chosen at create stay with the record."""
+    sized = _write_sized_record(
+        lima_provider,
+        host_name="published-host",
+        start_args=("--cpus=2", "--memory=4"),
+        host_data_disk_name=None,
+        host_data_disk_size=None,
+        resources=_RECORDED_SIZE,
+    )
+    assert sized.record.config is not None
+    forward = LimaPortForward(guest_port=59000, host_port=40123, protocol=PortProtocol.UDP)
+    record = sized.record.model_copy_update(
+        to_update(
+            sized.record.field_ref().config,
+            sized.record.config.model_copy_update(
+                to_update(sized.record.config.field_ref().published_port_forwards, (forward,))
+            ),
+        )
+    )
+
+    resized = lima_provider._resized_host_record(record, LimaSizeRequest(cpus=LimaCpuCount(4)))
+
+    assert resized.config is not None
+    assert resized.config.published_port_forwards == (forward,)
+    assert resized.config.start_args == ("--memory=4", "--cpus=4")
+
+
+def test_create_host_refuses_a_declaration_of_the_vm_sshd_port(lima_provider: LimaProviderInstance) -> None:
+    with pytest.raises(PublishedPortUnsupportedError, match="22/tcp"):
+        lima_provider.create_host(
+            HostName("sshd-port"),
+            published_ports=[PublishedPortDeclaration(guest_port=22, protocol=PortProtocol.TCP)],
+        )
 
 
 def test_resize_host_only_records_for_a_running_vm(

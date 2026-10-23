@@ -24,9 +24,14 @@ from imbue.mngr.primitives import InvalidAgentInstanceKey
 from imbue.mngr.primitives import InvalidByteSizeError
 from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import InvalidPublishedPortError
 from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import default_branch_name
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.primitives import read_checked_out_branch
 
 
@@ -367,3 +372,41 @@ def test_byte_size_is_the_shared_grammar_docker_memory_sizes_refine() -> None:
         ByteSize("huge")
     assert issubclass(DockerMemorySize, ByteSize)
     assert issubclass(InvalidDockerMemorySizeError, InvalidByteSizeError)
+
+
+def test_published_port_declaration_parses_bare_port_as_tcp() -> None:
+    declaration = PublishedPortDeclaration.from_string("59000")
+
+    assert declaration == PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP)
+    assert str(declaration) == "59000/tcp"
+
+
+def test_published_port_declaration_parses_udp_protocol_case_insensitively() -> None:
+    declaration = PublishedPortDeclaration.from_string("59000/UDP")
+
+    assert declaration.protocol is PortProtocol.UDP
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "abc", "59000/sctp", "59000/", "/udp", ""])
+def test_published_port_declaration_rejects_malformed_values(value: str) -> None:
+    with pytest.raises(InvalidPublishedPortError):
+        PublishedPortDeclaration.from_string(value)
+
+
+def test_parse_published_port_declarations_keeps_both_protocols_of_one_port() -> None:
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp"])
+
+    assert [declaration.protocol for declaration in declarations] == [PortProtocol.UDP, PortProtocol.TCP]
+
+
+def test_parse_published_port_declarations_rejects_a_duplicate_pair() -> None:
+    with pytest.raises(InvalidPublishedPortError, match="more than once"):
+        parse_published_port_declarations(["59000", "59000/tcp"])
+
+
+def test_published_endpoint_ignores_unknown_fields_from_newer_writers() -> None:
+    endpoint = PublishedEndpoint.model_validate(
+        {"guest_port": 59000, "protocol": "UDP", "host": "127.0.0.1", "host_port": 32771, "future_field": 1}
+    )
+
+    assert endpoint.host_port == 32771

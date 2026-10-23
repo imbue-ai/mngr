@@ -111,7 +111,7 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    rc.check_yaml_usage(_DIR, snapshot(115))
+    rc.check_yaml_usage(_DIR, snapshot(120))
 
 
 def test_prevent_functools_partial() -> None:

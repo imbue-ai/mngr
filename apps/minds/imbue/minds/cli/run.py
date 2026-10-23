@@ -129,6 +129,8 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.turn_credentials import ConnectorTurnCredentialClient
+from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
@@ -958,6 +960,15 @@ def run(
         device_id=str(device_id),
         identity_cache=identity_cache,
         forward_identity=forward_identity,
+        # The Screen's relay credentials: minted from the connector with the owning account's
+        # session, never handed into a workspace (specs/turn-relay/spec.md section 6).
+        turn_credential_broker=TurnCredentialBroker(
+            client=ConnectorTurnCredentialClient(
+                connector_url=client_env_config.connector_url,
+                mngr_host_dir=mngr_host_dir,
+                imbue_cloud_cli=imbue_cloud_cli,
+            )
+        ),
         connection_store=connection_store,
         provider_materializer=provider_materializer,
     )

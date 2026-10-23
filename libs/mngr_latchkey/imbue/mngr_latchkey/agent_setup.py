@@ -291,7 +291,10 @@ def register_agent_for_host(
     """Register ``agent_id`` for the given host, granting it access to the Minds API proxy.
 
     Reads the host's ``latchkey_permissions.json`` (writing a fresh
-    baseline if it does not yet exist), brings any stale gateway-self grants up to
+    baseline if it does not yet exist, or if it holds no rules: a rule-less
+    file is the deny-all default a machine is seeded with before this computer
+    has a policy for it, not a policy, and has no scope schema to list an agent
+    under anyway), brings any stale gateway-self grants up to
     the current baseline (:func:`reconcile_baseline_permissions`), extracts the
     current allowed-agent list out of the ``minds-api-proxy-unauthorized`` scope's
     ``not.anyOf`` block, appends a per-agent entry if ``agent_id`` is not already
@@ -311,13 +314,16 @@ def register_agent_for_host(
     over when this returns ``True``.
     """
     path = permissions_path_for_host(plugin_data_dir, host_id)
-    is_host_file_fresh = not path.is_file()
-    if is_host_file_fresh:
-        # First agent on this host: start from the baseline so the
-        # gateway-self rules and the minds-api-proxy gate are present.
+    existing_config = load_permissions(path) if path.is_file() else None
+    if existing_config is None or not existing_config.rules:
+        # First agent on this host (or a file holding no policy): start from
+        # the baseline so the gateway-self rules and the minds-api-proxy gate
+        # are present.
+        is_host_file_fresh = True
         config = AGENT_BASELINE_PERMISSIONS
     else:
-        config = load_permissions(path)
+        is_host_file_fresh = False
+        config = existing_config
 
     reconciled = reconcile_baseline_permissions(config)
     is_baseline_changed = reconciled != config

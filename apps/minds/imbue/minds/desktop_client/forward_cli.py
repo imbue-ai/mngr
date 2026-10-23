@@ -79,6 +79,7 @@ from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -538,6 +539,8 @@ class EnvelopeStreamConsumer(MutableModel):
     # (it carries no agent/host membership), so it is tracked here and joined onto
     # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    # The same event carries the host's published endpoints; tracked beside the SSH info.
+    _published_endpoints_by_host_id: dict[str, tuple[PublishedEndpoint, ...]] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     # Parallel to _services_by_agent: {agent_id_str: {service_name: registered
     # SVG icon markup}}. Untrusted workspace content, sanitized by consumers.
@@ -1108,10 +1111,16 @@ class EnvelopeStreamConsumer(MutableModel):
         hosts = self._aggregator.get_hosts()
         with self._lock:
             ssh_by_host_id = dict(self._ssh_by_host_id)
+            published_endpoints_by_host_id = dict(self._published_endpoints_by_host_id)
         ssh_info_by_agent_id = {
             str(agent.agent_id): ssh_by_host_id[str(agent.host_id)]
             for agent in agents
             if str(agent.host_id) in ssh_by_host_id
+        }
+        published_endpoints_by_agent_id = {
+            str(agent.agent_id): published_endpoints_by_host_id[str(agent.host_id)]
+            for agent in agents
+            if str(agent.host_id) in published_endpoints_by_host_id
         }
         host_state_by_host_id = {str(host.host_id): host.host_state for host in hosts if host.host_state is not None}
         # Capture every known host's normalized name (regardless of whether its state
@@ -1126,6 +1135,7 @@ class EnvelopeStreamConsumer(MutableModel):
             host_state_by_host_id=host_state_by_host_id,
             host_name_by_host_id=host_name_by_host_id,
             host_size_by_host_id=host_size_by_host_id,
+            published_endpoints_by_agent_id=published_endpoints_by_agent_id,
         )
 
     def _push_agents_view(self) -> None:
@@ -1144,6 +1154,7 @@ class EnvelopeStreamConsumer(MutableModel):
         for host_id_str in delta.removed_host_ids:
             with self._lock:
                 self._ssh_by_host_id.pop(host_id_str, None)
+                self._published_endpoints_by_host_id.pop(host_id_str, None)
         for instance_key in delta.removed_agent_instances:
             # Imbue Studio's own mirrors stay keyed by the bare agent id (its workspace
             # identity); the delta is instance-scoped, so extract the id here.
@@ -1173,6 +1184,7 @@ class EnvelopeStreamConsumer(MutableModel):
         )
         with self._lock:
             self._ssh_by_host_id[str(event.host_id)] = ssh_info
+            self._published_endpoints_by_host_id[str(event.host_id)] = tuple(event.published_endpoints)
 
     def _refire_discovered_for_host(self, host_id_str: str) -> None:
         """Re-announce every agent on a host, carrying the host's now-known SSH info."""

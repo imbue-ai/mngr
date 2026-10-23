@@ -1,4 +1,5 @@
 import shlex
+from collections.abc import Sequence
 from typing import Final
 
 from pydantic import Field
@@ -13,10 +14,14 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_MAC_PLACEHOLD
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_DISK_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_ORDINAL_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_ENV_KEY
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SUBNET_BASE
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_IP_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import derive_slice_network
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import distinct_guest_ports
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import gen2_instance_dir
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import published_port_placeholder
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_mac_address
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_tap_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_unix_user
@@ -55,6 +60,10 @@ def build_qemu_slice_env_file(
     vm_ssh_host_port: int | str,
     container_ssh_host_port: int | str,
     uplink_mbps: int | None,
+    # The MNGR_SLICE_PUBLISHED_PORTS value: ``render_published_ports_env_value``
+    # of the slice's entries, or a template form (``render_published_ports_env_template_value``
+    # or ``GEN2_PUBLISHED_PORTS_PLACEHOLDER``) the box substitutes.
+    published_ports_value: str,
 ) -> str:
     """The per-slice ``env`` file: every per-VM value the unit and helper need.
 
@@ -62,10 +71,11 @@ def build_qemu_slice_env_file(
     value is derived from it here so the two can never disagree) and
     ``total_units`` the box's sellable unit budget (the helper's fair-share
     denominator). ``data_disk_gib`` is recorded so the reserve scripts can sum
-    the box's disk budget from the recorded env files. The two host ports may
-    be placeholder tokens (str) when the file is rendered as a template whose
-    ports are substituted on the box under the reservation lock. An empty
-    ``MNGR_SLICE_UPLINK_MBPS`` disables fair-share traffic shaping for this VM.
+    the box's disk budget from the recorded env files. The two host ports and
+    the published-ports value may be placeholder tokens (str) when the file is
+    rendered as a template whose ports are substituted on the box under the
+    reservation lock. An empty ``MNGR_SLICE_UPLINK_MBPS`` disables fair-share
+    traffic shaping for this VM.
     """
     if ordinal is None:
         ordinal_text: str = GEN2_ORDINAL_PLACEHOLDER
@@ -99,6 +109,7 @@ def build_qemu_slice_env_file(
         f"MNGR_SLICE_VM_SSH_HOST_PORT={vm_ssh_host_port}",
         f"MNGR_SLICE_CONTAINER_SSH_HOST_PORT={container_ssh_host_port}",
         f"MNGR_SLICE_UPLINK_MBPS={uplink_mbps if uplink_mbps is not None else ''}",
+        f"{GEN2_PUBLISHED_PORTS_ENV_KEY}={published_ports_value}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -157,6 +168,72 @@ if [ $(( used_disk_gib + {GEN2_BOOT_DISK_GIB} + {data_disk_gib} )) -gt {disk_bud
     echo "{GEN2_NO_DISK_MARKER} used_gib=$used_disk_gib requested_gib={GEN2_BOOT_DISK_GIB + data_disk_gib} budget_gib={disk_budget_gib}" >&2
     exit 8
 fi
+"""
+
+
+@pure
+def render_gen2_port_pick_lines(
+    *,
+    port_range_start: int,
+    port_range_end: int,
+    # The marker the script prints on stderr (before ``exit 3``) when the
+    # range holds no free port.
+    no_ports_marker: str,
+    published_port_declarations: Sequence[SlicePortDeclaration],
+) -> str:
+    """The bash block that picks the slice's box ports under the lock: the two sshd ports, then one per distinct guest port.
+
+    A port counts as used when a TCP or UDP listener holds it (``ss`` over
+    both: one box port serves both protocols of a guest port, so neither
+    family may already own it) or when any recorded env file claims it (an
+    sshd port or a published ``host_port``). The picked ports land in
+    ``$vm_port``, ``$container_port`` and ``$published_port_<i>``; the block
+    also defines ``substitute_published_port_tokens`` (the ``sed`` that
+    replaces each ``published_port_placeholder(i)`` token in the env
+    template) and ``$published_ports_suffix`` (the picked published ports,
+    space-prefixed, for the marker line).
+    """
+    guest_ports = distinct_guest_ports(published_port_declarations)
+    pick_lines = "".join(
+        f'published_port_{index}=$(pick_port) || {{ echo "{no_ports_marker}" >&2; exit 3; }}\n'
+        f'echo "$published_port_{index}" >> "$used_ports_file"\n'
+        f'published_ports_suffix="$published_ports_suffix $published_port_{index}"\n'
+        for index in range(len(guest_ports))
+    )
+    sed_expressions = " ".join(
+        f'-e "s/{published_port_placeholder(index)}/$published_port_{index}/g"' for index in range(len(guest_ports))
+    )
+    substitute_body = f"    sed {sed_expressions}" if guest_ports else "    cat"
+    return f"""\
+# Free host ports: bound TCP + UDP ports, plus every recorded env file's
+# sshd and published ports.
+used_ports_file=$(mktemp)
+trap 'rm -f "$used_ports_file"' EXIT
+ss -Htln 2>/dev/null | awk '{{print $4}}' | sed 's/.*://' | grep -E '^[0-9]+$' >> "$used_ports_file" || true
+ss -Hlun 2>/dev/null | awk '{{print $4}}' | sed 's/.*://' | grep -E '^[0-9]+$' >> "$used_ports_file" || true
+grep -sh '_SSH_HOST_PORT=' "$INSTANCES_DIR"/*/env 2>/dev/null | cut -d= -f2 \\
+    | grep -E '^[0-9]+$' >> "$used_ports_file" || true
+grep -sh '^{GEN2_PUBLISHED_PORTS_ENV_KEY}=' "$INSTANCES_DIR"/*/env 2>/dev/null \\
+    | grep -oE '"host_port":[0-9]+' | cut -d: -f2 >> "$used_ports_file" || true
+pick_port() {{
+    local p
+    for ((p={port_range_start}; p<{port_range_end}; p++)); do
+        if ! grep -qx "$p" "$used_ports_file"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}}
+vm_port=$(pick_port) || {{ echo "{no_ports_marker}" >&2; exit 3; }}
+echo "$vm_port" >> "$used_ports_file"
+container_port=$(pick_port) || {{ echo "{no_ports_marker}" >&2; exit 3; }}
+echo "$container_port" >> "$used_ports_file"
+published_ports_suffix=""
+{pick_lines}\
+substitute_published_port_tokens() {{
+{substitute_body}
+}}
 """
 
 

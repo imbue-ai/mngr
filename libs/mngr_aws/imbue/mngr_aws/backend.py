@@ -498,6 +498,7 @@ class AwsProviderBackend(ProviderBackendInterface):
             subnet_id=config.subnet_id,
             vpc_id=config.vpc_id,
             allowed_ssh_cidrs=config.allowed_ssh_cidrs,
+            published_ports=config.firewall_published_port_declarations(),
             associate_public_ip=config.associate_public_ip,
             root_volume_size_gb=config.root_disk_size_gb,
             root_volume_type=config.root_volume_type,

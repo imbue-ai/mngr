@@ -122,6 +122,7 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
         max_active_machine_units=NonNegativeInt(16),
         max_total_machine_disk_gb=NonNegativeInt(280),
         max_shared_workspaces=NonNegativeInt(50),
+        max_turn_relay_gb_per_month=NonNegativeInt(50),
     )
     row = config.to_plan_row()
     assert row["max_total_bucket_bytes"] == 50 * 1024**3
@@ -132,6 +133,7 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     assert row["max_active_machine_units"] == 16
     assert row["max_total_machine_disk_gb"] == 280
     assert row["max_shared_workspaces"] == 50
+    assert row["max_turn_relay_gb_per_month"] == 50
     assert sorted(row) == [
         "max_active_machine_units",
         "max_active_synced_workspaces",
@@ -141,6 +143,7 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
         "max_total_bucket_bytes",
         "max_total_machine_disk_gb",
         "max_total_workspaces",
+        "max_turn_relay_gb_per_month",
         "monthly_llm_spend_usd",
     ]
 

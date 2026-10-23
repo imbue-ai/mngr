@@ -1,5 +1,6 @@
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import Field
@@ -7,10 +8,12 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr_imbue_cloud.data_types import BoxManagementTrust
 from imbue.mngr_imbue_cloud.data_types import SliceProvisionResult
 from imbue.mngr_imbue_cloud.data_types import StorageVolumeState
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 
@@ -80,6 +83,18 @@ class SliceVmAccessInterface(MutableModel, ABC):
         """Whether an SSH connection to the slice's address on ``port`` authenticates with this key."""
 
 
+class LeasePublishedEndpointsInterface(ABC):
+    """What a leased host asks its provider for its published endpoints (specs/published-ports).
+
+    Answered from the connector's current lease record, so a host restored at
+    fresh box ports reports the new ones the way its SSH ports are re-resolved.
+    """
+
+    @abstractmethod
+    def published_endpoints_for(self, host_id: HostId) -> list[PublishedEndpoint]:
+        """The host's published endpoints at its current placement; empty when it publishes none or has no lease."""
+
+
 class SliceVmClientInterface(VpsClientInterface, ABC):
     """VPS-client contract for slice VMs carved on a bare-metal box, driven over SSH.
 
@@ -139,6 +154,9 @@ class SliceVmClientInterface(VpsClientInterface, ABC):
         # The box's declared uplink rate for fair-share bandwidth shaping; None
         # disables shaping.
         uplink_mbps: int | None = None,
+        # The workload's declared guest ports (specs/published-ports); the
+        # reserve forwards one box port per distinct guest port to them.
+        published_port_declarations: Sequence[SlicePortDeclaration] = (),
     ) -> SliceProvisionResult:
         """Reserve the box's budgets + host ports, create the env-stamped slice VM, and boot it."""
 

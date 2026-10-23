@@ -178,6 +178,14 @@ endpoints.
 mngr imbue_cloud hosts rotate <host-id|host-db-id|name>
 ```
 
+## Published ports (slices)
+
+A create template's `publish` / `publish__extend` entries (or `mngr create --publish <port>[/<protocol>]`) declare the guest ports the workspace's workload listens on, TCP or UDP (`specs/published-ports/spec.md`).
+On Imbue Cloud the ports are fixed at the carve: the pool bake reserves one box port per distinct declared guest port beside the slice's two sshd ports (one number serves both protocols of a guest port), the box DNATs it to the VM with the declared protocol, the container publishes the guest port inside the VM on the same number, and the pool row records the result in `published_ports`.
+The lease matches a create's declared ports against the row's set exactly, the way it matches the template branch: a pool host baked before published ports existed, or at a tag that declares a different set, is never leased to a create that declares them, and the create reports no capacity rather than a half-published host.
+So a template that starts declaring ports needs the pool rebaked at that tag before it is promoted; a workspace that already runs on a host baked without them keeps running and reports none until a template update restores it onto a host that has them.
+A restore onto another box re-picks the box ports with the sshd ports and the connector re-reports them; `mngr list --format json` shows the current ones as `host.published_endpoints`, reachable at the box's address.
+
 ## Buckets
 
 Create an R2 bucket (for storing files remotely). Each bucket is isolated (think one per host) and has exactly **one** S3 key.

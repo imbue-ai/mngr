@@ -97,16 +97,22 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import InvalidPublishedPortError
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import parse_published_port_declarations
+from imbue.mngr.providers.published_ports import identity_published_endpoints
+from imbue.mngr.providers.published_ports import merge_published_endpoints
+from imbue.mngr.providers.published_ports import record_published_endpoints_on_host
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
@@ -612,6 +618,14 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("-s", "--start-arg", multiple=True, help="Argument for start [repeatable]")
 @optgroup.option(
+    "--publish",
+    "publish",
+    multiple=True,
+    help="Guest port the new host's workload listens on, as PORT or PORT/PROTOCOL (tcp or udp; default tcp). "
+    "The provider publishes it and 'mngr list' reports where it is reachable under host.published_endpoints. "
+    "Ports are declared at create only. [repeatable]",
+)
+@optgroup.option(
     "--post-host-create-command",
     "post_host_create_command",
     multiple=True,
@@ -927,6 +941,9 @@ def _create_agent(
     _is_local = target_host is None or (
         isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
     )
+    published_port_declarations = _parse_published_ports(opts.publish)
+    if isinstance(target_host, DiscoveredHost) and not _is_local:
+        _refuse_published_ports_on_existing_remote_host(published_port_declarations)
     if _is_local and setup.host_lifecycle != HostLifecycleOptions():
         raise UserInputError(
             "Idle timeout and idle mode are not supported for the local provider. "
@@ -987,6 +1004,8 @@ def _create_agent(
             if opts.update:
                 # --reuse --update: stop the existing agent, then re-create in place
                 existing_agent, existing_host = reuse_result
+                if not existing_host.is_local:
+                    _refuse_published_ports_on_existing_remote_host(published_port_declarations)
                 logger.info("Updating existing agent: {}", existing_agent.name)
                 existing_host.stop_agents([existing_agent.id])
                 # If the user didn't specify a target path (via :PATH in the address
@@ -1046,6 +1065,7 @@ def _create_agent(
     # This ensures local hosts get any --host-label values.
     if isinstance(resolved_target_host, OnlineHostInterface):
         _apply_host_labels(resolved_target_host, opts.host_label)
+        _apply_published_ports_to_existing_host(resolved_target_host, published_port_declarations)
 
     # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level).
     # User-specified --label values take precedence over auto-derived ones.
@@ -1507,6 +1527,40 @@ def _is_git_repo(path: Path, cg: ConcurrencyGroup) -> bool:
     return find_git_worktree_root(path, cg) is not None
 
 
+def _parse_published_ports(values: tuple[str, ...]) -> tuple[PublishedPortDeclaration, ...]:
+    """Parse the --publish declarations; raises UserInputError for a malformed or duplicated one."""
+    try:
+        return parse_published_port_declarations(values)
+    except InvalidPublishedPortError as e:
+        raise UserInputError(f"Invalid --publish value: {e}") from e
+
+
+def _refuse_published_ports_on_existing_remote_host(declarations: Sequence[PublishedPortDeclaration]) -> None:
+    """Refuse --publish for an existing host other than the local one; raises UserInputError.
+
+    Ports are published at create only (a provider cannot publish a port on a running host),
+    so the one existing host that can honour a declaration is the local machine. Called before
+    the create stops or starts anything, so a refused create leaves the host as it found it.
+    """
+    if declarations:
+        raise UserInputError(
+            "--publish only applies when creating a new host (or to the local host): ports cannot be "
+            "published on an existing host after it was created."
+        )
+
+
+def _apply_published_ports_to_existing_host(
+    host: OnlineHostInterface, declarations: Sequence[PublishedPortDeclaration]
+) -> None:
+    """Record identity endpoints for --publish on the local host, where the workload binds the port itself."""
+    if not declarations:
+        return
+    if not host.is_local:
+        _refuse_published_ports_on_existing_remote_host(declarations)
+    endpoints = merge_published_endpoints(host.get_published_endpoints(), identity_published_endpoints(declarations))
+    record_published_endpoints_on_host(host, endpoints)
+
+
 @pure
 def _split_cli_args(args: tuple[str, ...]) -> list[str]:
     """Shell-tokenize each CLI arg and flatten into a single list.
@@ -1804,6 +1858,7 @@ def _parse_target_host(
 
         combined_build_args = _split_cli_args(opts.build_arg)
         combined_start_args = _split_cli_args(opts.start_arg)
+        published_ports = _parse_published_ports(opts.publish)
 
         # Parse build options
         build_options = NewHostBuildOptions(
@@ -1835,6 +1890,7 @@ def _parse_target_host(
             ),
             lifecycle=lifecycle,
             provisioning=host_provisioning,
+            published_ports=published_ports,
         )
 
     # Targeting an existing host. ``host_name is None`` here would imply only
@@ -1970,9 +2026,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
     host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
     ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
     outer/management sshd (e.g. a slice's VM-root port reached via a
-    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
-    consumes these to build a pool row -- and to reach the host for any
-    post-bake SSH steps -- without a second ``mngr list`` round-trip.
+    box-forwarded port) it also adds ``outer_ssh_port``; ``published_endpoints``
+    carries the host-side endpoints of the create's ``--publish`` declarations
+    (empty when none). Pool-bake tooling consumes these to build a pool row --
+    and to reach the host for any post-bake SSH steps -- without a second
+    ``mngr list`` round-trip.
     """
     result_data: dict[str, Any] = {
         "agent_id": str(result.agent.id),
@@ -1997,6 +2055,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
         result_data["outer_host_public_key"] = outer_host_public_key
     if container_host_public_key is not None:
         result_data["container_host_public_key"] = container_host_public_key
+    # The host-side endpoints of the create's --publish declarations
+    # (specs/published-ports), so the pool bake can record them on the row.
+    result_data["published_endpoints"] = [
+        endpoint.model_dump(mode="json") for endpoint in result.host.get_published_endpoints()
+    ]
     return result_data
 
 
@@ -2024,7 +2087,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>] [--post-host-create-outer-command <COMMAND>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--publish <PORT[/PROTOCOL]>] [--post-host-create-command <COMMAND>] [--post-host-create-outer-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]

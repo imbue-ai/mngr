@@ -667,6 +667,7 @@ class AzureProviderBackend(ProviderBackendInterface):
             os_disk_size_gb=config.root_disk_size_gb,
             os_disk_type=config.os_disk_type,
             allowed_ssh_cidrs=config.allowed_ssh_cidrs,
+            published_ports=config.firewall_published_port_declarations(),
             associate_public_ip=config.associate_public_ip,
             container_ssh_port=config.container_ssh_port,
         )

@@ -55,15 +55,18 @@ from imbue.minds.desktop_client.agent_creator import classify_create_attempt_err
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import is_default_workspace_template_url
+from imbue.minds.desktop_client.agent_creator import is_network_restricting_build_arg
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
+from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
+from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
@@ -435,6 +438,47 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             assert command[index - 1] == "--host-env", (
                 f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
             )
+
+
+@pytest.mark.parametrize(
+    ("value", "is_restricting"),
+    [
+        ("--offline", True),
+        ("offline", True),
+        ("--cidr-allowlist=10.0.0.0/8", True),
+        ("'--cidr-allowlist 10.0.0.0/8'", True),
+        ("cidr_allowlist=10.0.0.0/8", True),
+        ("--region=us-east", False),
+        ("--timeout=3600", False),
+        ("'--cpu 16'", False),
+        ("", False),
+    ],
+)
+def test_is_network_restricting_build_arg_recognizes_modals_offline_and_cidr_allowlist(
+    value: str, is_restricting: bool
+) -> None:
+    assert is_network_restricting_build_arg(value) is is_restricting
+
+
+def test_network_restricted_label_is_stamped_only_when_a_build_arg_restricts_the_network() -> None:
+    restricted = ["mngr", "create", "a@b.modal", "-b", "--region=us-east", "-b", "--offline"]
+    assert network_restricted_label_args(restricted) == ["--label", f"{NETWORK_RESTRICTED_LABEL}=true"]
+    # A ``--offline`` that is not a ``-b`` value (a positional, say) restricts nothing.
+    assert network_restricted_label_args(["mngr", "create", "--offline", "-b", "--region=us-east"]) == []
+    assert network_restricted_label_args(["mngr", "create", "-b"]) == []
+
+
+def test_modal_create_command_carries_no_network_restricted_label_today() -> None:
+    """The create form has no restricted-network option, so a Modal create restricts nothing and stamps no label."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+        cloud_account="modal_0123456789abcdef",
+        region="us-east",
+        modal_sandbox_timeout_seconds=3600,
+    )
+    assert "--region=us-east" in command
+    assert not any(arg.startswith(f"{NETWORK_RESTRICTED_LABEL}=") for arg in command)
 
 
 def test_create_command_secrets_are_masked_for_logging() -> None:

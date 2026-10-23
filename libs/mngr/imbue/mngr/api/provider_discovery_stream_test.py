@@ -47,8 +47,10 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
@@ -1120,3 +1122,35 @@ def test_run_does_not_reread_when_the_reread_interval_is_not_below_the_poll_inte
         stop_event.set()
         thread.join(timeout=5.0)
     assert provider.reread_count(host.host_id) == 0
+
+
+def test_compute_host_read_delta_reports_ssh_info_when_only_published_endpoints_moved(temp_host_dir: Path) -> None:
+    """A re-picked published port re-emits the host's SSH info event, which carries the endpoints."""
+    host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    ssh_info = _make_ssh_info(temp_host_dir, 22001)
+    previous_endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=1)
+    moved_endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=2)
+    previous = BoundedHostRead(host=host, agents=(), ssh_info=ssh_info, published_endpoints=(previous_endpoint,))
+    current = BoundedHostRead(host=host, agents=(), ssh_info=ssh_info, published_endpoints=(moved_endpoint,))
+
+    delta = _compute_host_read_delta(previous, current)
+
+    assert delta.ssh_info == ssh_info
+    assert delta.published_endpoints == (moved_endpoint,)
+
+
+def test_host_reads_from_result_attaches_published_endpoints_to_their_host(temp_host_dir: Path) -> None:
+    published_host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    plain_host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.TCP, host="127.0.0.1", host_port=32768)
+    result = BoundedProviderDiscoveryResult(
+        hosts=(published_host, plain_host),
+        agents=(),
+        host_ssh_infos=((published_host.host_id, _make_ssh_info(temp_host_dir, 22001)),),
+        host_published_endpoints=((published_host.host_id, (endpoint,)),),
+    )
+
+    reads = _host_reads_from_result(result)
+
+    assert reads[published_host.host_id].published_endpoints == (endpoint,)
+    assert reads[plain_host.host_id].published_endpoints == ()

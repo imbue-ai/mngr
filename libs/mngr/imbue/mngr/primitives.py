@@ -6,10 +6,12 @@ from typing import Any
 from typing import Final
 from typing import Mapping
 from typing import Self
+from typing import Sequence
 
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
+from pydantic import ValidationError
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -806,6 +808,80 @@ class SSHInfo(FrozenModel):
         ),
     )
     command: str = Field(description="Full SSH command to connect")
+
+
+class PortProtocol(UpperCaseStrEnum):
+    """The transport protocol of a published port."""
+
+    TCP = auto()
+    UDP = auto()
+
+
+class InvalidPublishedPortError(ValueError):
+    """Raised when a published-port declaration is malformed, duplicated, or names the sshd port."""
+
+
+MIN_PORT_NUMBER: Final[int] = 1
+MAX_PORT_NUMBER: Final[int] = 65535
+_PUBLISHED_PORT_DECLARATION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\d{1,5})(?:/(tcp|udp))?$", re.IGNORECASE)
+
+
+class PublishedPortDeclaration(FrozenModel):
+    """A guest-side port a host's workload listens on, declared at create as ``<port>`` or ``<port>/<protocol>``.
+
+    The provider chooses the host-side address and port (see ``PublishedEndpoint``); nothing inside the
+    host needs to know them. See ``specs/published-ports/spec.md``.
+    """
+
+    guest_port: int = Field(
+        ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The port the workload binds inside the host"
+    )
+    protocol: PortProtocol = Field(description="The transport protocol; a bare ``<port>`` declaration means TCP")
+
+    @classmethod
+    def from_string(cls, value: str) -> "PublishedPortDeclaration":
+        """Parse ``<port>`` or ``<port>/<protocol>``; raises InvalidPublishedPortError otherwise."""
+        match = _PUBLISHED_PORT_DECLARATION_PATTERN.match(value.strip())
+        if match is None:
+            raise InvalidPublishedPortError(
+                f"Invalid published port {value!r}: expected <port> or <port>/<protocol> with protocol tcp or udp"
+            )
+        protocol_text = match.group(2)
+        protocol = PortProtocol.TCP if protocol_text is None else PortProtocol(protocol_text.upper())
+        try:
+            return cls(guest_port=int(match.group(1)), protocol=protocol)
+        except ValidationError as e:
+            raise InvalidPublishedPortError(
+                f"Invalid published port {value!r}: port must be between {MIN_PORT_NUMBER} and {MAX_PORT_NUMBER}"
+            ) from e
+
+    def __str__(self) -> str:
+        return f"{self.guest_port}/{self.protocol.value.lower()}"
+
+
+def parse_published_port_declarations(values: Sequence[str]) -> tuple[PublishedPortDeclaration, ...]:
+    """Parse every declaration, refusing a duplicate (port, protocol) pair; raises InvalidPublishedPortError."""
+    declarations: list[PublishedPortDeclaration] = []
+    for value in values:
+        declaration = PublishedPortDeclaration.from_string(value)
+        if declaration in declarations:
+            raise InvalidPublishedPortError(f"Published port {declaration} is declared more than once")
+        declarations.append(declaration)
+    return tuple(declarations)
+
+
+class PublishedEndpoint(FrozenModel):
+    """Where one declared guest port is reachable from outside the host, as this mngr client reaches it."""
+
+    # Parsed from persisted discovery event streams that newer program versions
+    # also write, so unknown (future, additive) fields are ignored rather than
+    # rejected -- see EventEnvelope for the full rationale.
+    model_config = ConfigDict(extra="ignore")
+
+    guest_port: int = Field(ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The declared port inside the host")
+    protocol: PortProtocol = Field(description="The declared transport protocol")
+    host: str = Field(description="An IP address or hostname reachable by this mngr client")
+    host_port: int = Field(ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The host-side port the provider chose")
 
 
 class DiscoveredHostSize(FrozenModel):

@@ -1381,6 +1381,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `idle_seconds < 300` - Agents active in the last 5 minutes
 - `host.resource.memory_gb >= 8` - Agents on hosts with 8GB+ memory
 - `host.uptime_seconds > 86400` - Agents on hosts running for more than a day
+- `size(host.published_endpoints) > 0` - Agents on hosts created with `--publish` (each endpoint has `guest_port`, `protocol`, `host` and `host_port`)
 
 **Existence checks:**
 - `has(url)` - Agents that have a URL set

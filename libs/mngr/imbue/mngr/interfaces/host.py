@@ -42,6 +42,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
@@ -143,6 +145,15 @@ class HostInterface(MutableModel, ABC):
     def get_image(self) -> str | None:
         """Return the base image used for this host, or None if not applicable."""
         ...
+
+    def get_published_endpoints(self) -> list[PublishedEndpoint]:
+        """Where each port the host was created with ``--publish`` is reachable from this mngr client.
+
+        Empty for a host with no declarations. Derived from the provider's own records, so it is
+        answered for stopped hosts too; a provider that re-picks host-side endpoints on a start
+        (Modal, Imbue Cloud) answers the current ones. See ``specs/published-ports/spec.md``.
+        """
+        return []
 
     @abstractmethod
     def get_tags(self) -> dict[str, str]:
@@ -1266,4 +1277,8 @@ class NewHostOptions(FrozenModel):
     provisioning: HostProvisioningOptions = Field(
         default_factory=HostProvisioningOptions,
         description="Post-create provisioning hooks",
+    )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="Guest ports the provider publishes for the host's workload (the --publish declarations)",
     )

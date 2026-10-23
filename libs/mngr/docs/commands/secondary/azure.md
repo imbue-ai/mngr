@@ -28,6 +28,7 @@ mngr azure prepare [OPTIONS]
 | `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to create / reuse. Defaults to the resolved provider config's resource_group. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
+| `--publish` | text | Published port (PORT or PORT/PROTOCOL) the NSG allows from every source, so hosts created with `mngr create --publish` on this provider are reachable there. Repeat for multiple. Defaults to the resolved provider config's firewall_published_ports. | None |
 
 ## Common
 

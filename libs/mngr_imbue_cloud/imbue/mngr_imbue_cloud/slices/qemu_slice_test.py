@@ -11,9 +11,17 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_me
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_network_config
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_user_data
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_MAX_SLICE_COUNT
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORT_ENTRY_BASH_RE
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import Gen2Reservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortProtocol
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePublishedPort
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import derive_slice_network
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import render_published_ports_env_template_value
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import render_published_ports_env_value
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_UPLINK_SHAPING_PERCENT
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.testing import assert_valid_bash
 from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_DHCP_UNIT_SANDBOX_DIRECTIVES
 from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_UNIT_SANDBOX_DIRECTIVES
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_boot_wait_script
@@ -21,6 +29,7 @@ from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_reserve_script
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_start_command
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_status_command
 from imbue.mngr_imbue_cloud.slices.qemu_slice import parse_gen2_reserved_line
+from imbue.mngr_imbue_cloud.slices.qemu_slice import render_published_ports_dnat_lines
 from imbue.mngr_imbue_cloud.slices.qemu_slice import render_slice_dhcp_config
 from imbue.mngr_imbue_cloud.slices.qemu_slice import render_slice_dhcp_nftables_policy
 from imbue.mngr_imbue_cloud.slices.qemu_slice import render_slice_dhcp_unit
@@ -226,7 +235,8 @@ def test_helper_script_installs_the_enforced_ceilings_and_management_block() -> 
     # only for traffic addressed to the box itself, so a box-originated
     # connection to a remote host on a slice-range port is left alone.
     assert "for CHAIN in prerouting output; do" in helper
-    assert helper.count('"$CHAIN" fib daddr type local') == 2
+    # The two sshd DNATs plus the per-entry published-port DNAT loop.
+    assert helper.count('"$CHAIN" fib daddr type local') == 3
     # The loopback-addressed hairpin (the transfer targets 127.0.0.1:<vm_port>)
     # additionally needs route_localnet on the tap and box-source traffic into
     # the tap masqueraded -- a VM handed src 127.0.0.1 would reply to itself.
@@ -311,7 +321,18 @@ def test_sudoers_scopes_the_service_user_to_exactly_the_slice_units() -> None:
     assert lines[-1].endswith(f"/usr/bin/systemctl reset-failed mngr-slice@{GEN2_MAX_SLICE_COUNT - 1}")
 
 
-def _reserve_script_for_test(units: int = 8, unit_budget_mib: int = 120 * 1024, disk_budget_gib: int = 400) -> str:
+_SCREEN_DECLARATIONS = (
+    SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.UDP),
+    SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.TCP),
+)
+
+
+def _reserve_script_for_test(
+    units: int = 8,
+    unit_budget_mib: int = 120 * 1024,
+    disk_budget_gib: int = 400,
+    published_port_declarations: tuple[SlicePortDeclaration, ...] = (),
+) -> str:
     user_data = build_qemu_slice_user_data(
         host_dir="/home/user/.mngr",
         host_private_key_pem="pem",
@@ -340,7 +361,9 @@ def _reserve_script_for_test(units: int = 8, unit_budget_mib: int = 120 * 1024, 
             vm_ssh_host_port="__MNGR_VM_SSH_PORT__",
             container_ssh_host_port="__MNGR_CONTAINER_SSH_PORT__",
             uplink_mbps=None,
+            published_ports_value=render_published_ports_env_template_value(published_port_declarations),
         ),
+        published_port_declarations=published_port_declarations,
     )
 
 
@@ -496,8 +519,37 @@ def test_dhcp_nftables_policy_drops_udp_67_from_every_interface_but_the_taps() -
     assert "type filter hook input priority -10; policy accept;" in policy
 
 
+def test_reserve_script_picks_and_prints_one_box_port_per_declared_guest_port() -> None:
+    script = _reserve_script_for_test(published_port_declarations=_SCREEN_DECLARATIONS)
+    assert_valid_bash(script)
+    # Both TCP and UDP listeners count as used (one box port serves both
+    # protocols of a guest port), as do other slices' recorded published ports.
+    assert "ss -Htln" in script
+    assert "ss -Hlun" in script
+    assert "grep -oE '\"host_port\":[0-9]+'" in script
+    # One extra pick for the one distinct guest port, substituted into the env
+    # template's token and printed after the ordinal.
+    assert "published_port_0=$(pick_port)" in script
+    assert "published_port_1=$(pick_port)" not in script
+    assert "s/__MNGR_PUBLISHED_PORT_0__/$published_port_0/g" in script
+    assert "| substitute_published_port_tokens" in script
+    assert 'echo "MNGR_SLICE_RESERVED $vm_port $container_port $ordinal$published_ports_suffix"' in script
+
+
+def test_reserve_script_without_declarations_picks_only_the_sshd_ports() -> None:
+    script = _reserve_script_for_test()
+    assert_valid_bash(script)
+    assert "published_port_0" not in script
+    assert "substitute_published_port_tokens() {\n    cat\n}" in script
+
+
 def test_parse_gen2_reserved_line_round_trips() -> None:
-    assert parse_gen2_reserved_line("noise\nMNGR_SLICE_RESERVED 22010 22011 3\n") == (22010, 22011, 3)
+    assert parse_gen2_reserved_line("noise\nMNGR_SLICE_RESERVED 22010 22011 3\n") == Gen2Reservation(
+        vm_ssh_host_port=22010, container_ssh_host_port=22011, ordinal=3
+    )
+    assert parse_gen2_reserved_line("MNGR_SLICE_RESERVED 22010 22011 3 22012\n") == Gen2Reservation(
+        vm_ssh_host_port=22010, container_ssh_host_port=22011, ordinal=3, published_host_ports=(22012,)
+    )
 
 
 def test_parse_gen2_reserved_line_rejects_malformed_output() -> None:
@@ -505,6 +557,62 @@ def test_parse_gen2_reserved_line_rejects_malformed_output() -> None:
         parse_gen2_reserved_line("MNGR_SLICE_RESERVED 22010 oops 3")
     with pytest.raises(SliceReserveOutputError):
         parse_gen2_reserved_line("nothing here")
+
+
+def _run_dnat_lines(published_ports_value: str) -> list[str]:
+    """Run the helper's published-port DNAT block with ``nft`` stubbed; return the rules it would add."""
+    script = (
+        "set -euo pipefail\n"
+        'nft() { echo "nft $*"; }\n'
+        'NFT_TABLE="mngr_slices"\nRULE_TAG="mngr-slice-ord-3"\nMNGR_SLICE_VM_IP="10.201.0.14"\n'
+        f"PUBLISHED_PORT_ENTRY_RE='{GEN2_PUBLISHED_PORT_ENTRY_BASH_RE}'\n"
+        f"MNGR_SLICE_PUBLISHED_PORTS='{published_ports_value}'\n"
+        + render_published_ports_dnat_lines()
+        + "\necho DONE\n"
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-1] == "DONE"
+    return lines[:-1]
+
+
+def test_helper_dnat_rules_cover_tcp_udp_and_both_protocols_in_both_nat_chains() -> None:
+    both = render_published_ports_env_value(
+        (
+            SlicePublishedPort(guest_port=59000, protocol=SlicePortProtocol.UDP, host_port=22012),
+            SlicePublishedPort(guest_port=59000, protocol=SlicePortProtocol.TCP, host_port=22012),
+            SlicePublishedPort(guest_port=8080, protocol=SlicePortProtocol.TCP, host_port=22013),
+        )
+    )
+    assert _run_dnat_lines(both) == snapshot(
+        [
+            'nft add rule inet mngr_slices prerouting fib daddr type local udp dport 22012 counter dnat ip to 10.201.0.14:59000 comment "mngr-slice-ord-3"',
+            'nft add rule inet mngr_slices output fib daddr type local udp dport 22012 counter dnat ip to 10.201.0.14:59000 comment "mngr-slice-ord-3"',
+            'nft add rule inet mngr_slices prerouting fib daddr type local tcp dport 22012 counter dnat ip to 10.201.0.14:59000 comment "mngr-slice-ord-3"',
+            'nft add rule inet mngr_slices output fib daddr type local tcp dport 22012 counter dnat ip to 10.201.0.14:59000 comment "mngr-slice-ord-3"',
+            'nft add rule inet mngr_slices prerouting fib daddr type local tcp dport 22013 counter dnat ip to 10.201.0.14:8080 comment "mngr-slice-ord-3"',
+            'nft add rule inet mngr_slices output fib daddr type local tcp dport 22013 counter dnat ip to 10.201.0.14:8080 comment "mngr-slice-ord-3"',
+        ]
+    )
+
+
+def test_helper_dnat_rules_are_none_for_an_empty_or_absent_value() -> None:
+    assert _run_dnat_lines("[]") == []
+    assert _run_dnat_lines("") == []
+
+
+def test_helper_validates_the_published_ports_value_and_accepts_an_absent_key() -> None:
+    helper = render_slice_helper_script()
+    assert_valid_bash(helper)
+    assert "MNGR_SLICE_PUBLISHED_PORTS=$(env_get MNGR_SLICE_PUBLISHED_PORTS" in helper
+    # The strict shape: an optional JSON list of exactly-rendered entries. The
+    # pattern accepts the empty value a pre-published-ports slice's env yields.
+    env_get_pattern = "(\\[\\]|\\[$PUBLISHED_PORT_ENTRY_RE(,$PUBLISHED_PORT_ENTRY_RE)*\\])?"
+    assert env_get_pattern in helper
+    assert render_published_ports_dnat_lines() in helper
+    # The published-port rules follow the sshd DNATs inside the setup arm.
+    assert helper.index('MNGR_SLICE_CONTAINER_SSH_HOST_PORT" \\') < helper.index('"$PROTOCOL" dport "$HOST_PORT"')
 
 
 def test_start_and_status_commands_target_the_recorded_ordinal() -> None:

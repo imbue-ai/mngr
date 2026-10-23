@@ -38,6 +38,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 
 
 def validate_and_create_discovered_agent(
@@ -181,6 +182,9 @@ class BaseHost(HostInterface):
         """Get the image used for this host."""
         all_data = self.get_certified_data()
         return all_data.image
+
+    def get_published_endpoints(self) -> list[PublishedEndpoint]:
+        return list(self.get_certified_data().published_endpoints)
 
     def get_tags(self) -> dict[str, str]:
         """Get tags from the provider."""

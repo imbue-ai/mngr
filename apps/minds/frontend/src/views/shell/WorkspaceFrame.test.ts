@@ -121,13 +121,22 @@ function makeContract() {
     TEAR_OUT: "minds:tear-out",
     OPEN_LINK: "minds:open-link",
     OPEN_EXTERNAL: "minds:open-external",
+    IMMERSIVE_REQUEST: "minds:immersive-request",
+    IMMERSIVE_CHANGED: "minds:immersive-changed",
     REQUEST_ID_PATTERN,
   } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
 
-function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; opensExternalLinks?: boolean } = {}) {
+function makeHandlers(
+  options: {
+    canPopOut?: boolean;
+    isRelaying?: boolean;
+    opensExternalLinks?: boolean;
+    canImmerse?: boolean;
+  } = {},
+) {
   const contract = makeContract();
   const navigations: { path: string; params?: Record<string, string> }[] = [];
   const popupOpens: (string | null)[] = [];
@@ -140,6 +149,7 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
   let frontCount = 0;
   const readyAnnouncements: boolean[] = [];
   const externalLinks: string[] = [];
+  const immersiveRequests: boolean[] = [];
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -161,17 +171,31 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
     onWorkspaceReady: (opensLinks) => readyAnnouncements.push(opensLinks),
-    openExternalLink: options.opensExternalLinks === true ? (url) => externalLinks.push(url) : null,
+    openExternalLink:
+      options.opensExternalLinks === true
+        ? (url) => externalLinks.push(url)
+        : null,
     popout:
       options.canPopOut === true
         ? {
             open: (request) => popoutCalls.push(["open", request]),
             beginDrag: (request) => popoutCalls.push(["drag", request]),
             endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-              popoutCalls.push(["ended", workspaceId, windowId, isDetached, isCancelled]),
-            detachedWindows: (windows) => popoutCalls.push(["detached", windows]),
+              popoutCalls.push([
+                "ended",
+                workspaceId,
+                windowId,
+                isDetached,
+                isCancelled,
+              ]),
+            detachedWindows: (windows) =>
+              popoutCalls.push(["detached", windows]),
           }
         : null,
+    immersive:
+      options.canImmerse === false
+        ? null
+        : { request: (on) => immersiveRequests.push(on) },
   });
   return {
     contract,
@@ -187,12 +211,14 @@ function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; open
     frontCount: () => frontCount,
     readyAnnouncements,
     externalLinks,
+    immersiveRequests,
   };
 }
 
 describe("buildEmbedHandlers", () => {
   it("reports a workspace's readiness announcement, which is what releases a held chat ask", () => {
-    const { contract, handlers, readyAnnouncements, navigations } = makeHandlers();
+    const { contract, handlers, readyAnnouncements, navigations } =
+      makeHandlers();
     handlers[contract.WORKSPACE_READY]({});
     expect(readyAnnouncements).toEqual([false]);
     expect(navigations).toEqual([]);
@@ -212,15 +238,39 @@ describe("buildEmbedHandlers", () => {
     const browser = makeHandlers();
     browser.handlers[browser.contract.WORKSPACE_READY]({});
     expect(browser.acks).toEqual([browser.contract.EMBEDDER_CAPABILITIES]);
-    expect(browser.ackPayloads).toEqual([{ canPopOut: false, opensExternalLinks: false }]);
+    // Immersive mode needs only the Fullscreen API, so a plain browser offers it too.
+    expect(browser.ackPayloads).toEqual([
+      { canPopOut: false, opensExternalLinks: false, immersive: true },
+    ]);
     const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
     desktop.handlers[desktop.contract.WORKSPACE_READY]({});
-    expect(desktop.ackPayloads).toEqual([{ canPopOut: true, opensExternalLinks: true }]);
+    expect(desktop.ackPayloads).toEqual([
+      { canPopOut: true, opensExternalLinks: true, immersive: true },
+    ]);
+    const frameless = makeHandlers({ canImmerse: false });
+    frameless.handlers[frameless.contract.WORKSPACE_READY]({});
+    expect(frameless.ackPayloads).toEqual([
+      { canPopOut: false, opensExternalLinks: false, immersive: false },
+    ]);
+  });
+
+  it("hands an immersive request on as the flag it carries, synchronously, and not where nothing can immerse", () => {
+    const { contract, handlers, immersiveRequests } = makeHandlers();
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: true });
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: false });
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: "true" });
+    expect(immersiveRequests).toEqual([true, false, false]);
+    const frameless = makeHandlers({ canImmerse: false });
+    expect(
+      frameless.handlers[frameless.contract.IMMERSIVE_REQUEST],
+    ).toBeUndefined();
   });
 
   it("hands an external link the workspace could not open itself to main, and ignores it where main cannot open one", () => {
     const desktop = makeHandlers({ opensExternalLinks: true });
-    desktop.handlers[desktop.contract.OPEN_EXTERNAL]({ url: "mailto:someone@example.com" });
+    desktop.handlers[desktop.contract.OPEN_EXTERNAL]({
+      url: "mailto:someone@example.com",
+    });
     expect(desktop.externalLinks).toEqual(["mailto:someone@example.com"]);
     const browser = makeHandlers();
     expect(browser.handlers[browser.contract.OPEN_EXTERNAL]).toBeUndefined();
@@ -229,13 +279,34 @@ describe("buildEmbedHandlers", () => {
   it("hands the pull-out asks to main with the mounted workspace's id, and ignores them where nothing can pop out", () => {
     const desktop = makeHandlers({ canPopOut: true });
     const { contract, handlers, popoutCalls } = desktop;
-    const size = { windowId: "win-0123", title: "Notes", width: 640, height: 480 };
+    const size = {
+      windowId: "win-0123",
+      title: "Notes",
+      width: 640,
+      height: 480,
+    };
     handlers[contract.POP_OUT_WINDOW]({ ...size, extra: "dropped" });
-    handlers[contract.WINDOW_DRAG_STARTED]({ ...size, grabX: 12, grabY: 8, extra: "dropped" });
-    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: true, isCancelled: false });
-    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false, isCancelled: true });
+    handlers[contract.WINDOW_DRAG_STARTED]({
+      ...size,
+      grabX: 12,
+      grabY: 8,
+      extra: "dropped",
+    });
+    handlers[contract.WINDOW_DRAG_ENDED]({
+      windowId: "win-0123",
+      isDetached: true,
+      isCancelled: false,
+    });
+    handlers[contract.WINDOW_DRAG_ENDED]({
+      windowId: "win-0123",
+      isDetached: false,
+      isCancelled: true,
+    });
     // A shell that does not say whether it cancelled.
-    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false });
+    handlers[contract.WINDOW_DRAG_ENDED]({
+      windowId: "win-0123",
+      isDetached: false,
+    });
     const request = { workspaceId: WORKSPACE_AGENT_ID, ...size };
     expect(popoutCalls).toEqual([
       ["open", request],
@@ -246,15 +317,26 @@ describe("buildEmbedHandlers", () => {
     ]);
     const browser = makeHandlers();
     expect(browser.handlers[browser.contract.POP_OUT_WINDOW]).toBeUndefined();
-    expect(browser.handlers[browser.contract.WINDOW_DRAG_STARTED]).toBeUndefined();
-    expect(browser.handlers[browser.contract.WINDOW_DRAG_ENDED]).toBeUndefined();
+    expect(
+      browser.handlers[browser.contract.WINDOW_DRAG_STARTED],
+    ).toBeUndefined();
+    expect(
+      browser.handlers[browser.contract.WINDOW_DRAG_ENDED],
+    ).toBeUndefined();
     expect(browser.handlers[browser.contract.DETACHED_WINDOWS]).toBeUndefined();
   });
 
   it("reads the detached set as window ids with their titles, dropping off-shape entries", () => {
-    const { contract, handlers, popoutCalls } = makeHandlers({ canPopOut: true });
+    const { contract, handlers, popoutCalls } = makeHandlers({
+      canPopOut: true,
+    });
     handlers[contract.DETACHED_WINDOWS]({
-      windows: [{ windowId: "win-1", title: "A" }, { windowId: "win-2" }, "junk", { title: "no id" }],
+      windows: [
+        { windowId: "win-1", title: "A" },
+        { windowId: "win-2" },
+        "junk",
+        { title: "no id" },
+      ],
     });
     expect(popoutCalls).toEqual([
       [
@@ -285,8 +367,7 @@ describe("buildEmbedHandlers", () => {
   });
 
   it("arms the relay for a sign-in and acks whether it is relaying, only once the relay answered", async () => {
-    const { contract, handlers, relayArms, sent, navigations } =
-      makeHandlers();
+    const { contract, handlers, relayArms, sent, navigations } = makeHandlers();
     const url = "https://claude.ai/oauth/authorize?state=s-1";
     handlers[contract.PROVIDER_SIGN_IN]({ url, flowId: "flow-7c" });
     expect(relayArms).toEqual([{ flowId: "flow-7c", url }]);
@@ -507,7 +588,10 @@ describe("FrameLinkHandling", () => {
     handling.frameArmed(WORKSPACE, true);
     handling.openLink(LINK);
     expect(sent).toEqual([]);
-    expect(reports.at(-1)).toEqual({ workspaceId: WORKSPACE, opensLinks: false });
+    expect(reports.at(-1)).toEqual({
+      workspaceId: WORKSPACE,
+      opensLinks: false,
+    });
     handling.pageReady(true);
     handling.openLink(LINK);
     expect(sent).toEqual([LINK]);

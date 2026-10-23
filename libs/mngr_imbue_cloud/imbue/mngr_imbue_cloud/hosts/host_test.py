@@ -8,10 +8,13 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import PortProtocol
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr_imbue_cloud.errors import FixedAgentIdError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.hosts.mock_published_endpoints_test import MockLeasePublishedEndpoints
 
 
 def _create_options(agent_id: AgentId | None) -> CreateAgentOptions:
@@ -29,7 +32,12 @@ def test_create_agent_state_without_baked_state_creates_the_agent_at_the_lease_i
     local_provider: LocalProviderInstance, temp_work_dir: Path
 ) -> None:
     lease_agent_id = AgentId.generate()
-    host = make_local_host_of_class(local_provider, ImbueCloudHost, pre_baked_agent_id=lease_agent_id)
+    host = make_local_host_of_class(
+        local_provider,
+        ImbueCloudHost,
+        pre_baked_agent_id=lease_agent_id,
+        published_endpoint_source=MockLeasePublishedEndpoints(),
+    )
 
     agent = host.create_agent_state(temp_work_dir, _create_options(agent_id=None))
 
@@ -42,7 +50,12 @@ def test_create_agent_state_refuses_an_agent_id_that_differs_from_the_lease(
 ) -> None:
     lease_agent_id = AgentId.generate()
     requested_agent_id = AgentId.generate()
-    host = make_local_host_of_class(local_provider, ImbueCloudHost, pre_baked_agent_id=lease_agent_id)
+    host = make_local_host_of_class(
+        local_provider,
+        ImbueCloudHost,
+        pre_baked_agent_id=lease_agent_id,
+        published_endpoint_source=MockLeasePublishedEndpoints(),
+    )
 
     with pytest.raises(FixedAgentIdError, match=str(lease_agent_id)):
         host.create_agent_state(temp_work_dir, _create_options(agent_id=requested_agent_id))
@@ -62,7 +75,12 @@ def test_provision_agent_runs_the_full_provisioning_after_a_create_without_baked
     local_provider: LocalProviderInstance, temp_work_dir: Path
 ) -> None:
     lease_agent_id = AgentId.generate()
-    host = make_local_host_of_class(local_provider, ImbueCloudHost, pre_baked_agent_id=lease_agent_id)
+    host = make_local_host_of_class(
+        local_provider,
+        ImbueCloudHost,
+        pre_baked_agent_id=lease_agent_id,
+        published_endpoint_source=MockLeasePublishedEndpoints(),
+    )
     options = _create_options(agent_id=None)
     agent = host.create_agent_state(temp_work_dir, options)
 
@@ -77,7 +95,12 @@ def test_provision_agent_skips_the_full_provisioning_when_the_baked_state_was_ad
     local_provider: LocalProviderInstance, temp_work_dir: Path
 ) -> None:
     lease_agent_id = AgentId.generate()
-    host = make_local_host_of_class(local_provider, ImbueCloudHost, pre_baked_agent_id=lease_agent_id)
+    host = make_local_host_of_class(
+        local_provider,
+        ImbueCloudHost,
+        pre_baked_agent_id=lease_agent_id,
+        published_endpoint_source=MockLeasePublishedEndpoints(),
+    )
     baked_data_path = local_provider.host_dir / "agents" / str(lease_agent_id) / "data.json"
     baked_data_path.parent.mkdir(parents=True)
     baked_data_path.write_text(
@@ -99,3 +122,17 @@ def test_provision_agent_skips_the_full_provisioning_when_the_baked_state_was_ad
 
     assert agent.id == lease_agent_id
     assert not _agent_shared_lib_path(local_provider, lease_agent_id).exists()
+
+
+# this tests: IF a leased host is asked for its published endpoints THEN: it asks its provider's
+# lease record every time, so a restore that re-picked the box ports is reported without a rebuild
+def test_get_published_endpoints_reads_the_lease_record_on_every_call(local_provider: LocalProviderInstance) -> None:
+    source = MockLeasePublishedEndpoints()
+    host = make_local_host_of_class(
+        local_provider, ImbueCloudHost, pre_baked_agent_id=AgentId.generate(), published_endpoint_source=source
+    )
+    assert host.get_published_endpoints() == []
+    moved = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.9", host_port=23012)
+    source.endpoints = [moved]
+    assert host.get_published_endpoints() == [moved]
+    assert source.asked_host_ids == [host.id, host.id]

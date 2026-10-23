@@ -706,6 +706,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             network=config.network,
             subnetwork=config.subnetwork,
             allowed_ssh_cidrs=config.allowed_ssh_cidrs,
+            published_ports=config.firewall_published_port_declarations(),
             firewall_name=config.firewall_name,
             firewall_target_tag=config.firewall_target_tag,
             associate_external_ip=config.associate_external_ip,

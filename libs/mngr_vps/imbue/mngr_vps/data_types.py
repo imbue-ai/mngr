@@ -7,6 +7,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.host_store import VpsHostRecord
 
 
@@ -83,6 +84,10 @@ class RealizePlacementContext(FrozenModel):
     tags: Mapping[str, str] | None = Field(default=None, description="User tags to stamp onto the placement")
     known_hosts: Sequence[str] | None = Field(default=None, description="Extra known_hosts entries for the agent")
     authorized_keys: Sequence[str] | None = Field(default=None, description="Extra authorized_keys for the agent")
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="Guest ports the placement publishes on every VM interface at the same number (container realizer)",
+    )
     extra_ssh_config_files: tuple[ContainerFile, ...] = Field(
         default=(),
         description=(

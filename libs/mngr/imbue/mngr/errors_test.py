@@ -34,6 +34,7 @@ from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
@@ -86,6 +87,16 @@ def test_image_not_found_error_sets_image() -> None:
     assert error.provider_name == _TEST_PROVIDER
     assert error.image == image
     assert "Image not found" in str(error)
+
+
+def test_published_port_unsupported_error_names_provider_declaration_and_reason() -> None:
+    error = PublishedPortUnsupportedError(_TEST_PROVIDER, "59000/udp", "this provider does not publish ports yet")
+    assert error.provider_name == _TEST_PROVIDER
+    assert error.declaration == "59000/udp"
+    assert error.reason == "this provider does not publish ports yet"
+    assert str(error) == (
+        f"Provider '{_TEST_PROVIDER}' cannot publish port 59000/udp: this provider does not publish ports yet"
+    )
 
 
 def test_host_name_conflict_error_sets_name() -> None:

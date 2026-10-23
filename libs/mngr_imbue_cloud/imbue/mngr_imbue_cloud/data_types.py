@@ -20,6 +20,7 @@ from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePublishedPort
 
 
 class BoxManagementTrust(FrozenModel):
@@ -46,13 +47,17 @@ class StorageVolumeState(FrozenModel):
 
 
 class SliceProvisionResult(FrozenModel):
-    """What a slice provision produced: the VM instance/disk identifiers and the two box host ports."""
+    """What a slice provision produced: the VM instance/disk identifiers, the two sshd box ports and the published ports."""
 
     instance_name: str = Field(description="Slice VM instance name (also the VpsInstanceId)")
     disk_name: str = Field(description="Identifier of the slice's btrfs data disk on the box")
     vm_ssh_host_port: int = Field(description="Box host port forwarded to the VM's root sshd")
     container_ssh_host_port: int = Field(description="Box host port forwarded to the inner container sshd")
     slice_ordinal: int = Field(description="The slice's box-local ordinal (drives its tap/user/subnet names)")
+    published_ports: tuple[SlicePublishedPort, ...] = Field(
+        default=(),
+        description="Every declared guest port with the box port the reserve forwarded to it (specs/published-ports)",
+    )
 
 
 class PoolHostDestroyTarget(FrozenModel):
@@ -114,6 +119,10 @@ class SliceBakeOutcome(FrozenModel):
     )
     attributes: dict[str, Any] | None = Field(
         default=None, description="Lease attributes stamped on the pool row (succeeded only)"
+    )
+    published_ports: tuple[SlicePublishedPort, ...] = Field(
+        default=(),
+        description="The box ports forwarded to the template's declared guest ports (succeeded only)",
     )
     error: str | None = Field(default=None, description="The failure description (failed only)")
 

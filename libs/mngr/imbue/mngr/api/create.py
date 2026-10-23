@@ -661,6 +661,7 @@ def _create_new_host(
         lifecycle=target_host.lifecycle,
         known_hosts_count=len(target_host.environment.known_hosts),
         authorized_keys_count=len(target_host.environment.authorized_keys),
+        published_ports=[str(declaration) for declaration in target_host.published_ports],
     ):
         new_host = provider.create_host(
             name=host_name,
@@ -671,6 +672,7 @@ def _create_new_host(
             known_hosts=target_host.environment.known_hosts,
             authorized_keys=target_host.environment.authorized_keys,
             snapshot=target_host.build.snapshot,
+            published_ports=target_host.published_ports,
         )
 
     return new_host

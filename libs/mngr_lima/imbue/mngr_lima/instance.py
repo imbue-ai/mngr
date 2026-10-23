@@ -55,6 +55,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -64,6 +65,7 @@ from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import pin_sole_endpoint_host_key
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
@@ -115,6 +117,8 @@ from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
 from imbue.mngr_lima.limactl import resolve_lima_home
 from imbue.mngr_lima.primitives import LimaDiskSize
+from imbue.mngr_lima.published_ports import choose_published_port_forwards
+from imbue.mngr_lima.published_ports import published_endpoints_for_port_forwards
 from imbue.mngr_lima.sizing import apply_size_request_to_start_args
 from imbue.mngr_lima.sizing import host_resources_for_lima_host
 from imbue.mngr_lima.sizing import is_same_vm_size
@@ -149,6 +153,8 @@ def _is_lima_not_found_error(message: str) -> bool:
 # How many times `limactl start` is attempted for a new VM when the failure is a
 # transient image-download error (2 = one retry), and the pause between attempts.
 _START_NEW_MAX_ATTEMPTS: Final[int] = 2
+# The guest's sshd, reached through lima's own ssh.localPort forward rather than a portForwards rule.
+VM_SSHD_PORT: Final[int] = 22
 _START_NEW_RETRY_WAIT_SECONDS: Final[float] = 2.0
 
 
@@ -775,8 +781,16 @@ sudo poweroff
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
-        """Create a new Lima VM host."""
+        """Create a new Lima VM host.
+
+        Published ports become `portForwards` rules in the VM's lima config, from a
+        free loopback port chosen here, ahead of the rules that ignore every other
+        guest port; the instance keeps them across start and `mngr lima resize`.
+        """
+        declarations = tuple(published_ports or ())
+        reject_sshd_port_declarations(self.name, declarations, VM_SSHD_PORT)
         self._ensure_lima_available()
         host_id = HostId.generate()
         # Derive the limactl instance name from the immutable host id, not the
@@ -798,9 +812,11 @@ sudo poweroff
         # Lima config: lifecycle operations against an abandoned create (destroy,
         # discovery) can then find the instance and disk it may have left behind.
         host_data_disk_size = self.config.host_data_disk_size if host_data_disk_name is not None else None
+        published_port_forwards = tuple(choose_published_port_forwards(declarations))
         lima_config_record = LimaHostConfig(
             instance_name=instance_name,
             start_args=effective_start_args,
+            published_port_forwards=published_port_forwards,
             image_url=str(image) if image else None,
             is_host_data_volume_exposed=is_host_data_volume_exposed,
             host_data_disk_name=host_data_disk_name,
@@ -860,6 +876,7 @@ sudo poweroff
                     host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
                     root_authorized_public_key=root_authorized_public_key,
                     volume_home_path=self._volume_home_path_str(),
+                    published_port_forwards=published_port_forwards,
                 )
                 lima_config = merge_lima_yaml(base_config, user_config)
             else:
@@ -876,6 +893,7 @@ sudo poweroff
                     host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
                     root_authorized_public_key=root_authorized_public_key,
                     volume_home_path=self._volume_home_path_str(),
+                    published_port_forwards=published_port_forwards,
                 )
 
             # Write the YAML config to a temp file
@@ -960,6 +978,7 @@ sudo poweroff
             tmux_session_prefix=self.mngr_ctx.config.prefix,
             created_at=now,
             updated_at=now,
+            published_endpoints=tuple(published_endpoints_for_port_forwards(published_port_forwards)),
         )
 
         # Resolve the effective SSH login (root when is_run_as_root, else Lima's user).

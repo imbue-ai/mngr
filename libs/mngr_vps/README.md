@@ -144,6 +144,16 @@ mngr create my-agent --provider vultr -b --vultr-plan=vc2-2c-4gb -b --file=Docke
 --memory=4g           # Memory limit
 ```
 
+## Published ports
+
+`mngr create --publish <port>[/<protocol>]` (or the create template key `publish`) publishes a guest port the agent's workload listens on.
+In the container shape the realizer adds `-p 0.0.0.0:<port>:<port>/<protocol>` beside the sshd mapping, so the port is reachable at the VM's public address at the same number; in the bare shape the workload binds the VM port itself.
+The endpoints (`host` is the VM's public IP, `host_port` equals the guest port) are recorded on the host and reported by `mngr list --format json` under `host.published_endpoints` for running and stopped hosts alike.
+Declaring port 22 is refused, since it is the container's sshd.
+
+Providers with a managed firewall (aws, gcp, azure) open published ports from every source in the rule their `prepare` command creates, from the config's `firewall_published_ports` list (or the `--publish` flags of `prepare`); a create that declares a port not in that list fails before any resource is created.
+OVH and Vultr manage no firewall, so every declared port is published as it is.
+
 ## Host lifecycle (container shape)
 
 | Operation | What happens |

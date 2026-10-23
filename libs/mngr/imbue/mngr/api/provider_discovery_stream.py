@@ -48,6 +48,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -124,7 +125,12 @@ class _HostReadDelta(FrozenModel):
     """What changed between two reads of one host: the per-host events a re-read owes the stream."""
 
     host: DiscoveredHost | None = Field(description="The host's listing, when it changed")
-    ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, when it changed")
+    ssh_info: SSHInfo | None = Field(
+        description="The host's SSH endpoint, when it or the published endpoints emitted beside it changed"
+    )
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="The host's current published endpoints, emitted beside its SSH endpoint"
+    )
     agents: tuple[DiscoveredAgent, ...] = Field(description="Agents that appeared, or whose data changed")
     destroyed_agent_ids: tuple[AgentId, ...] = Field(description="Agents that disappeared from the running host")
 
@@ -149,9 +155,13 @@ def _compute_host_read_delta(previous: BoundedHostRead, current: BoundedHostRead
         if is_live_listing
         else ()
     )
+    is_ssh_info_changed = (
+        current.ssh_info != previous.ssh_info or current.published_endpoints != previous.published_endpoints
+    )
     return _HostReadDelta(
         host=current.host if current.host != previous.host else None,
-        ssh_info=current.ssh_info if current.ssh_info != previous.ssh_info else None,
+        ssh_info=current.ssh_info if is_ssh_info_changed else None,
+        published_endpoints=current.published_endpoints,
         agents=changed_agents,
         destroyed_agent_ids=destroyed_agent_ids,
     )
@@ -166,11 +176,13 @@ def _host_reads_from_result(result: BoundedProviderDiscoveryResult) -> dict[Host
         if agent.host_id in agents_by_host_id:
             agents_by_host_id[agent.host_id].append(agent)
     ssh_info_by_host_id = dict(result.host_ssh_infos)
+    published_endpoints_by_host_id = dict(result.host_published_endpoints)
     return {
         host.host_id: BoundedHostRead(
             host=host,
             agents=tuple(agents_by_host_id[host.host_id]),
             ssh_info=ssh_info_by_host_id.get(host.host_id),
+            published_endpoints=published_endpoints_by_host_id.get(host.host_id, ()),
         )
         for host in result.hosts
     }
@@ -465,8 +477,14 @@ class _ProviderDiscoveryPoller(MutableModel):
         # emits these otherwise, which the running app never does periodically, so without this
         # a forward that loses a host's SSH info (e.g. after the host briefly left discovery)
         # never regains it and refuses to dial the host's loopback-registered service URL.
+        published_endpoints_by_host_id = dict(result.host_published_endpoints)
         for host_id, ssh_info in result.host_ssh_infos:
-            emit_host_ssh_info(self.mngr_ctx.config, host_id, ssh_info)
+            emit_host_ssh_info(
+                self.mngr_ctx.config,
+                host_id,
+                ssh_info,
+                published_endpoints=published_endpoints_by_host_id.get(host_id, ()),
+            )
 
     def _emit_error_snapshot(self, started_at: datetime, exc: BaseException) -> None:
         cause = exc.__cause__ if isinstance(exc, ProviderError) and exc.__cause__ is not None else exc
@@ -599,7 +617,9 @@ class _ProviderDiscoveryPoller(MutableModel):
         if delta.host is not None:
             emit_host_discovered(config, delta.host)
         if delta.ssh_info is not None:
-            emit_host_ssh_info(config, current_read.host.host_id, delta.ssh_info)
+            emit_host_ssh_info(
+                config, current_read.host.host_id, delta.ssh_info, published_endpoints=delta.published_endpoints
+            )
         for agent in delta.agents:
             emit_agent_discovered(config, agent)
         for agent_id in delta.destroyed_agent_ids:

@@ -182,6 +182,9 @@ def test_api_schema_route_returns_valid_openapi_for_the_real_routes(tmp_path: Pa
     assert "/api/v1/workspaces" in paths
     assert "/api/v1/workspaces/{agent_id}/ssh" in paths
     assert "/api/schema" in paths
+    # The workspace Screen's connect-info routes are agent-reachable (through the latchkey proxy).
+    assert set(paths["/api/v1/agents/{agent_id}/media-endpoints"]) == {"get"}
+    assert set(paths["/api/v1/agents/{agent_id}/ice-servers"]) == {"get"}
     assert not any(path.startswith("/api/v1/desktop/") for path in paths)
     assert not any(path.startswith("/api/v1/files") for path in paths)
 

@@ -62,6 +62,7 @@ const {
   isBareWorkspaceRoute,
   resolveDuplicateWorkspaceLanding,
 } = require('./window-policy');
+const { decidePermissionRequest, isKeyRelaySilenced, originOf } = require('./immersive-policy');
 const {
   shouldWriteSessionState,
   createDebouncedSaver,
@@ -684,6 +685,10 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     // For a main window: the workspace title-bar drag main is watching, if
     // any (see startDragWatch).
     dragWatch: null,
+    // Whether the page's workspace frame is in immersive mode (the Screen
+    // integration spec, section 5): menu shortcuts are off and the
+    // before-input-event relays are silenced while it is.
+    isImmersive: false,
     // The URL this window's content is "at" for session persistence and
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
@@ -894,8 +899,10 @@ function wireBundleNavigationEvents(bundle) {
   };
   wc.on('did-navigate', (_e, url) => {
     // A new document: whatever workspace the old page had mounted is gone
-    // with it, and the new page reports its own.
+    // with it, and the new page reports its own. Immersive mode went with
+    // the old page too (fullscreen ends with the document).
     linkRouter.forgetMount(wc);
+    setImmersiveFor(bundle, false);
     onTopLevelNavigate(url);
   });
   // Unlike did-navigate, this one also fires for the frames inside the page
@@ -1018,6 +1025,9 @@ function registerShortcutsFor(bundle, wc) {
 
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
+    // In immersive mode every key is the remote desktop's; the held Escape
+    // that ends it is Chromium's, handled before any page or relay sees it.
+    if (isKeyRelaySilenced(bundle)) return;
     const key = input.key ? input.key.toLowerCase() : '';
     const modifier = isMac ? input.meta : input.control;
     // Match on `input.code` (physical key): on macOS, Option transforms
@@ -2138,6 +2148,7 @@ async function onReady() {
   });
   registerAppImageDesktopEntry();
   installApplicationMenu();
+  installPermissionHandlers();
   installDockMenu();
   installDevDockIcon();
   installTray();
@@ -3024,6 +3035,48 @@ ipcMain.handle('install-update', async () => {
   await waitForQuitCancelled();
   return { error: null };
 });
+
+// Immersive mode, as the page reports it (electron/immersive-policy.js): the
+// application-menu accelerators (Cmd+W, Cmd+N, F11 and the rest) stop firing
+// for this window and its before-input-event relays go quiet, so every key
+// reaches the fullscreen workspace frame. Fullscreen itself is the page's
+// Fullscreen-API request, never a setFullScreen from here: the keyboard lock
+// engages only on a Fullscreen-API fullscreen.
+function setImmersiveFor(bundle, on) {
+  const isOn = on === true;
+  if (bundle.isImmersive === isOn) return;
+  bundle.isImmersive = isOn;
+  const wc = bundle.window.isDestroyed() ? null : bundle.window.webContents;
+  if (wc && !wc.isDestroyed()) wc.setIgnoreMenuShortcuts(isOn);
+  console.log(`[immersive] ${isOn ? 'on' : 'off'} (${bundle.kind} window)`);
+}
+
+ipcMain.on('set-immersive', (event, on) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed()) return;
+  setImmersiveFor(bundle, on);
+});
+
+// Which permission requests the default session grants. Electron grants
+// everything when no handler is installed; this keeps that and writes down
+// the one narrowing: fullscreen, keyboard lock and pointer lock go only to a
+// page whose top-level origin is the chrome's own (the workspace frame's
+// requests count, its top-level page being the chrome), so no Chrome lock
+// prompt can appear inside the app and a future narrowing has one place to
+// go. The check handler answers the same way, so a page that asks whether it
+// may before it requests hears one answer.
+function installPermissionHandlers() {
+  const decide = (contents, permission) =>
+    decidePermissionRequest({
+      permission,
+      topLevelOrigin: originOf(contents && !contents.isDestroyed() ? contents.getURL() : null),
+      chromeOrigin: originOf(backendBaseUrl),
+    });
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+    callback(decide(contents, permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((contents, permission) => decide(contents, permission));
+}
 
 ipcMain.on('bring-app-to-front', (event) => {
   const bundle = getBundleFromEvent(event);

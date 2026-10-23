@@ -1,0 +1,2 @@
+`mngr gcp prepare` creates a second tag-targeted firewall rule (`<firewall_name>-published`) opening the ports listed in the provider config's `firewall_published_ports` (or passed as `--publish PORT[/PROTOCOL]`) from every source, patches that rule's ports when the list changed since it was created, and `mngr gcp cleanup` deletes it beside the SSH rule.
+A `mngr create --publish` on this provider must declare only ports in that list; any other declaration fails before any resource is created (`specs/published-ports/spec.md`).
