@@ -3,12 +3,14 @@ import m from "mithril";
 import {
   attrsOf,
   byId,
+  collectVnodes,
   jsonResponse,
   renderRoot,
   settingsOverview,
   settle,
 } from "../testing";
 import { AutoUpdatePromptModal } from "../views/components/AutoUpdatePromptModal";
+import { DialogCloseButton } from "../views/components/Modal";
 import { AutoUpdatePromptModel } from "./autoUpdatePrompt";
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
 
@@ -167,7 +169,16 @@ describe("answering the auto-update prompt", () => {
   it("puts a prompt closed without an answer away for the session only, recording nothing", async () => {
     const { model, requests } = backend(null, true);
     await model.load();
-    model.putAway();
+    const modal = renderRoot(AutoUpdatePromptModal, {
+      model,
+    }) as unknown as m.Children;
+
+    const close = collectVnodes(modal).find(
+      (vnode) => vnode.tag === DialogCloseButton,
+    );
+    if (close === undefined) throw new Error("no close button to press");
+    (attrsOf(close).onClose as () => void)();
+
     expect(model.triggerFor(false, true)).toBeNull();
     expect(requests).toEqual(["GET /ui/api/settings"]);
   });
