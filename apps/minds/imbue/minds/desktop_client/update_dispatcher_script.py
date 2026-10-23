@@ -872,7 +872,7 @@ def current_window(now, start_minute_utc, length_minutes):
 
 def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     """What one tick does about an armed schedule: ``remove``, ``dispatch``, ``record_skip``, ``note_window``,
-    ``wait`` (the backoff after a failed attempt or a fresh dispatch has not passed), or ``nothing``.
+    ``wait`` (the hold after a fresh dispatch has not passed), or ``nothing``.
 
     ``is_marked_lead_gone`` is a callable, asked only when the answer turns on it.
     """
