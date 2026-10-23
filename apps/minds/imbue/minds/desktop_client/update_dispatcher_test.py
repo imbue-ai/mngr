@@ -315,16 +315,22 @@ def test_a_tick_held_back_logs_why_once_until_the_reason_changes(
     lease.parent.mkdir(parents=True)
     lease.write_text("---\nid: w-1\nstatus: in_progress\n---\n# updating workspace\n")
 
+    skill = staged.root / ".agents" / "skills" / "update-self" / "SKILL.md"
+    skill_text = skill.read_text()
+
     _tick(staged, _IN_WINDOW)
     _tick(staged, _IN_WINDOW + 60)
     lease.unlink()
+    skill.unlink()
     _tick(staged, _IN_WINDOW + 120)
+    _tick(staged, _IN_WINDOW + 180)
+    skill.write_text(skill_text)
+    _tick(staged, _IN_WINDOW + 240)
 
     log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
-    held = [line for line in log_lines if "held the scheduled update back" in line]
-    assert len(held) == 1
-    assert "LEASE_HELD" in held[0]
-    assert any("created update chat" in line for line in log_lines)
+    held = [line.rsplit(": ", 1)[-1] for line in log_lines if "held the scheduled update back" in line]
+    assert held == ["LEASE_HELD", "DISPATCH_FAILED"]
+    assert len(staged.chat_creates()) == 1
 
 
 @pytest.mark.parametrize(("holder_state", "is_dispatched"), [("RUNNING", False), (None, True), ("STOPPED", True)])
