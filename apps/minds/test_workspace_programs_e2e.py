@@ -19,6 +19,7 @@ import pytest
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
 from imbue.minds.desktop_client.update_workspace_command import UtcUpdateWindow
 from imbue.minds.desktop_client.update_workspace_command import build_read_arguments
+from imbue.minds.desktop_client.update_workspace_command import build_update_workspace_command
 from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
@@ -108,10 +109,10 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
         f"printf %s {shlex.quote(json.dumps(armed_schedule))} > {shlex.quote(SCHEDULE_FILE_PATH)}",
     )
     try:
-        read = run_workspace_program_in_container(
-            running_workspace,
-            update_workspace,
-            ("read", *build_read_arguments(settings, is_sign_in_checked=False)),
+        read = exec_in_workspace_container(
+            running_workspace.container_name,
+            f"cd {WORKSPACE_CONTAINER_ROOT} && "
+            + build_update_workspace_command("read", build_read_arguments(settings, is_sign_in_checked=False)),
             timeout=300,
         )
 
