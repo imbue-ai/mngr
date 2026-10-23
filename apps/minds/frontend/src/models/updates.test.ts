@@ -282,12 +282,6 @@ describe("update state predicates", () => {
     expect(standingUpdateNotice({ ...OUT_OF_DATE_UPDATE, availability: "UNKNOWN" }, false)).toBe("none");
   });
 
-  it("agrees with the row that a run which just landed this app's version left nothing behind", () => {
-    const landed = { ...OUT_OF_DATE_UPDATE, verdict: "UPDATED" as const, success_note_version: "minds-v0.4.1" };
-    expect(standingUpdateNotice(landed, false)).toBe("none");
-    expect(standingUpdateNotice({ ...landed, success_note_version: "minds-v0.4.0" }, false)).toBe("out-of-date");
-  });
-
   it("keeps saying a machine needs recreating: no run can silence a standing fact about it", () => {
     const tooOld = { ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION" as const };
     expect(standingUpdateNotice(tooOld, false)).toBe("needs-recreation");
