@@ -181,7 +181,6 @@ def test_update_and_restore_programs_sync_with_all_packages() -> None:
 
 @pytest.mark.parametrize("raw_status", [None, "", "paused", 1])
 def test_a_missing_or_malformed_status_reads_as_failed(raw_status: object) -> None:
-    # A missing or malformed status must never read as success.
     assert parse_backup_program_status(raw_status) == BackupProgramStatus.FAILED
 
 

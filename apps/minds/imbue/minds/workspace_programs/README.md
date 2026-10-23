@@ -14,7 +14,7 @@ the rest of the app.
 - **The template image's Python.** The interpreter is the workspace image's
   `python3` (3.12), the same version the app is checked against.
 - **No work at import time.** A module only defines constants and functions; a
-  program does its work in `main()`, behind `if __name__ == "__main__":`. The app
+  program does its work in `main(argv)`, behind `if __name__ == "__main__":`. The app
   imports these modules too (for their constants), and tests can import them.
 - **Parameters through argv, read once.** Values the app knows at dispatch time
   (a tag, an agent id, a setting) travel as command-line flags. A program's
