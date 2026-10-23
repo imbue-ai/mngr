@@ -1300,11 +1300,10 @@ def _tick_watchdog(now: float, agent_environment: AgentEnvironment) -> None:
     if run is None or run_verdict(run) is not None or not run.get("chat_agent_name"):
         return
     agents = list_agents(agent_environment)
-    state = _watchdog_state_for(run)
-    busy = busy_agents(agent_environment) if agents is not None else (set(), set(), set())
-    action = decide_watchdog_action(run, agents, busy, state, now)
     if agents is None:
         return
+    state = _watchdog_state_for(run)
+    action = decide_watchdog_action(run, agents, busy_agents(agent_environment), state, now)
     match action:
         case WatchdogAction.NOTHING:
             pass
