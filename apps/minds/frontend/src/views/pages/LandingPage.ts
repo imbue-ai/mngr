@@ -66,7 +66,7 @@ import {
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
-import type { UpdateBadgeTone } from "../../models/updates";
+import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
 import {
   displayVersion,
   isBadgeOpeningRunChat,
@@ -452,19 +452,20 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
+  function rowUpdateBadge(agentId: string): UpdateBadge | null {
+    const updates = getAppContext().stores.updates;
+    return updateBadgeFor(updates.publishedFor(agentId), updates.isUpdating(agentId), updates.isAutoUpdateEnabled);
+  }
+
   /** The row's one update control, or null when the machine has nothing to
    * say: the window it opens holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     const published = updates.publishedFor(entry.id);
-    const badge = updateBadgeFor(
-      published,
-      updates.isUpdating(entry.id),
-      updates.isAutoUpdateEnabled,
-    );
+    const badge = rowUpdateBadge(entry.id);
     if (badge === null) return null;
     const isOpeningRunChat = isBadgeOpeningRunChat(published, updates.isUpdating(entry.id));
-    const badgeButton = m(
+    return m(
       "button",
       {
         type: "button",
@@ -490,7 +491,6 @@ export const LandingPage: m.ClosureComponent = () => {
         m(Icon16, { name: "chevron-right", size: "sm", extra: "opacity-70" }),
       ],
     );
-    return badgeButton;
   }
 
   /** Into the run's chat, wherever the run was started from: a run the
@@ -515,8 +515,7 @@ export const LandingPage: m.ClosureComponent = () => {
   function updatedNote(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     // A row says one thing about its updates: while it has a badge, the badge.
-    if (updateBadgeFor(updates.publishedFor(entry.id), updates.isUpdating(entry.id), updates.isAutoUpdateEnabled) !== null)
-      return null;
+    if (rowUpdateBadge(entry.id) !== null) return null;
     const update = updates.forAgent(entry.id);
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
