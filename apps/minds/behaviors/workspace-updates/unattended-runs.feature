@@ -19,7 +19,7 @@ Feature: Scheduling an update
     The same note whether the run was scheduled or watched: it is news about the workspace, not a report on the user's attention.
     Given a workspace whose update landed
     Then the workspace's row notes the version it was updated to
-    But not while the row shows the state of a later update, which is the row's one word on its updates
+    But not while the row shows any other word on its updates, such as a later update's state or a version the app cannot read, since a row says one thing about its updates
     And the user can dismiss that note
     And a dismissed note stays dismissed after the app relaunches
     And dismissing it does not clear an unread failure of a later run
