@@ -481,6 +481,21 @@ def test_the_watchdog_revives_a_stopped_lead_every_tick_saying_how_many_times_it
     assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
+def test_without_the_chat_messenger_a_revive_starts_the_stopped_lead_through_mngr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """``mngr message`` only delivers to a running agent unless told to start it."""
+    staged = stage_update_workspace(tmp_path, monkeypatch, has_message_chat=False)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_LEAD, "STOPPED", _LEAD_ID)])
+
+    _tick(program, staged, _IN_WINDOW)
+
+    messages = [call for call in staged.recorded_calls() if call[:1] == ["message"]]
+    assert [message[:4] for message in messages] == [["message", _LEAD, "--start", "-m"]]
+    assert "Restarts so far: 1." in messages[0][4]
+
+
 def test_a_revive_leaves_alone_a_lead_that_recorded_its_verdict_meanwhile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
