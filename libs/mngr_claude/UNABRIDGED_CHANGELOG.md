@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-10-22
 
+The claude common transcript now keeps messages the user sends while a turn is running. Claude Code adds such a message to the running turn alongside the next tool result and records it only as a `queued_command` attachment, never as a user line, so the converter dropped it with the other attachments: `mngr transcript` and everything built on it (the ATIF trajectory among them) showed the agent answering a message nobody had sent. Each such message (`commandMode: prompt`) is now a user step, stamped by the `absorbed_mid_turn` queue removal Claude Code writes when the message joins the turn, so it sits between the tool result it arrived with and the agent's next step. A message with a pasted image keeps its text, with the image as `[image omitted]`. A message another session sent (`origin.kind: peer`, `isMeta`) is a system step, since nobody typed it here. A queue line whose ids or timestamp are not strings is skipped. Background-task notices, which ride the same attachment in `task-notification` mode, and every other attachment kind are still left out.
+
+## 2026-10-22
+
 Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.
 
 Changed: `imbue-mngr-claude` depends on `imbue-overlay` instead of `overlay`. The PyPI name `overlay` belongs to an unrelated third-party project, so the old pin could never be installed from PyPI.

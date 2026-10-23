@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Fixed: the agy protobuf schema release test (`test_decoder_field_map_matches_installed_antigravity_binary`) passes again against agy 1.4.5. agy 1.4.5 did not change the schema the transcript decoder reads: `gemini_coder.Step`'s descriptor is byte-identical to the one in 1.4.4, and the `cortex.proto` messages and enums the decoder uses are unchanged. The test failed because the extractor dropped `gemini_coder.Step`, and that is now fixed. The test now also checks `ChatToolCall`'s `name` and `arguments_json` field numbers, which the decoder uses for tool calls. `regenerating_protobuf_schema.md` now says how to tell a descriptor the extractor missed from one agy renamed.
+
 ## 2026-10-16
 
 An antigravity agent's transcript streamer and common transcript converter keep running after the agent is renamed, including after it restarts. The background-tasks supervisor tracks the agent's tmux session by its session id, which a rename does not change, and new launch commands no longer carry the session name. For an agent created by an older mngr, `mngr start` rewrites the session name out of its stored launch command, so its transcript runs again after its next restart.
