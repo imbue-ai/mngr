@@ -1,5 +1,5 @@
 Feature: Automatic workspace updates
-  Auto-update is one app-wide setting: when it is on, the app schedules every workspace that is a minor release behind, so the user never has to.
+  Auto-update is one app-wide setting: when it is on, the app schedules every workspace that is a minor release behind or below the security floor, so the user never has to.
   Updating spends tokens against the user's subscription or API usage, so it stays off until the user chooses it.
 
   @off-until-chosen
@@ -16,10 +16,12 @@ Feature: Automatic workspace updates
     Given auto-update is on
     And a running workspace is read as a minor release behind
     Then that workspace's update is scheduled for its next window
+    And a workspace below the security floor is scheduled the same way, for its next window, however small its gap
     And a workspace with only a patch available is not scheduled
 
   @quiet-under-auto-update
   Scenario: With auto-update on, an out-of-date workspace is not nagged about
+    A workspace below the security floor is no exception: auto-update schedules it like any other, so it is not nagged about either.
     Given auto-update is on
     And a workspace that auto-update will schedule
     Then the workspace view carries no out-of-date notice for it

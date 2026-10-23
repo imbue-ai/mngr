@@ -294,10 +294,12 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
-        description='How to handle opencode\'s startup auto-update. NEVER sets `"autoupdate": false` in the '
-        "per-agent opencode.json so opencode does not update itself on launch; AUTO leaves auto-update enabled. "
-        "ASK has no interactive flow for opencode and behaves like AUTO. When unset (the default), resolves to "
-        "NEVER (auto-update disabled) -- set AUTO to leave opencode's auto-update enabled. An explicit "
+        description='How to handle opencode\'s update check. NEVER sets `"autoupdate": false` in the per-agent '
+        "opencode.json. On opencode 1.19.0 and later, which never installs updates on its own, that only turns "
+        "off the update check and its notice; on earlier versions it also stops opencode updating itself on "
+        "launch. AUTO does not write `autoupdate`, so the user's own opencode config (or opencode's "
+        "default) decides. ASK has no interactive flow for opencode and behaves like AUTO. When unset (the "
+        "default), resolves to NEVER -- set AUTO to leave it to the user's opencode config. An explicit "
         "`autoupdate` key in `config_overrides` always wins.",
     )
     # emit_common_transcript gates the raw -> common-schema converter that writes

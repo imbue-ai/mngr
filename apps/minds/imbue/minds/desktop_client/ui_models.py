@@ -460,7 +460,8 @@ class UiWorkspaceUpdate(FrozenModel):
     """
 
     availability: UpdateAvailability = Field(
-        description="Up to date / out of date / unknown / app behind / needs recreation"
+        description="Up to date / out of date / patch available / security update / unknown / app behind / "
+        "needs recreation"
     )
     unknown_reason: UpdateUnknownReason | None = Field(
         default=None,
@@ -557,8 +558,9 @@ class UiWorkspaceUpdate(FrozenModel):
 
     @property
     def is_update_offered(self) -> bool:
-        """Whether the app has positively read that this workspace is a minor release behind: the badge, the band, and bulk actions."""
-        return self.availability is UpdateAvailability.OUT_OF_DATE
+        """Whether the app has positively read that this workspace is a minor release behind, or below the
+        security floor: the badge, the band, and bulk actions."""
+        return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.SECURITY_UPDATE)
 
     @property
     def is_update_dispatchable(self) -> bool:
@@ -572,6 +574,7 @@ class UiWorkspaceUpdate(FrozenModel):
         """
         return self.availability in (
             UpdateAvailability.OUT_OF_DATE,
+            UpdateAvailability.SECURITY_UPDATE,
             UpdateAvailability.PATCH_AVAILABLE,
             UpdateAvailability.UNKNOWN,
         )

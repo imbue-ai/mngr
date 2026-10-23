@@ -69,13 +69,13 @@ def test_a_workspace_above_the_ceiling_reports_the_app_as_behind() -> None:
 @pytest.mark.parametrize(
     ("workspace_ref", "ceiling_ref", "expected"),
     [
-        ("minds-v0.8.3", "minds-v0.9.0", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.9.3", "minds-v0.10.0", UpdateAvailability.OUT_OF_DATE),
         ("minds-v0.7.9", "minds-v0.8.4", UpdateAvailability.OUT_OF_DATE),
         ("minds-v0.9.5", "minds-v1.0.0", UpdateAvailability.OUT_OF_DATE),
         ("minds-v0.8.3", "minds-v0.9.0-rc.1", UpdateAvailability.OUT_OF_DATE),
         ("minds-v0.8.3", "minds-v0.8.4", UpdateAvailability.PATCH_AVAILABLE),
         ("minds-v0.8.0", "minds-v0.8.4", UpdateAvailability.PATCH_AVAILABLE),
-        ("minds-v0.9.0-rc.1", "minds-v0.9.0", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.10.0-rc.1", "minds-v0.10.0", UpdateAvailability.PATCH_AVAILABLE),
         ("minds-v0.8.4", "minds-v0.8.3", UpdateAvailability.APP_BEHIND),
     ],
 )
@@ -85,6 +85,53 @@ def test_only_a_newer_minor_release_makes_a_workspace_out_of_date(
     detection = derive_update_detection(workspace_ref, ceiling_ref)
     assert detection.availability is expected
     assert detection.unknown_reason is None
+
+
+@pytest.mark.witnesses("workspace-updates.below-the-security-floor")
+@pytest.mark.parametrize(
+    ("workspace_ref", "ceiling_ref", "expected"),
+    [
+        # Below the floor within the ceiling's minor release: a security update, not a patch.
+        ("minds-v0.9.0-rc.1", "minds-v0.9.0", UpdateAvailability.SECURITY_UPDATE),
+        ("minds-v0.9.0-rc.3", "minds-v0.9.2", UpdateAvailability.SECURITY_UPDATE),
+        # Below the floor across minor releases.
+        ("minds-v0.8.7", "minds-v0.9.0", UpdateAvailability.SECURITY_UPDATE),
+        ("minds-v0.8.3", "minds-v0.10.1", UpdateAvailability.SECURITY_UPDATE),
+        # At the floor: the minor-release rule decides.
+        ("minds-v0.9.0", "minds-v0.9.2", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.9.0", "minds-v0.10.0", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.9.0", "minds-v0.9.0", UpdateAvailability.UP_TO_DATE),
+        # A ceiling below the floor cannot deliver the fix, so the minor-release rule decides.
+        ("minds-v0.8.3", "minds-v0.8.7", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.7.9", "minds-v0.8.7", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.8.7", "minds-v0.9.0-rc.2", UpdateAvailability.OUT_OF_DATE),
+    ],
+)
+def test_a_workspace_below_the_security_floor_has_a_security_update_when_the_ceiling_can_deliver_it(
+    workspace_ref: str, ceiling_ref: str, expected: UpdateAvailability
+) -> None:
+    detection = derive_update_detection(workspace_ref, ceiling_ref)
+    assert detection.availability is expected
+    assert detection.unknown_reason is None
+
+
+@pytest.mark.witnesses("workspace-updates.security-floor-needs-a-released-app", partial="the detection verdict only")
+def test_a_dev_build_offers_no_security_update() -> None:
+    detection = derive_update_detection("minds-v0.8.7", "gabriel/some-branch")
+    assert detection.availability is UpdateAvailability.UNKNOWN
+    assert detection.unknown_reason is UpdateUnknownReason.NO_APP_VERSION
+
+
+@pytest.mark.witnesses("workspace-updates.too-old-is-missing-security-fixes", partial="the detection verdict only")
+def test_a_workspace_below_the_in_place_cutoff_needs_recreation_rather_than_a_security_update() -> None:
+    """Recreation is checked first: an in-place security update cannot be applied to such a workspace either."""
+    assert derive_update_detection("minds-v0.3.9", "minds-v0.9.0").availability is UpdateAvailability.NEEDS_RECREATION
+
+
+def test_a_security_update_is_offered_and_dispatchable() -> None:
+    security = _state_with(UpdateAvailability.SECURITY_UPDATE)
+    assert security.is_update_offered is True
+    assert security.is_update_dispatchable is True
 
 
 @pytest.mark.witnesses("workspace-updates.development-build", partial="the detection verdict only")

@@ -120,7 +120,7 @@ A workspace has at most one main window. Anything that would put a second main w
 
 The app registers the `imbue-studio://` URL scheme. The previous `minds://` scheme is still accepted and registered alongside it, so links published before the rename keep working; it goes away after a soak (`specs/imbue-studio-rename/05_cleanup.md`). Both live in `DEEPLINK_SCHEMES` in `electron/deeplink.js`, primary first. Packaged macOS builds get the OS registration from `appProtocolScheme` in `todesktop.js` (ToDesktop emits the `CFBundleURLTypes` Info.plist entry); `app.setAsDefaultProtocolClient` is also called for each scheme at every startup, using the dev-mode form (electron binary + app path) under `electron .`. Dev-mode registration is a no-op on macOS -- LaunchServices only honors schemes declared in a bundle's Info.plist -- so to exercise deeplinks against a dev app, pass the URL as an argument instead: `electron . 'imbue-studio://create?git_url=...'` (the same code path Windows/Linux cold starts use).
 
-To test real OS-level delivery (browser link clicks, `open 'imbue-studio://...'`) against a dev app on macOS, patch the checkout's dev Electron bundle once so LaunchServices knows about it. The bundle id must also be made unique: every worktree's dev Electron ships as `com.github.Electron`, and LaunchServices resolves the scheme's handler by bundle id, so a shared id can route the URL to some other checkout's copy.
+To test real OS-level delivery (browser link clicks, `open 'imbue-studio://...'`) against a dev app on macOS, patch the checkout's dev Electron bundle once so LaunchServices knows about it. The bundle id must also be made unique: every worktree's dev Electron ships as `com.github.Electron`, and LaunchServices resolves the scheme's handler by bundle id, so a shared id can route the URL to some other checkout's copy. Start the dev app once first: Electron downloads its binary into `node_modules/electron/dist` on first run, not at install.
 
 ```bash
 PLIST=apps/minds/node_modules/electron/dist/Electron.app/Contents/Info.plist
@@ -187,7 +187,8 @@ The CLI separates two channels, following the same conventions as mngr:
 The desktop app bundles platform-specific binaries so users need zero prerequisites:
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
-- **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, a system `etc/gitconfig`, and (on Linux) an `ssl/cacert.pem` CA bundle. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM` (plus `GIT_SSL_CAINFO` on Linux); a bare `PATH` prepend is not sufficient. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
+- **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, and a system `etc/gitconfig`. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM`; a bare `PATH` prepend is not sufficient. It also sets `GIT_SSL_CAINFO` to the certifi `cacert.pem` in the app's Python environment on every platform (`electron/git-env.js`), so git verifies TLS against the CA bundle the app pins rather than the payload's own Linux pem or macOS's `/etc/ssl/cert.pem`. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
+- **curl**: The curl router latchkey runs as its curl (`LATCHKEY_CURL`) and the Chrome-impersonating `curl-impersonate` beside it, from the `imbue-ai/latchkey-curl-shims` release. macOS and Linux only. Requests carrying the `X-Imbue-Impersonate` marker header go to `curl-impersonate`, and every other request goes to the first `curl` on `PATH`. On macOS the backend sets `CURL_CA_BUNDLE` to the same certifi `cacert.pem` git uses, so the system curl stops trusting the stale `/etc/ssl/cert.pem`. Apple's `/usr/bin/curl` still falls back to the system trust store when a chain fails the bundle; `curl-impersonate` trusts only the bundle, so keychain-only CAs (a corporate TLS proxy's, say) do not work for marked requests. On Linux both read the host's CA store.
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). SHA256-verified download, pinned to the version in `download-binaries.js`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; on Linux it runs the VM through the host's QEMU with KVM (see [Linux](#linux) below).
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image. Downloaded from GitHub releases. macOS/Linux only.
@@ -385,17 +386,17 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 
 ### Prerequisites
 
-- Node.js 24.15.0 (pinned via `.nvmrc` and `engines.node`)
+- Node.js 24.22.1 (pinned via `.nvmrc` and `engines.node`)
 - pnpm 10.33.4 (pinned via `engines.pnpm`)
-- Python 3.12, uv, git (for the Python backend)
+- Python 3.12, uv 0.13.4 or later (the root `pyproject.toml`'s `required-version`), git (for the Python backend)
 
 `apps/minds/.npmrc` sets `engine-strict=true`, so `pnpm install` refuses to run on any other Node or pnpm version instead of silently producing a broken install.
 
 ### Installing the pinned toolchain
 
-The pins are exact patches (`24.15.0`, `10.33.4`) and `engine-strict=true` will reject anything else. Use the recipes below -- they're the paths that reliably hit the exact versions on any given day.
+The pins are exact patches (`24.22.1`, `10.33.4`) and `engine-strict=true` will reject anything else. Use the recipes below -- they're the paths that reliably hit the exact versions on any given day.
 
-**Node.js 24.15.0** -- via a version manager:
+**Node.js 24.22.1** -- via a version manager:
 
 ```bash
 # nvm (https://github.com/nvm-sh/nvm)
@@ -407,7 +408,7 @@ fnm install         # reads .nvmrc
 fnm use             # reads .nvmrc
 ```
 
-Run `node --version` from inside `apps/minds/` -- it must print `v24.15.0`.
+Run `node --version` from inside `apps/minds/` -- it must print `v24.22.1`.
 
 **pnpm 10.33.4** -- via npm:
 
@@ -417,7 +418,7 @@ npm install --global pnpm@10.33.4
 
 Run `pnpm --version` -- it must print `10.33.4`. To swap back to a newer pnpm after working on Imbue Studio: `npm install --global pnpm@latest`.
 
-**A note on Homebrew**: `brew install node@24` and `brew install pnpm@10` work *if* the kegs currently happen to point at `24.15.0` / `10.33.4`, but Homebrew's `@<major>` formulae move forward through patch releases and there's no clean way to ask for an exact historical patch. Once a keg drifts past the pin, `engine-strict` will reject `pnpm install` and you'll need to switch to the version-manager / npm paths above anyway. If you already have these installed via brew and they still match, great -- just verify with `node --version` / `pnpm --version` before running `pnpm install`.
+**A note on Homebrew**: `brew install node@24` and `brew install pnpm@10` work *if* the kegs currently happen to point at `24.22.1` / `10.33.4`, but Homebrew's `@<major>` formulae move forward through patch releases and there's no clean way to ask for an exact historical patch. Once a keg drifts past the pin, `engine-strict` will reject `pnpm install` and you'll need to switch to the version-manager / npm paths above anyway. If you already have these installed via brew and they still match, great -- just verify with `node --version` / `pnpm --version` before running `pnpm install`.
 
 ### Dependency cooldown (minimum release age)
 
@@ -457,7 +458,7 @@ pnpm exec todesktop build         # Upload to ToDesktop for native builds
 
 ToDesktop builds the macOS arm64 native installer (.zip / .dmg) and the Linux x86_64 packages (.deb / AppImage) from one upload, and handles code signing, notarization, and the auto-update infrastructure. Which targets it builds is set in the ToDesktop dashboard (mac Intel and universal are off, the `.deb` is on); how each platform's resources are staged is in "How the shipped binaries are chosen" above, and the Linux specifics are in "Linux". There is no Windows target, and no packaged Linux arm64 build: `download-binaries.js` provisions linux/arm64 binaries for dev-mode runs only (exercised on a Raspberry Pi; see [raspberry-pi.md](./raspberry-pi.md)). The release pipeline (`minds-launch-to-msg.yml`) verifies the macOS app end to end and the Linux artifacts structurally.
 
-The build script (`scripts/build.js`) builds a wheel for every workspace package into the shared payload (`resources/shared/wheels/`), rewrites `[tool.uv.sources]` in the staged `resources/shared/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `uv.lock` beside it against the rewritten pyproject. The shared payload is then copied into every target tree, so the app reads them as `<resources>/wheels/` and `<resources>/pyproject/`. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
+The build script (`scripts/build.js`) builds a wheel for every workspace package into the shared payload (`resources/shared/wheels/`), rewrites `[tool.uv.sources]` in the staged `resources/shared/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `uv.lock` beside it against the rewritten pyproject. The shared payload is then copied into every target tree, so the app reads them as `<resources>/wheels/` and `<resources>/pyproject/`. The regenerated lockfile is what ships in the app bundle; the committed `electron/pyproject/uv.lock` is the dev-time lock and does not constrain a build.
 
 ### Updating the Python package
 

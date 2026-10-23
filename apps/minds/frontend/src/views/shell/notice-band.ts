@@ -46,6 +46,7 @@ export interface NoticePayload {
     | "workspace-update-outcome"
     | "workspace-out-of-date"
     | "workspace-needs-sign-in"
+    | "workspace-security-update"
     | "workspace-needs-recreation";
   variant: "info" | "warn" | "error";
   message: string;
@@ -325,12 +326,20 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
         message: "This workspace can't update until an AI account is signed in to it.",
         actions: [{ label: "Sign in", kind: "sign-in-for-update" }],
       };
+    case "security-update":
+      // Error, not warn: the stronger of the two offers, since what it brings is a security fix.
+      return {
+        key: "workspace-security-update",
+        variant: "error",
+        message: "An update for this workspace is available, which includes a critical security fix.",
+        actions: [SEE_UPDATE],
+      };
     case "needs-recreation":
       // The same action as out-of-date: the modal behind it carries the steps.
       return {
         key: "workspace-needs-recreation",
         variant: "warn",
-        message: "This workspace is too old to update in place.",
+        message: "This workspace is too old to update in place and is missing security fixes.",
         actions: [{ label: "See how to update", kind: "update-workspace" }],
       };
     case "none":

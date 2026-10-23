@@ -8,6 +8,7 @@ const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 const { backgroundLaunchEnv } = require('./background-launch');
+const { bundledGitEnv } = require('./git-env');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -57,6 +58,19 @@ function latchkeyCurlEnv() {
     return {};
   }
   return { LATCHKEY_CURL: router };
+}
+
+/**
+ * On macOS, the CA bundle both of latchkey's curls verify against: the system
+ * ``/usr/bin/curl`` that unmarked requests run, whose own default is the static
+ * ``/etc/ssl/cert.pem``, and the bundled curl-impersonate, which with a file
+ * named trusts only that file instead of Apple's SecTrust (so keychain-only
+ * CAs stop working for marked requests). Apple's curl still falls back to
+ * SecTrust when a chain fails the file, so it rejects a chain only when
+ * SecTrust does too. Linux needs nothing: both curls read the host store.
+ */
+function latchkeyCaBundleEnv(caBundlePath) {
+  return process.platform === 'darwin' ? { CURL_CA_BUNDLE: caBundlePath } : {};
 }
 
 /**
@@ -260,6 +274,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // Port is still occupied -- pick a different one.
         port = await findAvailablePort();
       }
+      // Resolved before the log stream opens: it throws when the venv has no
+      // certifi bundle, and nothing would end the stream on that path.
+      const caBundlePath = paths.getCertifiBundlePath();
       const logDir = paths.getLogDir();
 
       // Ensure log directory exists
@@ -291,23 +308,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
-      // The bundled dugite-native git is built with an empty prefix, so
-      // prepending its bin dir to PATH is not enough: git --exec-path would
-      // resolve to //libexec/git-core and `git clone https://...` would fail
-      // with "'remote-https' is not a git command". Export the payload's real
-      // locations so helper dispatch, templates, and TLS work in both dev and
-      // packaged modes. See specs/minds-managed-git/concise.md.
+      // Dev and packaged modes both run the bundled git, so both need its
+      // environment (see git-env.js for why each variable is required).
       const gitRoot = paths.getGitRootDir();
-      const gitEnv = {
-        GIT_EXEC_PATH: path.join(gitRoot, 'libexec', 'git-core'),
-        GIT_TEMPLATE_DIR: path.join(gitRoot, 'share', 'git-core', 'templates'),
-        GIT_CONFIG_SYSTEM: path.join(gitRoot, 'etc', 'gitconfig'),
-      };
-      // The Linux payload does not use the system trust store; macOS links the
-      // system libcurl and must NOT get this override.
-      if (process.platform === 'linux') {
-        gitEnv.GIT_SSL_CAINFO = path.join(gitRoot, 'ssl', 'cacert.pem');
-      }
+      const gitEnv = bundledGitEnv({ gitRoot, caBundlePath });
       logBundledGitVersion(gitRoot);
 
       // desync is not staged on win32, and naming a missing file here would make the
@@ -365,6 +369,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
+          ...latchkeyCaBundleEnv(caBundlePath),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -443,6 +448,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
+          ...latchkeyCaBundleEnv(caBundlePath),
           // How an agent brings this install up in the background when it
           // finds it stopped; the backend records it in the tier's app.json.
           ...backgroundLaunchEnv({

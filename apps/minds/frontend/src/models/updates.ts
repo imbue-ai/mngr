@@ -27,11 +27,18 @@ export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
   );
 }
 
-/** Whether the app has positively read this machine as a minor release behind:
- * what the badge and band claim, and what "Update all" covers. A machine behind
- * only by a patch is never prompted for. */
+/** Whether the app has positively read this machine as a minor release behind,
+ * or below the security floor: what the badge and band claim, and what "Update
+ * all" covers. A machine behind only by a patch is never prompted for, unless
+ * the patch carries a security fix it lacks. */
 export function isUpdateOffered(update: UiWorkspaceUpdate): boolean {
-  return update.availability === "OUT_OF_DATE";
+  return update.availability === "OUT_OF_DATE" || isSecurityUpdate(update);
+}
+
+/** Whether the app has positively read this machine as below the security
+ * floor, by a build that can take it past it: its update includes a security fix. */
+export function isSecurityUpdate(update: UiWorkspaceUpdate): boolean {
+  return update.availability === "SECURITY_UPDATE";
 }
 
 /** Whether the app has positively read this machine as too old to update in
@@ -93,10 +100,10 @@ export function skippedLine(update: UiWorkspaceUpdate, isAutoUpdateEnabled: bool
 /** The standing condition a surface says about a machine's version, if any.
  * Standing because it will still be true tomorrow, unlike a run's phase or
  * outcome. */
-export type StandingUpdateNotice = "none" | "out-of-date" | "needs-sign-in" | "needs-recreation";
+export type StandingUpdateNotice = "none" | "out-of-date" | "security-update" | "needs-sign-in" | "needs-recreation";
 
 /** What a surface should say about this machine's version. A run in flight
- * silences the out-of-date line (the run is already being reported);
+ * silences the out-of-date and security-update lines (the run is already being reported);
  * `isUpdating` rather than the pushed activity, so it does not reappear between
  * the press and the first frame. Recreation has no run to be silenced by. */
 export function standingUpdateNotice(
@@ -107,7 +114,8 @@ export function standingUpdateNotice(
   if (isRecreationRequired(update)) return "needs-recreation";
   if (isUpdating || isUpdateSkipped(update)) return "none";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
-  if (isUpdateOffered(update) && !isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return "out-of-date";
+  if (isUpdateOffered(update) && !isHandledByAutoUpdate(update, isAutoUpdateEnabled))
+    return isSecurityUpdate(update) ? "security-update" : "out-of-date";
   return "none";
 }
 
@@ -118,6 +126,7 @@ export function standingUpdateNotice(
 export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
   return (
     update.availability === "OUT_OF_DATE" ||
+    update.availability === "SECURITY_UPDATE" ||
     update.availability === "PATCH_AVAILABLE" ||
     update.availability === "UNKNOWN"
   );
@@ -304,7 +313,7 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (isUpdateSkipped(update)) return "skipped";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (update.is_scheduled ?? false) return "scheduled";
-  if (update.availability === "OUT_OF_DATE" || update.availability === "PATCH_AVAILABLE") return "offered";
+  if (isUpdateOffered(update) || update.availability === "PATCH_AVAILABLE") return "offered";
   // A landed run only while its note is showing: once dismissed, the machine's version decides
   // what is offered. A run that found nothing to do earns no note, so it stands until dismissed.
   if ((update.verdict === "UPDATED" && landed !== "") || update.verdict === "ALREADY_CURRENT") return "updated";
@@ -322,6 +331,7 @@ export type UpdateBadgeState =
   | "needs-sign-in"
   | "scheduled"
   | "skipped"
+  | "security-update"
   | "out-of-date"
   | "unknown";
 export type UpdateBadgeTone = "neutral" | "warn" | "error";
@@ -357,11 +367,12 @@ export interface UpdateBadge {
 
 /** Which badge a machine's row shows, or null. One at most, ordered by what
  * the reader would act on first: a run in flight, a decision or a failed run,
- * the standing "needs recreation", "skipped", "needs sign-in", or "out of date", then
- * "unknown", then a bare armed schedule. Every one opens the modal (hence
- * buttons); only "out of date" is an offer, and under auto-update it is
- * withheld for a machine auto-update will arm itself. A null `update` (nothing
- * published yet) earns no badge, except for a dispatch this window just made. */
+ * the standing "needs recreation", "skipped", "needs sign-in", "security update"
+ * or "out of date", then "unknown", then a bare armed schedule. Every one opens
+ * the modal (hence buttons); only "security update" and "out of date" are
+ * offers, the security one drawn as the stronger, and under auto-update both
+ * are withheld for a machine auto-update will arm itself. A null `update`
+ * (nothing published yet) earns no badge, except for a dispatch this window just made. */
 export function updateBadgeFor(
   update: UiWorkspaceUpdate | null,
   isUpdating: boolean,
@@ -440,7 +451,8 @@ export function updateBadgeFor(
       state: "needs-recreation",
       tone: "warn",
       label: "Recreate to update",
-      tooltip: "This workspace is too old to update in place — see how to move your work to a new one",
+      tooltip:
+        "This workspace is too old to update in place and is missing security fixes — see how to move your work to a new one",
       isSpinnerShown: false,
     };
   }
@@ -476,6 +488,15 @@ export function updateBadgeFor(
       };
     }
     if (isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return null;
+    if (isSecurityUpdate(update)) {
+      return {
+        state: "security-update",
+        tone: "error",
+        label: "Security update",
+        tooltip: "See the update available for this workspace, which includes a critical security fix",
+        isSpinnerShown: false,
+      };
+    }
     return {
       state: "out-of-date",
       tone: "warn",
@@ -680,8 +701,8 @@ export class UpdatesStore {
     return this.forAgent(agentId).activity === "APPLYING";
   }
 
-  /** The machines the bulk actions cover: confirmed out of date, with nothing
-   * standing in the way of a fresh run. */
+  /** The machines the bulk actions cover: confirmed out of date or below the
+   * security floor, with nothing standing in the way of a fresh run. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.keys()]
       .map((agentId) => [agentId, this.forAgent(agentId)] as const)

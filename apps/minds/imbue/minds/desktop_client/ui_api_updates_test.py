@@ -228,6 +228,16 @@ def _end_run_needing_decision(app: Flask, agent_id: AgentId) -> None:
     assert _service(app).state_store.get(agent_id).is_decision_pending
 
 
+def _mark_security_update(app: Flask, agent_id: AgentId) -> None:
+    _service(app).state_store.record_detection(
+        agent_id,
+        detection=UpdateDetection(availability=UpdateAvailability.SECURITY_UPDATE),
+        current_version="minds-v0.9.0-rc.1",
+        supported_version="minds-v0.9.0",
+        is_readable=True,
+    )
+
+
 def _post(client: FlaskClient, path: str, body: dict[str, Any] | None = None) -> Any:
     return client.post(path, json=body if body is not None else {})
 
@@ -962,6 +972,45 @@ def test_a_bulk_action_acts_only_on_the_requested_machines_live_state_says_are_b
     assert response.get_json()[accepted_key] == [str(stale_id)]
     assert poll_until(lambda: len(caller.calls) == 1, timeout=_BULK_TIMEOUT_SECONDS)
     assert caller.calls[0][2] == str(stale_id)
+
+
+@pytest.mark.witnesses("workspace-updates.security-update-prompted", partial="the bulk actions only")
+@pytest.mark.parametrize(
+    ("bulk_action", "accepted_key", "result"),
+    (("now", "dispatching", CREATED_UPDATE_COMMAND_RESULT), ("schedule", "scheduled", _armed())),
+)
+def test_a_bulk_action_covers_a_machine_with_a_security_update_however_small_the_gap(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    bulk_action: str,
+    accepted_key: str,
+    result: MngrCallResult,
+) -> None:
+    caller = RecordingMngrCaller(result=result)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
+    security_id = AgentId.generate()
+    patch_id = AgentId.generate()
+    _mark_security_update(app, security_id)
+    _mark_patch_available(app, patch_id)
+
+    response = _post(client, f"/ui/api/updates/bulk/{bulk_action}", {"agent_ids": [str(security_id), str(patch_id)]})
+
+    assert response.status_code == 200
+    assert response.get_json()[accepted_key] == [str(security_id)]
+    assert poll_until(lambda: len(caller.calls) == 1, timeout=_BULK_TIMEOUT_SECONDS)
+    assert caller.calls[0][2] == str(security_id)
+
+
+def test_a_machine_with_a_security_update_is_sent_its_update_agent_when_asked(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
+    _mark_security_update(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 200
+    assert _service(app).state_store.get(agent_id).is_run_in_flight is True
 
 
 @pytest.mark.parametrize("route", ("now", "schedule"))

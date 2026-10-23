@@ -514,7 +514,8 @@ def _build_firstboot_script(host_dir: str) -> str:
 
     The gen-2 base image pre-installs docker + the package set (via the prep
     stage's virt-customize), so the apt block is a presence-guarded fallback for
-    images staged before a customization existed. The btrfs block sets up the
+    images staged before a customization existed, followed by a best-effort
+    ca-certificates upgrade. The btrfs block sets up the
     data disk (selected by label, else the blank writable non-root disk): it is
     formatted when not already btrfs (so re-runs and restored disks survive),
     mounted at a fixed path, and ``host_dir`` symlinked to it.
@@ -554,6 +555,12 @@ test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt_get_retry update -qq
     apt_get_retry install -y -qq $PKGS_TO_INSTALL
+fi
+# The staged image keeps the CA bundle it was customized with until its next
+# re-stage, so every first boot upgrades it. Best effort: an apt outage must not
+# fail the first boot.
+if ! {{ apt_get_retry update -qq && apt_get_retry install -y -qq --only-upgrade ca-certificates; }}; then
+    echo "WARNING: could not upgrade ca-certificates; the VM keeps its staged CA bundle" >&2
 fi
 
 # Format + mount the btrfs data disk and symlink host_dir to it. Idempotent:

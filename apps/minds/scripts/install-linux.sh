@@ -43,6 +43,8 @@ set -euo pipefail
 
 MNGR_REPO_URL="https://github.com/imbue-ai/mngr.git"
 NVM_VERSION="v0.40.3"
+# The checkout's [tool.uv] required-version refuses any older uv.
+UV_VERSION="0.13.4"
 # Same gVisor release the mngr_vps host setup pins (PINNED_GVISOR_RELEASE);
 # apps/minds/scripts/build_test.py checks the two agree.
 GVISOR_RELEASE="20260601"
@@ -454,12 +456,18 @@ confirm_toolchain_install() {
     IS_TOOLCHAIN_CONFIRMED=1
 }
 
-if command -v uv >/dev/null 2>&1; then
+is_uv_current() {
+    command -v uv >/dev/null 2>&1 || return 1
+    printf '%s\n%s\n' "$UV_VERSION" "$(uv --version | awk '{print $2}')" | sort -C -V
+}
+if is_uv_current; then
     skip "uv is installed ($(uv --version))"
 else
     confirm_toolchain_install
-    echo "    Installing uv into ~/.local/bin"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    echo "    Installing uv ${UV_VERSION} into ~/.local/bin"
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+    hash -r
+    is_uv_current || die "the uv on PATH ($(command -v uv)) is still older than ${UV_VERSION} after installing it into ~/.local/bin"
 fi
 
 if [ -s "$NVM_DIR/nvm.sh" ]; then

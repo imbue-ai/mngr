@@ -56,7 +56,7 @@ LANDED_UPDATE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
 
 
 class UpdateAvailability(UpperCaseStrEnum):
-    """The detection tri-state, plus the reverse-divergence case."""
+    """Where a workspace's version stands against the app's ceiling, as far as both can be read."""
 
     UP_TO_DATE = auto()
     """A positive read on both sides, and the workspace is at the ceiling."""
@@ -65,6 +65,9 @@ class UpdateAvailability(UpperCaseStrEnum):
     PATCH_AVAILABLE = auto()
     """A positive read on both sides, and the workspace sorts below the ceiling within its minor release:
     never prompted for, but may be updated or scheduled by hand."""
+    SECURITY_UPDATE = auto()
+    """A positive read on both sides, the workspace sorts below the security floor, and the ceiling does not:
+    prompted for however small the gap, since the update carries a security fix the workspace lacks."""
     UNKNOWN = auto()
     """No comparable version on one side or the other; no update UI, no dispatch."""
     APP_BEHIND = auto()

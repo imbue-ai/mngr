@@ -11,6 +11,7 @@ import {
   displayVersion,
   isArmedByAutoUpdate,
   isRecreationRequired,
+  isSecurityUpdate,
   isUpdateDispatchable,
   plainScheduleTargetRef,
   recordedDispatchFailure,
@@ -25,6 +26,7 @@ import {
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
+import { Collapsible } from "./Collapsible";
 import { Modal, DialogCloseButton } from "./Modal";
 import { machineVerdict } from "./MachineVerdict";
 import { Notice } from "./Notice";
@@ -52,7 +54,19 @@ interface UpdateModalState {
   noBackupConfirm: "now" | "schedule" | null;
   /** Whether the skip confirmation stands in for the action row. */
   isSkipConfirmOpen: boolean;
+  /** Whether the security fix's details are expanded. */
+  isSecurityDetailsOpen: boolean;
 }
+
+/** What the fix behind the security floor addresses. Rewritten whenever a
+ * release raises `SECURITY_FLOOR_VERSION`, since that release's fix is the one
+ * every workspace below the floor lacks. */
+const SECURITY_FIX_DETAILS =
+  "Eight intermediate certificates issued under eMudhra's emSign root certificate authority were compromised: " +
+  "anyone can recover their private keys. Software that still trusts them can be tricked into connecting to an " +
+  "impostor posing as any website, which could then read or change what this workspace sends and receives, " +
+  "including credentials. This update moves the workspace's tools and certificate stores to versions that no " +
+  "longer trust them.";
 
 /** Where to go when a run ended without landing: its own chat has the details,
  * and whatever it found, the next step is a conversation with it. */
@@ -163,6 +177,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     errorDetail: "",
     noBackupConfirm: null,
     isSkipConfirmOpen: false,
+    isSecurityDetailsOpen: false,
   };
 
   function run(
@@ -274,7 +289,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This workspace is running a version of Imbue Studio too old to update in place. " +
+        "This workspace is running a version of Imbue Studio too old to update in place, and is missing security fixes. " +
           "To get it up to date, create a new workspace and move your work across.",
       ),
       m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
@@ -324,6 +339,27 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           updateVersionRow("This workspace", update.current_version),
           updateVersionRow("Supported by Imbue Studio", update.supported_version),
         ]);
+      // Wherever the machine is still below the security floor and an update is on offer.
+      const securityNotice = (): m.Children =>
+        isSecurityUpdate(update)
+          ? m(Notice, { variant: "error" }, [
+              m("p", "This update includes a critical security fix."),
+              m(
+                Collapsible,
+                {
+                  id: "security-fix-details",
+                  isOpen: state.isSecurityDetailsOpen,
+                  onToggle: () => (state.isSecurityDetailsOpen = !state.isSecurityDetailsOpen),
+                  extra: "mt-1",
+                  triggerExtra:
+                    "inline-flex items-center gap-1 type-helper bg-transparent border-0 p-0 text-inherit hover:underline",
+                  panelExtra: "mt-1 type-helper",
+                  summary: m("span", "See details"),
+                },
+                m("p", SECURITY_FIX_DETAILS),
+              ),
+            ])
+          : null;
       const pushOutcome = (variant: "success" | "warn" | "error", message: string): void => {
         body.push(m(Notice, { variant }, message));
         if (update.verdict_detail) body.push(m("p", { class: "type-helper text-secondary" }, update.verdict_detail));
@@ -528,6 +564,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           const skipLine = scheduleSkipLine(update);
           body.push(
             versionRows(),
+            securityNotice(),
             m("div", { class: "flex flex-col gap-1" }, [
               m(
                 "p",
@@ -562,13 +599,14 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         case "skipped":
           body.push(
             versionRows(),
+            securityNotice(),
             m("p", { class: "type-helper text-secondary" }, skippedLine(update, isAutoUpdateEnabled)),
           );
           actions.push(pressButton("schedule", "Schedule update", "primary"));
           actions.push(pressButton("now", "Update now", "secondary"));
           break;
         case "offered":
-          body.push(versionRows());
+          body.push(versionRows(), securityNotice());
           pushOffer();
           break;
         case "updated":

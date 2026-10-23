@@ -806,3 +806,29 @@ describe("the update modal over a workspace that stops", () => {
     expect(requests).toEqual([]);
   });
 });
+
+describe("the update modal over a machine below the security floor", () => {
+  const SECURITY: UiWorkspaceUpdate = {
+    ...OUT_OF_DATE_UPDATE,
+    availability: "SECURITY_UPDATE",
+  };
+
+  function securityDetails(root: m.Children): AnyVnode {
+    const details = byId(root, "security-fix-details");
+    if (details === undefined) throw new Error("no security fix details");
+    return details;
+  }
+
+  it("calls the fix critical, with its explanation shut until the reader opens it", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), SECURITY);
+    const root = draw();
+    expect(allText(root)).toContain("This update includes a critical security fix.");
+    const details = securityDetails(root);
+    expect(allText(attrsOf(details).summary)).toBe("See details");
+    expect(allText(details.children)).toContain("emSign");
+    expect(attrsOf(details).isOpen).toBe(false);
+
+    (attrsOf(details).onToggle as () => void)();
+    expect(attrsOf(securityDetails(draw())).isOpen).toBe(true);
+  });
+});

@@ -267,7 +267,7 @@ function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
       : update.availability === "APP_BEHIND"
         ? "This workspace is newer than this copy of Imbue Studio. Update the app to catch up."
         : isRecreationRequired(update)
-          ? "This workspace is too old to update in place. Create a new workspace and ask its agent to migrate your work across."
+          ? "This workspace is too old to update in place and is missing security fixes. Create a new workspace and ask its agent to migrate your work across."
           : (update.is_decision_pending ?? false)
             ? "The last update is waiting for your decision in its chat."
             : "";

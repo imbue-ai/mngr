@@ -141,10 +141,12 @@ describe("UpdatesStore", () => {
         "agent-patch": { ...OUT_OF_DATE_UPDATE, availability: "PATCH_AVAILABLE" },
         "agent-running": { ...OUT_OF_DATE_UPDATE, activity: "RUNNING" },
         "agent-deciding": { ...OUT_OF_DATE_UPDATE, verdict: "NEEDS_DECISION", is_decision_pending: true },
+        "agent-security": { ...OUT_OF_DATE_UPDATE, availability: "SECURITY_UPDATE" },
+        "agent-security-running": { ...OUT_OF_DATE_UPDATE, availability: "SECURITY_UPDATE", activity: "RUNNING" },
       }),
     );
 
-    expect(store.updatableAgentIds()).toEqual(["agent-stale"]);
+    expect(store.updatableAgentIds()).toEqual(["agent-stale", "agent-security"]);
   });
 
   it("reports a machine mid-apply so the health surfaces can defer to it", () => {
@@ -270,7 +272,8 @@ describe("update state predicates", () => {
 
   it("claims a machine has an update available only when it has read that it does", () => {
     expect(isUpdateOffered(OUT_OF_DATE_UPDATE)).toBe(true);
-    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND"] as const) {
+    expect(isUpdateOffered({ ...OUT_OF_DATE_UPDATE, availability: "SECURITY_UPDATE" })).toBe(true);
+    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND", "PATCH_AVAILABLE", "NEEDS_RECREATION"] as const) {
       expect(isUpdateOffered({ ...OUT_OF_DATE_UPDATE, availability })).toBe(false);
     }
   });
@@ -279,6 +282,13 @@ describe("update state predicates", () => {
     expect(standingUpdateNotice(OUT_OF_DATE_UPDATE, false)).toBe("out-of-date");
     expect(standingUpdateNotice(OUT_OF_DATE_UPDATE, true)).toBe("none");
     expect(standingUpdateNotice({ ...OUT_OF_DATE_UPDATE, availability: "UNKNOWN" }, false)).toBe("none");
+  });
+
+  it("says a machine below the security floor has a security update, until its run is in flight", () => {
+    const security = { ...OUT_OF_DATE_UPDATE, current_version: "minds-v0.9.0-rc.1", supported_version: "minds-v0.9.0", availability: "SECURITY_UPDATE" as const };
+    expect(standingUpdateNotice(security, false)).toBe("security-update");
+    expect(standingUpdateNotice(security, true)).toBe("none");
+    expect(isUpdateDispatchable(security)).toBe(true);
   });
 
   it("keeps saying a machine needs recreating: no run can silence a standing fact about it", () => {
@@ -390,6 +400,14 @@ describe("updateBadgeFor", () => {
   it("badges a machine below the in-place cutoff as needing recreation, not as an update offer", () => {
     const badge = updateBadgeFor({ ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION", is_scheduled: true }, false);
     expect(badge).toMatchObject({ state: "needs-recreation", tone: "warn", label: "Recreate to update" });
+  });
+
+  it("badges a security update more strongly than an ordinary offer, and an armed one as scheduled", () => {
+    const security = { ...OUT_OF_DATE_UPDATE, availability: "SECURITY_UPDATE" as const };
+    expect(updateBadgeFor(security, false)).toMatchObject({ state: "security-update", tone: "error" });
+    expect(updateBadgeFor(OUT_OF_DATE_UPDATE, false)?.tone).toBe("warn");
+    expect(updateBadgeFor({ ...security, is_scheduled: true }, false)?.state).toBe("scheduled");
+    expect(updateBadgeFor({ ...security, activity: "RUNNING" }, true)?.state).toBe("updating");
   });
 
   it("distinguishes an armed schedule from a standing offer", () => {
@@ -579,6 +597,16 @@ describe("auto-update's quiet surfaces", () => {
     expect(standingUpdateNotice(tooOld, false, true)).toBe("needs-recreation");
     const withNote = { ...OUT_OF_DATE_UPDATE, availability: "UP_TO_DATE" as const, verdict: "UPDATED_WITH_REBUILD_ITEMS" as const };
     expect(updateBadgeFor(withNote, false, true)?.state).toBe("needs-attention");
+  });
+
+  it("treats a security update as auto-update's to schedule, unless it cannot", () => {
+    const security = { ...OUT_OF_DATE_UPDATE, availability: "SECURITY_UPDATE" as const, is_workspace_readable: true };
+    expect(updateBadgeFor(security, false, true)).toBeNull();
+    expect(standingUpdateNotice(security, false, true)).toBe("none");
+    const unarmable = { ...security, needs_sign_in: true };
+    expect(updateBadgeFor(unarmable, false, true)?.state).toBe("needs-sign-in");
+    expect(updateBadgeFor(security, false, false)).toMatchObject({ state: "security-update", tone: "error" });
+    expect(standingUpdateNotice(security, false, false)).toBe("security-update");
   });
 
   it("keeps a failed run visible under auto-update", () => {
