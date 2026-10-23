@@ -376,17 +376,7 @@ class LatchkeyAutoRegister(MutableModel):
         :meth:`stop` and with the group's shutdown.
         """
         deadline = time.monotonic() + self.machine_watch_seconds
-        while True:
-            self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
-            # Every way the watch ends is decided in the lock hold that leaves the watched set, and before it
-            # schedules anything: a worker that re-holds the host from here on finds it unwatched and starts a new
-            # watch, instead of relying on this one, which is about to exit.
-            with self._push_lock:
-                agent_id = self._hosts_awaiting_machine.get(host_id)
-                is_over = agent_id is None or self._stop_event.is_set() or time.monotonic() >= deadline
-                if is_over:
-                    self._hosts_watched_for_machine.discard(host_id)
-                    return
+        while (agent_id := self._held_agent_after_a_poll(host_id, deadline)) is not None:
             if self._has_machine(host_id):
                 with self._push_lock:
                     self._hosts_watched_for_machine.discard(host_id)
@@ -395,6 +385,25 @@ class LatchkeyAutoRegister(MutableModel):
                 )
                 self._schedule_push(host_id, agent_id)
                 return
+
+    def _held_agent_after_a_poll(self, host_id: HostId, deadline: float) -> AgentId | None:
+        """Wait one poll interval, then the agent ``host_id``'s held push is addressed by while its watch goes on,
+        or ``None`` once the watch is over: the push is no longer held, :meth:`stop` or the group's shutdown
+        happened, or ``deadline`` passed.
+
+        Every way the watch ends is decided in the lock hold that leaves the
+        watched set, and before the watch schedules anything: a worker that
+        re-holds the host from here on finds it unwatched and starts a new
+        watch, instead of relying on this one, which is about to exit.
+        """
+        self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
+        with self._push_lock:
+            agent_id = self._hosts_awaiting_machine.get(host_id)
+            is_over = agent_id is None or self._stop_event.is_set() or time.monotonic() >= deadline
+            if is_over:
+                self._hosts_watched_for_machine.discard(host_id)
+                return None
+            return agent_id
 
     def _claim_pending_push(self, host_id: HostId) -> AgentId | None:
         """Take the change waiting for ``host_id``, releasing the host's worker when there is none."""
