@@ -24,6 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from typing import Final
+from typing import TypedDict
 
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
 from imbue.minds.workspace_programs.update_dispatcher import CreateResult
@@ -106,7 +107,16 @@ def _arg(context: ProgramContext, flag: str, default: str = "") -> str:
     return default
 
 
-def _app_fields(context: ProgramContext) -> dict[str, object]:
+class _AppFields(TypedDict):
+    """The schedule fields the app owns."""
+
+    ceiling: str
+    window_start_minute_utc: int
+    window_length_minutes: int
+    is_backup_configured: bool
+
+
+def _app_fields(context: ProgramContext) -> _AppFields:
     """The schedule fields the app owns, from this run's arguments."""
     return {
         "ceiling": _arg(context, "--ceiling"),
@@ -146,6 +156,7 @@ def mode_arm(context: ProgramContext) -> None:
         return
     existing = read_json_object(SCHEDULE_FILE_PATH) or {}
     app_fields = _app_fields(context)
+    override_ref = _arg(context, "--override")
     schedule: dict[str, object] = {
         "schema": UPDATE_PROGRAM_SCHEMA,
         "armed_at": context["now"],
@@ -157,18 +168,18 @@ def mode_arm(context: ProgramContext) -> None:
         "last_skip_reason": "",
         "last_skip_at": None,
         **app_fields,
-        "override_ref": _arg(context, "--override"),
+        "override_ref": override_ref,
         "is_auto_armed": _arg(context, "--auto-armed", "0") == "1",
     }
     write_json_atomically(SCHEDULE_FILE_PATH, schedule)
-    start_minute_utc = int(_arg(context, "--window-start-minute-utc"))
+    start_minute_utc = app_fields["window_start_minute_utc"]
     write_log_line(
         "armed a schedule (%d minutes from %02d:%02d UTC, target %s)"
         % (
-            int(_arg(context, "--window-length-minutes")),
+            app_fields["window_length_minutes"],
             start_minute_utc // 60,
             start_minute_utc % 60,
-            schedule["override_ref"] or schedule["ceiling"],
+            override_ref or app_fields["ceiling"],
         )
     )
     emit_update_answer({**create_result(OUTCOME_ARMED), "mode": "arm", "schedule": schedule})
