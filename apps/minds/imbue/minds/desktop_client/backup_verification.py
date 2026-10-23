@@ -29,6 +29,7 @@ import os
 from datetime import datetime
 from enum import auto
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -52,13 +53,11 @@ from imbue.minds.desktop_client.backup_verification_store import is_backup_verif
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.workspace_programs import backup_check
+from imbue.minds.workspace_programs.backup_protocol import BackupCodeState
+from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_MATCHES
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_NEWER
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_OUTDATED
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_UNVERIFIABLE
-from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_RUNNING
-from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_UNKNOWN
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_code_state
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_service_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -211,23 +210,29 @@ def classify_check_payload(
     problems: list[BackupServiceProblem] = []
     details: list[str] = []
 
-    code_state = str(payload.get("code_state", CODE_STATE_UNVERIFIABLE))
-    if code_state == CODE_STATE_OUTDATED:
-        problems.append(BackupServiceProblem.CODE_OUTDATED)
-    elif code_state in (CODE_STATE_MATCHES, CODE_STATE_NEWER):
-        pass
-    else:
-        problems.append(BackupServiceProblem.UNVERIFIABLE)
-        code_detail = str(payload.get("code_detail", ""))
-        if code_detail:
-            details.append(code_detail)
+    match parse_backup_code_state(payload.get("code_state")):
+        case BackupCodeState.OUTDATED:
+            problems.append(BackupServiceProblem.CODE_OUTDATED)
+        case BackupCodeState.MATCHES | BackupCodeState.NEWER:
+            pass
+        case BackupCodeState.UNVERIFIABLE:
+            problems.append(BackupServiceProblem.UNVERIFIABLE)
+            code_detail = str(payload.get("code_detail", ""))
+            if code_detail:
+                details.append(code_detail)
+        case _ as unreachable:
+            assert_never(unreachable)
 
-    service_state = str(payload.get("service_state", SERVICE_STATE_UNKNOWN))
-    if service_state != SERVICE_STATE_RUNNING:
-        problems.append(BackupServiceProblem.SERVICE_NOT_RUNNING)
-        service_detail = str(payload.get("service_detail", ""))
-        if service_detail:
-            details.append(service_detail)
+    match parse_backup_service_state(payload.get("service_state")):
+        case BackupServiceState.RUNNING:
+            pass
+        case BackupServiceState.NOT_RUNNING | BackupServiceState.UNKNOWN:
+            problems.append(BackupServiceProblem.SERVICE_NOT_RUNNING)
+            service_detail = str(payload.get("service_detail", ""))
+            if service_detail:
+                details.append(service_detail)
+        case _ as unreachable:
+            assert_never(unreachable)
 
     env_payload = payload.get("env")
     env_info: dict[str, object] = (

@@ -18,7 +18,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import RatchetRuleInfo
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
 from imbue.imbue_common.ratchet_testing.core import check_regex_ratchet
-from imbue.minds.desktop_client.workspace_program_command import WORKSPACE_PROGRAMS_PACKAGE
+from imbue.minds import workspace_programs
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -110,6 +110,7 @@ def test_prevent_host_lifecycle_argv_outside_the_shared_action() -> None:
 # modules of its own package beside it (desktop_client/workspace_program_command.py
 # ships them), so an import of anything else works here and crashes in the workspace.
 _WORKSPACE_PROGRAMS_DIR: Final[Path] = _DIR / "imbue" / "minds" / "workspace_programs"
+_WORKSPACE_PROGRAMS_PACKAGE: Final[str] = workspace_programs.__name__
 
 
 def _imported_module_names(path: Path) -> set[str]:
@@ -131,8 +132,8 @@ def test_workspace_programs_import_only_the_standard_library_and_their_own_packa
     violations: list[str] = []
     for path in program_files:
         for module_name in sorted(_imported_module_names(path)):
-            is_own_package = module_name == WORKSPACE_PROGRAMS_PACKAGE or module_name.startswith(
-                f"{WORKSPACE_PROGRAMS_PACKAGE}."
+            is_own_package = module_name == _WORKSPACE_PROGRAMS_PACKAGE or module_name.startswith(
+                f"{_WORKSPACE_PROGRAMS_PACKAGE}."
             )
             if module_name.split(".")[0] not in sys.stdlib_module_names and not is_own_package:
                 violations.append(f"{path.name}: {module_name}")

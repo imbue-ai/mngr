@@ -1,3 +1,5 @@
+from enum import StrEnum
+from enum import auto
 from typing import Final
 
 # Each backup program's answer line starts with its marker (see ``program_support.emit_marker_json``).
@@ -6,21 +8,55 @@ GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
 RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
 
-# The ``status`` a mutating program (update, restore) answers with.
-STATUS_OK: Final[str] = "ok"
-STATUS_BLOCKED: Final[str] = "blocked"
-STATUS_FAILED: Final[str] = "failed"
 
-# The check's ``code_state``: the installed backup code against the minimum release.
-CODE_STATE_MATCHES: Final[str] = "matches"
-CODE_STATE_NEWER: Final[str] = "newer"
-CODE_STATE_OUTDATED: Final[str] = "outdated"
-CODE_STATE_UNVERIFIABLE: Final[str] = "unverifiable"
+class BackupProgramStatus(StrEnum):
+    """The ``status`` a mutating backup program (update, restore) answers with."""
 
-# The check's ``service_state``: the host-backup program as supervisord reports it.
-SERVICE_STATE_RUNNING: Final[str] = "running"
-SERVICE_STATE_NOT_RUNNING: Final[str] = "not_running"
-SERVICE_STATE_UNKNOWN: Final[str] = "unknown"
+    OK = auto()
+    BLOCKED = auto()
+    FAILED = auto()
+
+
+class BackupCodeState(StrEnum):
+    """The check's ``code_state``: the installed backup code against the minimum release."""
+
+    MATCHES = auto()
+    NEWER = auto()
+    OUTDATED = auto()
+    UNVERIFIABLE = auto()
+
+
+class BackupServiceState(StrEnum):
+    """The check's ``service_state``: the host-backup program as supervisord reports it."""
+
+    RUNNING = auto()
+    NOT_RUNNING = auto()
+    UNKNOWN = auto()
+
+
+def parse_backup_program_status(raw: object) -> BackupProgramStatus:
+    """The status an answer carries; a missing or unknown one reads as FAILED."""
+    try:
+        return BackupProgramStatus(raw)
+    except ValueError:
+        return BackupProgramStatus.FAILED
+
+
+def parse_backup_code_state(raw: object) -> BackupCodeState:
+    """The code state a check answer carries; a missing or unknown one reads as UNVERIFIABLE."""
+    try:
+        return BackupCodeState(raw)
+    except ValueError:
+        return BackupCodeState.UNVERIFIABLE
+
+
+def parse_backup_service_state(raw: object) -> BackupServiceState:
+    """The service state a check answer carries; a missing or unknown one reads as UNKNOWN."""
+    try:
+        return BackupServiceState(raw)
+    except ValueError:
+        return BackupServiceState.UNKNOWN
+
 
 # The one repository backup-service code is fetched from. Imbue Studio owns the
 # ``official`` remote on every workspace: the programs create it (or repoint it)

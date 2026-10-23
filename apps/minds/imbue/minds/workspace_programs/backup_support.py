@@ -8,15 +8,9 @@ from collections.abc import Sequence
 from typing import Final
 from typing import TypedDict
 
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
+from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
 from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
-from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
-from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_NOT_RUNNING
-from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_RUNNING
-from imbue.minds.workspace_programs.backup_protocol import SERVICE_STATE_UNKNOWN
-from imbue.minds.workspace_programs.backup_protocol import STATUS_BLOCKED
-from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
-from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
-from imbue.minds.workspace_programs.program_support import argv_value
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import as_json_object_list
 from imbue.minds.workspace_programs.program_support import poll_until
@@ -130,31 +124,32 @@ def backup_code_path_in_tree(ref: str) -> str:
     return ""
 
 
-def _ensure_official_remote() -> str:
+def _ensure_official_remote(official_url: str) -> str:
     """Idempotently point the `official` remote at the official template URL; "" or an error detail.
 
     Imbue Studio owns this remote name: a missing remote is added and a remote
     pointing anywhere else is repointed, so the fetch below always talks to
     the official repository regardless of what the workspace was created from.
     """
-    url = argv_value("--official-url", OFFICIAL_REMOTE_URL)
     current = run_command(["git", "remote", "get-url", OFFICIAL_REMOTE_NAME], SHORT_COMMAND_TIMEOUT_SECONDS)
     if current.returncode == 0:
-        if current.stdout.strip() == url:
+        if current.stdout.strip() == official_url:
             return ""
-        repointed = run_command(["git", "remote", "set-url", OFFICIAL_REMOTE_NAME, url], SHORT_COMMAND_TIMEOUT_SECONDS)
+        repointed = run_command(
+            ["git", "remote", "set-url", OFFICIAL_REMOTE_NAME, official_url], SHORT_COMMAND_TIMEOUT_SECONDS
+        )
         if repointed.returncode != 0:
             return "cannot repoint official remote: %s" % repointed.stderr.strip()
         return ""
-    added = run_command(["git", "remote", "add", OFFICIAL_REMOTE_NAME, url], SHORT_COMMAND_TIMEOUT_SECONDS)
+    added = run_command(["git", "remote", "add", OFFICIAL_REMOTE_NAME, official_url], SHORT_COMMAND_TIMEOUT_SECONDS)
     if added.returncode != 0:
         return "cannot add official remote: %s" % added.stderr.strip()
     return ""
 
 
-def fetch_official_tags() -> str:
-    """Fetch every tag from the official remote; "" or an error detail."""
-    remote_error = _ensure_official_remote()
+def fetch_official_tags(official_url: str) -> str:
+    """Fetch every tag from the official remote, pointed at ``official_url`` first; "" or an error detail."""
+    remote_error = _ensure_official_remote(official_url)
     if remote_error:
         return remote_error
     fetched = run_command(["git", "fetch", OFFICIAL_REMOTE_NAME, "--tags", "--quiet"], _TAG_FETCH_TIMEOUT_SECONDS)
@@ -177,15 +172,15 @@ def tag_sort_key(tag: str) -> list[int]:
     return key
 
 
-def service_state() -> tuple[str, str]:
+def service_state() -> tuple[BackupServiceState, str]:
     """``(state, detail)`` of the host-backup program: running | not_running | unknown."""
     status = run_command(["supervisorctl", "status", "host-backup"], SHORT_COMMAND_TIMEOUT_SECONDS)
     text = (status.stdout or "").strip()
     if text and "RUNNING" in text.split():
-        return SERVICE_STATE_RUNNING, text
+        return BackupServiceState.RUNNING, text
     if text:
-        return SERVICE_STATE_NOT_RUNNING, text
-    return SERVICE_STATE_UNKNOWN, (status.stderr or "supervisorctl produced no output").strip()
+        return BackupServiceState.NOT_RUNNING, text
+    return BackupServiceState.UNKNOWN, (status.stderr or "supervisorctl produced no output").strip()
 
 
 def _read_background_chats() -> list[dict[str, object]]:
@@ -344,7 +339,7 @@ def is_backup_tick_in_flight(agent_id: str) -> bool:
     # be alive, and any started-but-unfinished journal entry is an orphan from
     # a killed tick (e.g. a restore's `stop all`), not live work to wait for.
     state, _ = service_state()
-    if state != SERVICE_STATE_RUNNING:
+    if state != BackupServiceState.RUNNING:
         return False
     events_path = _backup_events_path(agent_id)
     if not events_path or not os.path.isfile(events_path):
@@ -394,7 +389,7 @@ def _stop_running_chats(gate: RunningChatsGate) -> str:
 
 def gate_chats_and_wait_for_tick(
     agent_id: str, is_stop_chats: bool, is_chat_gate_skipped: bool
-) -> tuple[str, dict[str, object], str]:
+) -> tuple[BackupProgramStatus, dict[str, object], str]:
     """Gate a mutating program: no running or busy chats (optionally stop them), no in-flight tick.
 
     Returns (status, extra, detail) with status in ok | blocked | failed;
@@ -406,16 +401,16 @@ def gate_chats_and_wait_for_tick(
     if not is_chat_gate_skipped:
         gate, gate_error = list_running_chats()
         if gate is None:
-            return STATUS_FAILED, {}, "cannot determine running chats: %s" % gate_error
+            return BackupProgramStatus.FAILED, {}, "cannot determine running chats: %s" % gate_error
         if gate["chats"] and is_stop_chats:
             stop_error = _stop_running_chats(gate)
             if stop_error:
-                return STATUS_FAILED, {}, stop_error
+                return BackupProgramStatus.FAILED, {}, stop_error
             gate, gate_error = list_running_chats()
             if gate is None:
-                return STATUS_FAILED, {}, "cannot re-check running chats: %s" % gate_error
+                return BackupProgramStatus.FAILED, {}, "cannot re-check running chats: %s" % gate_error
         if gate["chats"]:
-            return STATUS_BLOCKED, {"running_chats": gate["chats"]}, "chat agents are running"
+            return BackupProgramStatus.BLOCKED, {"running_chats": gate["chats"]}, "chat agents are running"
     is_tick_still_in_flight = poll_until(
         lambda: is_backup_tick_in_flight(agent_id),
         lambda is_in_flight: not is_in_flight,
@@ -423,5 +418,5 @@ def gate_chats_and_wait_for_tick(
         _TICK_POLL_SECONDS,
     )
     if is_tick_still_in_flight:
-        return STATUS_FAILED, {}, "timed out waiting for the in-flight backup tick to finish"
-    return STATUS_OK, {}, ""
+        return BackupProgramStatus.FAILED, {}, "timed out waiting for the in-flight backup tick to finish"
+    return BackupProgramStatus.OK, {}, ""

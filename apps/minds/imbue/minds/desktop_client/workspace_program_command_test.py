@@ -40,7 +40,6 @@ def test_archive_bytes_depend_only_on_the_sources() -> None:
 
     with zipfile.ZipFile(io.BytesIO(archive)) as opened:
         assert {entry.date_time for entry in opened.infolist()} == {(1980, 1, 1, 0, 0, 0)}
-    assert build_workspace_program_archive(backup_check) == archive
 
 
 def test_command_runs_the_program_from_a_temporary_file_with_its_arguments_and_removes_the_file(

@@ -27,14 +27,16 @@ import json
 import shlex
 import zipfile
 from collections.abc import Sequence
+from functools import cache
 from importlib import resources
 from types import ModuleType
 from typing import Final
 
 from imbue.imbue_common.pure import pure
+from imbue.minds import workspace_programs
 from imbue.minds.errors import MindError
 
-WORKSPACE_PROGRAMS_PACKAGE: Final[str] = "imbue.minds.workspace_programs"
+WORKSPACE_PROGRAMS_PACKAGE: Final[str] = workspace_programs.__name__
 
 _ARCHIVE_MAIN_PATH: Final[str] = "__main__.py"
 # Fixed entry metadata, so an archive's bytes depend on its sources alone.
@@ -98,7 +100,13 @@ def _package_init_archive_paths() -> tuple[str, ...]:
 
 def build_workspace_program_archive(program: ModuleType) -> bytes:
     """``program`` as a self-contained zip application, runnable as ``python3 <archive>``."""
-    main_source = _read_package_module_source(program.__name__)
+    return _build_archive_of_module(program.__name__)
+
+
+@cache
+def _build_archive_of_module(module_name: str) -> bytes:
+    """The archive of the program module ``module_name``, built once per process: its sources cannot change."""
+    main_source = _read_package_module_source(module_name)
     text_by_archive_path = {
         **{path: "" for path in _package_init_archive_paths()},
         **_dependency_sources_by_archive_path(main_source),

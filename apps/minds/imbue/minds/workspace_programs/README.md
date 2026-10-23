@@ -16,8 +16,12 @@ the rest of the app.
 - **No work at import time.** A module only defines constants and functions; a
   program does its work in `main()`, behind `if __name__ == "__main__":`. The app
   imports these modules too (for their constants), and tests can import them.
-- **Parameters through argv.** Values the app knows at dispatch time (a tag, an
-  agent id, a setting) travel as command-line flags.
+- **Parameters through argv, read once.** Values the app knows at dispatch time
+  (a tag, an agent id, a setting) travel as command-line flags. A program's
+  entry point is `main(argv)`, called as `main(sys.argv[1:])`; it reads every
+  flag (`program_support.argv_value`, `has_argv_flag`) and passes the values
+  down as arguments, so no helper reads the process's argv and a test can call
+  `main` with the arguments it wants.
 - **One answer.** A program answers on one marker-prefixed JSON line
   (`program_support.emit_marker_json`); the app finds it with
   `extract_marker_json` however noisy the rest of the output is.
@@ -47,9 +51,12 @@ A program imports what it shares as an ordinary module of this package
 (`from imbue.minds.workspace_programs.backup_support import service_state`). A
 constant the app also needs goes in a module here, and the app imports it from
 there: the program and the app read one definition, and the type checker sees
-both reads. Enumerated values a program reports (an outcome, a state) belong
-here as plain string constants, which the program answers with and the app
-compares against.
+both reads. Enumerated values a program reports (an outcome, a state) are a
+stdlib `StrEnum` here, with a parse function beside it that maps a missing or
+unrecognized value to the safe member (`parse_backup_program_status` reads
+anything else as `FAILED`). The program answers with a member's value; the app
+parses the answer and matches on the enum with `assert_never`, so adding a
+member is a type error wherever it is not handled.
 
 ## How a program ships
 

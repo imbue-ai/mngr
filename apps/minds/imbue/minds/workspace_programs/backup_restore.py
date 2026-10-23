@@ -50,10 +50,10 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Final
 from typing import NoReturn
+from typing import TypedDict
 
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
-from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.backup_support import RESTIC_ENV_PATH
 from imbue.minds.workspace_programs.backup_support import SERVICE_VERIFY_TIMEOUT_SECONDS
 from imbue.minds.workspace_programs.backup_support import SHORT_COMMAND_TIMEOUT_SECONDS
@@ -150,12 +150,17 @@ _HEALTHY_SERVICE_STATES: Final[tuple[str, ...]] = ("RUNNING", "EXITED")
 _RESTORE_CRITICAL_SERVICES: Final[tuple[str, ...]] = ("system_interface",)
 _SERVICE_SETTLE_POLL_SECONDS: Final[float] = 2.0
 
-# Cleanup obligations of the current run. Every side effect the restore takes
-# registers its cleanup here, and _finish pays the debts (best-effort) before
-# reporting -- so no individual failure path can forget to bring the services
-# back. `is_resume_owed` flips on right after `stop all` and off once the
-# success path has brought the services back and is verifying them.
-_DEBTS: Final[dict[str, bool]] = {"is_resume_owed": False}
+
+class _RestoreObligations(TypedDict):
+    """The cleanup one restore run owes, which _finish pays (best-effort) before reporting.
+
+    Every side effect the restore takes registers its cleanup here, so no
+    individual failure path can forget to bring the services back.
+    """
+
+    # On right after `stop all`, off once the success path has brought the
+    # services back and is verifying them.
+    is_resume_owed: bool
 
 
 def _all_service_states() -> dict[str, str]:
@@ -239,6 +244,13 @@ def _wait_for_service_recovery(
     )
 
 
+# _resume_services as one shell command, which the app runs as its backstop when
+# this program dies without reporting. Keep the two in step.
+RESUME_SERVICES_COMMAND: Final[str] = (
+    "if supervisorctl reread; then supervisorctl reload; else supervisorctl restart all; fi"
+)
+
+
 def _resume_services(result: dict[str, object]) -> tuple[str, subprocess.CompletedProcess[str]]:
     # `reload` brings the services back as a boot would, from the config the
     # tree now holds: programs the restored tree lacks are dropped, ones it adds
@@ -258,11 +270,13 @@ def _resume_services(result: dict[str, object]) -> tuple[str, subprocess.Complet
     return command, resumed
 
 
-def _finish(result: dict[str, object], status: str, detail: str) -> NoReturn:
-    if _DEBTS["is_resume_owed"]:
+def _finish(
+    result: dict[str, object], obligations: _RestoreObligations, status: BackupProgramStatus, detail: str
+) -> NoReturn:
+    if obligations["is_resume_owed"]:
         _resume_services(result)
-        _DEBTS["is_resume_owed"] = False
-    result["status"] = status
+        obligations["is_resume_owed"] = False
+    result["status"] = status.value
     if detail:
         result["detail"] = detail
     emit_marker_json(RESTORE_RESULT_MARKER, result)
@@ -546,17 +560,18 @@ def _resolve_backup_root() -> str:
     return mngr_host_dir
 
 
-def _service_verify_timeout_seconds() -> float:
-    # Test hook: production dispatch never passes this; unit tests shrink the
-    # post-restart settle wait so failure paths stay fast.
+def _service_verify_timeout_seconds(argv: Sequence[str]) -> float:
+    # Only the program's tests pass this: the app always waits the full settle
+    # time, and the tests shorten it so their failure paths stay fast.
     try:
-        return float(argv_value("--service-verify-timeout-seconds", str(SERVICE_VERIFY_TIMEOUT_SECONDS)))
+        return float(argv_value(argv, "--service-verify-timeout-seconds", str(SERVICE_VERIFY_TIMEOUT_SECONDS)))
     except ValueError:
         return SERVICE_VERIFY_TIMEOUT_SECONDS
 
 
 def _restore_snapshot_in_place(
     result: dict[str, object],
+    obligations: _RestoreObligations,
     snapshot_id: str,
     snapshot_subpath: str,
     backup_root: str,
@@ -594,24 +609,30 @@ def _restore_snapshot_in_place(
             "the in-place restore failed (%s); the workspace may be mixed between versions -- "
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
-        _finish(result, STATUS_FAILED, detail)
+        _finish(result, obligations, BackupProgramStatus.FAILED, detail)
     # Sanity-check the restored tree by its repo checkout: workspace/ in the
     # current layout, code/ in legacy snapshots.
     if not os.path.isdir(os.path.join(backup_root, "workspace")) and not os.path.isdir(
         os.path.join(backup_root, "code")
     ):
         _finish(
-            result, STATUS_FAILED, "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root
+            result,
+            obligations,
+            BackupProgramStatus.FAILED,
+            "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root,
         )
     result["restored"] = True
 
 
 def _bring_services_back_and_verify(
-    result: dict[str, object], services_up_before: set[str], service_verify_timeout: float
+    result: dict[str, object],
+    obligations: _RestoreObligations,
+    services_up_before: set[str],
+    service_verify_timeout: float,
 ) -> NoReturn:
     """Resume every service from the restored tree's config and judge the restore by the ones that came back.
 
-    This pays the resume debt directly (and clears it first, so a failed
+    This pays the resume obligation directly (and clears it first, so a failed
     resume is not blindly retried by _finish) because the success path must
     also verify the services came back. The re-run env-converge one-shot
     converges the (untouched) rootfs back to the restored environment record
@@ -621,7 +642,7 @@ def _bring_services_back_and_verify(
     immediately, and only the restore-critical set decides the verdict.
     """
     write_progress_line("Restarting the workspace services...")
-    _DEBTS["is_resume_owed"] = False
+    obligations["is_resume_owed"] = False
     resume_command, resumed = _resume_services(result)
     post_states, critical_down, other_down = _wait_for_service_recovery(service_verify_timeout, services_up_before)
     if critical_down:
@@ -630,23 +651,23 @@ def _bring_services_back_and_verify(
             ", ".join("%s (%s)" % (name, post_states.get(name) or "absent") for name in critical_down),
             ("; %s said: %s" % (resume_command, resume_tail)) if resumed.returncode != 0 else "",
         )
-        _finish(result, STATUS_FAILED, detail)
+        _finish(result, obligations, BackupProgramStatus.FAILED, detail)
     if other_down:
         result["services_down"] = other_down
-    _finish(result, STATUS_OK, "")
+    _finish(result, obligations, BackupProgramStatus.OK, "")
 
 
-def main() -> None:
-    agent_id = argv_value("--agent-id", "")
-    snapshot_id = argv_value("--snapshot-id", "")
+def main(argv: Sequence[str]) -> None:
+    agent_id = argv_value(argv, "--agent-id", "")
+    snapshot_id = argv_value(argv, "--snapshot-id", "")
     # Resolved by Imbue Studio from its own view of the repository and passed in, so
     # this program never queries restic for snapshot metadata.
-    snapshot_subpath = argv_value("--snapshot-subpath", "")
-    source_time = argv_value("--source-time", "")
-    is_stop_chats = has_argv_flag("--stop-chats")
-    is_chat_gate_skipped = has_argv_flag("--skip-chat-gate")
-    is_safety_snapshot_skipped = has_argv_flag("--skip-safety-snapshot")
-    service_verify_timeout = _service_verify_timeout_seconds()
+    snapshot_subpath = argv_value(argv, "--snapshot-subpath", "")
+    source_time = argv_value(argv, "--source-time", "")
+    is_stop_chats = has_argv_flag(argv, "--stop-chats")
+    is_chat_gate_skipped = has_argv_flag(argv, "--skip-chat-gate")
+    is_safety_snapshot_skipped = has_argv_flag(argv, "--skip-safety-snapshot")
+    service_verify_timeout = _service_verify_timeout_seconds(argv)
     result: dict[str, object] = {
         "schema": 2,
         "safety_snapshot_taken": False,
@@ -656,10 +677,11 @@ def main() -> None:
         "restored_snapshot_taken": False,
         "restic_downloaded": False,
     }
+    obligations: _RestoreObligations = {"is_resume_owed": False}
     if not snapshot_id:
-        _finish(result, STATUS_FAILED, "no --snapshot-id provided")
+        _finish(result, obligations, BackupProgramStatus.FAILED, "no --snapshot-id provided")
     if not snapshot_subpath:
-        _finish(result, STATUS_FAILED, "no --snapshot-subpath provided")
+        _finish(result, obligations, BackupProgramStatus.FAILED, "no --snapshot-subpath provided")
 
     # Gate before anything mutates. The chat half needs the current machine
     # code (`uv run mngr`); a forced restore skips only that half -- the tick
@@ -671,8 +693,8 @@ def main() -> None:
         agent_id, is_stop_chats, is_chat_gate_skipped=is_chat_gate_skipped
     )
     result.update(gate_extra)
-    if gate_status != STATUS_OK:
-        _finish(result, gate_status, gate_detail)
+    if gate_status != BackupProgramStatus.OK:
+        _finish(result, obligations, gate_status, gate_detail)
 
     # Read the current credentials, which the restore must keep working.
     code_dir = os.path.realpath(os.getcwd())
@@ -682,17 +704,17 @@ def main() -> None:
         with open(env_path, "rb") as env_file:
             env_content = env_file.read()
     except OSError as e:
-        _finish(result, STATUS_FAILED, "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
+        _finish(result, obligations, BackupProgramStatus.FAILED, "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
     env_map = _parse_env_lines(env_content.decode("utf-8", "replace"))
     if not env_map.get("RESTIC_REPOSITORY"):
-        _finish(result, STATUS_FAILED, "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
+        _finish(result, obligations, BackupProgramStatus.FAILED, "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
 
     # Resolve a usable restic (downloading the pinned build if the installed
     # one is too old) and the snapshot excludes before anything is stopped or
     # mutated, so these failures are cheap and leave the machine untouched.
     restic_binary, restic_error = _resolve_restic_binary(backup_root, result)
     if not restic_binary:
-        _finish(result, STATUS_FAILED, restic_error)
+        _finish(result, obligations, BackupProgramStatus.FAILED, restic_error)
     excludes = _read_snapshot_excludes(code_dir)
 
     # Read before anything is stopped: the verdict is relative to this.
@@ -704,10 +726,10 @@ def main() -> None:
     # channel this program runs through is not supervisord-managed, so it
     # survives. Best-effort: already-stopped (or missing) services must not
     # abort the restore. From here on, every exit owes a resume -- registered
-    # as a debt that _finish itself pays, so no failure path can forget it.
+    # as an obligation that _finish itself pays, so no failure path can forget it.
     write_progress_line("Stopping the workspace services...")
     run_command(["supervisorctl", "stop", "all"], _ALL_SERVICES_COMMAND_TIMEOUT_SECONDS)
-    _DEBTS["is_resume_owed"] = True
+    obligations["is_resume_owed"] = True
 
     # Safety snapshot of the current state, so this restore is itself
     # undoable. Skipped only on an explicit user re-dispatch after this very
@@ -717,10 +739,15 @@ def main() -> None:
         backup_args = _snapshot_backup_args(backup_root, ["pre-restore"], excludes)
         backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
         if backed_up != 0:
-            _finish(result, STATUS_FAILED, "pre-restore safety snapshot failed: %s" % backup_output[-500:])
+            _finish(
+                result,
+                obligations,
+                BackupProgramStatus.FAILED,
+                "pre-restore safety snapshot failed: %s" % backup_output[-500:],
+            )
         result["safety_snapshot_taken"] = True
 
-    _restore_snapshot_in_place(result, snapshot_id, snapshot_subpath, backup_root, env_map, restic_binary)
+    _restore_snapshot_in_place(result, obligations, snapshot_id, snapshot_subpath, backup_root, env_map, restic_binary)
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
     # none); the current credentials must keep working, so write them back.
@@ -729,7 +756,12 @@ def main() -> None:
         with open(env_path, "wb") as env_file:
             env_file.write(env_content)
     except OSError as e:
-        _finish(result, STATUS_FAILED, "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e))
+        _finish(
+            result,
+            obligations,
+            BackupProgramStatus.FAILED,
+            "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e),
+        )
 
     # Append a snapshot of the restored state, tagged with its lineage, so the
     # backup timeline shows the restored version as a new entry ("Restored
@@ -755,9 +787,14 @@ def main() -> None:
     write_progress_line("Reinstalling dependencies (uv sync)...")
     synced = run_command(["uv", "sync", "--all-packages"], _UV_SYNC_TIMEOUT_SECONDS, cwd=code_dir)
     if synced.returncode != 0:
-        _finish(result, STATUS_FAILED, "restored, but uv sync failed: %s" % output_tail(synced, 800))
+        _finish(
+            result,
+            obligations,
+            BackupProgramStatus.FAILED,
+            "restored, but uv sync failed: %s" % output_tail(synced, 800),
+        )
 
-    _bring_services_back_and_verify(result, services_up_before, service_verify_timeout)
+    _bring_services_back_and_verify(result, obligations, services_up_before, service_verify_timeout)
 
 
 # No catch-all here: an unexpected crash prints its traceback to stderr and
@@ -766,4 +803,4 @@ def main() -> None:
 # (the same backstop that covers an exec timeout, which no in-program handler
 # could survive anyway).
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

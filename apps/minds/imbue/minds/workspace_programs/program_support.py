@@ -27,17 +27,16 @@ def run_command(
         )
 
 
-def argv_value(flag: str, default: str) -> str:
-    """The value following ``flag`` on this program's command line, or ``default`` when it is absent."""
-    argv = sys.argv[1:]
+def argv_value(argv: Sequence[str], flag: str, default: str) -> str:
+    """The value following ``flag`` in a program's arguments, or ``default`` when it is absent."""
     for idx, token in enumerate(argv):
         if token == flag and idx + 1 < len(argv):
             return argv[idx + 1]
     return default
 
 
-def has_argv_flag(flag: str) -> bool:
-    return flag in sys.argv[1:]
+def has_argv_flag(argv: Sequence[str], flag: str) -> bool:
+    return flag in argv
 
 
 def poll_until(

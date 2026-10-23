@@ -12,12 +12,12 @@ configured envs). Reads ``--minimum-tag``; answers on one
 import base64
 import hashlib
 import os
+import sys
+from collections.abc import Sequence
 
+from imbue.minds.workspace_programs.backup_protocol import BackupCodeState
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_MATCHES
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_NEWER
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_OUTDATED
-from imbue.minds.workspace_programs.backup_protocol import CODE_STATE_UNVERIFIABLE
+from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
 from imbue.minds.workspace_programs.backup_support import RESTIC_ENV_PATH
 from imbue.minds.workspace_programs.backup_support import SHORT_COMMAND_TIMEOUT_SECONDS
 from imbue.minds.workspace_programs.backup_support import backup_code_path_in_tree
@@ -32,13 +32,13 @@ from imbue.minds.workspace_programs.program_support import emit_marker_json
 from imbue.minds.workspace_programs.program_support import run_command
 
 
-def _resolve_minimum_tag(minimum_tag: str) -> tuple[str, str]:
+def _resolve_minimum_tag(minimum_tag: str, official_url: str) -> tuple[str, str]:
     """``(tag, error)``. The minimum tag has no fallback: found or unverifiable."""
     if not minimum_tag:
         return "", "no minimum tag provided"
     if tag_exists(minimum_tag):
         return minimum_tag, ""
-    fetch_error = fetch_official_tags()
+    fetch_error = fetch_official_tags(official_url)
     if tag_exists(minimum_tag):
         return minimum_tag, ""
     return "", fetch_error or ("minimum tag %s not found" % minimum_tag)
@@ -66,22 +66,24 @@ def _is_cross_layout_content_match(minimum_tag: str, tag_path: str, code_path: s
     )
 
 
-def _compare_code_to_tag_content(minimum_tag: str, code_path: str) -> tuple[str, str] | None:
+def _compare_code_to_tag_content(minimum_tag: str, code_path: str) -> tuple[BackupCodeState, str] | None:
     """``(state, detail)`` when comparing content settles it (matches | unverifiable), else None."""
     tag_path = backup_code_path_in_tree(minimum_tag) or code_path
     if tag_path != code_path:
         # The tag lays the code out at a different layout era's path, so a
         # same-path `git diff` can never match.
-        return (CODE_STATE_MATCHES, "") if _is_cross_layout_content_match(minimum_tag, tag_path, code_path) else None
+        return (
+            (BackupCodeState.MATCHES, "") if _is_cross_layout_content_match(minimum_tag, tag_path, code_path) else None
+        )
     diffed = run_command(["git", "diff", "--quiet", minimum_tag, "--", code_path], SHORT_COMMAND_TIMEOUT_SECONDS)
     if diffed.returncode == 0:
-        return CODE_STATE_MATCHES, ""
+        return BackupCodeState.MATCHES, ""
     if diffed.returncode != 1:
-        return CODE_STATE_UNVERIFIABLE, "git diff failed: %s" % output_tail(diffed, 500)
+        return BackupCodeState.UNVERIFIABLE, "git diff failed: %s" % output_tail(diffed, 500)
     return None
 
 
-def _compute_code_state(minimum_tag: str, installed_version: str, code_path: str) -> tuple[str, str]:
+def _compute_code_state(minimum_tag: str, installed_version: str, code_path: str) -> tuple[BackupCodeState, str]:
     """``(state, detail)``: matches | newer | outdated | unverifiable.
 
     At-or-above the minimum is fine. Three ways to establish that:
@@ -98,10 +100,10 @@ def _compute_code_state(minimum_tag: str, installed_version: str, code_path: str
         return content_state
     ancestor = run_command(["git", "merge-base", "--is-ancestor", minimum_tag, "HEAD"], SHORT_COMMAND_TIMEOUT_SECONDS)
     if ancestor.returncode == 0:
-        return CODE_STATE_NEWER, ""
+        return BackupCodeState.NEWER, ""
     if installed_version.startswith("minds-v") and tag_sort_key(installed_version) >= tag_sort_key(minimum_tag):
-        return CODE_STATE_NEWER, ""
-    return CODE_STATE_OUTDATED, ""
+        return BackupCodeState.NEWER, ""
+    return BackupCodeState.OUTDATED, ""
 
 
 def _installed_backup_version() -> str:
@@ -157,27 +159,28 @@ def _workspace_uptime_seconds() -> float | None:
         return None
 
 
-def main() -> None:
-    minimum = argv_value("--minimum-tag", "")
+def main(argv: Sequence[str]) -> None:
+    minimum = argv_value(argv, "--minimum-tag", "")
+    official_url = argv_value(argv, "--official-url", OFFICIAL_REMOTE_URL)
     code_path = resolve_workspace_backup_code_path()
     result: dict[str, object] = {"schema": 1}
     result["uptime_seconds"] = _workspace_uptime_seconds()
     installed_version = _installed_backup_version()
     result["installed_version"] = installed_version
-    tag, tag_error = _resolve_minimum_tag(minimum)
+    tag, tag_error = _resolve_minimum_tag(minimum, official_url)
     result["target_tag"] = tag or minimum
     if tag:
         code_state, code_detail = _compute_code_state(tag, installed_version, code_path)
     else:
-        code_state, code_detail = CODE_STATE_UNVERIFIABLE, tag_error
-    result["code_state"] = code_state
+        code_state, code_detail = BackupCodeState.UNVERIFIABLE, tag_error
+    result["code_state"] = code_state.value
     result["code_detail"] = code_detail
     state, state_detail = service_state()
-    result["service_state"] = state
+    result["service_state"] = state.value
     result["service_detail"] = state_detail
     result["env"] = _read_restic_env()
     emit_marker_json(CHECK_RESULT_MARKER, result)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

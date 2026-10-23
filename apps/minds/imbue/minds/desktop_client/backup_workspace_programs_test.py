@@ -32,10 +32,12 @@ from imbue.minds.workspace_programs import backup_apply_update
 from imbue.minds.workspace_programs import backup_check
 from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
 
 
 def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup") -> Path:
@@ -175,6 +177,29 @@ def test_update_and_restore_programs_sync_with_all_packages() -> None:
         source = inspect.getsource(program)
         assert '["uv", "sync", "--all-packages"]' in source
         assert '["uv", "sync"]' not in source
+
+
+@pytest.mark.parametrize("raw_status", [None, "", "paused", 1])
+def test_a_missing_or_malformed_status_reads_as_failed(raw_status: object) -> None:
+    # A missing or malformed status must never read as success.
+    assert parse_backup_program_status(raw_status) == BackupProgramStatus.FAILED
+
+
+def test_a_program_runs_in_process_from_the_arguments_its_main_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Outside any git repository the check cannot resolve the tag and reports it
+    # as given, so the answer shows the arguments reached it; this process's own
+    # argv is pytest's and never does.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+    backup_check.main(["--minimum-tag", "minds-v9.9.9", "--official-url", str(tmp_path / "nowhere")])
+
+    payload = extract_marker_json(capsys.readouterr().out, CHECK_RESULT_MARKER)
+    assert payload is not None
+    assert payload["target_tag"] == "minds-v9.9.9"
+    assert payload["code_state"] == "unverifiable"
 
 
 # The tests below marked flaky time out at the 10s per-test budget while shelling out

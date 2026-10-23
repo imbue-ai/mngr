@@ -31,6 +31,7 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 
 from collections.abc import Callable
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -64,12 +65,12 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.workspace_programs import backup_apply_update
 from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import STATUS_BLOCKED
-from imbue.minds.workspace_programs.backup_protocol import STATUS_FAILED
-from imbue.minds.workspace_programs.backup_protocol import STATUS_OK
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
+from imbue.minds.workspace_programs.backup_restore import RESUME_SERVICES_COMMAND
 from imbue.mngr.primitives import AgentId
 
 # Machine-readable prefix on the operation error when running chats block the
@@ -110,13 +111,7 @@ _APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 3600.0
 # restore) plus its tick wait and a `uv sync`; the ceiling must exceed their
 # sum so the script's structured failure payload always beats the exec timeout.
 _RESTORE_EXEC_TIMEOUT_SECONDS: Final[float] = 9000.0
-# The restore program's ``_resume_services`` as one shell command, for the backstop
-# when the program dies without reporting: ``reload`` when the config parses,
-# since a ``reload`` that cannot parse it takes supervisord down with every service.
-_RESUME_SERVICES_COMMAND: Final[str] = (
-    "if supervisorctl reread; then supervisorctl reload; else supervisorctl restart all; fi"
-)
-# Ceiling for the best-effort _RESUME_SERVICES_COMMAND dispatched when the
+# Ceiling for the best-effort RESUME_SERVICES_COMMAND dispatched when the
 # restore exec dies without reporting; restarting every service can take a
 # couple of minutes on a loaded workspace.
 _SERVICE_RESUME_TIMEOUT_SECONDS: Final[float] = 360.0
@@ -320,16 +315,20 @@ def _apply_update_and_verify(
     if payload is None:
         detail = (apply_result.stderr or apply_result.stdout).strip()[-800:]
         return f"The update script produced no result: {detail}"
-    status = str(payload.get("status", STATUS_FAILED))
-    if status == STATUS_BLOCKED:
-        running_chats = payload.get("running_chats")
-        chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-        return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
-    if status != STATUS_OK:
-        detail = str(payload.get("detail", "unknown failure"))
-        rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
-        stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
-        return f"{detail}{rolled_back_note}{stash_note}"
+    match parse_backup_program_status(payload.get("status")):
+        case BackupProgramStatus.BLOCKED:
+            running_chats = payload.get("running_chats")
+            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+            return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
+        case BackupProgramStatus.FAILED:
+            detail = str(payload.get("detail", "unknown failure"))
+            rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
+            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
+            return f"{detail}{rolled_back_note}{stash_note}"
+        case BackupProgramStatus.OK:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     if payload.get("committed"):
         registry.append_log(agent_id, f"Updated backup service code to {payload.get('tag', 'the target tag')}.")
     else:
@@ -706,7 +705,7 @@ def _run_restore_phases(
         registry.append_log(agent_id, "The restore did not report a result; restarting the workspace services...")
         resume_result = run_mngr_exec_on_agent(
             agent_address,
-            _RESUME_SERVICES_COMMAND,
+            RESUME_SERVICES_COMMAND,
             parent_cg=parent_cg,
             timeout_seconds=_SERVICE_RESUME_TIMEOUT_SECONDS,
         )
@@ -715,23 +714,27 @@ def _run_restore_phases(
             logger.warning("Post-failure service resume for {} failed: {}", agent_id, resume_detail)
         registry.fail(agent_id, f"The restore script produced no result: {detail}")
         return
-    status = str(payload.get("status", STATUS_FAILED))
-    if status == STATUS_BLOCKED:
-        running_chats = payload.get("running_chats")
-        chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-        registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
-        return
-    if status != STATUS_OK:
-        detail = str(payload.get("detail", "unknown failure"))
-        safety_note = (
-            " A safety backup of the pre-restore state was taken first."
-            if payload.get("safety_snapshot_taken")
-            else ""
-        )
-        config_warning = _supervisord_config_warning(payload)
-        config_note = f" {config_warning}" if config_warning is not None else ""
-        registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
-        return
+    match parse_backup_program_status(payload.get("status")):
+        case BackupProgramStatus.BLOCKED:
+            running_chats = payload.get("running_chats")
+            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
+            return
+        case BackupProgramStatus.FAILED:
+            detail = str(payload.get("detail", "unknown failure"))
+            safety_note = (
+                " A safety backup of the pre-restore state was taken first."
+                if payload.get("safety_snapshot_taken")
+                else ""
+            )
+            config_warning = _supervisord_config_warning(payload)
+            config_note = f" {config_warning}" if config_warning is not None else ""
+            registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
+            return
+        case BackupProgramStatus.OK:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     registry.append_log(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
     )

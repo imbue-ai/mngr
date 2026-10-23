@@ -84,6 +84,15 @@ def test_service_not_running_is_flagged() -> None:
     assert "STOPPED" in check.detail
 
 
+def test_unrecognized_code_and_service_states_are_flagged_rather_than_passed() -> None:
+    payload = _healthy_payload()
+    payload["code_state"] = "superseded"
+    payload["service_state"] = "paused"
+    check, _ = classify_check_payload(payload, canonical_env=_CANONICAL_ENV)
+    assert BackupServiceProblem.UNVERIFIABLE in check.problems
+    assert BackupServiceProblem.SERVICE_NOT_RUNNING in check.problems
+
+
 def test_missing_workspace_env_is_flagged_when_canonical_exists() -> None:
     payload = _healthy_payload()
     payload["env"] = {"present": False}
