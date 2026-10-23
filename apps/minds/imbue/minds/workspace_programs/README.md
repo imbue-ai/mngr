@@ -34,7 +34,9 @@ the rest of the app.
   `backup_restore.py`: the programs. Each module's docstring says what it does.
 - `update_protocol.py`: what the update program and the app share (state paths,
   cron names, the answer marker, the outcome, skip-reason and started-by
-  strings, and the text of the messages the program sends).
+  strings, and the text of the messages the program sends). The app reads
+  those strings into its own enums in `desktop_client/update_status.py`, and
+  `update_workspace_command_test.py` pins them to the enums' values.
 - `update_workspace.py`: the update program (its modes `arm`, `now`, `cancel`,
   `read` and `tick`); `update_dispatcher.py`: the dispatcher its `tick` runs,
   and what the modes share with it.
