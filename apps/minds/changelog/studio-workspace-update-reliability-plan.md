@@ -44,4 +44,4 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - The workspace's update dispatcher keeps its warnings in its log however it was run, with a timestamp, including the ones from a check Studio runs.
 
-- "Sign in" opens the sign-in chat on workspaces from before the workspace-layout command (minds-v0.8.5 and older) too.
+- "Sign in" opens the sign-in chat on workspaces from before the workspace-layout command (minds-v0.7.0 through minds-v0.8.5) too.
