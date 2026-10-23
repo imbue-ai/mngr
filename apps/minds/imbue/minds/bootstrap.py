@@ -19,6 +19,9 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
+# The inert ``ci-snapshot`` tier (apps/minds/imbue/minds/config/envs/ci-snapshot/) the e2e harnesses
+# run under when no env is activated, and the root the minds-snapshot image's workspace was baked under.
+CI_SNAPSHOT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
 _MINDS_PREFIX: Final[str] = "minds"
 # Legal env-name suffixes after ``minds-``.
 # Mirrors the rules in :mod:`imbue.minds.envs.primitives` and the reserved tier names the operator env CLI accepts:

@@ -48,7 +48,6 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
@@ -116,6 +115,7 @@ from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SO
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_workspace_command import UPDATE_WORKSPACE_PROGRAM
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
 from imbue.minds.utils.mngr_caller import MngrCallResult

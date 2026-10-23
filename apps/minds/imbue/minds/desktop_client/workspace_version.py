@@ -33,10 +33,10 @@ from pydantic import Field
 
 from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_NAME
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
+from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
 
 # Field separator used in the ``git log`` format string; a tab cannot appear in
 # a commit hash or ISO timestamp, and we only keep the subject's first line.

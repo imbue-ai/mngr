@@ -53,21 +53,20 @@ from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agen
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
 from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import RESUME_SERVICES_COMMAND
-from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import OLDEST_IN_PLACE_UPDATABLE_VERSION
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.workspace_programs import backup_apply_update
+from imbue.minds.workspace_programs import backup_gate_probe
+from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.mngr.primitives import AgentId
 
 # Machine-readable prefix on the operation error when running chats block the
@@ -108,7 +107,13 @@ _APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 3600.0
 # restore) plus its tick wait and a `uv sync`; the ceiling must exceed their
 # sum so the script's structured failure payload always beats the exec timeout.
 _RESTORE_EXEC_TIMEOUT_SECONDS: Final[float] = 9000.0
-# Ceiling for the best-effort RESUME_SERVICES_COMMAND dispatched when the
+# The restore program's ``_resume_services`` as one shell command, for the backstop
+# when the program dies without reporting: ``reload`` when the config parses,
+# since a ``reload`` that cannot parse it takes supervisord down with every service.
+_RESUME_SERVICES_COMMAND: Final[str] = (
+    "if supervisorctl reread; then supervisorctl reload; else supervisorctl restart all; fi"
+)
+# Ceiling for the best-effort _RESUME_SERVICES_COMMAND dispatched when the
 # restore exec dies without reporting; restarting every service can take a
 # couple of minutes on a loaded workspace.
 _SERVICE_RESUME_TIMEOUT_SECONDS: Final[float] = 360.0
@@ -290,8 +295,8 @@ def _apply_update_and_verify(
 
     # The mutating apply script (stash/checkout/commit/sync/restart).
     registry.append_log(agent_id, "Applying the backup service update...")
-    apply_command = build_workspace_script_command(
-        BACKUP_APPLY_UPDATE_SCRIPT,
+    apply_command = build_workspace_program_command(
+        backup_apply_update,
         (
             "--minds-version",
             resolve_release_id(),
@@ -363,7 +368,7 @@ def _wait_for_quiet_workspace(
     first). Cancellation between polls ends the operation as failed
     ("cancelled"); nothing has been mutated at this point.
     """
-    probe_command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
+    probe_command = build_workspace_program_command(backup_gate_probe, ("--agent-id", str(agent_id)))
     is_waiting_logged = False
     is_gate_error_logged = False
     while not registry.is_cancel_requested(agent_id):
@@ -662,8 +667,8 @@ def _run_restore_phases(
     registry.append_log(
         agent_id, "Backing up the current state, then restoring the selected backup. This can take a while..."
     )
-    restore_command = build_workspace_script_command(
-        BACKUP_RESTORE_SCRIPT,
+    restore_command = build_workspace_program_command(
+        backup_restore,
         (
             "--agent-id",
             str(agent_id),
@@ -698,7 +703,7 @@ def _run_restore_phases(
         registry.append_log(agent_id, "The restore did not report a result; restarting the workspace services...")
         resume_result = run_mngr_exec_on_agent(
             agent_address,
-            RESUME_SERVICES_COMMAND,
+            _RESUME_SERVICES_COMMAND,
             parent_cg=parent_cg,
             timeout_seconds=_SERVICE_RESUME_TIMEOUT_SECONDS,
         )

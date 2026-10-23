@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 from typing import Final
 
 import httpx
@@ -18,7 +20,10 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import mngr_host_dir_for
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
+from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
 from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
@@ -573,3 +578,174 @@ def get_mngr_plugin_package_names() -> dict[str, str]:
         for entry_point in importlib_metadata.entry_points(group="mngr")
         if entry_point.dist is not None
     }
+
+
+# The docker provider keeps a singleton ``*docker-state*`` sidecar container per
+# workspace; the workspace agent container is the one that is NOT the
+# docker-state sidecar.
+_DOCKER_STATE_CONTAINER_MARKER: Final[str] = "docker-state"
+# Where the workspace's repo checkout lives inside its container, and where
+# every in-workspace command the app runs starts.
+WORKSPACE_CONTAINER_ROOT: Final[str] = "/home/user/workspace"
+# system_interface's in-container port. It is a core bootstrap-managed
+# app with a fixed port (registered in the data/.state app registry);
+# kept as a constant so a drift shows up as a clear assertion failure.
+SYSTEM_INTERFACE_PORT: Final[int] = 8000
+MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
+_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
+
+
+class RunningWorkspaceContainer(FrozenModel):
+    """A running workspace container built from the default workspace template, and its system-services agent."""
+
+    container_name: str = Field(description="The workspace's Docker container (not its docker-state sidecar)")
+    services_agent_id: str = Field(description="The id of the primary system-services agent")
+
+
+def snapshot_workspace_container_prefix() -> str:
+    """The container-name prefix of the minds env under test.
+
+    mngr names docker hosts ``{mngr_prefix}-{host_name}`` and the sandbox's
+    conftest pins ``MINDS_ROOT_NAME`` to the snapshot's root, so in CI this is
+    the ``minds-ci-snapshot-`` prefix every baked container carries. Scoping by
+    the env (rather than a bare ``minds-``) is what makes these tests runnable
+    on a dev machine, where containers from many envs coexist: only the named
+    env's containers are started or selected, never a colleague env's.
+    """
+    return f"{os.environ.get('MINDS_ROOT_NAME', CI_SNAPSHOT_MINDS_ROOT_NAME)}-"
+
+
+def format_container_states(states: Mapping[str, DockerContainerState]) -> str:
+    """Render container states for an assertion message, sorted so the text is stable."""
+    return ", ".join(f"{name}={state.value}" for name, state in sorted(states.items()))
+
+
+def _recorded_env_container_names(snapshot_container_states: Mapping[str, DockerContainerState]) -> list[str]:
+    """The containers under the env's prefix that the snapshot was resumed with."""
+    prefix = snapshot_workspace_container_prefix()
+    return sorted(name for name in snapshot_container_states if name.startswith(prefix))
+
+
+def snapshot_workspace_container_name(snapshot_container_states: Mapping[str, DockerContainerState]) -> str:
+    """The workspace container (not the docker-state sidecar) the snapshot was resumed with.
+
+    Read from the snapshot's recording rather than from the daemon: offload reuses a sandbox
+    across batches, so workspaces other tests created can be running beside it under the same prefix.
+    """
+    workspace_names = [
+        name
+        for name in _recorded_env_container_names(snapshot_container_states)
+        if _DOCKER_STATE_CONTAINER_MARKER not in name
+    ]
+    assert len(workspace_names) == 1, (
+        f"Expected exactly one {snapshot_workspace_container_prefix()}* workspace container among those the "
+        f"snapshot was resumed with: {format_container_states(snapshot_container_states)}"
+    )
+    return workspace_names[0]
+
+
+def start_snapshot_containers(snapshot_container_states: Mapping[str, DockerContainerState]) -> None:
+    """Start the snapshot's workspace and docker-state containers; already-running ones are left as they are."""
+    subprocess.run(
+        ["docker", "start", *_recorded_env_container_names(snapshot_container_states)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def exec_in_workspace_container(
+    container_name: str, command: str, *, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command inside ``container_name`` via ``docker exec``."""
+    return subprocess.run(
+        ["docker", "exec", container_name, "bash", "-lc", command],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def list_agents_in_workspace_container(container_name: str) -> list[dict[str, Any]]:
+    """Return the agents mngr sees from inside the workspace container.
+
+    Run from inside the host (the container), where mngr uses the local
+    provider and the baked-in ``MNGR_HOST_DIR=/home/user/.mngr`` -- no desktop-side
+    provider fan-out, so an unrelated (uncredentialed) provider can't blank
+    the listing. ``--on-error continue`` keeps any single provider failure
+    from aborting the list.
+    """
+    result = exec_in_workspace_container(
+        container_name,
+        f"cd {WORKSPACE_CONTAINER_ROOT} && mngr list --format json --on-error continue",
+        timeout=60,
+    )
+    assert result.returncode == 0, f"`mngr list` failed inside {container_name}: {result.stderr}"
+    return json.loads(result.stdout)["agents"]
+
+
+def system_services_agent_id(container_name: str) -> str:
+    """Return the id of the primary system-services agent (runs the bootstrap)."""
+    agents = list_agents_in_workspace_container(container_name)
+    for agent in agents:
+        if agent.get("labels", {}).get("is_primary") == "true" or agent.get("name") == "system-services":
+            return agent["id"]
+    raise AssertionError(f"No primary system-services agent among {[a.get('name') for a in agents]!r}")
+
+
+def wait_for_system_interface_up(container_name: str) -> bool:
+    """Poll system_interface from inside the container until it answers, or time out.
+
+    The poll loop (and its sleeps) run in shell inside ``docker exec`` rather
+    than Python so the test never calls ``time.sleep``. Any 2xx/3xx/401 means
+    the interface is serving (it may redirect to auth); a connection refused
+    surfaces as ``000``.
+    """
+    poll = (
+        "for i in $(seq 1 40); do "
+        f"code=$(curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{SYSTEM_INTERFACE_PORT}/ 2>/dev/null); "
+        'case "$code" in 200|301|302|307|401) exit 0;; esac; '
+        "sleep 3; done; exit 1"
+    )
+    return (
+        exec_in_workspace_container(
+            container_name, poll, timeout=_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS + 30
+        ).returncode
+        == 0
+    )
+
+
+def resume_snapshot_workspace(
+    snapshot_container_states: Mapping[str, DockerContainerState],
+) -> RunningWorkspaceContainer:
+    """Resume the minds snapshot's workspace container and return it once system_interface serves.
+
+    The captured container is stopped, so a sandbox booted from the snapshot
+    must (1) ``docker start`` it and (2) restart the system-services agent so
+    the bootstrap respawns system_interface. This is the mngr-level building
+    block behind minds' own recovery flow.
+    """
+    container_name = snapshot_workspace_container_name(snapshot_container_states)
+    start_snapshot_containers(snapshot_container_states)
+    services_agent_id = system_services_agent_id(container_name)
+    start_result = exec_in_workspace_container(
+        container_name,
+        f"cd {WORKSPACE_CONTAINER_ROOT} && mngr start {services_agent_id} --quiet",
+        timeout=MNGR_START_TIMEOUT_SECONDS,
+    )
+    assert start_result.returncode == 0, f"`mngr start` failed for system-services: {start_result.stderr}"
+    assert wait_for_system_interface_up(container_name), (
+        "system_interface never answered after resuming the system-services agent."
+    )
+    return RunningWorkspaceContainer(container_name=container_name, services_agent_id=services_agent_id)
+
+
+def run_workspace_program_in_container(
+    workspace: RunningWorkspaceContainer, program: ModuleType, args: Sequence[str], *, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run a workspace program at the workspace root, through the same command the app ships it with."""
+    command = build_workspace_program_command(program, args)
+    return exec_in_workspace_container(
+        workspace.container_name, f"cd {WORKSPACE_CONTAINER_ROOT} && {command}", timeout=timeout
+    )

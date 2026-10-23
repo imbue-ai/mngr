@@ -48,6 +48,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 from pydantic import SecretStr
 
+from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
@@ -78,12 +79,10 @@ _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^https?://(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.localhost:\d+(?:/|$)"
 )
 
-# Default env identity when nothing is activated: a dedicated, inert
-# ``ci-snapshot`` tier (committed under
-# apps/minds/imbue/minds/config/envs/ci-snapshot/) so callers can boot the
-# backend without an explicit ``minds-admin env activate`` step and without pointing
-# at any real environment.
-_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
+# Default env identity when nothing is activated: the dedicated, inert
+# ``ci-snapshot`` tier, so callers can boot the backend without an explicit
+# ``minds-admin env activate`` step and without pointing at any real environment.
+_DEFAULT_MINDS_ROOT_NAME: Final[str] = CI_SNAPSHOT_MINDS_ROOT_NAME
 # The throwaway root the Linux harnesses point MINDS_DATA_HOME at. Named here
 # so test_snapshot_resume.py can find what a baked image actually contains.
 _E2E_DATA_HOME_DIR_NAME: Final[str] = ".minds-e2e-data-home"

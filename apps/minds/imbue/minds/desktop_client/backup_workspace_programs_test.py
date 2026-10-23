@@ -1,12 +1,13 @@
-"""Tests for the workspace-side backup scripts, run for real against temp git repos.
+"""Tests for the workspace-side backup programs, run for real against temp git repos.
 
-The scripts are executed exactly as they are on a workspace -- through the
-base64 shell command via ``bash -c`` -- with a stub ``uv`` / ``supervisorctl``
+The programs are executed exactly as they are on a workspace -- through the
+shell command that ships their archive, via ``bash -c`` -- with a stub ``uv`` / ``supervisorctl``
 placed on PATH so the mngr-list gate and the service restart behave like a
 healthy (or deliberately broken) workspace without any real infrastructure.
-The restore-script tests additionally run against a real local restic repo.
+The restore-program tests additionally run against a real local restic repo.
 """
 
+import inspect
 import json
 import os
 import shutil
@@ -14,28 +15,27 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Final
 
 import pytest
 
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_NAME
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
-from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.testing import run_git_for_backup_test
 from imbue.minds.testing import tag_cross_layout_release_content
 from imbue.minds.testing import tag_newer_release_content
 from imbue.minds.testing import write_stub_supervisorctl
+from imbue.minds.workspace_programs import backup_apply_update
+from imbue.minds.workspace_programs import backup_check
+from imbue.minds.workspace_programs import backup_gate_probe
+from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 
 
 def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup") -> Path:
@@ -57,17 +57,17 @@ def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup")
     return repo
 
 
-def _run_script(
+def _run_program(
     repo: Path,
-    script: str,
+    program: ModuleType,
     args: tuple[str, ...],
     *,
     extra_path: Path | None = None,
     env_overrides: dict[str, str] | None = None,
     launcher: tuple[str, ...] = ("bash", "-c"),
 ) -> dict:
-    """Run ``script`` as a workspace would. ``launcher`` is the argv the shell command is appended to."""
-    command = build_workspace_script_command(script, args)
+    """Run ``program`` as a workspace would. ``launcher`` is the argv the shell command is appended to."""
+    command = build_workspace_program_command(program, args)
     env = dict(os.environ)
     if extra_path is not None:
         env["PATH"] = f"{extra_path}:{env['PATH']}"
@@ -163,47 +163,18 @@ def _running_chat_agents_json(repo: Path) -> str:
     return json.dumps({"agents": agents, "errors": []})
 
 
-def test_the_module_official_remote_constants_match_the_script_defaults() -> None:
-    # The module-level constants (used for display / docs, and by the desktop
-    # client's version read) and the values baked into the script preamble must
-    # never drift apart.
-    assert f'DEFAULT_OFFICIAL_REMOTE_URL = "{OFFICIAL_REMOTE_URL}"' in BACKUP_CHECK_SCRIPT
-    assert f'OFFICIAL_REMOTE_NAME = "{OFFICIAL_REMOTE_NAME}"' in BACKUP_CHECK_SCRIPT
-
-
-def test_update_and_restore_scripts_sync_with_all_packages() -> None:
+def test_update_and_restore_programs_sync_with_all_packages() -> None:
     # `uv sync` is exact: a root-closure-scoped sync prunes uv workspace
     # members that are not root dependencies from the venv, deleting their
     # console scripts and spawn-erroring their `uv run <name>` supervisord
-    # programs on the restart that follows. Every sync these scripts run must
+    # programs on the restart that follows. Every sync these programs run must
     # therefore be --all-packages, matching the workspace's boot-time
-    # converge. The scripts ship verbatim as these constants, so asserting on
-    # the source covers all call sites (including the update rollback path).
-    for script in (BACKUP_APPLY_UPDATE_SCRIPT, BACKUP_RESTORE_SCRIPT):
-        assert '["uv", "sync", "--all-packages"]' in script
-        assert '["uv", "sync"]' not in script
-
-
-def test_extract_marker_json_finds_last_payload_amid_noise() -> None:
-    stdout = 'warning: something\nMARKER:{"a": 1}\nnoise\nMARKER:{"a": 2}\ntrailing\n'
-    assert extract_marker_json(stdout, "MARKER:") == {"a": 2}
-
-
-def test_extract_marker_json_returns_none_without_marker() -> None:
-    assert extract_marker_json("no marker here", "MARKER:") is None
-
-
-def test_extract_marker_json_returns_none_for_bad_json() -> None:
-    assert extract_marker_json("MARKER:{broken", "MARKER:") is None
-
-
-def test_build_workspace_script_command_round_trips_through_bash(tmp_path: Path) -> None:
-    script = 'import sys\nprint("OUT:" + " ".join(sys.argv[1:]))\n'
-    command = build_workspace_script_command(script, ("--flag", "value with spaces"))
-    result = subprocess.run(
-        ["bash", "-c", command], capture_output=True, text=True, check=True, timeout=60, cwd=tmp_path
-    )
-    assert "OUT:--flag value with spaces" in result.stdout
+    # converge. Asserting on the source covers all call sites (including the
+    # update rollback path).
+    for program in (backup_apply_update, backup_restore):
+        source = inspect.getsource(program)
+        assert '["uv", "sync", "--all-packages"]' in source
+        assert '["uv", "sync"]' not in source
 
 
 # The tests below marked flaky time out at the 10s per-test budget while shelling out
@@ -218,7 +189,7 @@ def test_check_script_reports_matches_when_tag_equals_worktree(tmp_path: Path) -
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["target_tag"] == "minds-v1.0.0"
@@ -234,7 +205,7 @@ def test_check_script_reports_newer_when_tag_is_ancestor(tmp_path: Path) -> None
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "local improvement on top of the tag")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "newer"
@@ -246,7 +217,7 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
     # does not contain the tag -> outdated.
     tag_newer_release_content(repo)
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "outdated"
@@ -254,7 +225,7 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
 
 # Marked flaky: observed timing out under the default 10s budget only when
 # run alongside the full suite under heavy parallel load (git/subprocess I/O
-# in _run_script and tag_newer_release_content), while passing cleanly in
+# in _run_program and tag_newer_release_content), while passing cleanly in
 # isolation and every sibling check_script test in this file uses the same
 # unextended default -- a load-dependent fluke, not a defect in the test body.
 @pytest.mark.flaky
@@ -266,7 +237,7 @@ def test_check_script_reports_outdated_on_a_new_layout_workspace(tmp_path: Path)
     repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
     tag_newer_release_content(repo, code_path="system/libs/host_backup")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "outdated"
@@ -281,7 +252,7 @@ def test_check_script_reports_outdated_on_a_creation_rename_layout_workspace(tmp
     repo = _make_workspace_repo(tmp_path, code_path="system/services/host_backup")
     tag_newer_release_content(repo, code_path="system/services/host_backup")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "outdated"
@@ -297,7 +268,7 @@ def test_check_script_reports_outdated_when_the_tag_uses_the_pre_declutter_layou
         repo, workspace_code_path="system/libs/host_backup", tag_code_path="libs/host_backup"
     )
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "outdated"
@@ -309,9 +280,9 @@ def test_check_script_reports_unverifiable_when_minimum_tag_is_missing(tmp_path:
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_CHECK_SCRIPT,
+        backup_check,
         ("--minimum-tag", "minds-v9.9.9", "--official-url", str(tmp_path / "nonexistent-remote")),
         extra_path=stub_bin,
     )
@@ -333,9 +304,9 @@ def test_check_script_fetches_missing_minimum_tag_from_the_official_remote(tmp_p
         ["git", "clone", "-q", "--no-tags", str(template), str(repo)], check=True, capture_output=True, timeout=60
     )
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_CHECK_SCRIPT,
+        backup_check,
         ("--minimum-tag", "minds-v1.0.0", "--official-url", str(template)),
         extra_path=stub_bin,
     )
@@ -367,9 +338,9 @@ def test_check_script_repoints_a_wrong_official_remote(tmp_path: Path) -> None:
         timeout=60,
     )
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_CHECK_SCRIPT,
+        backup_check,
         ("--minimum-tag", "minds-v1.0.0", "--official-url", str(template)),
         extra_path=stub_bin,
     )
@@ -399,7 +370,7 @@ def test_check_script_accepts_installed_identity_at_or_above_the_minimum(tmp_pat
     run_git_for_backup_test(repo, "tag", "-f", "minds-v1.0.0")
     run_git_for_backup_test(repo, "checkout", "-q", "main")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["installed_version"] == "minds-v2.0.0"
@@ -413,7 +384,7 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     env_path.parent.mkdir(parents=True)
     env_path.write_text("RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
+    run = _run_program(repo, backup_check, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     env_info = payload["env"]
@@ -428,7 +399,7 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
 def test_gate_probe_reports_running_chats_excluding_main_and_worktrees(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     stub_bin = _make_stub_bin(tmp_path, agents_json=_running_chat_agents_json(repo))
-    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+    run = _run_program(repo, backup_gate_probe, ("--agent-id", "agent-x"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
     assert payload["running_chats"] == ["chat-1"]
@@ -440,7 +411,7 @@ def test_gate_probe_answers_in_a_machine_whose_own_mngr_config_it_cannot_parse(t
     repo = _make_workspace_repo(tmp_path)
     stub_bin = _make_stub_bin(tmp_path, agents_json=_running_chat_agents_json(repo), is_unknown_config_fatal=True)
 
-    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+    run = _run_program(repo, backup_gate_probe, ("--agent-id", "agent-x"), extra_path=stub_bin)
 
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
@@ -526,7 +497,7 @@ def test_gate_probe_counts_a_waiting_chat_whose_chat_is_busy_as_running(
     agents_json = json.dumps({"agents": _busy_and_idle_chat_agents(repo), "errors": []})
     stub_bin = _make_stub_bin(tmp_path, agents_json=agents_json)
 
-    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+    run = _run_program(repo, backup_gate_probe, ("--agent-id", "agent-x"), extra_path=stub_bin)
 
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
@@ -551,7 +522,7 @@ def test_gate_probe_counts_a_chat_handed_off_to_another_agent_as_busy_from_the_f
     listed = [{**agent, "type": "claude", "work_dir": str(repo)} for agent in agents]
     stub_bin = _make_stub_bin(tmp_path, agents_json=json.dumps({"agents": listed, "errors": []}))
 
-    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+    run = _run_program(repo, backup_gate_probe, ("--agent-id", "agent-x"), extra_path=stub_bin)
 
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
@@ -609,9 +580,9 @@ def test_apply_update_with_stop_chats_stops_busy_chats_and_ends_their_runners(tm
         stop_log = tmp_path / "stopped.txt"
         _write_stateful_mngr_uv_stub(stub_bin, _busy_and_idle_chat_agents(repo), stop_log)
 
-        run = _run_script(
+        run = _run_program(
             repo,
-            BACKUP_APPLY_UPDATE_SCRIPT,
+            backup_apply_update,
             ("--minds-version", "1.0.0", "--agent-id", "agent-x", "--stop-chats"),
             extra_path=stub_bin,
         )
@@ -637,9 +608,9 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
     )
     stub_bin = _make_stub_bin(tmp_path)
 
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_GATE_PROBE_SCRIPT,
+        backup_gate_probe,
         ("--agent-id", "agent-x"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host_dir)},
@@ -664,9 +635,9 @@ def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_pat
     )
     stub_bin = _make_stub_bin(tmp_path)
 
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_GATE_PROBE_SCRIPT,
+        backup_gate_probe,
         ("--agent-id", "agent-x"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host_dir)},
@@ -709,9 +680,9 @@ def test_gate_probe_reads_only_the_tail_of_a_huge_backup_events_log(tmp_path: Pa
 
     # A wrapper process owns the script's process tree, so its RUSAGE_CHILDREN
     # peak is the script's alone rather than any earlier child of this worker.
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_GATE_PROBE_SCRIPT,
+        backup_gate_probe,
         ("--agent-id", "agent-x"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host_dir)},
@@ -740,9 +711,9 @@ def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running
     # The is_restart_ok=False supervisorctl stub reports the service STOPPED.
     stub_bin = _make_stub_bin(tmp_path, restart_ok=False)
 
-    run = _run_script(
+    run = _run_program(
         repo,
-        BACKUP_GATE_PROBE_SCRIPT,
+        backup_gate_probe,
         ("--agent-id", "agent-x"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host_dir)},
@@ -764,8 +735,8 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
     (repo / "untracked.txt").write_text("scratch\n")
 
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -792,8 +763,8 @@ def test_apply_update_converges_new_layout_code_to_the_tag(tmp_path: Path) -> No
     tag_newer_release_content(repo, code_path="system/libs/host_backup")
 
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -818,8 +789,8 @@ def test_apply_update_converges_a_decluttered_workspace_onto_a_pre_declutter_tag
     )
 
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -830,7 +801,7 @@ def test_apply_update_converges_a_decluttered_workspace_onto_a_pre_declutter_tag
     subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
     assert subject == "backup-update: minds-v2.0.0"
 
-    recheck = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    recheck = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     recheck_payload = extract_marker_json(recheck["stdout"], CHECK_RESULT_MARKER)
     assert recheck_payload is not None, recheck
     assert recheck_payload["code_state"] == "matches"
@@ -846,8 +817,8 @@ def test_apply_update_converges_a_pre_declutter_workspace_onto_a_decluttered_tag
     )
 
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -858,7 +829,7 @@ def test_apply_update_converges_a_pre_declutter_workspace_onto_a_decluttered_tag
     subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
     assert subject == "backup-update: minds-v2.0.0"
 
-    recheck = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    recheck = _run_program(repo, backup_check, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     recheck_payload = extract_marker_json(recheck["stdout"], CHECK_RESULT_MARKER)
     assert recheck_payload is not None, recheck
     assert recheck_payload["code_state"] == "matches"
@@ -874,8 +845,8 @@ def test_apply_update_removes_files_deleted_in_the_target_tag(tmp_path: Path) ->
     tag_newer_release_content(repo, removed_file="libs/host_backup/stale.py")
 
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -898,8 +869,8 @@ def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Pa
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path, agents_json=_running_chat_agents_json(repo))
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -917,8 +888,8 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     pre_content = (repo / "libs" / "host_backup" / "service.py").read_text()
 
     stub_bin = _make_stub_bin(tmp_path, restart_ok=False)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -937,8 +908,8 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     # The reverted update must not read as the installed version: the check
     # skips the reverted `backup-update:` subject and (here) falls back to an
     # empty identity, since the tag is not an ancestor of HEAD.
-    check_run = _run_script(
-        repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    check_run = _run_program(
+        repo, backup_check, ("--minimum-tag", "minds-v2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     check_payload = extract_marker_json(check_run["stdout"], CHECK_RESULT_MARKER)
     assert check_payload is not None, check_run
@@ -949,8 +920,8 @@ def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) 
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(
-        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    run = _run_program(
+        repo, backup_apply_update, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
     assert payload is not None, run
@@ -1103,9 +1074,9 @@ def test_restore_script_rewinds_host_dir_in_place_and_takes_a_safety_snapshot(tm
     env_path.write_text(current_env)
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1155,9 +1126,9 @@ def test_restore_script_keeps_the_authorized_keys_no_snapshot_carries(tmp_path: 
     (code / "extra.txt").write_text("added after the snapshot\n")
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, subpath="/"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1192,9 +1163,9 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
     current_env = env_path.read_text()
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, entry["id"], subpath=entry["paths"][0] + "/host_dir"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1223,9 +1194,9 @@ def test_restore_script_restores_a_snapshot_stored_at_the_tree_root(tmp_path: Pa
     (code / "extra.txt").write_text("added after the snapshot\n")
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, entry["id"], subpath="/"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1252,9 +1223,9 @@ def test_restore_script_reports_failure_when_the_restored_tree_lacks_a_checkout(
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1276,9 +1247,9 @@ def test_restore_script_is_blocked_by_running_chats_and_mutates_nothing(tmp_path
     (code / "file.txt").write_text("version 2\n")
 
     stub_bin = _stub_bin_with_restic(tmp_path, agents_json=_running_chat_agents_json(code))
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1303,9 +1274,9 @@ def test_restore_script_skips_the_chat_gate_only_when_forced(tmp_path: Path) -> 
     (code / "file.txt").write_text("version 2\n")
     stub_bin = _stub_bin_with_restic(tmp_path, list_ok=False)
 
-    blocked_run = _run_script(
+    blocked_run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1316,9 +1287,9 @@ def test_restore_script_skips_the_chat_gate_only_when_forced(tmp_path: Path) -> 
     assert "cannot determine running chats" in str(blocked_payload["detail"])
     assert (code / "file.txt").read_text() == "version 2\n"
 
-    forced_run = _run_script(
+    forced_run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--skip-chat-gate",)),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1340,9 +1311,9 @@ def test_restore_script_skips_the_safety_snapshot_only_when_asked(tmp_path: Path
     (code / "file.txt").write_text("version 2\n")
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--skip-safety-snapshot",)),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1364,9 +1335,9 @@ def _restore_and_list_its_snapshots(
 ) -> tuple[str, str]:
     """Run a successful restore of `snapshot_id`; return `restic ls` of its safety and restored-state snapshots."""
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1456,9 +1427,9 @@ def test_restore_script_clears_a_stale_repository_lock_and_retries(tmp_path: Pat
     )
 
     stub_bin = _stub_bin_with_restic(tmp_path, restic_script=restic_wrapper)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1489,9 +1460,9 @@ def test_restore_script_uses_a_preseeded_fallback_restic_when_path_restic_is_too
     os.symlink(_real_restic_path(), fallback_dir / "restic")
 
     stub_bin = _stub_bin_with_restic(tmp_path, restic_script=old_restic)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1526,9 +1497,9 @@ def test_restore_script_stops_all_services_before_the_restore_and_restarts_them_
     call_log = tmp_path / "supervisorctl-calls.log"
 
     stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_call_log=call_log)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1562,9 +1533,9 @@ def test_restore_script_resumes_services_when_the_restic_restore_fails(tmp_path:
     )
 
     stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_call_log=call_log, restic_script=failing_restore)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1598,9 +1569,9 @@ def test_restore_script_resumes_services_when_uv_sync_fails_after_the_restore(tm
     call_log = tmp_path / "supervisorctl-calls.log"
 
     stub_bin = _stub_bin_with_restic(tmp_path, sync_ok=False, supervisorctl_call_log=call_log)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1629,9 +1600,9 @@ def test_restore_script_fails_cleanly_without_a_snapshot_subpath(tmp_path: Path)
     (code / "file.txt").write_text("version 2\n")
 
     stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         ("--agent-id", "agent-x", "--snapshot-id", "ffffffff"),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1671,9 +1642,9 @@ def test_restore_script_succeeds_when_restart_all_fails_but_services_recover(tmp
         supervisorctl_status_lines=healthy,
         supervisorctl_status_lines_after_restart=healthy,
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1714,9 +1685,9 @@ def test_restore_script_reports_non_critical_services_down_as_a_warning_not_fail
             "xvfb BACKOFF Exited too quickly (process log may have details)",
         ),
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1754,9 +1725,9 @@ def test_restore_script_ignores_a_service_that_was_already_down_when_it_started(
         supervisorctl_status_lines=roster,
         supervisorctl_status_lines_after_restart=roster,
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "30")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1790,9 +1761,9 @@ def test_restore_script_fails_a_restore_critical_service_that_was_also_down_befo
         supervisorctl_status_lines=roster,
         supervisorctl_status_lines_after_restart=roster,
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1828,9 +1799,9 @@ def test_restore_script_fails_when_a_restore_critical_service_does_not_come_back
             "system_interface BACKOFF Exited too quickly (process log may have details)",
         ),
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1872,9 +1843,9 @@ def test_restore_script_treats_the_backup_service_as_non_critical(tmp_path: Path
             "system_interface RUNNING pid 124, uptime 0:00:01",
         ),
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1916,9 +1887,9 @@ def test_restore_script_leaves_an_autostart_false_service_stopped_and_unjudged(t
         ),
         manual_programs=("datalib",),
     )
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
@@ -1943,9 +1914,9 @@ def test_restore_script_falls_back_to_restart_all_when_the_restored_config_does_
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
     call_log = tmp_path / "supervisorctl-calls.log"
     stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_call_log=call_log, reread_ok=False)
-    run = _run_script(
+    run = _run_program(
         code,
-        BACKUP_RESTORE_SCRIPT,
+        backup_restore,
         _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},

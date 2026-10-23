@@ -39,7 +39,6 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
 from imbue.minds.desktop_client.in_workspace_mngr import exec_log_detail
 from imbue.minds.desktop_client.in_workspace_mngr import exec_verdict_detail
@@ -57,6 +56,7 @@ from imbue.minds.desktop_client.update_status import parse_update_epoch
 from imbue.minds.desktop_client.update_status import parse_update_last_dispatch
 from imbue.minds.desktop_client.update_status import parse_update_run_record
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.utils.mngr_caller import MngrCaller
 
 # The command's modes; ``tick`` is cron's alone.

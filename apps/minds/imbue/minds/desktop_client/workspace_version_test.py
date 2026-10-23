@@ -8,7 +8,6 @@ import pytest
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.workspace_version import _GIT_DESCRIBE_ARGS
 from imbue.minds.desktop_client.workspace_version import _GIT_UPDATE_SELF_ARGS
@@ -21,6 +20,7 @@ from imbue.minds.testing import run_git_for_backup_test
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
 from imbue.mngr.primitives import AgentId
 
 # The release the published template was cut from: tagged in the official

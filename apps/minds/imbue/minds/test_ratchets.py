@@ -21,6 +21,11 @@ _EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = (
     "*/desktop_client/update_program_stubs_testing.py",
 )
 
+# The programs the app runs inside a workspace (see workspace_programs/README.md). They are
+# standard-library only, so stdout/stderr are their only output channels (a marker-prefixed JSON
+# line is how each answers the app) and they run the workspace's tools with subprocess directly.
+_WORKSPACE_PROGRAMS: tuple[str, ...] = ("workspace_programs/*.py",)
+
 
 # ratchet_group("Code safety")
 
@@ -42,7 +47,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(10))
+    rc.check_time_sleep(_DIR, snapshot(11))
 
 
 def test_prevent_global_keyword() -> None:
@@ -50,7 +55,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
+    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS + _WORKSPACE_PROGRAMS)
 
 
 # ratchet_group("Exception handling")
@@ -264,6 +269,7 @@ def test_prevent_direct_subprocess() -> None:
         "*/desktop_client/e2e_workspace_runner.py",
         "*/desktop_client/default_workspace_template_worktree.py",
         *_EMBEDDED_CONTAINER_SCRIPTS,
+        *_WORKSPACE_PROGRAMS,
     )
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 

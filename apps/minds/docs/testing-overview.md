@@ -50,6 +50,7 @@ run. By area:
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
 | `test_snapshot_resume.py` (16 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials, open on the welcome chat the creation page seeded with the onboarding conversation), sends that chat a message, signs in through the provider chooser that first send opens in the chat's own frame (the Anthropic API-key path) with a raw API key (needs `ANTHROPIC_API_KEY`), and asserts the agent answers the message. It runs under a minds root of its own, so its containers never share the snapshot workspace's name prefix, and removes them in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
+| `test_workspace_programs_e2e.py` | `minds_snapshot_resume` + `docker` + `timeout(600)` | Runs a workspace program (the backup gate probe) inside the snapshot's real DEFAULT_WORKSPACE_TEMPLATE workspace container, through the same zip-application command the app ships it with, and checks it answers without a `gate_error`. Only via `just test-offload-minds-snapshot`. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
 
@@ -177,7 +178,7 @@ then cheap test sandboxes fan out from the baked image.
   The config boots straight from the override image (no Dockerfile/post-patch),
   `cpu_cores=4.0`, `memory_gb=8`, `vm_runtime=true` (must match the producer),
   one `[groups.all]` with `filters="-m 'minds_snapshot_resume' -c pyproject.toml"`,
-  and `[framework].paths` scoped to the two snapshot-resume test files so local
+  and `[framework].paths` scoped to the files that carry the mark so local
   discovery takes seconds instead of a ~90s full-monorepo collection.
   `max_parallel=20`. The image is deleted on success. Both jobs are gated by the
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
@@ -185,7 +186,8 @@ then cheap test sandboxes fan out from the baked image.
   `test_snapshot_resume.py` (resume sanity checks, the Electron create+chat
   round-trip, the backup-update chat gate, the backup-service
   check/update and enable/repair/destination-change flows, and the in-place
-  backup restore). Run a single one locally with
+  backup restore) and `test_workspace_programs_e2e.py` (a workspace program
+  run in the real workspace). Run a single one locally with
   `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`, or in
   CI via the `minds_snapshot_test_filter` workflow_dispatch input on ci.yml;
   mint an image id manually via `uv run python
@@ -196,13 +198,17 @@ actually run), but these tests do **not** require an imbue_cloud login.
 
 ### 1.7 Fixtures available for new tests
 
-- **Modal snapshot** (`test_snapshot_resume.py`): the `running_workspace` fixture
-  (yields a `_ResumedWorkspace` after starting the snapshot's stopped containers
-  + waiting for `system_interface`; the workspace is chosen from the container
-  states the sandbox recorded at resume, `snapshot_container_states`, never from
-  whatever the daemon lists later), plus autouse
-  `_ensure_dockerd_after_snapshot_resume`. Use marks `minds_snapshot_resume` +
-  `docker`.
+- **Modal snapshot** (`apps/minds/conftest.py`): the session-scoped
+  `running_workspace` fixture (returns an `imbue.minds.testing.RunningWorkspaceContainer`
+  after starting the snapshot's stopped containers + waiting for
+  `system_interface`; the workspace is chosen from the container states the
+  sandbox recorded at resume, `snapshot_container_states`, never from whatever
+  the daemon lists later). Run a workspace program inside it with
+  `run_workspace_program_in_container` (`imbue/minds/testing.py`), and a shell
+  command with `exec_in_workspace_container`. `test_snapshot_resume.py` adds the
+  module-autouse `_ensure_dockerd_after_snapshot_resume`. Use marks
+  `minds_snapshot_resume` + `docker`, and add a new file that carries the mark to
+  `[framework].paths` in `offload-modal-minds-snapshot.toml`.
 - **Live Electron workspace** (driver, not a fixture):
   `imbue/minds/desktop_client/e2e_workspace_runner.py` --
   `create_workspace_via_electron`, `destroy_agent_best_effort`,

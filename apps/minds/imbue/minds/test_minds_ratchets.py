@@ -4,7 +4,9 @@ Lives outside ``test_ratchets.py`` because that file must define the same
 test set across every project (enforced by ``test_meta_ratchets.py``).
 """
 
+import ast
 import re
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -16,6 +18,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import RatchetRuleInfo
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
 from imbue.imbue_common.ratchet_testing.core import check_regex_ratchet
+from imbue.minds.desktop_client.workspace_program_command import WORKSPACE_PROGRAMS_PACKAGE
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -78,12 +81,12 @@ _ALLOWED_HOST_LIFECYCLE_FILES = (
     # Quit-time bulk stop: one mngr call over many agents, which the per-workspace
     # action cannot express. It marks each agent itself.
     "desktop_control.py",
-    # Not host lifecycle at all: this module is python3 script text that runs
+    # Not host lifecycle at all: this module is a workspace program's, which runs
     # *inside* an already-running container, and its `mngr stop` stops a chat
     # agent there. There is no host to override the state of and no recovery
     # mark to keep in step, and the module holds no desktop-side code that
     # could ever acquire one.
-    "backup_workspace_scripts.py",
+    "workspace_programs/backup_support.py",
     # The same for the update program's own tests: the argv they assert is the `mngr stop` the
     # program ran inside a staged workspace, which stops the update's worker agent, not a host.
     "update_dispatcher_script_test.py",
@@ -101,6 +104,42 @@ def test_prevent_host_lifecycle_argv_outside_the_shared_action() -> None:
         _DIR, FileExtension(".py"), _HOST_LIFECYCLE_ARGV_PATTERN, _ALLOWED_HOST_LIFECYCLE_FILES
     )
     assert len(chunks) <= snapshot(0), _HOST_LIFECYCLE_ARGV_RULE.format_failure(tuple(chunks))
+
+
+# A workspace program runs under the workspace's own python3 with only the
+# modules of its own package beside it (desktop_client/workspace_program_command.py
+# ships them), so an import of anything else works here and crashes in the workspace.
+_WORKSPACE_PROGRAMS_DIR: Final[Path] = _DIR / "imbue" / "minds" / "workspace_programs"
+
+
+def _imported_module_names(path: Path) -> set[str]:
+    """Every module ``path`` imports, with a relative import named by its dots."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add("." * node.level + (node.module or ""))
+        else:
+            pass
+    return names
+
+
+def test_workspace_programs_import_only_the_standard_library_and_their_own_package() -> None:
+    program_files = sorted(_WORKSPACE_PROGRAMS_DIR.glob("*.py"))
+    assert len(program_files) >= 5, "the workspace_programs package lost its modules"
+    violations: list[str] = []
+    for path in program_files:
+        for module_name in sorted(_imported_module_names(path)):
+            is_own_package = module_name == WORKSPACE_PROGRAMS_PACKAGE or module_name.startswith(
+                f"{WORKSPACE_PROGRAMS_PACKAGE}."
+            )
+            if module_name.split(".")[0] not in sys.stdlib_module_names and not is_own_package:
+                violations.append(f"{path.name}: {module_name}")
+    assert not violations, (
+        "workspace_programs ships into workspaces, which have none of these: "
+        f"{violations} (keep the package on the standard library and its own modules)"
+    )
 
 
 _NEXT_DEPLOY_CHECKLIST_PATH: Final[Path] = _DIR / "docs" / "deploy" / "next_deploy.md"

@@ -172,6 +172,9 @@ omit = [
   # pure orchestration (ensure.py) is covered via mock_lima_image_test.
   "*/imbue/minds/lima_image/desync.py",
   "*/imbue/minds/lima_image/manifest_fetcher.py",
+  # The workspace programs run inside a workspace, as a zip application in a
+  # subprocess that coverage cannot trace; their tests run them exactly that way.
+  "*/imbue/minds/workspace_programs/*",
 ]
 
 [tool.inline-snapshot]

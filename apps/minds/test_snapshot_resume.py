@@ -46,6 +46,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.config.data_types import InstallationPaths
@@ -62,16 +63,6 @@ from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_h
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
-from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
-from imbue.minds.desktop_client.e2e_workspace_runner import _DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _E2E_DATA_HOME_DIR_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
@@ -91,37 +82,33 @@ from imbue.minds.desktop_client.workspace_diagnostics import collect_workspace_d
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.testing import MNGR_START_TIMEOUT_SECONDS
+from imbue.minds.testing import RunningWorkspaceContainer
+from imbue.minds.testing import SYSTEM_INTERFACE_PORT
+from imbue.minds.testing import WORKSPACE_CONTAINER_ROOT
+from imbue.minds.testing import exec_in_workspace_container
+from imbue.minds.testing import format_container_states
+from imbue.minds.testing import list_agents_in_workspace_container
+from imbue.minds.testing import run_workspace_program_in_container
+from imbue.minds.testing import snapshot_workspace_container_name
+from imbue.minds.testing import snapshot_workspace_container_prefix
+from imbue.minds.testing import start_snapshot_containers
+from imbue.minds.testing import system_services_agent_id
+from imbue.minds.testing import wait_for_system_interface_up
 from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
+from imbue.minds.workspace_programs import backup_apply_update
+from imbue.minds.workspace_programs import backup_check
+from imbue.minds.workspace_programs import backup_gate_probe
+from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
+from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
 
-# The docker provider keeps a singleton ``*docker-state*`` sidecar container per
-# workspace; the workspace agent container is the one that is NOT the
-# docker-state sidecar.
-_DOCKER_STATE_MARKER: Final[str] = "docker-state"
-
-
-def _workspace_container_prefix() -> str:
-    """The container-name prefix of the minds env under test.
-
-    mngr names docker hosts ``{mngr_prefix}-{host_name}`` and the sandbox's
-    conftest pins ``MINDS_ROOT_NAME`` to the snapshot's root, so in CI this is
-    the ``minds-ci-snapshot-`` prefix every baked container carries. Scoping by
-    the env (rather than a bare ``minds-``) is what makes these tests runnable
-    on a dev machine, where containers from many envs coexist: only the named
-    env's containers are started or selected, never a colleague env's.
-    """
-    return f"{os.environ.get('MINDS_ROOT_NAME', _DEFAULT_MINDS_ROOT_NAME)}-"
-
-
-# system_interface's in-container port. It is a core bootstrap-managed
-# app with a fixed port (registered in the data/.state app registry);
-# kept as a constant so a drift shows up as a clear assertion failure.
-_SYSTEM_INTERFACE_PORT: Final[int] = 8000
-_MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
-_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
 _SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
 
 # The always-on core services that must re-register in the data/.state app registry
@@ -133,7 +120,7 @@ _BROWSER_SERVICE_NAME: Final[str] = "browser"
 # earlyoom's shed ledger inside the container (written by its ``-N`` hook; path
 # pinned by ``OOM_PRIORITY_RUNTIME_DIR`` in the template's ``.mngr/settings.toml``).
 # Only human-facing corroboration in the shed evidence dump, not the decision.
-_SHED_LEDGER_PATH: Final[str] = "/home/user/workspace/data/.state/oom_priority/events/shed.jsonl"
+_SHED_LEDGER_PATH: Final[str] = f"{WORKSPACE_CONTAINER_ROOT}/data/.state/oom_priority/events/shed.jsonl"
 # supervisord's own log; source of the browser-shed signal.
 _SUPERVISORD_LOG_PATH: Final[str] = "/var/log/supervisor/supervisord.log"
 
@@ -149,114 +136,15 @@ _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
 
 # HTTP status codes that mean system_interface is serving (as opposed to a
 # connection refusal, which curl reports as ``000``): a 2xx, a redirect, or a
-# 401 auth challenge. The shell poll loops in ``_wait_for_system_interface_up``
+# 401 auth challenge. The shell poll loops in ``wait_for_system_interface_up``
 # mirror this set in a ``case`` statement (they run inside ``docker exec`` and
 # cannot reference this constant).
 _SERVED_HTTP_STATUS_CODES: Final[frozenset[str]] = frozenset({"200", "301", "302", "307", "401"})
 
 
-class _ResumedWorkspace(FrozenModel):
-    """The workspace container + its system-services agent id, post-resume."""
-
-    container_name: str
-    services_agent_id: str
-
-
-def _format_container_states(states: Mapping[str, DockerContainerState]) -> str:
-    """Render container states for an assertion message, sorted so the text is stable."""
-    return ", ".join(f"{name}={state.value}" for name, state in sorted(states.items()))
-
-
 def _run_docker(args: list[str], *, timeout: int = 30) -> str:
     """Run a ``docker`` command on the sandbox host and return stdout."""
     return subprocess.run(["docker", *args], check=True, capture_output=True, text=True, timeout=timeout).stdout
-
-
-def _exec_in_container(container_name: str, command: str, *, timeout: int) -> subprocess.CompletedProcess[str]:
-    """Run a shell command inside ``container_name`` via ``docker exec``."""
-    return subprocess.run(
-        ["docker", "exec", container_name, "bash", "-lc", command],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def _recorded_env_container_names(snapshot_container_states: Mapping[str, DockerContainerState]) -> list[str]:
-    """The containers under the env's prefix that the snapshot was resumed with."""
-    prefix = _workspace_container_prefix()
-    return sorted(name for name in snapshot_container_states if name.startswith(prefix))
-
-
-def _snapshot_workspace_container_name(snapshot_container_states: Mapping[str, DockerContainerState]) -> str:
-    """The workspace container (not the docker-state sidecar) the snapshot was resumed with.
-
-    Read from the snapshot's recording rather than from the daemon: offload reuses a sandbox
-    across batches, so workspaces other tests created can be running beside it under the same prefix.
-    """
-    workspace_names = [
-        name for name in _recorded_env_container_names(snapshot_container_states) if _DOCKER_STATE_MARKER not in name
-    ]
-    assert len(workspace_names) == 1, (
-        f"Expected exactly one {_workspace_container_prefix()}* workspace container among those the snapshot "
-        f"was resumed with: {_format_container_states(snapshot_container_states)}"
-    )
-    return workspace_names[0]
-
-
-def _start_snapshot_containers(snapshot_container_states: Mapping[str, DockerContainerState]) -> None:
-    """Start the snapshot's workspace and docker-state containers; already-running ones are left as they are."""
-    subprocess.run(
-        ["docker", "start", *_recorded_env_container_names(snapshot_container_states)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-
-
-def _list_agents_in_container(container_name: str) -> list[dict[str, Any]]:
-    """Return the agents mngr sees from inside the workspace container.
-
-    Run from inside the host (the container), where mngr uses the local
-    provider and the baked-in ``MNGR_HOST_DIR=/home/user/.mngr`` -- no desktop-side
-    provider fan-out, so an unrelated (uncredentialed) provider can't blank
-    the listing. ``--on-error continue`` keeps any single provider failure
-    from aborting the list.
-    """
-    result = _exec_in_container(
-        container_name, "cd /home/user/workspace && mngr list --format json --on-error continue", timeout=60
-    )
-    assert result.returncode == 0, f"`mngr list` failed inside {container_name}: {result.stderr}"
-    return json.loads(result.stdout)["agents"]
-
-
-def _system_services_agent_id(container_name: str) -> str:
-    """Return the id of the primary system-services agent (runs the bootstrap)."""
-    agents = _list_agents_in_container(container_name)
-    for agent in agents:
-        if agent.get("labels", {}).get("is_primary") == "true" or agent.get("name") == "system-services":
-            return agent["id"]
-    raise AssertionError(f"No primary system-services agent among {[a.get('name') for a in agents]!r}")
-
-
-def _wait_for_system_interface_up(container_name: str) -> bool:
-    """Poll system_interface from inside the container until it answers, or time out.
-
-    The poll loop (and its sleeps) run in shell inside ``docker exec`` rather
-    than Python so the test never calls ``time.sleep``. Any 2xx/3xx/401 means
-    the interface is serving (it may redirect to auth); a connection refused
-    surfaces as ``000``.
-    """
-    poll = (
-        "for i in $(seq 1 40); do "
-        f"code=$(curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{_SYSTEM_INTERFACE_PORT}/ 2>/dev/null); "
-        'case "$code" in 200|301|302|307|401) exit 0;; esac; '
-        "sleep 3; done; exit 1"
-    )
-    return (
-        _exec_in_container(container_name, poll, timeout=_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS + 30).returncode == 0
-    )
 
 
 def _wait_for_services_registered(container_name: str, service_names: tuple[str, ...]) -> str:
@@ -270,13 +158,13 @@ def _wait_for_services_registered(container_name: str, service_names: tuple[str,
     """
     presence_checks = " && ".join(f'grep -q {name} "$f"' for name in service_names)
     poll = (
-        "f=/home/user/workspace/data/.state/apps.toml; "
+        f"f={WORKSPACE_CONTAINER_ROOT}/data/.state/apps.toml; "
         "for i in $(seq 1 40); do "
         f'if [ -f "$f" ] && {presence_checks}; then break; fi; '
         "sleep 3; done; "
         'cat "$f" 2>/dev/null'
     )
-    return _exec_in_container(container_name, poll, timeout=_SERVICES_REGISTERED_TIMEOUT_SECONDS + 30).stdout
+    return exec_in_workspace_container(container_name, poll, timeout=_SERVICES_REGISTERED_TIMEOUT_SECONDS + 30).stdout
 
 
 def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
@@ -319,7 +207,7 @@ def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
         "echo '=== earlyoom service log tail ==='; "
         "tail -20 /var/log/supervisor/earlyoom-stderr.log 2>/dev/null"
     )
-    diagnostics = _exec_in_container(container_name, diagnostic, timeout=30).stdout
+    diagnostics = exec_in_workspace_container(container_name, diagnostic, timeout=30).stdout
     return "BROWSER_SIGNAL_KILLED=yes" in diagnostics, diagnostics
 
 
@@ -331,37 +219,11 @@ def _wait_for_system_interface_down(container_name: str) -> bool:
     """
     poll = (
         "for i in $(seq 1 20); do "
-        f"code=$(curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{_SYSTEM_INTERFACE_PORT}/ 2>/dev/null); "
+        f"code=$(curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{SYSTEM_INTERFACE_PORT}/ 2>/dev/null); "
         '[ "$code" = "000" ] && exit 0; '
         "sleep 3; done; exit 1"
     )
-    return _exec_in_container(container_name, poll, timeout=90).returncode == 0
-
-
-@pytest.fixture(scope="session")
-def running_workspace(
-    snapshot_container_states: Mapping[str, DockerContainerState],
-) -> Iterator[_ResumedWorkspace]:
-    """Resume the snapshot's workspace and yield it once system_interface serves.
-
-    The captured container is stopped, so a sandbox booted from the snapshot
-    must (1) ``docker start`` it and (2) restart the system-services agent so
-    the bootstrap respawns system_interface. This is the mngr-level building
-    block behind minds' own recovery flow.
-    """
-    container_name = _snapshot_workspace_container_name(snapshot_container_states)
-    _start_snapshot_containers(snapshot_container_states)
-    services_agent_id = _system_services_agent_id(container_name)
-    start_result = _exec_in_container(
-        container_name,
-        f"cd /home/user/workspace && mngr start {services_agent_id} --quiet",
-        timeout=_MNGR_START_TIMEOUT_SECONDS,
-    )
-    assert start_result.returncode == 0, f"`mngr start` failed for system-services: {start_result.stderr}"
-    assert _wait_for_system_interface_up(container_name), (
-        "system_interface never answered after resuming the system-services agent."
-    )
-    yield _ResumedWorkspace(container_name=container_name, services_agent_id=services_agent_id)
+    return exec_in_workspace_container(container_name, poll, timeout=90).returncode == 0
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -432,7 +294,7 @@ def test_workspace_docker_container_is_present_and_stopped(
     workspace_states = {name: state for name, state in snapshot_container_states.items() if name.startswith("minds-")}
     assert workspace_states, (
         "No `minds-*` workspace containers in the snapshot. All containers seen: "
-        f"{_format_container_states(snapshot_container_states)}. The snapshot script's docker-stop pass "
+        f"{format_container_states(snapshot_container_states)}. The snapshot script's docker-stop pass "
         "must have run against the wrong container set, or the snapshot was taken before mngr_modal "
         "created the workspace container."
     )
@@ -440,7 +302,7 @@ def test_workspace_docker_container_is_present_and_stopped(
     not_stopped = {name: state for name, state in workspace_states.items() if state is not DockerContainerState.EXITED}
     assert not not_stopped, (
         "Expected every minds workspace container to be in the `exited` state after "
-        f"snapshot resume; got states: {_format_container_states(workspace_states)}. The snapshot script "
+        f"snapshot resume; got states: {format_container_states(workspace_states)}. The snapshot script "
         "should have `docker stop`ped them before calling snapshot_filesystem."
     )
 
@@ -457,34 +319,34 @@ def test_resumed_workspace_is_the_snapshots_own_even_beside_a_newer_container_un
     beside the snapshot's under the same container prefix, and ``docker ps`` lists the newest first.
     """
     image_id = _run_docker(
-        ["inspect", "--format", "{{.Image}}", _snapshot_workspace_container_name(snapshot_container_states)]
+        ["inspect", "--format", "{{.Image}}", snapshot_workspace_container_name(snapshot_container_states)]
     ).strip()
-    lookalike_name = f"{_workspace_container_prefix()}lookalike-{get_short_random_string()}"
+    lookalike_name = f"{snapshot_workspace_container_prefix()}lookalike-{get_short_random_string()}"
     _run_docker(["run", "--detach", "--name", lookalike_name, "--entrypoint", "sleep", image_id, "58213"])
     try:
-        resumed_workspace_name = _snapshot_workspace_container_name(snapshot_container_states)
+        resumed_workspace_name = snapshot_workspace_container_name(snapshot_container_states)
     finally:
         _run_docker(["rm", "--force", lookalike_name])
 
     assert resumed_workspace_name in snapshot_container_states, (
         f"Took {resumed_workspace_name!r} for the resumed workspace, but the snapshot was resumed with "
-        f"{_format_container_states(snapshot_container_states)}."
+        f"{format_container_states(snapshot_container_states)}."
     )
 
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(300)
-def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWorkspace) -> None:
+def test_resumed_workspace_serves_system_interface(running_workspace: RunningWorkspaceContainer) -> None:
     """After resume, the workspace's system_interface answers HTTP.
 
     A fresh probe (independent of the fixture's readiness wait) must get a
     served response (2xx, a redirect, or a 401 auth challenge -- anything but
     a connection refusal) from system_interface inside the container.
     """
-    result = _exec_in_container(
+    result = exec_in_workspace_container(
         running_workspace.container_name,
-        f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{_SYSTEM_INTERFACE_PORT}/",
+        f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{SYSTEM_INTERFACE_PORT}/",
         timeout=30,
     )
     assert result.stdout.strip() in _SERVED_HTTP_STATUS_CODES, (
@@ -495,7 +357,7 @@ def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWo
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(300)
-def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _ResumedWorkspace) -> None:
+def test_resumed_workspace_system_services_agent_is_alive(running_workspace: RunningWorkspaceContainer) -> None:
     """After resume, the primary system-services agent's tmux window is alive.
 
     The services agent is a plain ``command``-type agent running
@@ -503,7 +365,7 @@ def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _Re
     older template revisions read as ``REPLACED`` instead). Both are "alive";
     only STOPPED/DONE would mean the resume failed to bring the agent back.
     """
-    agents = _list_agents_in_container(running_workspace.container_name)
+    agents = list_agents_in_workspace_container(running_workspace.container_name)
     services_agents = [agent for agent in agents if agent["id"] == running_workspace.services_agent_id]
     assert services_agents, (
         f"system-services agent {running_workspace.services_agent_id} vanished from `mngr list` after resume."
@@ -517,7 +379,7 @@ def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _Re
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(300)
-def test_resumed_workspace_registered_expected_apps(running_workspace: _ResumedWorkspace) -> None:
+def test_resumed_workspace_registered_expected_apps(running_workspace: RunningWorkspaceContainer) -> None:
     """After resume, the bootstrap re-registered the expected apps in the app registry.
 
     After resume, services re-register into the app registry asynchronously, so we
@@ -578,16 +440,16 @@ def test_minds_recovery_restores_dead_system_interface(
     Self-contained (it establishes its own broken state) so it is robust to
     running in the same sandbox as the ``running_workspace`` fixture tests.
     """
-    container_name = _snapshot_workspace_container_name(snapshot_container_states)
-    _start_snapshot_containers(snapshot_container_states)
-    services_agent_id = _system_services_agent_id(container_name)
+    container_name = snapshot_workspace_container_name(snapshot_container_states)
+    start_snapshot_containers(snapshot_container_states)
+    services_agent_id = system_services_agent_id(container_name)
 
     # Break it: stopping the system-services agent tears down the bootstrap
     # and the services it manages, including system_interface.
-    stop_result = _exec_in_container(
+    stop_result = exec_in_workspace_container(
         container_name,
-        f"cd /home/user/workspace && mngr stop {services_agent_id} --quiet",
-        timeout=_MNGR_START_TIMEOUT_SECONDS,
+        f"cd {WORKSPACE_CONTAINER_ROOT} && mngr stop {services_agent_id} --quiet",
+        timeout=MNGR_START_TIMEOUT_SECONDS,
     )
     assert stop_result.returncode == 0, (
         f"Failed to stop system-services to set up the broken state: {stop_result.stderr}"
@@ -600,14 +462,14 @@ def test_minds_recovery_restores_dead_system_interface(
 
     # Recover by bouncing the system-services agent (stop is idempotent here;
     # start respawns it, and the bootstrap brings system_interface back up).
-    restart_result = _exec_in_container(
+    restart_result = exec_in_workspace_container(
         container_name,
-        f"cd /home/user/workspace && mngr stop {services_agent_id} --quiet; mngr start {services_agent_id} --quiet",
-        timeout=_MNGR_START_TIMEOUT_SECONDS,
+        f"cd {WORKSPACE_CONTAINER_ROOT} && mngr stop {services_agent_id} --quiet; mngr start {services_agent_id} --quiet",
+        timeout=MNGR_START_TIMEOUT_SECONDS,
     )
     assert restart_result.returncode == 0, f"system-services agent restart failed: {restart_result.stderr}"
 
-    assert _wait_for_system_interface_up(container_name), (
+    assert wait_for_system_interface_up(container_name), (
         "system_interface did not recover after restarting the system-services agent."
     )
 
@@ -678,7 +540,7 @@ def _point_desktop_mngr_at_the_baked_workspace(tmp_path: Path, monkeypatch: pyte
     .mngr would fail the config guard). The cwd is left neutral and the providers
     that would need cloud credentials during discovery are silenced.
     """
-    root_name = os.environ.get("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
+    root_name = os.environ.get("MINDS_ROOT_NAME", CI_SNAPSHOT_MINDS_ROOT_NAME)
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     baked_mngr_host_dir = _baked_mngr_host_dir(root_name, real_home)
     assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
@@ -708,7 +570,7 @@ def _prepare_electron_workspace_inputs(
     monkeypatch.setenv("MINDS_ROOT_NAME", root_name)
     monkeypatch.setenv(
         "MINDS_CLIENT_CONFIG_PATH",
-        str(repo_tier_client_config_path(env_name_from_root_name(_DEFAULT_MINDS_ROOT_NAME))),
+        str(repo_tier_client_config_path(env_name_from_root_name(CI_SNAPSHOT_MINDS_ROOT_NAME))),
     )
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
@@ -819,7 +681,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
 # The backup update's chat gate must (a) classify a non-main agent that is
 # RUNNING as a running chat, (b) block the mutating update on it, and (c) stop
 # it for real when the "Stop all chats and retry" flow passes --stop-chats. The
-# unit tests in backup_workspace_scripts_test.py drive these paths with a
+# unit tests in backup_workspace_programs_test.py drive these paths with a
 # stubbed `mngr list`; this test drives them against the resumed snapshot
 # workspace with a controllable `command` agent held RUNNING via the `active`
 # marker, so the gate has a deterministic RUNNING window to observe.
@@ -827,7 +689,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
 
 def _find_agent_by_name(container_name: str, name: str) -> dict[str, Any]:
     """Return the agent record whose name matches ``name`` from mngr list."""
-    agents = _list_agents_in_container(container_name)
+    agents = list_agents_in_workspace_container(container_name)
     matching = [agent for agent in agents if agent.get("name") == name]
     assert matching, f"No agent named {name!r} among {[agent.get('name') for agent in agents]!r}"
     return matching[0]
@@ -836,7 +698,7 @@ def _find_agent_by_name(container_name: str, name: str) -> dict[str, Any]:
 def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: str, *, attempts: int = 40) -> bool:
     """Poll (shell-side, no python sleeps) until the agent reports the state, or time out."""
     read_state = (
-        "cd /home/user/workspace && mngr list --format json --on-error continue | "
+        f"cd {WORKSPACE_CONTAINER_ROOT} && mngr list --format json --on-error continue | "
         f'python3 -c \'import json,sys; print(next((a["state"] for a in json.load(sys.stdin)["agents"] '
         f'if a["id"] == "{agent_id}"), ""))\''
     )
@@ -845,22 +707,14 @@ def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: st
         f'state=$({read_state}); [ "$state" = "{expected_state}" ] && exit 0; '
         "sleep 3; done; exit 1"
     )
-    return _exec_in_container(container_name, poll, timeout=attempts * 3 + 120).returncode == 0
-
-
-def _run_backup_script_in_container(
-    container_name: str, script: str, args: tuple[str, ...], *, timeout: int
-) -> subprocess.CompletedProcess[str]:
-    """Run one of the minds backup workspace scripts inside the container at /home/user/workspace."""
-    command = build_workspace_script_command(script, args)
-    return _exec_in_container(container_name, f"cd /home/user/workspace && {command}", timeout=timeout)
+    return exec_in_workspace_container(container_name, poll, timeout=attempts * 3 + 120).returncode == 0
 
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(900)
 def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
 ) -> None:
     """The backup-update gate blocks while an agent is RUNNING and --stop-chats clears it.
 
@@ -882,16 +736,16 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         # live process; the `active` marker (which real agents get from their
         # hooks) is what mngr reads as RUNNING rather than WAITING. `--transfer
         # none` keeps it in the repo root, the only work_dir the gate looks at.
-        created = _exec_in_container(
+        created = exec_in_workspace_container(
             container_name,
-            f"cd /home/user/workspace && mngr create {blocker_name} --type command "
+            f"cd {WORKSPACE_CONTAINER_ROOT} && mngr create {blocker_name} --type command "
             "--transfer none --no-ensure-clean --no-connect -- sleep 100196",
             timeout=180,
         )
         assert created.returncode == 0, f"`mngr create` failed for the blocker agent: {created.stderr}"
-        marked = _exec_in_container(
+        marked = exec_in_workspace_container(
             container_name,
-            f"cd /home/user/workspace && mngr exec {blocker_name} 'touch \"$MNGR_AGENT_STATE_DIR/active\"'",
+            f"cd {WORKSPACE_CONTAINER_ROOT} && mngr exec {blocker_name} 'touch \"$MNGR_AGENT_STATE_DIR/active\"'",
             timeout=120,
         )
         assert marked.returncode == 0, f"marking the blocker agent active failed: {marked.stderr}"
@@ -901,9 +755,9 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         )
 
         # The gate probe classifies the running blocker as a running chat.
-        probe = _run_backup_script_in_container(
-            container_name,
-            BACKUP_GATE_PROBE_SCRIPT,
+        probe = run_workspace_program_in_container(
+            running_workspace,
+            backup_gate_probe,
             ("--agent-id", services_agent_id),
             timeout=300,
         )
@@ -913,9 +767,9 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         assert isinstance(probe_chats, list) and blocker_name in probe_chats, probe_payload
 
         # The mutating update refuses to run while the blocker is RUNNING.
-        blocked = _run_backup_script_in_container(
-            container_name,
-            BACKUP_APPLY_UPDATE_SCRIPT,
+        blocked = run_workspace_program_in_container(
+            running_workspace,
+            backup_apply_update,
             ("--minds-version", "0.0.0-snapshot-test", "--agent-id", services_agent_id),
             timeout=600,
         )
@@ -929,9 +783,9 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         # and proceeds past the gate. Whether the rest of the update succeeds
         # depends on the baked repo's tags; the contract under test is that the
         # outcome is anything but blocked and the agent is genuinely stopped.
-        retried = _run_backup_script_in_container(
-            container_name,
-            BACKUP_APPLY_UPDATE_SCRIPT,
+        retried = run_workspace_program_in_container(
+            running_workspace,
+            backup_apply_update,
             ("--minds-version", "0.0.0-snapshot-test", "--agent-id", services_agent_id, "--stop-chats"),
             timeout=600,
         )
@@ -944,8 +798,8 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
     finally:
         # The workspace is a session-scoped shared container; never leak a
         # RUNNING agent that would block a sibling test's own gate.
-        _exec_in_container(
-            container_name, f"cd /home/user/workspace && mngr destroy {blocker_name} --force", timeout=180
+        exec_in_workspace_container(
+            container_name, f"cd {WORKSPACE_CONTAINER_ROOT} && mngr destroy {blocker_name} --force", timeout=180
         )
 
 
@@ -961,13 +815,13 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
 
 
 def _git_in_workspace(container_name: str, args: str) -> subprocess.CompletedProcess[str]:
-    return _exec_in_container(container_name, f"cd /home/user/workspace && git {args}", timeout=60)
+    return exec_in_workspace_container(container_name, f"cd {WORKSPACE_CONTAINER_ROOT} && git {args}", timeout=60)
 
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(900)
-def test_backup_service_check_update_and_force_update_converge(running_workspace: _ResumedWorkspace) -> None:
+def test_backup_service_check_update_and_force_update_converge(running_workspace: RunningWorkspaceContainer) -> None:
     """Check against the shipped minimum tag, update to it, verify convergence + force-update idempotence.
 
     The check fetches the minimum tag from the official GitHub remote when it
@@ -985,8 +839,8 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
     # 1. The check runs end to end: official remote ensured (and pointed at
     # the canonical URL), tags fetched from GitHub when missing, real
     # supervisord state reported.
-    check = _run_backup_script_in_container(
-        container_name, BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+    check = run_workspace_program_in_container(
+        running_workspace, backup_check, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
     )
     check_payload = extract_marker_json(check.stdout, CHECK_RESULT_MARKER)
     assert check_payload is not None, (check.stdout, check.stderr)
@@ -999,9 +853,9 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
     # 2. Update (converge) to the minimum tag's content. Whether a commit
     # lands depends on how far the baked template has moved past the tag;
     # either way the script must succeed and restart the service.
-    update = _run_backup_script_in_container(
-        container_name,
-        BACKUP_APPLY_UPDATE_SCRIPT,
+    update = run_workspace_program_in_container(
+        running_workspace,
+        backup_apply_update,
         ("--minds-version", minimum_version, "--agent-id", agent_id),
         timeout=800,
     )
@@ -1015,8 +869,8 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
 
     # 3. Re-check: the code now matches the minimum tag exactly and the
     # service came back RUNNING.
-    recheck = _run_backup_script_in_container(
-        container_name, BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+    recheck = run_workspace_program_in_container(
+        running_workspace, backup_check, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
     )
     recheck_payload = extract_marker_json(recheck.stdout, CHECK_RESULT_MARKER)
     assert recheck_payload is not None, (recheck.stdout, recheck.stderr)
@@ -1025,9 +879,9 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
 
     # 4. Force update at the already-converged version: ok, nothing to
     # commit, service restarted/verified again.
-    forced = _run_backup_script_in_container(
-        container_name,
-        BACKUP_APPLY_UPDATE_SCRIPT,
+    forced = run_workspace_program_in_container(
+        running_workspace,
+        backup_apply_update,
         ("--minds-version", minimum_version, "--agent-id", agent_id),
         timeout=800,
     )
@@ -1073,7 +927,7 @@ def _ensure_restic_on_sandbox_host(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 @pytest.mark.docker
 @pytest.mark.timeout(900)
 def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1099,7 +953,9 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     repo_two = tmp_path / "restic-repo-2"
 
     def read_workspace_env() -> str:
-        result = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
+        result = exec_in_workspace_container(
+            container_name, f"cat {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env", timeout=30
+        )
         assert result.returncode == 0, result.stderr
         return result.stdout
 
@@ -1123,16 +979,16 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
 
     # Repair: corrupt the workspace copy, re-inject, and confirm the drifted
     # copy was rotated aside inside the container rather than lost.
-    corrupted = _exec_in_container(
+    corrupted = exec_in_workspace_container(
         container_name,
-        "printf 'RESTIC_REPOSITORY=garbage\n' > /home/user/workspace/data/.secrets/restic.env",
+        f"printf 'RESTIC_REPOSITORY=garbage\n' > {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env",
         timeout=30,
     )
     assert corrupted.returncode == 0, corrupted.stderr
     reinject_canonical_env(agent_id=agent_id, agent_address=str(agent_id), paths=paths)
     assert read_workspace_env() == canonical_one
-    rotated = _exec_in_container(
-        container_name, "grep -l garbage /home/user/workspace/data/.secrets/restic.env.*", timeout=30
+    rotated = exec_in_workspace_container(
+        container_name, f"grep -l garbage {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env.*", timeout=30
     )
     assert rotated.returncode == 0 and rotated.stdout.strip(), (rotated.stdout, rotated.stderr)
 
@@ -1163,7 +1019,9 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # aside, so the backup service reads "not configured" again.
     disable_backups_for_host(agent_id=agent_id, agent_address=str(agent_id), paths=paths)
     assert read_canonical_env(paths, agent_id) is None
-    gone = _exec_in_container(container_name, "test -f /home/user/workspace/data/.secrets/restic.env", timeout=30)
+    gone = exec_in_workspace_container(
+        container_name, f"test -f {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env", timeout=30
+    )
     assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
     archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
     assert len(archived_after_disable) == 2
@@ -1204,14 +1062,14 @@ def _cp_repo_container_to_host(container_name: str, repository: Path) -> None:
 
 def _restic_env_prefix() -> str:
     """Shell prefix exporting the injected restic.env for an in-container restic call."""
-    return "set -a; . /home/user/workspace/data/.secrets/restic.env; set +a; "
+    return f"set -a; . {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env; set +a; "
 
 
 def _host_backup_state(container_name: str) -> str:
     """The supervisord state token for the workspace's ``host-backup`` program (e.g. ``RUNNING``/``STOPPED``)."""
     # `supervisorctl status <name>` prints "<name> <STATE> <detail>"; its exit
     # code is non-zero for any non-RUNNING state, so only the token matters.
-    status = _exec_in_container(container_name, "supervisorctl status host-backup", timeout=30)
+    status = exec_in_workspace_container(container_name, "supervisorctl status host-backup", timeout=30)
     parts = status.stdout.split()
     return parts[1] if len(parts) >= 2 else ""
 
@@ -1232,7 +1090,7 @@ class _QuiescedWorkspaceRepo(FrozenModel):
     def backup(self, source_path: str, *, tag: str, excludes: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         """Take a tagged ``restic backup`` of ``source_path`` (a lock-holding write)."""
         exclude_flags = "".join(f" --exclude {shlex.quote(pattern)}" for pattern in excludes)
-        return _exec_in_container(
+        return exec_in_workspace_container(
             self.container_name,
             _restic_env_prefix() + f"restic backup {shlex.quote(source_path)} --tag {shlex.quote(tag)}{exclude_flags}",
             timeout=600,
@@ -1253,7 +1111,7 @@ class _LiveWorkspaceRepo(FrozenModel):
         """List snapshots with ``--no-lock`` (a read that never blocks on a live tick's lock)."""
         # Safe without the lock: a live tick only appends snapshots, never
         # removing the ones under assertion.
-        return _exec_in_container(
+        return exec_in_workspace_container(
             self.container_name, _restic_env_prefix() + "restic snapshots --no-lock --json", timeout=120
         )
 
@@ -1264,7 +1122,7 @@ class _LiveWorkspaceRepo(FrozenModel):
         The restore under test brings the service back itself (``supervisorctl
         reload``), so production service recovery is still exercised.
         """
-        _exec_in_container(self.container_name, "supervisorctl stop host-backup", timeout=60)
+        exec_in_workspace_container(self.container_name, "supervisorctl stop host-backup", timeout=60)
         # The service is a separate process the type cannot see, so verify the
         # stop took and fail closed rather than trust the type alone.
         state = _host_backup_state(self.container_name)
@@ -1272,11 +1130,11 @@ class _LiveWorkspaceRepo(FrozenModel):
         # Stopping mid-tick can kill a restic holding the lock, leaving it stale;
         # clear it so the exclusive scope starts clean (the service is down, so
         # `unlock` only removes dead-holder locks).
-        _exec_in_container(self.container_name, _restic_env_prefix() + "restic unlock", timeout=60)
+        exec_in_workspace_container(self.container_name, _restic_env_prefix() + "restic unlock", timeout=60)
         try:
             yield _QuiescedWorkspaceRepo(container_name=self.container_name)
         finally:
-            _exec_in_container(self.container_name, "supervisorctl start host-backup", timeout=60)
+            exec_in_workspace_container(self.container_name, "supervisorctl start host-backup", timeout=60)
 
 
 @pytest.mark.minds_snapshot_resume
@@ -1288,7 +1146,7 @@ class _LiveWorkspaceRepo(FrozenModel):
 # race is investigated -- the marker is what routes this into the retrying offload group.
 @pytest.mark.flaky
 def test_backup_restore_rewinds_the_resumed_workspace_in_place(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1344,8 +1202,8 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # taken from inside the container (like the hourly service would), with
     # the workspace's own restic -- the distro 0.14 is fine for backup, which
     # is exactly why the restore script must upgrade for restore --delete.
-    sentinel = "/home/user/workspace/restore-e2e-sentinel.txt"
-    written = _exec_in_container(container_name, f"printf 'version-one\\n' > {sentinel}", timeout=30)
+    sentinel = f"{WORKSPACE_CONTAINER_ROOT}/restore-e2e-sentinel.txt"
+    written = exec_in_workspace_container(container_name, f"printf 'version-one\\n' > {sentinel}", timeout=30)
     assert written.returncode == 0, written.stderr
     # Take the source snapshot with the repository to ourselves: host-backup
     # ticks against this same repo, and a live tick's lock would fail this
@@ -1359,9 +1217,9 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     assert source_backup.returncode == 0, (source_backup.stdout, source_backup.stderr)
 
     # Work done after the snapshot: the restore must undo both of these.
-    mutated = _exec_in_container(
+    mutated = exec_in_workspace_container(
         container_name,
-        f"printf 'version-two\\n' > {sentinel} && printf 'after\\n' > /home/user/workspace/restore-e2e-extra.txt",
+        f"printf 'version-two\\n' > {sentinel} && printf 'after\\n' > {WORKSPACE_CONTAINER_ROOT}/restore-e2e-extra.txt",
         timeout=30,
     )
     assert mutated.returncode == 0, mutated.stderr
@@ -1411,21 +1269,25 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
 
     # The workspace content was rewound: the sentinel is back at version-one
     # and the post-snapshot file is gone.
-    sentinel_after = _exec_in_container(container_name, f"cat {sentinel}", timeout=30)
+    sentinel_after = exec_in_workspace_container(container_name, f"cat {sentinel}", timeout=30)
     assert sentinel_after.returncode == 0, sentinel_after.stderr
     assert sentinel_after.stdout.strip() == "version-one"
-    extra_after = _exec_in_container(container_name, "test -f /home/user/workspace/restore-e2e-extra.txt", timeout=30)
+    extra_after = exec_in_workspace_container(
+        container_name, f"test -f {WORKSPACE_CONTAINER_ROOT}/restore-e2e-extra.txt", timeout=30
+    )
     assert extra_after.returncode != 0, "the post-snapshot file should have been deleted by the restore"
 
     # The injected credentials survived the restore (the snapshot predates
     # them only logically -- the script writes the current env back).
-    env_after = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
+    env_after = exec_in_workspace_container(
+        container_name, f"cat {WORKSPACE_CONTAINER_ROOT}/data/.secrets/restic.env", timeout=30
+    )
     assert env_after.returncode == 0, env_after.stderr
     assert f"RESTIC_REPOSITORY={repository}" in env_after.stdout
 
     # The script upgraded the workspace's restic (the distro build predates
     # restore --delete) and persisted the pinned version.
-    version_after = _exec_in_container(container_name, "restic version", timeout=30)
+    version_after = exec_in_workspace_container(container_name, "restic version", timeout=30)
     assert version_after.returncode == 0, version_after.stderr
     # The pinned minor (the script pins 0.18.x); update alongside a pin bump.
     assert "restic 0.18" in version_after.stdout, version_after.stdout
@@ -1446,7 +1308,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # Every supervisord service came back onto the restored tree; the script
     # verified host-backup itself, and the system interface serving again
     # proves the broader workspace is alive.
-    assert _wait_for_system_interface_up(container_name)
+    assert wait_for_system_interface_up(container_name)
 
 
 # Bug-report diagnostics against the resumed workspace
@@ -1537,7 +1399,7 @@ def _chat_agents_in_container(container_name: str) -> list[tuple[str, str]]:
     spawned worker) is this fixture's own choice of plant target -- the
     collector itself considers every agent.
     """
-    listed = _exec_in_container(
+    listed = exec_in_workspace_container(
         container_name,
         "export PATH=/root/.local/bin:$PATH; "
         'mngr list --format "{id}|{name}|{labels.is_primary}|{labels.agent_created}" 2>/dev/null',
@@ -1585,7 +1447,7 @@ def _plant_transcript_pair_in_container(container_name: str, agent_dir: str, cha
         f" && touch -d '+1 hour' {agent_dir}/events/claude/common_transcript/events.jsonl"
         f" && touch -d '+2 hours' {agent_dir}/events/logs/common_transcript/events.jsonl"
     )
-    result = _exec_in_container(container_name, plant, timeout=30)
+    result = exec_in_workspace_container(container_name, plant, timeout=30)
     assert result.returncode == 0, f"could not plant the transcript fixtures: {result.stderr}"
 
 
@@ -1623,7 +1485,9 @@ def _read_zip_members(staged_zip: Path) -> dict[str, str]:
 
 def _leftover_collection_scratch_in_container(container_name: str) -> list[str]:
     """Payload files the collector staged for scanning inside the workspace and should have removed."""
-    result = _exec_in_container(container_name, f"ls -1 {_IN_CONTAINER_SCRATCH_GLOB} 2>/dev/null || true", timeout=30)
+    result = exec_in_workspace_container(
+        container_name, f"ls -1 {_IN_CONTAINER_SCRATCH_GLOB} 2>/dev/null || true", timeout=30
+    )
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -1644,7 +1508,7 @@ def _warm_host_side_mngr() -> None:
 
 
 def _collect_diagnostics_from_workspace(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     *,
     include_transcript: bool,
     staging_dir: Path,
@@ -1678,7 +1542,7 @@ def _collect_diagnostics_from_workspace(
 # flaky mark stays for residual load variance on the shared 4-core box.
 @pytest.mark.flaky
 def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
@@ -1739,7 +1603,7 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     finally:
         # Only the planted event streams: the directory belongs to a real agent
         # now, so removing it would take the workspace's own state with it.
-        _exec_in_container(
+        exec_in_workspace_container(
             running_workspace.container_name,
             f"rm -rf {planted_agent_dir}/events/claude/common_transcript"
             f" {planted_agent_dir}/events/logs/common_transcript",
@@ -1801,7 +1665,7 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
 # full-collection test above).
 @pytest.mark.flaky
 def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
@@ -1860,7 +1724,7 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
             concurrency_group=cg,
         )
     finally:
-        _exec_in_container(
+        exec_in_workspace_container(
             running_workspace.container_name,
             # Only the planted event streams -- these are real agents' directories.
             f"rm -rf {clean_agent_dir}/events/claude/common_transcript"
@@ -1895,7 +1759,7 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
 @pytest.mark.docker
 @pytest.mark.timeout(600)
 def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_predates_it(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
@@ -1912,7 +1776,7 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
     staging_dir = tmp_path / "bug-report-staging"
     staging_dir.mkdir()
     moved_aside_path = WORKSPACE_COLLECTOR_PATH + _COLLECTOR_MOVED_ASIDE_SUFFIX
-    moved = _exec_in_container(
+    moved = exec_in_workspace_container(
         running_workspace.container_name, f"mv {WORKSPACE_COLLECTOR_PATH} {moved_aside_path}", timeout=30
     )
     assert moved.returncode == 0, f"could not move the collector aside: {moved.stderr}"
@@ -1924,7 +1788,7 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
             concurrency_group=cg,
         )
     finally:
-        restored = _exec_in_container(
+        restored = exec_in_workspace_container(
             running_workspace.container_name, f"mv {moved_aside_path} {WORKSPACE_COLLECTOR_PATH}", timeout=30
         )
         assert restored.returncode == 0, (
@@ -1941,7 +1805,7 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
 @pytest.mark.docker
 @pytest.mark.timeout(300)
 def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
-    running_workspace: _ResumedWorkspace,
+    running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
@@ -2045,7 +1909,7 @@ def _hold_restic_executing(container_name: str) -> str:
         "backup --stdin --stdin-filename hold <&3 >/dev/null 2>&1 & "
         "echo $!"
     )
-    started = _exec_in_container(container_name, hold, timeout=120)
+    started = exec_in_workspace_container(container_name, hold, timeout=120)
     assert started.returncode == 0, f"could not start the restic holder: {started.stderr}"
     pid = started.stdout.strip()
     # `$!` is echoed while the holder is still in setsid -> nohup -> env; wait for it to reach restic.
@@ -2055,7 +1919,7 @@ def _hold_restic_executing(container_name: str) -> str:
         f'case "$exe" in /usr/local/bin/restic*) break;; esac; sleep 0.2; done; '
         f"kill -0 {pid} && readlink /proc/{pid}/exe"
     )
-    alive = _exec_in_container(container_name, inside_restic, timeout=60)
+    alive = exec_in_workspace_container(container_name, inside_restic, timeout=60)
     assert alive.returncode == 0 and alive.stdout.strip().startswith("/usr/local/bin/restic"), (
         f"the restic holder (pid {pid}) is not executing /usr/local/bin/restic: "
         f"exe={alive.stdout.strip()!r} stderr={alive.stderr!r}"
@@ -2066,7 +1930,7 @@ def _hold_restic_executing(container_name: str) -> str:
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(1150)
-def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspace: _ResumedWorkspace) -> None:
+def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspace: RunningWorkspaceContainer) -> None:
     """The PR's ``setup_system.sh`` re-runs cleanly inside a live workspace, as an agent would run it.
 
     Runs from the workspace tree under ``HOME=/home/user`` (what an agent-driven re-run gets)
@@ -2075,10 +1939,10 @@ def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspac
     container_name = running_workspace.container_name
     holder_pid = _hold_restic_executing(container_name)
     try:
-        reprovision = _exec_in_container(
+        reprovision = exec_in_workspace_container(
             container_name,
             f"rm -f {_PROVISION_MARKER_DIR}/*.setup_system.done; "
-            "cd /home/user/workspace && HOME=/home/user bash system/scripts/setup_system.sh",
+            f"cd {WORKSPACE_CONTAINER_ROOT} && HOME=/home/user bash system/scripts/setup_system.sh",
             timeout=_LIVE_REPROVISION_TIMEOUT_SECONDS,
         )
         assert reprovision.returncode == 0, (
@@ -2090,21 +1954,25 @@ def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspac
         # script did not run; its other lines (an inherited pin being ignored) are printed
         # by a run that proceeds.
         assert "already provisioned for tree" not in reprovision.stdout, "the provision guard skipped the re-provision"
-        stamped = _exec_in_container(container_name, f"ls {_PROVISION_MARKER_DIR}/*.setup_system.done", timeout=30)
+        stamped = exec_in_workspace_container(
+            container_name, f"ls {_PROVISION_MARKER_DIR}/*.setup_system.done", timeout=30
+        )
         assert stamped.returncode == 0, f"no fresh provision marker under {_PROVISION_MARKER_DIR}: {stamped.stderr!r}"
         # The busy binary was replaced under the running process (no ETXTBSY).
-        pinned = _exec_in_container(
+        pinned = exec_in_workspace_container(
             container_name,
-            "grep -o 'RESTIC_VERSION:=[0-9.]*' /home/user/workspace/system/scripts/setup_system.sh | cut -d= -f2",
+            f"grep -o 'RESTIC_VERSION:=[0-9.]*' {WORKSPACE_CONTAINER_ROOT}/system/scripts/setup_system.sh | cut -d= -f2",
             timeout=30,
         ).stdout.strip()
         assert pinned, "could not read RESTIC_VERSION from setup_system.sh"
-        installed = _exec_in_container(container_name, "/usr/local/bin/restic version", timeout=30)
+        installed = exec_in_workspace_container(container_name, "/usr/local/bin/restic version", timeout=30)
         assert installed.returncode == 0 and f"restic {pinned}" in installed.stdout, (
             f"restic at /usr/local/bin is not the pinned {pinned} after the re-provision: "
             f"{installed.stdout!r} {installed.stderr!r}"
         )
-        still_held = _exec_in_container(container_name, f"kill -0 {holder_pid}", timeout=30)
+        still_held = exec_in_workspace_container(container_name, f"kill -0 {holder_pid}", timeout=30)
         assert still_held.returncode == 0, "the restic holder died during the re-provision"
     finally:
-        _exec_in_container(container_name, f"kill {holder_pid} 2>/dev/null; rm -rf {_RESTIC_HOLD_DIR}", timeout=60)
+        exec_in_workspace_container(
+            container_name, f"kill {holder_pid} 2>/dev/null; rm -rf {_RESTIC_HOLD_DIR}", timeout=60
+        )

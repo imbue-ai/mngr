@@ -2,7 +2,7 @@
 
 Runs as part of the per-workspace backups route: for an online,
 verification-enabled workspace, one ``mngr exec`` runs the stdlib-only check
-script (see ``backup_workspace_scripts``) which compares the installed
+program (``workspace_programs/backup_check.py``) which compares the installed
 backup-service code (``system/services/host_backup``, ``system/libs/host_backup``,
 or ``libs/host_backup`` on
 pre-declutter workspaces) against the *minimum required* ``minds-v*`` tag
@@ -49,10 +49,10 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agent
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
+from imbue.minds.workspace_programs import backup_check
+from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -287,8 +287,8 @@ def check_backup_service_for_workspace(
     if not is_workspace_online(resolver, agent_id):
         return BackupServiceCheck(state=BackupServiceCheckState.OFFLINE)
 
-    command_str = build_workspace_script_command(
-        BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
+    command_str = build_workspace_program_command(
+        backup_check, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
     )
     result = run_mngr_exec_on_agent(
         build_agent_address(agent_id, resolver),
