@@ -230,6 +230,25 @@ describe("the update modal's verdict line", () => {
     expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
   });
 
+  it("reports a run to a branch with its chat, which the row's badge leaves no other way to", () => {
+    const { draw, routeSet, onClose } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      availability: "UNKNOWN",
+      unknown_reason: "NO_MACHINE_VERSION",
+      current_version: "upstream/fake-catchup-848b",
+      verdict: "UPDATED",
+      success_note_version: "upstream/fake-catchup-848b",
+      chat_agent_id: "agent-lead-4",
+    });
+    const root = draw();
+
+    expect(allText(root)).toContain("This workspace was updated to upstream/fake-catchup-848b.");
+    expect(buttonLabels(root)).toEqual(["Open chat", "Dismiss"]);
+    press(root, "Open chat");
+    expect(onClose).toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, { chat: "agent-lead-4" });
+  });
+
   it("offers an update over a machine of unknown version once its last run's note is dismissed", () => {
     // A run to a branch leaves the machine's version unreadable; Dismiss clears the note, not the verdict.
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {

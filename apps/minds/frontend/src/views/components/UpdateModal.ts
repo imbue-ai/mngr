@@ -561,6 +561,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         case "updated":
           body.push(versionRows());
           pushOutcome("success", verdictMessage(update));
+          // The row hides its note, and the note's chat, behind any badge, so this is that chat's way in.
+          if (update.verdict === "UPDATED") pushOpenChat();
           actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
           break;
         case "unknown":
