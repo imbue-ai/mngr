@@ -26,9 +26,10 @@ from __future__ import annotations
 import importlib.resources
 import json
 import os
-import signal
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ import pytest
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import running_in_own_process_group
 from imbue.mngr_codex.resources.testing import rollout_assistant_message as _assistant
 from imbue.mngr_codex.resources.testing import rollout_event_msg_user as _event_msg_user
 from imbue.mngr_codex.resources.testing import rollout_function_call as _function_call
@@ -48,9 +50,6 @@ from imbue.mngr_codex.resources.testing import rollout_user_message as _user
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
 
-# The daemon spends nearly all its time in `sleep`, which defers a signal until the
-# current one returns, so give it more than one poll interval to die.
-_WATCHER_EXIT_TIMEOUT = 15
 # The daemon needs one poll cycle with no growth before it declares the input
 # complete; a few cycles of headroom keeps a loaded CI box from failing the wait.
 _COMPLETING_PASS_TIMEOUT = 30
@@ -89,37 +88,19 @@ def _run_converter(state_dir: Path) -> str:
     return result.stderr
 
 
-def _start_watcher(state_dir: Path) -> subprocess.Popen[bytes]:
-    """Start the real poll daemon (no --single-pass); its loop never exits.
+@contextmanager
+def _running_watcher(state_dir: Path) -> Iterator[None]:
+    """Run the real poll daemon (no --single-pass) for the block; its loop never exits on its own.
 
-    Given its own process group so _stop_watcher can take an in-flight converter
-    child down with the bash parent. The caller owns the handle and must stop it
-    by that exact handle, never by pattern.
+    On exit the daemon's whole process group, including any converter it was
+    running, is SIGKILLed until it is empty.
     """
-    return subprocess.Popen(
-        ["bash", str(_SCRIPT_PATH)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    with running_in_own_process_group(
+        command=["bash", str(_SCRIPT_PATH)],
         env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
-        start_new_session=True,
-    )
-
-
-def _stop_watcher(watcher: subprocess.Popen[bytes]) -> None:
-    """Stop a daemon started by _start_watcher (SIGTERM to its group, then SIGKILL).
-
-    The group, not the bash parent alone: a SIGTERM that lands while the parent's
-    converter child holds the convert lock kills bash without releasing it.
-    """
-    try:
-        os.killpg(watcher.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        os.killpg(watcher.pid, signal.SIGKILL)
-        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
+        stdout=subprocess.DEVNULL,
+    ):
+        yield
 
 
 def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -317,8 +298,7 @@ def test_poll_daemon_releases_a_step_no_token_count_ever_closes(state_dir: Path)
     )
     output_path = state_dir / "events" / "codex" / "common_transcript" / "events.jsonl"
 
-    watcher = _start_watcher(state_dir)
-    try:
+    with _running_watcher(state_dir):
         # Wait on the raw text: the trailing step is the last record the releasing
         # pass writes, so seeing it means that write finished and _steps can parse.
         released = poll_until(
@@ -328,8 +308,6 @@ def test_poll_daemon_releases_a_step_no_token_count_ever_closes(state_dir: Path)
         )
         assert released, "the daemon never released the step no token_count closed"
         assert [s["message"] for s in _steps(state_dir)] == ["measured", trailing_message]
-    finally:
-        _stop_watcher(watcher)
 
 
 def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:

@@ -1,0 +1,5 @@
+Added `running_in_own_process_group` to `imbue.mngr.utils.testing` (MIND-377). It is a context manager that runs a command as the leader of a new process group and, on exit, leaves nothing in that group running.
+
+On exit it sends SIGKILL to the group again and again until every process in it has exited, rather than once. CI runs tests in Modal sandboxes, which use gVisor (a user-space Linux kernel), and gVisor lets a child that is being forked at the moment of the kill join the group after the signal has gone out, so a single kill can miss it. Every process in the group inherits the write end of a pipe that nothing writes to, and that pipe reaches end-of-file only once the last of them has exited, which is how the helper knows the group is empty. The group leader is reaped only after that, because its pid is the group id and reaping it earlier would let an unrelated group reuse the number.
+
+The claude and codex `common_transcript.sh` tests use it to stop their background watchers. Test utility only; no change to `mngr` behaviour.
