@@ -156,7 +156,7 @@ MESSAGE_CHAT_SCRIPT = "system/scripts/message_chat.py"
 # The template's env wrapper, the first that exists.
 # CLEANUP: drop the automations path once update-self's floor, the oldest release the app updates from,
 # keeps the wrapper under system/libs/routines.
-AGENT_ENV_WRAPPERS =("system/libs/routines/with_agent_env.sh", "system/libs/automations/with_agent_env.sh")
+AGENT_ENV_WRAPPERS = ("system/libs/routines/with_agent_env.sh", "system/libs/automations/with_agent_env.sh")
 HOST_ENV_FILE = "/home/user/.mngr/env"
 LOCAL_SETTINGS_PATH = ".mngr/settings.local.toml"
 ACCOUNT_GATE_SCRIPT = "system/scripts/require_create_account.py"
