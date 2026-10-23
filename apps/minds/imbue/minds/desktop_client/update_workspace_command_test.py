@@ -211,6 +211,7 @@ def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pi
 The Imbue Studio app pinned this update, so do not ask it for its version:
 - Target: minds-v0.9.0
 - Ceiling: minds-v0.9.0
+If Step 1 finds uncommitted changes, do not stop the update for them: commit them all as one work-in-progress commit on the current branch, with a message that lists their paths, name that commit in your results, and carry on.
 When you resolve the target in Step 2, append `--ceiling minds-v0.9.0` to the `resolve-target` command. If the app cannot be reached for anything else during this run, that is not a fault.\
 """)
     dispatch = staged.read_state("last-dispatch.json")

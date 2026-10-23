@@ -53,6 +53,15 @@ PINNED_NOTE_TEMPLATE: Final[str] = (
 )
 
 # CLEANUP: drop this instruction once the oldest release the app updates in place
+# (``OLDEST_IN_PLACE_UPDATABLE_VERSION``) ships update-self prose whose Step 1 commits a dirty tree
+# itself: until then a workspace's local Step 1 refuses one, and nobody may be there to clean it.
+OLD_STEP_ONE_INSTRUCTION: Final[str] = (
+    "If Step 1 finds uncommitted changes, do not stop the update for them: commit them all as one "
+    "work-in-progress commit on the current branch, with a message that lists their paths, name that "
+    "commit in your results, and carry on."
+)
+
+# CLEANUP: drop this instruction once the oldest release the app updates in place
 # (``OLDEST_IN_PLACE_UPDATABLE_VERSION``) ships update-self prose whose Step 2 reads the pinned
 # lines above itself: until then a workspace's local Step 2 predates them, and ``--ceiling`` is
 # the flag every release back to minds-v0.3.10 takes.

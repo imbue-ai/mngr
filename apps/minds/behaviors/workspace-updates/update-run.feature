@@ -80,6 +80,7 @@ Feature: Running an update
   Scenario: Every run is started with the same message
     The update flow is unattended by design: it ends by reporting what changed and offering a rollback, whether or not anyone watched. So a run carries no consent tier of its own, and the agent is never told whether it was scheduled or pressed: only the slash command, the release it targets and the app's ceiling, and the answers the app already collected at the button that an older workspace's flow would otherwise stop to ask for again.
     The release and ceiling travel in the message so the agent never has to reach the app for them.
+    An older workspace's flow that would stop for uncommitted work is told to save it in one commit and carry on, as the newer flow does by itself.
     Given an out-of-date workspace with backups configured
     When an update is started for that workspace by any path
     Then the update agent's seed message is the update command with the release it targets and the app's ceiling

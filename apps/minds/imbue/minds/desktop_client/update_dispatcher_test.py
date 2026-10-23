@@ -306,6 +306,27 @@ def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window
     assert closed["last_skip_at"] == _AFTER_WINDOW
 
 
+def test_a_tick_held_back_logs_why_once_until_the_reason_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    lease = staged.root / "data" / ".tickets" / "w-1.md"
+    lease.parent.mkdir(parents=True)
+    lease.write_text("---\nid: w-1\nstatus: in_progress\n---\n# updating workspace\n")
+
+    _tick(staged, _IN_WINDOW)
+    _tick(staged, _IN_WINDOW + 60)
+    lease.unlink()
+    _tick(staged, _IN_WINDOW + 120)
+
+    log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
+    held = [line for line in log_lines if "held the scheduled update back" in line]
+    assert len(held) == 1
+    assert "LEASE_HELD" in held[0]
+    assert any("created update chat" in line for line in log_lines)
+
+
 @pytest.mark.parametrize(("holder_state", "is_dispatched"), [("RUNNING", False), (None, True), ("STOPPED", True)])
 def test_a_lease_counts_as_held_only_while_its_holder_is_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holder_state: str | None, is_dispatched: bool

@@ -47,6 +47,7 @@ from imbue.minds.workspace_programs.program_support import emit_marker_json
 from imbue.minds.workspace_programs.program_support import run_command
 from imbue.minds.workspace_programs.update_protocol import LAST_DISPATCH_FILE_PATH
 from imbue.minds.workspace_programs.update_protocol import NO_BACKUP_NOTE
+from imbue.minds.workspace_programs.update_protocol import OLD_STEP_ONE_INSTRUCTION
 from imbue.minds.workspace_programs.update_protocol import OLD_STEP_TWO_INSTRUCTION_TEMPLATE
 from imbue.minds.workspace_programs.update_protocol import OUTCOME_CHAT_APP_UNREACHABLE
 from imbue.minds.workspace_programs.update_protocol import OUTCOME_CREATED
@@ -694,7 +695,7 @@ def _render_update_message(target_ref: str, ceiling_ref: str, is_override: bool,
     """The update chat's first message: one shape whether the run was scheduled or pressed."""
     pinned = PINNED_NOTE_TEMPLATE.format(target=target_ref, ceiling=ceiling_ref)
     old_step_two = OLD_STEP_TWO_INSTRUCTION_TEMPLATE.format(ceiling=ceiling_ref)
-    parts = [UPDATE_COMMAND, pinned + "\n" + old_step_two]
+    parts = [UPDATE_COMMAND, "\n".join((pinned, OLD_STEP_ONE_INSTRUCTION, old_step_two))]
     if is_override:
         parts.append(OVERRIDE_NOTE_TEMPLATE.format(target=target_ref))
     if not is_backup_configured:
@@ -1096,6 +1097,9 @@ def _tick_schedule(now: float, agent_environment: AgentEnvironment) -> None:
                     {"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + _REDISPATCH_AFTER_SECONDS}
                 )
             else:
+                # Once per reason, not every minute the window stays open.
+                if reason != schedule.get("pending_skip_reason"):
+                    write_log_line("held the scheduled update back: %s" % reason)
                 # A chat a failed create left behind is adopted by the next attempt, so it can come at once.
                 schedule.update({"pending_skip_reason": reason, "next_attempt_at": None})
             _save_schedule_marks(schedule)
