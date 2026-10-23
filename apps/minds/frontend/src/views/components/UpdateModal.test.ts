@@ -246,6 +246,21 @@ describe("the update modal's verdict line", () => {
     expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
   });
 
+  it("reports a run that found nothing to do, which earns no note of its own", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      availability: "UNKNOWN",
+      unknown_reason: "NO_MACHINE_VERSION",
+      current_version: "upstream/fake-catchup-848b",
+      verdict: "ALREADY_CURRENT",
+      success_note_version: "",
+    });
+    const root = draw();
+
+    expect(allText(root)).toContain("Nothing was changed.");
+    expect(buttonLabels(root)).toEqual(["Dismiss"]);
+  });
+
   it("settles a failed run before offering another: its chat and Dismiss, no update buttons", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
       ...OUT_OF_DATE_UPDATE,

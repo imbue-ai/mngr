@@ -305,8 +305,9 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (update.is_scheduled ?? false) return "scheduled";
   if (update.availability === "OUT_OF_DATE" || update.availability === "PATCH_AVAILABLE") return "offered";
-  // Only while its note is showing: once dismissed, the machine's version decides what is offered.
-  if ((update.verdict === "UPDATED" || update.verdict === "ALREADY_CURRENT") && landed !== "") return "updated";
+  // A landed run only while its note is showing: once dismissed, the machine's version decides
+  // what is offered. A run that found nothing to do earns no note, so it stands until dismissed.
+  if ((update.verdict === "UPDATED" && landed !== "") || update.verdict === "ALREADY_CURRENT") return "updated";
   if (update.availability === "UNKNOWN") return "unknown";
   return "up-to-date";
 }
