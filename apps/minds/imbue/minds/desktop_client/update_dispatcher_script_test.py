@@ -258,7 +258,7 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     creates = staged.chat_creates()
     assert len(creates) == 1
     # A scheduled run surfaces no window of its own.
-    assert "--label" not in creates[0]
+    assert not any(label.startswith(("assist=", "auto_open=")) for label in _create_labels(creates[0]))
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     assert (schedule["marked_chat"], schedule["marked_at"]) == (_LEAD, _IN_WINDOW)
@@ -518,10 +518,9 @@ def test_under_cron_the_agent_environment_is_restored_through_the_templates_wrap
     assert program.agent_env()["MNGR_AGENT_ID"] == "agent-services"
 
 
-def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
+def test_a_failed_create_that_made_no_chat_is_tried_again_at_the_next_tick(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
-    """A create that failed may have left a chat behind; retrying every minute for the whole window would pile them up."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
     staged.script_tool(
@@ -531,13 +530,44 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
             ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
         ],
     )
+
     _tick(program, staged, _IN_WINDOW)
     _tick(program, staged, _IN_WINDOW + 60)
-    _tick(program, staged, _IN_WINDOW + 16 * 60)
 
     assert len(staged.chat_creates()) == 2
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["marked_chat"] == _LEAD
+
+
+def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """A create can fail or time out after its chat exists; the chat carries the attempt's label."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [ScriptedToolAnswer(exit_code=1, stderr="The chat app did not create the chat: timed out\n")],
+    )
+    _tick(program, staged, _IN_WINDOW)
+    attempt = staged.read_state("dispatch-attempt.json")
+    assert attempt is not None
+    left_behind = {**_agent(_LEAD, "RUNNING", _LEAD_ID), "update_dispatch_attempt": attempt["attempt_id"]}
+    staged.set_agents([left_behind])
+
+    _tick(program, staged, _IN_WINDOW + 60)
+
+    assert len(staged.chat_creates()) == 1
+    assert f"update_dispatch_attempt={attempt['attempt_id']}" in _create_labels(staged.chat_creates()[0])
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None and schedule["marked_chat"] == _LEAD
+    dispatch = staged.read_state("last-dispatch.json")
+    assert dispatch is not None
+    assert (dispatch["chat_agent_name"], dispatch["chat_id"]) == (_LEAD, _LEAD_ID)
+
+
+def _create_labels(create_argv: list[str]) -> list[str]:
+    return [create_argv[index + 1] for index, token in enumerate(create_argv) if token == "--label"]
 
 
 def test_a_tick_leaves_alone_a_chat_update_now_made_moments_ago(

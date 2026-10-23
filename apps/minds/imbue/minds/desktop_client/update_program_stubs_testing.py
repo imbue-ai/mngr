@@ -18,7 +18,14 @@ command = sys.argv[1] if len(sys.argv) > 1 else ""
 if command == "list":
     with open(os.environ["STUB_AGENTS_FILE"]) as handle:
         for agent in json.load(handle):
-            fields = (agent["id"], agent["name"], agent["state"], agent.get("is_primary", ""), agent.get("chat_id", ""))
+            fields = (
+                agent["id"],
+                agent["name"],
+                agent["state"],
+                agent.get("is_primary", ""),
+                agent.get("chat_id", ""),
+                agent.get("update_dispatch_attempt", ""),
+            )
             print("|".join(fields))
 elif command == "create":
     print(json.dumps({"event": "created", "agent_id": "agent-" + "c" * 32}))

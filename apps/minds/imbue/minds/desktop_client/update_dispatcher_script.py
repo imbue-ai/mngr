@@ -132,6 +132,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime
 from datetime import timezone
 
@@ -139,6 +140,9 @@ from datetime import timezone
 DISPATCHER_PATH = STATE_DIR + "/dispatcher.py"
 LOG_PATH = STATE_DIR + "/dispatcher.log"
 WATCHDOG_PATH = STATE_DIR + "/watchdog.json"
+# The id the last create of an update chat labelled it with, written before the create runs.
+DISPATCH_ATTEMPT_PATH = STATE_DIR + "/dispatch-attempt.json"
+DISPATCH_ATTEMPT_LABEL = "update_dispatch_attempt"
 DURABLE_CRON_PATH = "data/.state/cron.d/" + CRON_NAME
 CRON_LOCK_PATH = "/run/update-self-dispatch.lock"
 CRON_PATH_LINE = "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -156,7 +160,7 @@ ACCOUNT_RESOLVER_SCRIPT = "system/scripts/default_account_args.py"
 TICKETS_DIR_DEFAULT = "data/.tickets"
 BACKGROUND_TASKS_SCRIPT = "system/scripts/background_tasks.py"
 MNGR_LIST_FIELD_SEPARATOR = "|"
-MNGR_LIST_FIELDS = ("id", "name", "state", "labels.is_primary", "labels.chat_id")
+MNGR_LIST_FIELDS = ("id", "name", "state", "labels.is_primary", "labels.chat_id", "labels." + DISPATCH_ATTEMPT_LABEL)
 MNGR_LIST_ARGV = (
     "mngr",
     "list",
@@ -175,8 +179,6 @@ CRITICAL_APP_LEASE_PREFIX = "editing critical app "
 AUTO_OPEN_LABELS = ("assist", "auto_open")
 SKIP_CLAUDE_INSTALLATION_CHECK_SETTING = "agent_types.claude.check_installation=false"
 
-# How long a window waits before trying again after an attempt that can cost something to repeat.
-RETRY_BACKOFF_SECONDS_BY_SKIP = {SKIP_DISPATCH_FAILED: 15 * 60, SKIP_NEEDS_SIGN_IN: 5 * 60}
 # A chat dispatched this window is not replaced sooner than this, however soon its lead ends: a
 # lead that dies at launch would otherwise be replaced every minute.
 REDISPATCH_AFTER_SECONDS = 15 * 60
@@ -772,6 +774,22 @@ def _create_through_mngr(title, message, labels, account_args):
     return _create_result(OUTCOME_CREATED, "", name, _created_agent_id(created.stdout))
 
 
+def unreported_attempt_chat(agents):
+    """``(agent, attempt id)`` for a chat the last create made but did not report as made (it failed or
+    timed out after the chat existed); ``(None, "")`` when that create reported its chat or made none.
+
+    Every create labels its chat with a fresh attempt id, written down before the create runs, and
+    an agent is listed with its labels from the start of its create.
+    """
+    attempt_id = str((read_json(DISPATCH_ATTEMPT_PATH) or {}).get("attempt_id") or "")
+    if not attempt_id or (read_json(LAST_DISPATCH_PATH) or {}).get("attempt_id") == attempt_id:
+        return None, ""
+    for agent in agents or []:
+        if agent.get("labels." + DISPATCH_ATTEMPT_LABEL) == attempt_id:
+            return agent, attempt_id
+    return None, ""
+
+
 def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, account):
     """Create the update chat for a pinned target, record the dispatch, and say how it went.
 
@@ -789,11 +807,19 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, acc
     message = render_message(
         target_ref, ceiling_ref, bool(override_ref), bool(schedule_like.get("is_backup_configured", True))
     )
-    labels = {label: "true" for label in AUTO_OPEN_LABELS} if is_auto_open else {}
-    result = _create_through_message_chat(title, taken_names, message, labels)
-    if result is None:
-        free_title = first_free_title(title, taken_names, mngr_agent_name)
-        result = _create_through_mngr(free_title, message, labels, account_args)
+    leftover, attempt_id = unreported_attempt_chat(agents)
+    if leftover is not None:
+        result = _create_result(OUTCOME_CREATED, "", str(leftover.get("name") or ""), chat_id_of(leftover))
+        log("adopted update chat %s, which an earlier create made but did not report" % result["chat_agent_name"])
+    else:
+        attempt_id = uuid.uuid4().hex
+        write_json(DISPATCH_ATTEMPT_PATH, {"schema": SCHEMA, "attempt_id": attempt_id, "attempted_at": now})
+        labels = {label: "true" for label in AUTO_OPEN_LABELS} if is_auto_open else {}
+        labels[DISPATCH_ATTEMPT_LABEL] = attempt_id
+        result = _create_through_message_chat(title, taken_names, message, labels)
+        if result is None:
+            free_title = first_free_title(title, taken_names, mngr_agent_name)
+            result = _create_through_mngr(free_title, message, labels, account_args)
     if result["outcome"] == OUTCOME_CREATED:
         write_json(
             LAST_DISPATCH_PATH,
@@ -805,6 +831,7 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, acc
                 "ceiling": ceiling_ref,
                 "target_ref": target_ref,
                 "dispatched_at": now,
+                "attempt_id": attempt_id,
             },
         )
         log("created update chat %s (%s, target %s)" % (result["chat_agent_name"], started_by, target_ref))
@@ -970,9 +997,8 @@ def tick_schedule(now):
     if reason is None:
         schedule.update({"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + REDISPATCH_AFTER_SECONDS})
     else:
-        # A create that failed may have left a chat behind, so it is not retried every minute.
-        backoff = RETRY_BACKOFF_SECONDS_BY_SKIP.get(reason, 0)
-        schedule.update({"pending_skip_reason": reason, "next_attempt_at": now + backoff if backoff else None})
+        # A chat a failed create left behind is adopted by the next attempt, so it can come at once.
+        schedule.update({"pending_skip_reason": reason, "next_attempt_at": None})
     save_schedule_marks(schedule)
 
 

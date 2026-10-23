@@ -207,7 +207,10 @@ def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pi
     creates = staged.chat_creates()
     assert len(creates) == 1
     assert _flag(creates[0], "--name") == "Update to v0.9.0"
-    assert _labels(creates[0]) == ["assist=true", "auto_open=true"]
+    labels = _labels(creates[0])
+    assert labels[:2] == ["assist=true", "auto_open=true"]
+    attempt = staged.read_state("dispatch-attempt.json")
+    assert attempt is not None and labels[2:] == [f"update_dispatch_attempt={attempt['attempt_id']}"]
     assert creates[0][-1] == snapshot("""\
 /update-self
 
