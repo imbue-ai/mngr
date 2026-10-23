@@ -151,32 +151,42 @@ _STOPPED_LEADS_RUN = json.dumps({"chat_agent_name": "update-old"}) + "\n"
 
 
 @pytest.mark.parametrize(
-    ("probe_stdout", "activity", "is_chat_gone"),
+    ("probe_stdout", "known_chat_id", "activity", "is_chat_gone"),
     [
         # Its chat was deleted: the run is over, and there is no chat left to open.
-        (update_run_probe_stdout(agents=""), UpdateActivity.STALLED, True),
+        (update_run_probe_stdout(agents=""), _RUN_CHAT_ID, UpdateActivity.STALLED, True),
+        # Unlisted, but the create never named its id: it may still be on its way, so it is not called deleted.
+        (update_run_probe_stdout(agents=""), "", UpdateActivity.STALLED, False),
         # Stopped where nothing will restart it: over, but its chat is still there to open and resume.
-        (update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE), UpdateActivity.STALLED, False),
+        (
+            update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE),
+            _RUN_CHAT_ID,
+            UpdateActivity.STALLED,
+            False,
+        ),
         # Stopped where the workspace's watchdog restarts it: still under way.
         (
             update_run_probe_stdout(run=_STOPPED_LEADS_RUN, agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
+            _RUN_CHAT_ID,
             UpdateActivity.RUNNING,
             False,
         ),
         # Stopped before it recorded its run: the watchdog has no run to restart it for.
         (
             update_run_probe_stdout(agents=_STOPPED_LEAD_LINE, is_watchdog_installed=True),
+            _RUN_CHAT_ID,
             UpdateActivity.STALLED,
             False,
         ),
     ],
-    ids=["deleted", "stopped-no-watchdog", "stopped-watchdog", "stopped-watchdog-unrecorded"],
+    ids=["deleted", "unlisted-without-id", "stopped-no-watchdog", "stopped-watchdog", "stopped-watchdog-unrecorded"],
 )
 @pytest.mark.witnesses("workspace-updates.gone-agent-closed-out", partial="the app's report only")
 def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_back(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     probe_stdout: str,
+    known_chat_id: str,
     activity: UpdateActivity,
     is_chat_gone: bool,
 ) -> None:
@@ -188,14 +198,14 @@ def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_ba
     agent_id = AgentId.generate()
     assert service.state_store.try_begin_run(agent_id, target_override="")
     assert service.state_store.adopt_dispatched_chat(
-        agent_id, chat_agent_name="update-old", chat_agent_id=_RUN_CHAT_ID
+        agent_id, chat_agent_name="update-old", chat_agent_id=known_chat_id
     )
 
     service.poll_in_flight_runs()
 
     state = service.state_store.get(agent_id)
     assert (state.activity, state.is_chat_gone) == (activity, is_chat_gone)
-    assert state.chat_agent_id == ("" if is_chat_gone else _RUN_CHAT_ID)
+    assert state.chat_agent_id == ("" if is_chat_gone else known_chat_id)
     assert landings_told == []
 
 

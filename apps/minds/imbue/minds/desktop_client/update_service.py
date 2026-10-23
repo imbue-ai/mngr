@@ -593,7 +593,8 @@ class WorkspaceUpdateService(MutableModel):
             and not _is_earlier_runs_record(status, state.run_started_at)
         )
         self.state_store.note_chat_agent_id(agent_id, probe.chat_agent_id)
-        if probe.is_probe_answered and probe.agent_liveness is UpdateAgentLiveness.GONE:
+        # Unlisted means deleted only for a chat the create named: one it did not may still be landing.
+        if probe.is_probe_answered and probe.agent_liveness is UpdateAgentLiveness.GONE and state.chat_agent_id:
             self.state_store.note_chat_gone(agent_id)
         if is_records_run:
             assert status is not None
