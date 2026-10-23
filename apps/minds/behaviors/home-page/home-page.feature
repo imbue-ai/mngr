@@ -1,6 +1,6 @@
 Feature: Home page routing
   "/" is the home page.
-  For an authenticated user, what it shows depends on the one-time consent gate, whether initial workspace discovery has finished, which workspaces are known, and -- when none are -- whether the installation has ever been taken past the first-run start flow ("onboarding complete": a workspace create was started, or the user signed in from the start flow's "I already have a workspace" answer).
+  For an authenticated user, what it shows depends on the one-time consent gate, whether initial workspace discovery has finished, which workspaces are known, and -- when none are -- whether the installation has ever been taken past the first-run start flow ("onboarding complete": a workspace create was started, or the user signed in from the start flow's "I have an account (log in)" answer).
 
   @consent-gate
   Scenario: The consent question is asked once, right after a session is authenticated
@@ -41,7 +41,7 @@ Feature: Home page routing
     And the initial workspace discovery finished without finding any workspace
     When they visit "/"
     Then they are taken to the start flow, the chat that creates their first workspace
-    And once a create is started, or they sign in from the start flow's "I already have a workspace" answer, no later visit to "/" ever hands over to the start flow again
+    And once a create is started, or they sign in from the start flow's "I have an account (log in)" answer, no later visit to "/" ever hands over to the start flow again
 
   @deep-link-prefill
   Scenario: A deep link pre-fills the new-workspace form

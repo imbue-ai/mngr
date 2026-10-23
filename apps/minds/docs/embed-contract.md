@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 8 (tracks `CONTRACT_VERSION` in
+Version: 9 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v8)
+## Message inventory (v9)
 
 ### workspace -> embedder
 
@@ -65,6 +65,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:window-drag-ended` | `{ windowId, isDetached, isCancelled? }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out); `isCancelled` is true for a cancel (Escape), which drops any popout being dragged, and false for a release, after which a popout that is out stays and the embedder sends `minds:tear-out` `released`. The shell takes the embedder's last `minds:tear-out` word on the drag even when it lands after its own release. A shell that omits `isCancelled` is taken at its `isDetached`. |
 | `minds:open-external` | `{ url }` | Open this external link outside the workspace: a web link in the user's default browser, a `mailto:` or `tel:` link in the system's mail or phone app once the user confirms it in a dialog. `url` is an absolute `http:`, `https:`, `mailto:` or `tel:` URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The workspace sends it for an external link no app of its own is registered for, and only to an embedder that said `opensExternalLinks: true` or for an external link that embedder handed over with `minds:open-link`. |
 | `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
+| `minds:highlight-chrome` | `{ anchor }` | Pulse a ring around one of the chrome's own controls while the workspace's tour talks about it: `anchor` is one of `workspace-switcher`, `permissions`, `settings`, `share`, `help`, or `null` to clear the ring. Fire-and-forget (no ack); the tour's words never depend on the ring, so a chrome that ignores it reads the same. |
 
 ### embedder -> workspace
 
@@ -236,3 +237,9 @@ payloads -- to the console.
   `opensExternalLinks: true`, or for an external link that chrome handed
   over with `open-link`. The desktop app asks before opening a
   `mailto:` or `tel:` link.
+- **9** -- added `highlight-chrome` (workspace -> embedder): the workspace
+  shell's tour asks the chrome to pulse a ring around one of its own controls
+  (the workspace switcher, a workspace tab, the help button) while a card
+  talks about it, and to clear the ring when the card goes. The card's words
+  never depend on the ring: an older chrome ignores the type, and a plain
+  browser has no chrome at all.

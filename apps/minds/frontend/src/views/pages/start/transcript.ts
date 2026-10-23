@@ -92,13 +92,23 @@ function arrivalClass(attrs: ArrivalAttrs): string {
   return attrs.isInstant ? "" : " start-chat-in";
 }
 
+/** Lines a user turn folds behind a chevron under its text: the settings a create was submitted with. */
+export interface TurnDetails {
+  /** Unique on the page; ties the toggle to what it opens. */
+  id: string;
+  label: string;
+  lines: string[];
+  isOpen: boolean;
+  onToggle: () => void;
+}
+
 /**
  * A user turn: what you said, in the grey pill a sent message gets. The
  * bottom-right corner is the one that is not 18px, the corner nearest the
- * person who said it.
+ * person who said it. `details` folds lines under the text, closed until opened.
  */
 export function userTurn(
-  attrs: ArrivalAttrs & { text: string; onUndo?: () => void },
+  attrs: ArrivalAttrs & { text: string; onUndo?: () => void; details?: TurnDetails },
 ): m.Children {
   // The undo sits beside the bubble: it acts on the answer rather than being
   // part of what was said.
@@ -134,10 +144,28 @@ export function userTurn(
             // and only a token with nowhere to break is split.
             "whitespace-pre-wrap break-words",
         },
-        attrs.text,
+        [attrs.text, attrs.details === undefined ? null : turnDetails(attrs.details)],
       ),
       undo,
     ],
+  );
+}
+
+/** The folded lines of a user turn, opened by a chevron on their own line under the text. */
+function turnDetails(details: TurnDetails): m.Children {
+  return m(
+    "div",
+    { class: "mt-1", "data-turn-details": details.id },
+    m(
+      Disclosure,
+      {
+        id: details.id,
+        isOpen: details.isOpen,
+        onToggle: details.onToggle,
+        summary: details.label,
+      },
+      details.lines.join("\n"),
+    ),
   );
 }
 
@@ -171,6 +199,8 @@ export function agentTurn(attrs: {
   strong?: string;
   /** A type class for the whole turn, when it is not body text. */
   class?: string;
+  /** The space over the turn, in place of the usual turn gap. */
+  marginClass?: string;
   more?: TurnMore;
 }): m.Children {
   const isInstant = attrs.isInstant ?? false;
@@ -193,7 +223,7 @@ export function agentTurn(attrs: {
       key: attrs.key,
       id: attrs.id,
       class:
-        "mt-10 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0" +
+        `${attrs.marginClass ?? "mt-10"} max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0` +
         (attrs.class !== undefined ? ` ${attrs.class}` : ""),
       "data-agent-turn": "",
     },

@@ -145,6 +145,9 @@ class CreateRetryPrefill(FrozenModel):
     memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     color: str = Field(description="Accent color of the interrupted attempt")
+    is_onboarding_driven_by_agent: bool = Field(
+        description="Whether the attempt's creation page asks the onboarding questions, which a retry keeps"
+    )
     unavailable_reason: str = Field(
         description=(
             "Why the attempt cannot be retried as recorded (its connection was removed), shown instead of "
@@ -260,6 +263,11 @@ class CreateAttemptRequestSummary(FrozenModel):
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     repository: str = Field(description="Template repository URL or local path")
     branch: str = Field(description="Requested branch/tag, empty for the repo default")
+    is_onboarding_driven_by_agent: bool = Field(
+        default=False,
+        description="Whether the creation page asks its onboarding questions while the workspace is built and "
+        "closes the welcome chat on the answer; not a setting the page restates",
+    )
 
 
 class LiveCreateAttemptDetail(FrozenModel):
@@ -393,6 +401,7 @@ def _read_retry_prefill(
         memory_gb=retry_request.memory_gb,
         disk_gb=retry_request.disk_gb,
         color=retry_request.color or DEFAULT_WORKSPACE_COLOR,
+        is_onboarding_driven_by_agent=retry_request.is_onboarding_driven_by_agent,
         unavailable_reason=_retry_unavailable_reason(retry_request.cloud_account, cloud_accounts),
     )
 
@@ -609,6 +618,7 @@ def _request_summary(request_record: PendingCreateAttemptRequest) -> CreateAttem
         disk_gb=request_record.disk_gb,
         repository=request_record.repo_source,
         branch=request_record.branch,
+        is_onboarding_driven_by_agent=request_record.is_onboarding_driven_by_agent,
     )
 
 

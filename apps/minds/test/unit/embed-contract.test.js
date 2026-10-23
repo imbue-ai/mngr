@@ -461,3 +461,29 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LINK, url: 'http://localhost/' } });
   assert.deepStrictEqual(seen, []);
 });
+
+test('embedder endpoint takes a highlight-chrome only for a known anchor or null', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg.anchor) },
+  });
+  const from = (data) => win.deliver({ source: frameWin, origin: 'o', data });
+  from({ type: contract.HIGHLIGHT_CHROME });
+  from({ type: contract.HIGHLIGHT_CHROME, anchor: 'sidebar' });
+  from({ type: contract.HIGHLIGHT_CHROME, anchor: 7 });
+  assert.deepStrictEqual(seen, []);
+  for (const anchor of contract.CHROME_ANCHORS) from({ type: contract.HIGHLIGHT_CHROME, anchor });
+  from({ type: contract.HIGHLIGHT_CHROME, anchor: null });
+  assert.deepStrictEqual(seen, [...contract.CHROME_ANCHORS, null]);
+  assert.deepStrictEqual(contract.CHROME_ANCHORS, ['workspace-switcher', 'permissions', 'settings', 'share', 'help']);
+});
+
+test('workspace endpoint never honours a highlight-chrome, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.HIGHLIGHT_CHROME, anchor: 'share' } });
+  assert.deepStrictEqual(seen, []);
+});

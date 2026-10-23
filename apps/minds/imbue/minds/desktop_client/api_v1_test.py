@@ -204,6 +204,7 @@ class _RecordingAgentCreator(AgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
@@ -222,6 +223,7 @@ class _RecordingAgentCreator(AgentCreator):
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
             "account_id": account_id,
+            "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
             "on_created": on_created,
         }
         return CreateAttemptId()
@@ -5986,6 +5988,7 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
             "A machine named 'contended' is already being created. "
@@ -6076,6 +6079,32 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
+
+
+def test_create_workspace_threads_the_onboarding_questions_flag_off_unless_the_body_turns_it_on(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    # The creation page reads the flag back from the attempt's record, so it must reach the creator;
+    # the form leaves it off, and the start flow's creates (and the form's switch) turn it on.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    quiet = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "quiet-create"},
+    )
+    assert quiet.status_code == 202
+    assert creator.last_call["is_onboarding_driven_by_agent"] is False
+
+    asked = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "asked-create", "is_onboarding_driven_by_agent": True},
+    )
+    assert asked.status_code == 202
+    assert creator.last_call["is_onboarding_driven_by_agent"] is True
 
 
 def test_create_workspace_marks_onboarding_complete(

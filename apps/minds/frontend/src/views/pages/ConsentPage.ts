@@ -4,6 +4,7 @@
 
 import m from "mithril";
 import { REPORTING_CONSENT_QUESTION, recordErrorReportingConsent } from "../../models/onboarding";
+import { REPORTING_MORE_DETAIL } from "../../models/startFlow";
 import { Button } from "../components/Button";
 import { Link } from "../components/Link";
 
@@ -42,7 +43,7 @@ function ConsentPageComponent(): m.Component {
           m(
             "p",
             { class: "text-tertiary type-helper mb-4" },
-            "Privacy and transparency are core values for Imbue. The reports we collect include diagnostic details about the error and your setup, which can be identifying at times (e.g. an email account). You can change this any time in Settings → Error reporting.",
+            REPORTING_MORE_DETAIL,
           ),
           m("p", { class: "text-tertiary type-helper mb-8" }, [
             "Our privacy policy is ",

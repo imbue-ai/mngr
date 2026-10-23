@@ -293,7 +293,7 @@ class MindsConfig(MutableModel):
         """Return whether this installation has been taken past the first-run start flow. Default: False.
 
         Flips to True once the user starts creating a workspace (any surface) or signs in
-        from the start flow's "I already have a workspace" answer; while False and no workspace
+        from the start flow's "I have an account (log in)" answer; while False and no workspace
         exists, a launch lands on the start flow.
         """
         return self._get_bool("is_onboarding_complete", default=False)

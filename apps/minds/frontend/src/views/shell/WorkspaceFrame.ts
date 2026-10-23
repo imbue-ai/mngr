@@ -12,6 +12,7 @@ import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
 import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
 import type {
+  ChromeAnchor,
   DetachedWindowEntry,
   OpenLinkSender,
   PermissionResolvedSender,
@@ -53,6 +54,8 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
+  HIGHLIGHT_CHROME: string;
+  CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -138,6 +141,8 @@ export interface EmbedHandlerDeps {
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
+  /** Ring one of the chrome's own controls while the workspace's tour talks about it, or clear the ring (null). */
+  highlightChrome: (anchor: ChromeAnchor | null) => void;
   /** The workspace asked to pull one of its windows out (the pull-out-window
    * spec); null in a chrome that cannot, which then never answers with the
    * capability either. */
@@ -236,6 +241,12 @@ export function buildEmbedHandlers(
   if (openExternalLink !== null) {
     handlers[contract.OPEN_EXTERNAL] = (message) => openExternalLink(String(message.url));
   }
+  handlers[contract.HIGHLIGHT_CHROME] = (message) => {
+    // The contract's list is the one source of anchor names; anything else clears the ring.
+    const anchor = message.anchor;
+    const isKnown = typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
+    deps.highlightChrome(isKnown ? (anchor as ChromeAnchor) : null);
+  };
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
@@ -449,6 +460,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
+      shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
     linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
@@ -462,6 +474,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
+    shell.highlightedChromeAnchor = null;
     frameElement.src =
       shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
     linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
@@ -532,6 +545,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
+          highlightChrome: (anchor) => {
+            shell.highlightedChromeAnchor = anchor;
+            m.redraw();
+          },
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
@@ -623,6 +640,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           );
         };
         onFrameLoad = () => {
+          // A page the workspace itself reloaded is a fresh page with no tour on it. The load listener is
+          // a DOM one, outside Mithril's redraw, so the ring is redrawn away here.
+          if (shell.highlightedChromeAnchor !== null) {
+            shell.highlightedChromeAnchor = null;
+            m.redraw();
+          }
           sendSnapshot();
           if (snapshotResendTimer !== null) clearTimeout(snapshotResendTimer);
           snapshotResendTimer = setTimeout(sendSnapshot, 2000);
@@ -669,6 +692,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // frame is mounted when a successor already reported its own.
       if (vnode.attrs.shell.workspaceFrame === frameHandle) {
         vnode.attrs.shell.workspaceFrame = null;
+        vnode.attrs.shell.highlightedChromeAnchor = null;
         linkHandling.unmounted();
       }
       frameHandle = null;

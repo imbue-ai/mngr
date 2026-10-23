@@ -103,6 +103,9 @@ export interface WorkspaceFrameHandle {
   lastLoadedAtMs(): number | null;
 }
 
+/** A control of the chrome's own that a workspace's tour may ask to have ringed: the embed contract's CHROME_ANCHORS. */
+export type ChromeAnchor = "workspace-switcher" | "permissions" | "settings" | "share" | "help";
+
 export class ShellState {
   readonly stores: AppStores;
   private readonly webLogin: WebLoginModel;
@@ -129,6 +132,8 @@ export class ShellState {
   } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
+  /** The chrome control the displayed workspace's tour is talking about, ringed in the titlebar; null for none. */
+  highlightedChromeAnchor: ChromeAnchor | null = null;
   /** The workspace-options route an app modal was opened over, so the Shell can
    * keep that panel painted (and mounted) beneath the modal: the live route is
    * the modal's, which carries none of the panel's params. Null whenever no

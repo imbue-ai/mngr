@@ -945,10 +945,10 @@ _CHECKOUT_STEP: Final[ProgressStepId] = ProgressStepId("checkout_branch")
 _MNGR_CREATE_STEP: Final[ProgressStepId] = ProgressStepId("mngr_create")
 _READY_STEP: Final[ProgressStepId] = ProgressStepId("wait_for_ready")
 _DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
-    _CLONE_STEP: "Fetching the workspace template",
-    _CHECKOUT_STEP: "Checking out the branch",
-    _MNGR_CREATE_STEP: "Creating the workspace",
-    _READY_STEP: "Waiting for the workspace to boot",
+    _CLONE_STEP: "Getting things ready",
+    _CHECKOUT_STEP: "Building your workspace",
+    _MNGR_CREATE_STEP: "Installing your tools",
+    _READY_STEP: "Almost there",
 }
 # How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
 # bound on stopping it once the readiness wait ends; the stop must outlast the
@@ -2253,6 +2253,7 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -2378,6 +2379,7 @@ class AgentCreator(MutableModel):
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
             backup_request=backup_request,
+            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
 
         thread = threading.Thread(
@@ -2514,6 +2516,7 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime,
         original_minds_version: str,
         backup_request: BackupSetupRequest | None,
+        is_onboarding_driven_by_agent: bool,
     ) -> None:
         """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
 
@@ -2552,6 +2555,7 @@ class AgentCreator(MutableModel):
                     backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
                 ),
                 backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
+                is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
             ),
         )
         try:

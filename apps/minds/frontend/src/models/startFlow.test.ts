@@ -93,7 +93,8 @@ describe("answering where to run", () => {
   it("cloud, signed out: the answer lands and the account question follows with the ack", () => {
     const state = answerStep(started(), 1, "cloud", SIGNED_OUT);
     expect(state.entries[1]).toMatchObject({ kind: "step", id: "run", answer: "cloud", said: "Use Imbue Cloud" });
-    expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Imbue Cloud it is.", answer: null, said: "" });
+    // Signed out, the reply opens "Great." rather than "Imbue Cloud it is.", which the signed-in reply keeps.
+    expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Great.", answer: null, said: "" });
     expect(state.isCloudCreatePending).toBe(false);
     expect(openStepIndex(state)).toBe(2);
   });
