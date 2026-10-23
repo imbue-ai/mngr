@@ -458,7 +458,7 @@ export const LandingPage: m.ClosureComponent = () => {
   }
 
   /** The row's one update control, or null when the machine has nothing to
-   * say: the window it opens holds the actions. */
+   * say: the update window it opens, or a running update's chat, holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     const published = updates.publishedFor(entry.id);
