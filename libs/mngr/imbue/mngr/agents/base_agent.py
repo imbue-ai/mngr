@@ -127,7 +127,7 @@ def build_stderr_tee_redirect(quoted_log_path: str) -> str:
     log is truncated per launch (no ``-a``), which bounds it without rotation.
 
     Process substitution is a bash/zsh/ksh feature, not POSIX, so the agent pane's shell
-    must be one of those (see ``_build_agent_launch_steps``). The shell does not wait for
+    must be one of those (see ``_build_sourced_launch_steps``). The shell does not wait for
     the substitution to finish, so the last lines can reach the file a moment after the
     command exits; readers that need them promptly should poll.
     """

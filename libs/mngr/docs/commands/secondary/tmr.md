@@ -50,7 +50,7 @@ distinct suites stay separable and reviewable on their own. For example, run the
 mngr suite and the minds suite as separate variants:
 
 mngr tmr libs/mngr --name tmr-mngr -- -m "release and not docker and not docker_sdk"
-  mngr tmr apps/minds --name tmr-minds -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+  mngr tmr apps/minds --name tmr-minds -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume and not smoke"
 
 Use --mapper-prompt / --reducer-prompt to point a variant at its own Jinja
 prompt templates (they may extend or include the packaged ones by name).

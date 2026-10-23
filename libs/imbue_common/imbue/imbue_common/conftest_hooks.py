@@ -127,6 +127,8 @@ _SHARED_MARKERS: Final[list[str]] = [
     "flaky: marks tests as known-flaky (retried by offload with a separate retry count)",
     "witnesses(coordinate, partial=None): marks a test as verifying the behavior unit at the given"
     " coordinate (see the behaviors skill); partial= notes what the test does not cover",
+    "smoke: marks a test that runs after a deploy or release against the published artifact and the"
+    " deployed production environment; never collected by any other test selection",
 ]
 
 # Additional markers registered by projects via register_marker().

@@ -559,8 +559,19 @@ _SIGWINCH_MODE_FIT: Final[str] = "fit"
 _SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
 
 # Script (at the root of the agent's state dir) holding the agent's launch command, which the
-# agent window sources rather than having it typed in. See _build_agent_launch_steps.
+# agent window sources rather than having it typed in. See _build_sourced_launch_steps.
 _AGENT_LAUNCH_SCRIPT_NAME: Final[str] = "launch_agent.sh"
+
+# Script (at the root of the agent's state dir) holding an additional window's command when that
+# command is too long to type. Named by the window's index, so a configured window name can never
+# shape a path. See _build_additional_window_steps.
+_WINDOW_LAUNCH_SCRIPT_NAME_TEMPLATE: Final[str] = "launch_window_{index}.sh"
+
+# Ceiling, in bytes, on what may be typed into a pane's shell with send-keys. A pty in canonical
+# mode -- where a just-started shell sits until its line editor takes over -- discards input past
+# its buffer while both the write and tmux report success. That buffer is 1024 bytes on macOS and
+# the terminating newline counts against it; this bound keeps margin under that.
+_MAX_SAFE_SEND_KEYS_LENGTH: Final[int] = 512
 
 # Opens each agent's data.json in the batched read.
 _AGENT_DATA_FILE_MARKER: Final[str] = "---MNGR_AGENT_DATA_FILE:"
@@ -3416,10 +3427,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Start agents by creating their tmux sessions.
 
         Creates a tmux session, writes the agent's command to a launch script, and uses
-        send-keys to source it (see _build_agent_launch_steps for why it is not typed in
+        send-keys to source it (see _build_sourced_launch_steps for why it is not typed in
         directly). This allows the user to hit ctrl-c and then up arrow to restart the
         command, and leaves the exact command that ran readable on disk. Commands for
-        additional windows are still typed in directly.
+        additional windows are typed in directly unless they are too long to survive the
+        pty, in which case they take the same script route -- see
+        _build_additional_window_steps.
 
         For an agent with no session up, the stored command first goes through the
         agent's upgrade_stored_command, and a rewritten command is saved back to the
@@ -4070,31 +4083,24 @@ def _build_pane_send_keys_steps(quoted_exact_window: str, typed_command: str) ->
 
 
 @pure
-def _build_agent_launch_steps(
+def _build_sourced_launch_steps(
     launch_script_path: Path,
     command: str,
     quoted_exact_window: str,
 ) -> list[str]:
-    """Steps that write the agent's command to a launch script and source it in its window.
+    """Steps that write ``command`` to a launch script and source it in a tmux pane's shell.
 
-    The command cannot simply be typed. ``send-keys`` writes into the pane's pty, and a pty in
-    canonical mode -- where a just-started shell sits until its line editor takes over -- silently
-    discards input past its buffer (1KB on macOS) while both the write and tmux still report
-    success. Because the keys are sent in the same tmux batch that creates the session, they
-    routinely land inside that startup window, so a long command arrives truncated mid-token and
-    the shell blocks on an unterminated construct with nothing logged anywhere. Sourcing keeps
-    what crosses the pty to a short fixed-length line however long the command grows, and records
-    on disk exactly what ran.
+    Sourcing keeps what crosses the pty to a short fixed-length line however long the command
+    grows (see _MAX_SAFE_SEND_KEYS_LENGTH for what typing it would hit), and records on disk
+    exactly what ran.
 
-    This makes the POSIX ``.`` a requirement on the agent window's shell (the user's login shell).
-    That is not a new constraint in practice: mngr's generated launch chains already use
-    ``$(...)``, ``export``, and ``{ ... } || { ... }``, so a shell that cannot handle ``.`` could
-    not have run them typed either. The interactive harness plugins go one step further and use
-    process substitution (``2> >(tee ...)``, see ``build_stderr_tee_redirect``), which is a
-    bash/zsh/ksh feature rather than POSIX -- so the agent window's shell must be one of those,
-    which covers macOS (zsh), Linux desktops (bash), and every container image mngr ships.
-    Commands for *additional* windows are still typed directly, because those windows inherit
-    the user's tmux ``default-command``, which need not be a POSIX shell at all.
+    This makes the POSIX ``.`` a requirement on the pane's shell. That is not a new constraint in
+    practice: mngr's generated launch chains already use ``$(...)``, ``export``, and
+    ``{ ... } || { ... }``, so a shell that cannot handle ``.`` could not have run them typed
+    either. The interactive harness plugins go one step further and use process substitution
+    (``2> >(tee ...)``, see ``build_stderr_tee_redirect``), which is a bash/zsh/ksh feature rather
+    than POSIX -- so the agent window's shell must be one of those, which covers macOS (zsh), Linux
+    desktops (bash), and every container image mngr ships.
     """
     quoted_script_path = shlex.quote(str(launch_script_path))
     # printf '%s' rather than a heredoc so each step stays a single && chain link, and
@@ -4105,6 +4111,31 @@ def _build_agent_launch_steps(
     ]
     return write_steps + _build_pane_send_keys_steps(
         quoted_exact_window=quoted_exact_window, typed_command=f". {quoted_script_path}"
+    )
+
+
+@pure
+def _build_additional_window_steps(
+    launch_script_path: Path,
+    command: str,
+    quoted_exact_window: str,
+) -> list[str]:
+    """Steps that run an additional window's command, typing it when it is short enough to type.
+
+    Typing is what leaves the command visible in the pane and re-runnable with up-arrow, and it is
+    the only form that works whatever shell the pane runs -- additional windows inherit the user's
+    tmux ``default-command``, which need not be a POSIX shell at all (elvish, for one, has no ``.``
+    builtin).
+
+    Longer commands cannot be typed at all, so they are sourced instead, which does require that
+    shell to understand the POSIX ``.``.
+    """
+    if len(command.encode()) < _MAX_SAFE_SEND_KEYS_LENGTH:
+        return _build_pane_send_keys_steps(quoted_exact_window=quoted_exact_window, typed_command=command)
+    return _build_sourced_launch_steps(
+        launch_script_path=launch_script_path,
+        command=command,
+        quoted_exact_window=quoted_exact_window,
     )
 
 
@@ -4378,6 +4409,7 @@ def _build_start_agent_shell_command(
     # ensures all windows exist before the agent starts, preventing a race
     # where a fast-exiting agent command destroys the session before
     # additional windows can be created.
+    agent_state_dir = get_agent_state_dir_path(host_dir, agent.id)
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
         quoted_exact_named_window = TmuxWindowTarget(session_name=session_name, window=window_name).as_shell_arg()
@@ -4388,12 +4420,11 @@ def _build_start_agent_shell_command(
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        # Typed rather than sourced: these windows inherit the user's tmux default-command,
-        # which need not be a POSIX shell (see _build_agent_launch_steps).
         steps.extend(
-            _build_pane_send_keys_steps(
+            _build_additional_window_steps(
+                launch_script_path=agent_state_dir / _WINDOW_LAUNCH_SCRIPT_NAME_TEMPLATE.format(index=idx + 1),
+                command=str(named_cmd.command),
                 quoted_exact_window=quoted_exact_named_window,
-                typed_command=str(named_cmd.command),
             )
         )
 
@@ -4406,8 +4437,8 @@ def _build_start_agent_shell_command(
     # Target the agent's primary window by name explicitly so this works even
     # after additional windows have been created (which changes the active window).
     steps.extend(
-        _build_agent_launch_steps(
-            launch_script_path=get_agent_state_dir_path(host_dir, agent.id) / _AGENT_LAUNCH_SCRIPT_NAME,
+        _build_sourced_launch_steps(
+            launch_script_path=agent_state_dir / _AGENT_LAUNCH_SCRIPT_NAME,
             command=command,
             quoted_exact_window=quoted_exact_agent_window,
         )
@@ -4415,7 +4446,7 @@ def _build_start_agent_shell_command(
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
-    activity_dir = get_agent_state_dir_path(host_dir, agent.id) / "activity"
+    activity_dir = agent_state_dir / "activity"
     activity_path = activity_dir / ActivitySource.START.value.lower()
     steps.append(f"mkdir -p {shlex.quote(str(activity_dir))}")
     activity_printf_cmd = (

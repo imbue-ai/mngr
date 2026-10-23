@@ -46,8 +46,10 @@ from playwright.sync_api import Page
 from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
@@ -102,6 +104,22 @@ _ELECTRON_OUTPUT_INFO_MARKERS: Final[tuple[str, ...]] = (
     "GPU process",
     "[lifecycle] SIG",
     "exited with signal",
+)
+
+
+class ElectronLaunchTarget(FrozenModel):
+    """How to start the Imbue Studio app: a program, plus the main script a bare Electron runtime needs."""
+
+    executable: Path = Field(description="The program to run: a packaged build, or this checkout's Electron binary.")
+    main_js: Path | None = Field(
+        description="The Electron main script handed to a bare runtime; None for a packaged build, which has its own."
+    )
+    extra_arguments: tuple[str, ...] = Field(description="Chromium switches appended to every launch of this target.")
+
+
+# This checkout's Electron running this checkout's app.
+DEV_CHECKOUT_LAUNCH_TARGET: Final[ElectronLaunchTarget] = ElectronLaunchTarget(
+    executable=_ELECTRON_BINARY, main_js=_ELECTRON_MAIN_JS, extra_arguments=()
 )
 
 # Per-phase wall-clock budgets. Tight enough to fail with a useful
@@ -262,7 +280,11 @@ def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
             )
 
 
-def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
+def _build_electron_env(
+    workspace_git_url: Path | None,
+    extra_env: Mapping[str, str] | None = None,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
@@ -270,23 +292,29 @@ def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | 
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
     ``_operator_workspace_default`` in workspace_defaults.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
-    don't silently leak into every workspace we create.
+    don't silently leak into every workspace we create. A ``None`` template
+    path leaves the create form on the app's own published defaults, which is
+    what a run that tests the shipped product wants.
 
     ``extra_env`` is layered over the inherited environment first, so a caller
     that must not mutate its own ``os.environ`` (the demo harness selecting a
     data root and display) can still address the child; the prefill and scrub
-    below win over it.
+    below win over it. ``base_env`` replaces that inherited environment
+    outright, for a caller that composes the child's environment itself rather
+    than handing down its own (the smoke suite, whose app under test is a
+    shipped build that must not see this process's pytest variables).
 
     The workspace name is not prefilled: ``drive_create_flow`` types it into
     the create form's "Name" field directly, which is what pins the name the
     test later destroys by.
     """
-    env = dict(os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     if extra_env is not None:
         env.update(extra_env)
-    env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
-    # Opt into the local-worktree create-form defaults (see just minds-start).
-    env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
+    if workspace_git_url is not None:
+        env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
+        # Opt into the local-worktree create-form defaults (see just minds-start).
+        env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds DEFAULT_WORKSPACE_TEMPLATE's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The Imbue Studio
@@ -408,12 +436,16 @@ def _user_data_dir_for_launch(persistent_dir: Path | None) -> Iterator[str]:
 
 @contextmanager
 def _launched_electron(
-    workspace_git_url: Path,
+    workspace_git_url: Path | None,
     debug_port: int,
     host_config_dir: Path | None = None,
     extra_env: Mapping[str, str] | None = None,
     # A profile to keep between launches (cookies, the desktop's client identity); a throwaway one per launch when None.
     user_data_dir: Path | None = None,
+    # Which build to start.
+    launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
+    # The environment to launch from, in place of this process's own (see ``_build_electron_env``).
+    base_env: Mapping[str, str] | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
 
@@ -454,15 +486,16 @@ def _launched_electron(
     agent / Docker container. Those persist as separate host-level
     processes; cleanup of them is the caller's responsibility.
     """
-    if not _ELECTRON_BINARY.is_file():
-        raise FileNotFoundError(
-            f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
+    if not launch_target.executable.is_file():
+        install_hint = (
+            " Run `cd apps/minds && pnpm install` first." if launch_target == DEV_CHECKOUT_LAUNCH_TARGET else ""
         )
+        raise FileNotFoundError(f"Electron executable missing at {launch_target.executable}.{install_hint}")
 
     with _user_data_dir_for_launch(user_data_dir) as launch_user_data_dir:
         cmd = [
-            str(_ELECTRON_BINARY),
-            str(_ELECTRON_MAIN_JS),
+            str(launch_target.executable),
+            *([str(launch_target.main_js)] if launch_target.main_js is not None else []),
             f"--remote-debugging-port={debug_port}",
             # A fresh, throwaway profile per launch unless the caller keeps one.
             # Electron's single-instance lock is keyed on the user-data-dir;
@@ -480,12 +513,13 @@ def _launched_electron(
             # the binary we drive is a dev-mode Electron launched against
             # our own backend, not a downloaded one.
             "--no-sandbox",
+            *launch_target.extra_arguments,
         ]
         logger.info("Launching Electron: {}", " ".join(cmd))
         process = subprocess.Popen(
             cmd,
             cwd=str(host_config_dir or _REPO_ROOT),
-            env=_build_electron_env(workspace_git_url, extra_env),
+            env=_build_electron_env(workspace_git_url, extra_env, base_env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Own session/process group so teardown can signal the whole tree.
@@ -674,7 +708,7 @@ def _read_failure_message(page: Page) -> str:
     return message or "unknown error: the '#error-message' element was empty"
 
 
-def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
+def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
     """Block until the create flow reaches the workspace or reports failure; return the workspace frame.
 
     The create flow has two mutually exclusive terminal states after the create
@@ -737,7 +771,7 @@ def drive_create_flow(
 
     ``page`` is the chrome page the form is driven on; the ready workspace
     opens inside that page's sandboxed content iframe, whose frame this
-    returns (see ``_wait_for_workspace_ready_or_failure``).
+    returns (see ``wait_for_workspace_ready_or_failure``).
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
@@ -806,7 +840,7 @@ def drive_create_flow(
     # fails this run fast with the surfaced error rather than blocking the whole
     # navigation budget. The ready workspace opens inside the chrome page's
     # content iframe once the page routes onto /workspace/<id>.
-    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+    workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
 
     workspace_page.wait_for_selector(
@@ -888,11 +922,13 @@ def _attempt_create_workspace_via_electron(
 
 @contextmanager
 def electron_app_session(
-    workspace_git_url: Path,
+    workspace_git_url: Path | None,
     debug_port: int,
     host_config_dir: Path | None = None,
     extra_env: Mapping[str, str] | None = None,
     user_data_dir: Path | None = None,
+    launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
+    base_env: Mapping[str, str] | None = None,
 ) -> Iterator[tuple[Browser, Page]]:
     """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
 
@@ -906,15 +942,21 @@ def electron_app_session(
     The same caller contract as :func:`create_workspace_via_electron` applies
     (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
     pytest config guard). ``workspace_git_url`` only seeds the create form's
-    repo prefill; sessions that never open the create form still need a real
-    path here. ``extra_env`` and ``user_data_dir`` are handed to every launch
-    (see :func:`_launched_electron`).
+    repo prefill; ``None`` leaves the form on the app's published defaults.
+    ``extra_env``, ``user_data_dir``, ``launch_target`` and ``base_env`` are
+    handed to every launch (see :func:`_launched_electron`).
     """
     last_error: _ElectronConnectError | None = None
     for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
         attempt_port = debug_port if attempt == 1 else find_free_port()
         with _launched_electron(
-            workspace_git_url, attempt_port, host_config_dir, extra_env=extra_env, user_data_dir=user_data_dir
+            workspace_git_url,
+            attempt_port,
+            host_config_dir,
+            extra_env=extra_env,
+            user_data_dir=user_data_dir,
+            launch_target=launch_target,
+            base_env=base_env,
         ):
             with sync_playwright() as playwright:
                 try:
@@ -1154,7 +1196,7 @@ def drive_create_docker_imbue_workspace(
     # the workspace once the create attempt completes.
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
-    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+    workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
     workspace_page.wait_for_selector(
         DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
@@ -1249,8 +1291,12 @@ def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[st
     return chat
 
 
-def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
+def chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
     """The first chat page's frame inside the workspace, once the workspace has opened one.
+
+    A fresh workspace opens on the welcome chat the creation page seeded, so
+    that is the frame this returns -- and it returns before the composer
+    renders, which is what a caller that has to sign the chat in first needs.
 
     Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
     """
@@ -1367,7 +1413,7 @@ def wait_for_chat_input(page: Page | Frame) -> Frame:
     """The first chat's frame inside the workspace, once its composer is visible."""
     logger.info("Waiting up to {}s for the first chat's frame and its input", _CHAT_INPUT_TIMEOUT_SECONDS)
     input_deadline = time.monotonic() + _CHAT_INPUT_TIMEOUT_SECONDS
-    chat = _chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
+    chat = chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
     # Playwright reads a zero timeout as "wait forever", so the remainder is floored.
     input_wait_seconds = max(input_deadline - time.monotonic(), 1.0)
     logger.info("Chat frame at {}; waiting up to {:.0f}s for its input", chat.url, input_wait_seconds)

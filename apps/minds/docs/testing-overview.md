@@ -7,8 +7,9 @@ e2e tests fan out in parallel through offload).
 
 The test taxonomy and locations follow the repo `style_guide.md` ("Types of
 tests"): unit (`*_test.py`), integration (`test_*.py`, unmarked), acceptance
-(`@pytest.mark.acceptance`), and release (`@pytest.mark.release`). Imbue Studio adds a
-few app-specific markers (below).
+(`@pytest.mark.acceptance`), release (`@pytest.mark.release`), and smoke
+(`@pytest.mark.smoke`, see 1.10). Imbue Studio adds a few app-specific markers
+(below).
 
 Tests that verify a behavior unit declare it with the
 `witnesses(coordinate, partial=...)` marker: the coordinate names a unit in the
@@ -68,7 +69,7 @@ excludes the whole `apps/minds` tree by path.
   `test_deploy_new_version`, `test_deploy_auto_rollback_on_broken_healthcheck`,
   `test_deploy_then_destroy_round_trip`.
 - `@pytest.mark.minds_services` (run against a pre-stood-up shared env):
-  `test_logged_in_smoke`, `test_litellm_spend_tracking_via_local_workspace`
+  `test_logged_in_routes`, `test_litellm_spend_tracking_via_local_workspace`
   (currently `skip`), plus the remote-workspace pool tests
   (`test_pool_lease`, `test_pool_fast_path_create`,
   `test_workspace_stop_start`), which lease real pre-baked bare-metal
@@ -110,11 +111,11 @@ is the only thing that runs them.
   an offload sandbox.
 - **`test-offload`** ("Unit + Integration Tests") -- `just test-offload`. Filter:
   `not acceptance and not release and not flaky and not sdk_live and not
-  minds_deployment and not minds_services and not minds_snapshot_resume`, plus a
-  retrying `flaky` group.
+  minds_deployment and not minds_services and not minds_snapshot_resume and not
+  smoke`, plus a retrying `flaky` group.
 - **`test-offload-acceptance`** ("Acceptance Tests") -- `acceptance and not
   docker and not docker_sdk and not minds_deployment and not minds_services and
-  not minds_snapshot_resume`; pre-creates a shared Modal env.
+  not minds_snapshot_resume and not smoke`; pre-creates a shared Modal env.
 - **`test-docker`** -- real Docker daemon on a GitHub runner; `(docker or
   docker_sdk) and not release and not minds_snapshot_resume`.
 - **`test-minds-linux-install`** -- the public-repo developer bootstrap: runs
@@ -136,7 +137,7 @@ is the only thing that runs them.
   the `minds_deployment` group via the deployment orchestrator (each mints +
   destroys its own ephemeral ci env), then the plain Imbue Studio `@release` tests that
   need no ci env, selected by tag: `-m 'release and not minds_deployment and not
-  minds_services and not minds_snapshot_resume'`. That is where
+  minds_services and not minds_snapshot_resume and not smoke'`. That is where
   `test_claude_version_alignment.py`, `test_sse_redirect.py` (Chromium installed
   in-job), and `test_aws_workspace_release.py` (skips without AWS opt-in) run.
 
@@ -149,6 +150,11 @@ above (the Imbue Studio release procedure is a manual dispatch, not a `v*` tag):
   `--ignore apps/minds`.
 - **`test-mngr-release`** -- the `release` suite with `--ignore apps/minds`,
   matrixed `[ubuntu, macos] x group 1..12` (pytest-split).
+
+`.github/workflows/minds-smoke.yml`: the smoke workflow -- validates the
+published artifact against the deployed production environment after a deploy of
+the tier services to production. It gates nothing; a failure alerts Slack. See
+1.10 for its target, trigger, jobs, and credentials.
 
 `.github/workflows/minds-launch-to-msg.yml`: builds the `.app` via ToDesktop,
 runs `scripts/launch_to_msg_e2e.py` (Python launch-to-first-message + Slack), and
@@ -248,6 +254,212 @@ rules keep that from corrupting the workspaces under test:
   build or a crash left holding the root is stopped by
   `uv run minds-admin env stop-local dev-<you>-b` (backend plus supervisor);
   `--list-only` reports what still holds a root without stopping it.
+
+### 1.10 Smoke tests (`apps/minds/smoke_tests/`)
+
+Smoke tests run *after* a deploy or a release, against the published artifact
+and the deployed production environment, and never gate the release they
+validate -- the repo `style_guide.md` ("Types of tests" -> "Smoke Tests") holds
+that definition. This section is the operational half: what they target, what
+triggers them, how their CI jobs are segmented, which credentials they hold, and
+how to run them. The decisions behind the first shape are recorded in
+`specs/minds-smoke-tests/spec.md`.
+
+**The first shape.** One journey, driven through the installed Imbue Studio app
+against the production backend: launch the published build and reach the landing
+page; sign in to Imbue Cloud through the app's web-login flow, completing the
+hosted login page in the test's own browser; create an Imbue Cloud workspace;
+send the chat a prompt that builds a hello-world scaffolding app (a web server
+with a route that answers 200, registered as a workspace app; the prompt is
+optimized to be minimally expensive while still building that server); share the
+workspace from within the app, open the app's route through the share, and assert
+the 200 (the visitor is the owner -- grants are a later scenario); turn sharing
+off from within the app as the original user; destroy the workspace.
+
+Beside the journey, two cheaper tests:
+
+- **Signup** -- completes the half of signup that production allows automation
+  to drive: a throwaway account minted by the `setup` job verifies its email
+  through mail.tm, and the download page then lists installers. Production's
+  signup form has Turnstile and the waitlist on, so automation does not drive
+  the form itself; the two accounts (one persistent, one throwaway) are the
+  accepted shortcut.
+- **Read-only probes** of the deployed surfaces: connector and LLM-proxy
+  liveness and version, the hosted accounts pages, the web chrome and its
+  `/open` page, the redirects off the legacy chrome hosts, the download
+  redirect, and the release feed's channel manifests and installers.
+
+**Target: `binary` and `backend` are fixtures.** Which artifact to test, and
+which backend to test it against, are both fixtures, so a scenario is decoupled
+from their selection and creation: `test_foo_1234(binary, backend)`. The
+`binary` fixture resolves a published build from a release channel's feed
+manifest, a local path, or the dev checkout's Electron; the `backend` fixture
+resolves a tier's committed `client.toml` and `deploy.toml`, or an activated dev
+env. In CI the target is **(alpha, production)** -- that pairing is the value the
+suite adds. The channel and the tier are workflow inputs, so the target can vary
+with the trigger later. Linux runs first, on `ubuntu-latest`, against the `.deb`
+(an implementation detail, not a commitment); macOS is a fast follow.
+
+**Trigger.** One: a deploy of the tier services to production, dispatched by a
+successful `minds-admin env deploy` against production (`--skip-smoke` opts
+out). A release-channel publish (`minds-release-channels.yml`) does not trigger
+a run, so publishing a new app binary never starts one on its own. In CI the
+manifest, the pytest log and the screenshots are uploaded as the run's artifact,
+which `teardown` downloads. A daily run, when it is added, may carry a different
+target (for example stable/production daily, alpha/production post deploy).
+
+**Jobs.** Cleanup is the CI job's responsibility, segmented so the test job can
+never delete resources and the cleanup happens regardless of what the test did:
+
+- **`setup`** mints the throwaway account (and its mail.tm inbox) and hands it to
+  the test job through a per-run Vault path.
+- **`test`** holds only user credentials -- the persistent account and the
+  throwaway account. It acts as a user, records every resource it creates in a
+  run manifest, and never holds administrative or database credentials.
+- **`teardown`** runs regardless: it releases any workspaces the run leased,
+  turns off any shares left on, deletes the throwaway account (through
+  the connector's own `DELETE /account`, as its holder), deletes the mail.tm inbox and the per-run Vault
+  path, and sweeps stale smoke resources from earlier runs by their
+  `studio-smoke-` prefix.
+- **`notify_slack`** runs regardless and posts the outcome. Its webhook is read
+  from Vault; the channel is configured later, and the workflow keeps working
+  when the webhook is not set.
+
+**Accounts.** The persistent account signs in, creates, builds, shares, and
+destroys; it is on the ally plan, the only plan with an LLM budget. A script and
+a `just` recipe create it on a tier and put its credentials in the right Vault
+path -- the operator runs that once per tier, as part of deploying this suite.
+The throwaway account exists for the signup test and is deleted by `teardown`.
+
+**Mutual exclusion and the single rerun.** Runs are rival and exclusive: no two
+smoke invocations run at the same time (a GitHub `concurrency` group per tier,
+queued rather than cancelled). The test step gets one rerun before the run counts
+as failed; `teardown` cleans up after both attempts.
+
+**CI keys that talk to production.** This is the first CI workflow holding
+production credentials. These are CI's keys, which happen to give one specific CI
+job access to production; each one belongs to a named job of `minds-smoke.yml`:
+
+| GitHub Environment | Vault role and policy | Reads | Writes |
+|---|---|---|---|
+| `minds-smoke-setup` | `ci_minds_smoke_setup_production_access` | `minds/production/supertokens/MINDS_ADMIN_KEY`, `minds/production/smoke/*` | `minds/ci/smoke-runs/*` |
+| `minds-smoke-test` | `ci_minds_smoke_test_production_access` | `minds/production/smoke/*`, `minds/ci/smoke-runs/*` | nothing |
+| `minds-smoke-teardown` | `ci_minds_smoke_teardown_production_access` | `minds/production/supertokens/{MINDS_ADMIN_KEY,SUPERTOKENS_CONNECTION_URI,SUPERTOKENS_API_KEY}`, `minds/production/neon/DATABASE_URL`, `minds/production/smoke/*`, `minds/ci/smoke-runs/*` | deletes `minds/ci/smoke-runs/*` |
+
+Paths are under the `secrets` mount. The persistent account lives at
+`minds/<tier>/smoke/{SMOKE_ACCOUNT_EMAIL,SMOKE_ACCOUNT_PASSWORD}`, the per-run
+handoff at `minds/ci/smoke-runs/<run_id>/`, and the Slack webhook at
+`mngr/ci/SLACK_MINDS_SMOKE_WEBHOOK` (read through the existing `mngr_ci_gh`
+role). The roles and policies are defined in the imbue-ai/vault terraform repo.
+
+**How the journey drives the app.** The build under test is whatever the
+channel serves, so it cannot carry an accommodation for being driven from a
+test: the suite makes the app's process look like an installed one instead.
+It is launched from an empty directory outside any checkout, on an
+environment composed by the launcher rather than inherited -- every
+`PYTEST_*` variable (pytest's own marker, which mngr's config guard reads,
+and the resource guards' per-test switches, which make a guarded binary exit
+127), every `MNGR_*` / `MINDS_*` variable of the test process, the `UV_*`
+switches the mngr test harness sets (`UV_OFFLINE` would forbid the app's
+first-launch `uv sync` the managed CPython it downloads), the test venv, and
+the resource guards' shim directory on `PATH` are dropped, and
+`MINDS_DATA_HOME`, `MINDS_ROOT_NAME`, the client config and `DISPLAY` are set
+explicitly. The `BROWSER` it is given is a no-op, so its web-login never
+reaches the operator's own browser (which would hand whatever account is
+signed in there to the app); the suite opens the hosted sign-in URL from the
+start flow's "I already have a workspace" aside and completes it in its own
+headless Chromium.
+
+The workspace is created in the region the form already points at, which is
+the app's own choice for where this machine's workspaces run; a run therefore
+fails when that region is out of pool capacity, which is a true thing to
+report about the tier.
+
+A fresh workspace boots with no AI credentials. A user gives it the account's
+own through the chat's provider chooser: its "Sign in with Imbue" lane floats
+the desktop's AI-keys dialog, whose button mints a LiteLLM key and shows a
+two-line credential blob to paste back into the lane. The suite calls the two
+routes behind that lane directly -- `POST /settings/ai-keys/mint` on the
+desktop, then `POST /api/claude-auth/submit-credentials` into the chat,
+requiring the workspace to report back the proxied `imbue` auth mode -- without
+driving the lane's own controls; exercising those is a follow-up recorded in
+the spec. The prompt then goes to a chat started
+from the desktop's launcher, which the chat app mints on the account signed in
+by then (it re-reads the account list before choosing one). The suite waits for
+that chat to appear in the app's own `GET /api/chats` before typing: a create
+answers as soon as the chat has an id, and its composer renders at once, but a
+send before mngr has registered the chat's agent is refused with "Chat '<id>'
+not found". The seeded welcome chat cannot take the prompt: a workspace that
+booted without credentials renders the no-provider notice in place of its
+composer, and the page reads its accounts only as it boots -- while the reload
+that would show the composer loses the welcome chat's own creation, so its
+send is refused the same way.
+
+**Running it locally.** The suite runs from a developer laptop against staging
+or production with nothing but this branch, so a developer can see whether the
+tier passes or fails before any CI exists. What a run needs:
+
+- Vault: `vault login -method=oidc role=minds_staging` for staging; production
+  needs the production role. The suite reads the persistent account from
+  `secrets/minds/<tier>/smoke/{SMOKE_ACCOUNT_EMAIL,SMOKE_ACCOUNT_PASSWORD}` (or
+  from `MINDS_SMOKE_ACCOUNT_EMAIL` / `MINDS_SMOKE_ACCOUNT_PASSWORD`);
+  `minds-smoke-create-persistent-account` and `minds-smoke-setup` read
+  `secrets/minds/<tier>/supertokens/MINDS_ADMIN_KEY` (or `MINDS_ADMIN_KEY`);
+  `minds-smoke-teardown` also reads
+  `secrets/minds/<tier>/supertokens/{SUPERTOKENS_CONNECTION_URI,SUPERTOKENS_API_KEY}`
+  and `secrets/minds/<tier>/neon/DATABASE_URL`, which the stale sweep needs to
+  list the tier's accounts and find the pool rows an abandoned one still holds.
+  Deleting an account needs no store credentials of its own: the connector's
+  two deletion steps do the removal, so the throwaway goes through
+  `DELETE /account` as its holder and only ending a grace period early is an
+  operator call.
+- Toolchain: `uv run playwright install chromium` once (the hosted sign-in page
+  and the share visit run in the suite's own headless Chromium). For the
+  dev-checkout build, the pinned Node on `PATH`
+  (`export PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH"`), then
+  `cd apps/minds && pnpm install --frozen-lockfile && node scripts/ensure-binaries.js && pnpm run build:ui`.
+- The build under test, named by one env var: `MINDS_SMOKE_DEV_CHECKOUT=1` runs
+  this checkout's Electron (the laptop default, and the only mode exercised so
+  far); `MINDS_SMOKE_BINARY_PATH` names an installed executable (untried on
+  macOS, where an installed Imbue Studio.app holds a single-instance lock, so
+  quit the running app first); `MINDS_SMOKE_CHANNEL=alpha` downloads and unpacks
+  the channel's published build: the Linux `.deb` on Linux x86_64 (what CI runs;
+  needs `dpkg`), or the Apple Silicon `.zip` on an arm64 Mac (unpacked with
+  `ditto`; the only Mac build the feed publishes).
+
+The sequence, with `<tier>` staging or production and `<run-id>` lowercase
+`YYYYMMDDtHHMMSSz`:
+
+```bash
+just minds-smoke-create-persistent-account <tier>                     # once per tier; writes the account's Vault leaves
+just minds-smoke-setup <tier> <run-id> /tmp/smoke-<run-id>.json       # the throwaway account and its mail.tm inbox
+export MINDS_SMOKE_HANDOFF_FILE=/tmp/smoke-<run-id>.json
+MINDS_SMOKE_DEV_CHECKOUT=1 just minds-smoke <tier>                    # -k journey, -k signup or -k probes narrows it
+just minds-smoke-teardown <tier> <run-id> --state /tmp/smoke-<run-id>.json
+```
+
+A run leases one pool row at the build's template tag, in the region the
+create form already points at (and fails when the tier's pool has none to lease
+there, which is a true thing to report about the tier), mints one LiteLLM key
+for the persistent account, and has a real agent build the hello-world app; a
+passing journey destroys its workspace and turns its share off itself. After a
+failed run, `just minds-smoke-teardown` releases whatever the manifest and the
+two accounts still hold, turns off their shares, deletes the throwaway account
+and its mailbox, and sweeps `studio-smoke-` accounts older than a day. A fixture
+whose input is missing skips and names the input. Screenshots land under
+`.test_output/smoke/<test name>/`, and the run manifest at
+`.test_output/smoke/run-manifest-<run id>.jsonl` (the run id from
+`MINDS_SMOKE_RUN_ID`, else the handoff file, else minted when the session
+starts) unless `MINDS_SMOKE_MANIFEST_PATH` names a place;
+`just minds-smoke-teardown` reads that file by default. Helpers
+live in `apps/minds/imbue/minds/smoke_tests/`; the tooling is
+`apps/minds_admin/scripts/smoke_tests.py` (`setup`, `teardown`,
+`create-persistent-account`), each with its own `just` recipe.
+
+**Prerequisites before the first production run.** The Vault terraform change is
+applied and the three GitHub Environments exist; the operator has run the
+persistent-account script against production; the Slack webhook secret exists
+(optional -- the workflow runs without it).
 
 ## Part 2 -- End-to-end tests worth adding
 
