@@ -1,6 +1,9 @@
 """Starting, scheduling, and cancelling updates through the workspace's update command, and the run close-out."""
 
 import json
+import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -41,6 +44,7 @@ from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.update_service import build_sign_in_chat_open_script
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
@@ -1121,3 +1125,41 @@ def test_skipping_an_update_remembers_the_apps_ceiling_for_that_workspace_and_ca
     assert MindsConfig(data_dir=config_dir).get_skipped_update_target(str(agent_id)) == _CEILING
     assert service.state_store.get(agent_id).is_scheduled is False
     assert update_program_invocation(caller.calls[1])[0] == "cancel"
+
+
+@pytest.mark.parametrize(
+    ("is_legacy_layout_script_present", "expected_tool"),
+    [(True, "layout.py"), (False, "uv")],
+    ids=("before-workspace-layout", "workspace-layout"),
+)
+def test_the_sign_in_chat_opens_through_whichever_layout_command_the_workspace_has(
+    tmp_path: Path, is_legacy_layout_script_present: bool, expected_tool: str
+) -> None:
+    """Templates before minds-v0.8.6 have only ``system/scripts/layout.py``; later ones only ``workspace-layout``."""
+    calls_file = tmp_path / "calls.jsonl"
+    recorder = f"import json, sys\nopen({str(calls_file)!r}, 'a').write(json.dumps(sys.argv) + '\\n')\n"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(f"#!{sys.executable}\n{recorder}")
+    fake_uv.chmod(0o755)
+    if is_legacy_layout_script_present:
+        legacy_script = tmp_path / "system" / "scripts" / "layout.py"
+        legacy_script.parent.mkdir(parents=True)
+        legacy_script.write_text(recorder)
+
+    completed = subprocess.run(
+        ["bash", "-c", build_sign_in_chat_open_script()],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = [json.loads(line) for line in calls_file.read_text().splitlines()]
+    assert len(calls) == 1
+    assert Path(calls[0][0]).name == expected_tool
+    assert calls[0][-6:] == ["open", "chat", "--path", "/?open=providers", "--if-present", "new"]

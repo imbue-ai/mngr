@@ -170,7 +170,9 @@ def test_a_mode_the_app_runs_keeps_its_warnings_in_the_dispatcher_log(
     _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
-    assert any(line.endswith("mngr list did not list this workspace's services agent; ignoring it") for line in log_lines)
+    assert any(
+        line.endswith("mngr list did not list this workspace's services agent; ignoring it") for line in log_lines
+    )
 
 
 @pytest.mark.witnesses("workspace-updates.one-seed-message")

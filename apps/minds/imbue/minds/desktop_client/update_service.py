@@ -25,6 +25,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -89,6 +90,10 @@ _SIGN_IN_OPEN_ATTEMPTS: Final[int] = 15
 _SIGN_IN_OPEN_INTERVAL_SECONDS: Final[int] = 2
 _SIGN_IN_OPENED_SENTINEL: Final[str] = "MINDS_SIGN_IN_CHAT_OPENED"
 _SIGN_IN_TIMEOUT_SECONDS: Final[float] = 90.0
+_SIGN_IN_OPEN_ARGS: Final[tuple[str, ...]] = ("open", "chat", "--path", _SIGN_IN_CHAT_PATH, "--if-present", "new")
+# CLEANUP: drop this script (and the branch that runs it) once update-self's floor, the oldest
+# release the app updates from, reaches minds-v0.8.6, the first to ship ``workspace-layout``.
+_LEGACY_LAYOUT_SCRIPT: Final[str] = "system/scripts/layout.py"
 
 
 class UpdateDispatchOutcome(UpperCaseStrEnum):
@@ -234,6 +239,19 @@ def _is_earlier_runs_record(status: UpdateRunStatus, run_started_at: datetime | 
     if status.started_at is None or run_started_at is None:
         return False
     return status.started_at < run_started_at - _EARLIER_RUN_RECORD_MARGIN
+
+
+@pure
+def build_sign_in_chat_open_script() -> str:
+    """The in-workspace bash that opens the sign-in chat, retried while the user's client connects."""
+    current = build_in_workspace_command(["uv", "run", "--no-sync", "workspace-layout", *_SIGN_IN_OPEN_ARGS])
+    legacy = build_in_workspace_command(["python3", _LEGACY_LAYOUT_SCRIPT, *_SIGN_IN_OPEN_ARGS])
+    open_window = f"{{ if [ -f {_LEGACY_LAYOUT_SCRIPT} ]; then {legacy}; else {current}; fi; }}"
+    return (
+        f"for attempt in $(seq 1 {_SIGN_IN_OPEN_ATTEMPTS}); do "
+        f"if {open_window}; then echo {_SIGN_IN_OPENED_SENTINEL}; exit 0; fi; "
+        f"sleep {_SIGN_IN_OPEN_INTERVAL_SECONDS}; done; exit 1"
+    )
 
 
 def _command_result(call: UpdateCommandCall) -> UpdateCommandResult | None:
@@ -499,17 +517,14 @@ class WorkspaceUpdateService(MutableModel):
 
         Retried inside the workspace while the user's client connects to it.
         """
-        open_window = build_in_workspace_command(
-            ["uv", "run", "--no-sync", "workspace-layout", "open", "chat", "--path", _SIGN_IN_CHAT_PATH]
-            + ["--if-present", "new"]
-        )
-        script = (
-            f"for attempt in $(seq 1 {_SIGN_IN_OPEN_ATTEMPTS}); do "
-            f"if {open_window}; then echo {_SIGN_IN_OPENED_SENTINEL}; exit 0; fi; "
-            f"sleep {_SIGN_IN_OPEN_INTERVAL_SECONDS}; done; exit 1"
-        )
         result = self.mngr_caller.call(
-            ["exec", "--agent", self._address(agent_id), f"bash -c {shlex.quote(script)}", "--no-start"],
+            [
+                "exec",
+                "--agent",
+                self._address(agent_id),
+                f"bash -c {shlex.quote(build_sign_in_chat_open_script())}",
+                "--no-start",
+            ],
             timeout=_SIGN_IN_TIMEOUT_SECONDS,
         )
         is_opened = _SIGN_IN_OPENED_SENTINEL in result.stdout
