@@ -18,6 +18,8 @@ from imbue.minds.desktop_client.testing import update_program_context
 from imbue.minds.workspace_programs import update_dispatcher
 from imbue.minds.workspace_programs import update_workspace
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
+from imbue.minds.workspace_programs.update_dispatcher import ScheduleAction
+from imbue.minds.workspace_programs.update_dispatcher import WatchdogAction
 
 _LEAD = STAGED_CREATED_CHAT["name"]
 _LEAD_ID = "agent-" + "1" * 32
@@ -93,14 +95,14 @@ def _never_gone() -> bool:
     ("schedule", "run", "now", "is_gone", "action"),
     [
         # No run yet this window: start one.
-        (_schedule(), None, _IN_WINDOW, _never_gone, "dispatch"),
+        (_schedule(), None, _IN_WINDOW, _never_gone, ScheduleAction.DISPATCH),
         # A run that started before this window opened does not count against it.
         (
             _schedule(),
             {"chat_agent_name": "old", "started_at": _WINDOW_OPENED - 3600},
             _IN_WINDOW,
             _never_gone,
-            "dispatch",
+            ScheduleAction.DISPATCH,
         ),
         # A run started since the window opened is this window's run.
         (
@@ -108,19 +110,31 @@ def _never_gone() -> bool:
             {"chat_agent_name": "x", "started_at": _WINDOW_OPENED + 60},
             _IN_WINDOW,
             _never_gone,
-            "note_window",
+            ScheduleAction.NOTE_WINDOW,
         ),
         # A chat dispatched this window whose lead never recorded a start, and is gone: start again.
-        (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: True, "dispatch"),
+        (
+            _schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60),
+            None,
+            _IN_WINDOW,
+            lambda: True,
+            ScheduleAction.DISPATCH,
+        ),
         # The same, with its lead still there: leave it be.
-        (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: False, "note_window"),
+        (
+            _schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60),
+            None,
+            _IN_WINDOW,
+            lambda: False,
+            ScheduleAction.NOTE_WINDOW,
+        ),
         # Gone, but dispatched too recently to replace yet.
         (
             _schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60, next_attempt_at=_IN_WINDOW + 60),
             None,
             _IN_WINDOW,
             lambda: True,
-            "wait",
+            ScheduleAction.WAIT,
         ),
         # The run the file dispatched has a verdict, though the file was re-armed after it started: retire it.
         (
@@ -128,7 +142,7 @@ def _never_gone() -> bool:
             {"chat_agent_name": _LEAD, "started_at": _WINDOW_OPENED + 90, "verdict": "UPDATED"},
             _IN_WINDOW,
             _never_gone,
-            "remove",
+            ScheduleAction.REMOVE,
         ),
         # A verdict under the marked name from a run that started before the mark is an earlier chat's.
         (
@@ -136,7 +150,7 @@ def _never_gone() -> bool:
             {"chat_agent_name": _LEAD, "started_at": _WINDOW_OPENED - 99999, "verdict": "UPDATED"},
             _IN_WINDOW,
             lambda: False,
-            "note_window",
+            ScheduleAction.NOTE_WINDOW,
         ),
         # A verdict from a run that predates the arm says nothing about this schedule.
         (
@@ -144,20 +158,20 @@ def _never_gone() -> bool:
             {"chat_agent_name": "old", "started_at": _WINDOW_OPENED - 99999 * 2, "verdict": "UPDATED"},
             _IN_WINDOW,
             _never_gone,
-            "dispatch",
+            ScheduleAction.DISPATCH,
         ),
         # A window that closed after being seen open, with nothing started in it: record why.
-        (_schedule(window_seen_open_at=_WINDOW_OPENED), None, _AFTER_WINDOW, _never_gone, "record_skip"),
+        (_schedule(window_seen_open_at=_WINDOW_OPENED), None, _AFTER_WINDOW, _never_gone, ScheduleAction.RECORD_SKIP),
         # One that closed with this window's run started in it: nothing to record.
         (
             _schedule(window_seen_open_at=_WINDOW_OPENED),
             {"chat_agent_name": "x", "started_at": _WINDOW_OPENED + 60},
             _AFTER_WINDOW,
             _never_gone,
-            "note_window",
+            ScheduleAction.NOTE_WINDOW,
         ),
         # A workspace stopped through the whole window never saw it open, so nothing is recorded.
-        (_schedule(), None, _AFTER_WINDOW, _never_gone, "nothing"),
+        (_schedule(), None, _AFTER_WINDOW, _never_gone, ScheduleAction.NOTHING),
     ],
 )
 @pytest.mark.witnesses("workspace-updates.gone-agent-restarted-in-window")
@@ -165,9 +179,9 @@ def _never_gone() -> bool:
     "workspace-updates.stopped-workspace-not-updated", partial="the decision only; not the row once readable"
 )
 def test_one_tick_decides_from_the_window_and_the_run_record(
-    schedule: dict[str, Any], run: dict[str, Any] | None, now: float, is_gone: Any, action: str
+    schedule: dict[str, Any], run: dict[str, Any] | None, now: float, is_gone: Any, action: ScheduleAction
 ) -> None:
-    assert update_dispatcher.decide_schedule_action(schedule, run, now, is_gone) == action
+    assert update_dispatcher.decide_schedule_action(schedule, run, now, is_gone) is action
 
 
 def _agent(name: str, state: str, agent_id: str = "") -> dict[str, Any]:
@@ -182,23 +196,29 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
     ("run", "agents", "busy", "state", "action"),
     [
         # The lead's chat was deleted with no verdict: close the run out.
-        (_OPEN_RUN, [], _NOTHING_BUSY, {}, "close_out"),
+        (_OPEN_RUN, [], _NOTHING_BUSY, {}, WatchdogAction.CLOSE_OUT),
         # The lead stopped or exited with no verdict (a workspace restart, a crash, a stop): bring it back.
-        (_OPEN_RUN, [_agent(_LEAD, "DONE")], _NOTHING_BUSY, {}, "revive"),
-        (_OPEN_RUN, [_agent(_LEAD, "STOPPED")], _NOTHING_BUSY, {}, "revive"),
+        (_OPEN_RUN, [_agent(_LEAD, "DONE")], _NOTHING_BUSY, {}, WatchdogAction.REVIVE),
+        (_OPEN_RUN, [_agent(_LEAD, "STOPPED")], _NOTHING_BUSY, {}, WatchdogAction.REVIVE),
         # A listing that could not be read is no evidence of anything.
-        (_OPEN_RUN, None, _NOTHING_BUSY, {}, "nothing"),
+        (_OPEN_RUN, None, _NOTHING_BUSY, {}, WatchdogAction.NOTHING),
         # The worker is moving: nothing is owed yet.
-        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "RUNNING")], _NOTHING_BUSY, {}, "reset"),
+        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "RUNNING")], _NOTHING_BUSY, {}, WatchdogAction.RESET),
         # The lead waits on a background task the workspace reports busy.
-        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")], ({_LEAD}, set(), set()), {}, "reset"),
+        (
+            _OPEN_RUN,
+            [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")],
+            ({_LEAD}, set(), set()),
+            {},
+            WatchdogAction.RESET,
+        ),
         # Both idle, briefly: count it.
         (
             _OPEN_RUN,
             [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")],
             _NOTHING_BUSY,
             {},
-            "count_idle",
+            WatchdogAction.COUNT_IDLE,
         ),
         # Both idle for long enough, and not reminded lately: remind.
         (
@@ -206,7 +226,7 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
             [_agent(_LEAD, "WAITING")],
             _NOTHING_BUSY,
             {"idle_ticks": 2, "last_reminded_at": 0.0},
-            "remind",
+            WatchdogAction.REMIND,
         ),
         # Reminded a minute ago: wait out the interval.
         (
@@ -214,14 +234,20 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
             [_agent(_LEAD, "WAITING")],
             _NOTHING_BUSY,
             {"idle_ticks": 9, "last_reminded_at": _IN_WINDOW - 60},
-            "count_idle",
+            WatchdogAction.COUNT_IDLE,
         ),
         # A run that is landing belongs to the apply's own recovery.
-        ({**_OPEN_RUN, "apply_phase": "merged"}, [], _NOTHING_BUSY, {}, "reset"),
+        ({**_OPEN_RUN, "apply_phase": "merged"}, [], _NOTHING_BUSY, {}, WatchdogAction.RESET),
         # A record holding for the user (an older template's hold) is waiting on purpose.
-        ({**_OPEN_RUN, "is_holding": True}, [_agent(_LEAD, "WAITING")], _NOTHING_BUSY, {"idle_ticks": 9}, "reset"),
+        (
+            {**_OPEN_RUN, "is_holding": True},
+            [_agent(_LEAD, "WAITING")],
+            _NOTHING_BUSY,
+            {"idle_ticks": 9},
+            WatchdogAction.RESET,
+        ),
         # A run with a verdict owes nothing.
-        ({**_OPEN_RUN, "verdict": "UPDATED"}, [], _NOTHING_BUSY, {}, "nothing"),
+        ({**_OPEN_RUN, "verdict": "UPDATED"}, [], _NOTHING_BUSY, {}, WatchdogAction.NOTHING),
     ],
 )
 def test_the_watchdog_decides_from_the_lead_and_worker_states(
@@ -229,9 +255,9 @@ def test_the_watchdog_decides_from_the_lead_and_worker_states(
     agents: list[dict[str, Any]] | None,
     busy: tuple[set[str], set[str], set[str]],
     state: dict[str, Any],
-    action: str,
+    action: WatchdogAction,
 ) -> None:
-    assert update_dispatcher.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) == action
+    assert update_dispatcher.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) is action
 
 
 def _tick(staged: StagedUpdateWorkspace, now: float) -> None:
