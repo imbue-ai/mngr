@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: The claude common transcript dropped messages the user sent while a turn was running, so `mngr transcript` and the ATIF trajectory showed the agent replying to a message nobody had sent; each such message is now recorded as a user step in order.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

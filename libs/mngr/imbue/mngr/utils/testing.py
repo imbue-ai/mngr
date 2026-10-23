@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+import select
 import selectors
 import shlex
 import shutil
@@ -16,6 +17,7 @@ import time
 import typing
 from collections.abc import Callable
 from collections.abc import Generator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -942,6 +944,58 @@ def running_background_tasks_supervisor(
                     os.kill(sleep_pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+
+# A process group being stopped normally empties at once; this only caps the wait if
+# something is badly wrong.
+_PROCESS_GROUP_EXIT_TIMEOUT_SECONDS: Final[float] = 15.0
+_PROCESS_GROUP_REKILL_INTERVAL_SECONDS: Final[float] = 0.1
+
+
+@contextmanager
+def running_in_own_process_group(
+    command: Sequence[str], env: Mapping[str, str], stdout: int
+) -> Generator[subprocess.Popen[bytes], None, None]:
+    """Run ``command`` as the leader of a new process group; on exit, nothing in the group is left running.
+
+    Every process in the group inherits the write end of a liveness pipe that nothing
+    writes to, so the read end reaches EOF exactly when the last of them has exited.
+    """
+    liveness_read_fd, liveness_write_fd = os.pipe()
+    process = subprocess.Popen(command, stdout=stdout, env=env, start_new_session=True, pass_fds=(liveness_write_fd,))
+    os.close(liveness_write_fd)
+    try:
+        yield process
+    finally:
+        _kill_process_group_until_empty(process=process, liveness_read_fd=liveness_read_fd)
+        os.close(liveness_read_fd)
+
+
+def _kill_process_group_until_empty(process: subprocess.Popen[bytes], liveness_read_fd: int) -> None:
+    """SIGKILL the leader's process group until the liveness pipe reaches EOF, then reap the leader.
+
+    One kill is not enough: gVisor admits a child forked during ``killpg`` into the group
+    after the signal went out, so that child never receives it. Reaping the leader waits
+    until the group is empty because the leader's pid is the group id, and once reaped it
+    can be reused by an unrelated group that the next kill would hit.
+    """
+    deadline = time.monotonic() + _PROCESS_GROUP_EXIT_TIMEOUT_SECONDS
+    while not _is_group_empty_after_sigkill(process_group_id=process.pid, liveness_read_fd=liveness_read_fd):
+        assert time.monotonic() < deadline, (
+            f"process group {process.pid} still has live members after repeated SIGKILLs"
+        )
+    process.wait(timeout=_PROCESS_GROUP_EXIT_TIMEOUT_SECONDS)
+
+
+def _is_group_empty_after_sigkill(process_group_id: int, liveness_read_fd: int) -> bool:
+    """SIGKILL the group, then report whether its liveness pipe reaches EOF within one re-kill interval."""
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except PermissionError:
+        # macOS refuses to signal a group whose only member is the unreaped leader.
+        pass
+    readable, _, _ = select.select([liveness_read_fd], [], [], _PROCESS_GROUP_REKILL_INTERVAL_SECONDS)
+    return bool(readable)
 
 
 def create_test_agent_via_cli(
