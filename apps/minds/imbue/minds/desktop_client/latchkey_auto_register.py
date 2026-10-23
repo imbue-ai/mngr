@@ -372,17 +372,22 @@ class LatchkeyAutoRegister(MutableModel):
             self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
             if self._stop_event.is_set():
                 break
+            # The watch leaves the watched set in the same lock hold that decides it is over, and before it
+            # schedules anything: a worker that re-holds the host from here on finds it unwatched and starts a new
+            # watch, instead of relying on this one, which is about to exit.
             with self._push_lock:
                 agent_id = self._hosts_awaiting_machine.get(host_id)
-            if agent_id is None:
-                # The push was carried (a resolver change found the machine) or re-marked; a new hold starts a new watch.
-                break
+                if agent_id is None:
+                    self._hosts_watched_for_machine.discard(host_id)
+                    return
             if self._has_machine(host_id):
+                with self._push_lock:
+                    self._hosts_watched_for_machine.discard(host_id)
                 logger.debug(
                     "Carrying the held latchkey permissions push for host {}: its machine key appeared", host_id
                 )
                 self._schedule_push(host_id, agent_id)
-                break
+                return
         with self._push_lock:
             self._hosts_watched_for_machine.discard(host_id)
 
