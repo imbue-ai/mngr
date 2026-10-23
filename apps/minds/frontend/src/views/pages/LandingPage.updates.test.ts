@@ -171,13 +171,24 @@ describe("a row's update actions", () => {
     ["a newer run failed", { verdict: "STUCK", chat_agent_id: "agent-lead-11" }, false],
   ] as const)("leave the Updated to X note out while the row's badge says %s", (_case, fields, isAuto) => {
     const { draw } = harness(
-      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, success_note_version: "minds-v0.4.1", ...fields } as UiWorkspaceUpdate },
+      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, success_note_version: "minds-v0.4.0", ...fields } as UiWorkspaceUpdate },
       isAuto,
     );
     const root = draw();
 
     expect(updateBadges(root)).toHaveLength(1);
-    expect(allText(root)).not.toContain("Updated to v0.4.1.");
+    expect(allText(root)).not.toContain("Updated to v0.4.0.");
+  });
+
+  it("say Updated to X, not Update available, while detection still reads a run that just landed as behind", () => {
+    const { draw } = harness(
+      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, verdict: "UPDATED", success_note_version: "minds-v0.4.1" } },
+      false,
+    );
+    const root = draw();
+
+    expect(updateBadges(root)).toHaveLength(0);
+    expect(allText(root)).toContain("Updated to v0.4.1.");
   });
 
   it("offer no chat for an update that never went out", () => {

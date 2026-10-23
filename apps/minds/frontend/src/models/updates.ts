@@ -34,6 +34,13 @@ export function isUpdateOffered(update: UiWorkspaceUpdate): boolean {
   return update.availability === "OUT_OF_DATE";
 }
 
+/** Whether the last run landed this app's version. Detection reads the machine
+ * as behind for a while after the apply, so this outranks what it reads. */
+export function isLandedOnSupportedVersion(update: UiWorkspaceUpdate): boolean {
+  const landed = update.success_note_version ?? "";
+  return update.verdict === "UPDATED" && landed !== "" && landed === update.supported_version;
+}
+
 /** Whether the app has positively read this machine as too old to update in
  * place: the only way forward is a new machine, migrated into. */
 export function isRecreationRequired(update: UiWorkspaceUpdate): boolean {
@@ -299,8 +306,8 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (outcome === "needs-attention") return "updated-with-note";
   if (isRecreationRequired(update)) return "needs-recreation";
   if (update.availability === "APP_BEHIND") return "app-behind";
+  if (isLandedOnSupportedVersion(update)) return "updated";
   const landed = update.success_note_version ?? "";
-  if (update.verdict === "UPDATED" && landed !== "" && landed === update.supported_version) return "updated";
   if (isUpdateSkipped(update)) return "skipped";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (update.is_scheduled ?? false) return "scheduled";
@@ -357,7 +364,8 @@ export interface UpdateBadge {
 
 /** Which badge a machine's row shows, or null. One at most, ordered by what
  * the reader would act on first: a run in flight, a decision or a failed run,
- * the standing "needs recreation", "skipped", "needs sign-in", or "out of date", then
+ * the standing "needs recreation", none for a run that landed this app's
+ * version, then "skipped", "needs sign-in", or "out of date", then
  * "unknown", then a bare armed schedule. Every one opens the modal (hence
  * buttons); only "out of date" is an offer, and under auto-update it is
  * withheld for a machine auto-update will arm itself. A null `update` (nothing
@@ -444,6 +452,8 @@ export function updateBadgeFor(
       isSpinnerShown: false,
     };
   }
+  // The row's "Updated to X" note says this, not an offer detection has yet to take back.
+  if (isLandedOnSupportedVersion(update)) return null;
   // Neutral: the reader chose this, so it asks nothing of them, but it is still
   // the way to the modal that updates the machine by hand.
   if (isUpdateSkipped(update)) {
