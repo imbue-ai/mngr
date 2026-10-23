@@ -196,10 +196,7 @@ def test_a_run_whose_lead_is_not_running_ends_only_when_nothing_will_bring_it_ba
     landings_told: list[AgentId] = []
     service.add_on_update_landed_callback(lambda agent_id, run_started_at, ended_at: landings_told.append(agent_id))
     agent_id = AgentId.generate()
-    assert service.state_store.try_begin_run(agent_id, target_override="")
-    assert service.state_store.adopt_dispatched_chat(
-        agent_id, chat_agent_name="update-old", chat_agent_id=known_chat_id
-    )
+    begin_dispatched_update_run(service.state_store, agent_id, "update-old", chat_agent_id=known_chat_id)
 
     service.poll_in_flight_runs()
 

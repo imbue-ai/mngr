@@ -1784,10 +1784,15 @@ CUT_OFF_ON_REACHED_HOST_EXEC_RESULT: Final[MngrCallResult] = MngrCallResult(
 )
 
 
-def begin_dispatched_update_run(store: WorkspaceUpdateStateStore, agent_id: AgentId, chat_agent_name: str) -> None:
-    """Put ``agent_id``'s row where a dispatch whose chat the workspace created leaves it."""
+def begin_dispatched_update_run(
+    store: WorkspaceUpdateStateStore, agent_id: AgentId, chat_agent_name: str, *, chat_agent_id: str = ""
+) -> None:
+    """Put ``agent_id``'s row where a dispatch whose chat the workspace created leaves it.
+
+    ``chat_agent_id`` is the id the create answered with, '' for a create that named none.
+    """
     assert store.try_begin_run(agent_id, target_override="")
-    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id="")
+    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id=chat_agent_id)
 
 
 def update_program_invocation(argv: Sequence[str]) -> tuple[str, dict[str, str]]:
