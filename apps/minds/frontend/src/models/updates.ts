@@ -305,7 +305,8 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (update.is_scheduled ?? false) return "scheduled";
   if (update.availability === "OUT_OF_DATE" || update.availability === "PATCH_AVAILABLE") return "offered";
-  if (update.verdict === "UPDATED" || update.verdict === "ALREADY_CURRENT") return "updated";
+  // Only while its note is showing: once dismissed, the machine's version decides what is offered.
+  if ((update.verdict === "UPDATED" || update.verdict === "ALREADY_CURRENT") && landed !== "") return "updated";
   if (update.availability === "UNKNOWN") return "unknown";
   return "up-to-date";
 }
@@ -510,19 +511,6 @@ export function updateBadgeFor(
     };
   }
   return null;
-}
-
-/** The row's one shortcut beside its badge, or null: the run's chat for an
- * outcome the user settles there (a decision, a failure), or the sign-in a
- * refused update is waiting on. A run that never went out has no chat. */
-export type RowUpdateShortcut = "open-chat" | "sign-in" | null;
-
-export function rowUpdateShortcutFor(update: UiWorkspaceUpdate | null, badge: UpdateBadge | null): RowUpdateShortcut {
-  if (update === null || badge === null) return null;
-  if (badge.state === "needs-sign-in") return "sign-in";
-  const isSettledInChat =
-    badge.state === "needs-decision" || (badge.state === "failed" && updateRunOutcome(update) === "failed");
-  return isSettledInChat && (update.chat_agent_id ?? "") !== "" ? "open-chat" : null;
 }
 
 const MINUTES_PER_DAY = 24 * 60;

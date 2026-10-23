@@ -16,7 +16,6 @@ import {
   OUT_OF_DATE_UPDATE,
   recordingFetch,
   renderRoot,
-  settle,
   updatesShell,
   workspacesMessage,
 } from "../../testing";
@@ -119,47 +118,32 @@ describe("the machines list under auto-update", () => {
   });
 });
 
-describe("a row that needs a sign-in", () => {
-  it("says so and signs in from the row, entering the workspace before asking it", async () => {
-    const { draw, requests, routeSet } = harness(
-      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, needs_sign_in: true } },
+describe("a row's update actions", () => {
+  it.each([
+    ["needs a sign-in", { ...OUT_OF_DATE_UPDATE, needs_sign_in: true }, true],
+    [
+      "ended in a failure the user never saw a window for",
+      { ...OUT_OF_DATE_UPDATE, verdict: "STUCK", chat_agent_id: "agent-lead-9", started_by: "SCHEDULED" },
       true,
-    );
+    ],
+    [
+      "waits on the user's decision",
+      { ...OUT_OF_DATE_UPDATE, verdict: "NEEDS_DECISION", is_decision_pending: true, chat_agent_id: "agent-lead-8" },
+      false,
+    ],
+  ] as const)("are the badge alone on a row whose update %s, and it opens the update window", (_case, update, isAuto) => {
+    const { draw, routeSet } = harness({ [ALPHA]: update as UiWorkspaceUpdate }, isAuto);
     const root = draw();
 
-    expect(allText(updateBadges(root))).toContain(
-      "Needs sign-in to auto-update",
-    );
-    press(pressable(root, "landing-update-sign-in"));
-    await settle();
-
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {});
-    expect(requests).toEqual([`/ui/api/updates/${ALPHA}/sign-in`]);
-  });
-});
-
-describe("a row's way into its run's chat", () => {
-  it("sits beside a failed run's badge, for a run the user never saw a window for", () => {
-    const { draw, routeSet } = harness(
-      {
-        [ALPHA]: {
-          ...OUT_OF_DATE_UPDATE,
-          verdict: "STUCK",
-          chat_agent_id: "agent-lead-9",
-          started_by: "SCHEDULED",
-        },
-      },
-      true,
-    );
-
-    press(pressable(draw(), "landing-update-open-chat"));
-
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
-      chat: "agent-lead-9",
-    });
+    expect(updateBadges(root)).toHaveLength(1);
+    expect(pressable(root, "landing-update-sign-in")).toBeUndefined();
+    expect(pressable(root, "landing-update-open-chat")).toBeUndefined();
+    press(updateBadges(root)[0]);
+    expect(getAppContext().shell.openUpdateModalAgentId()).toBe(ALPHA);
+    expect(routeSet).not.toHaveBeenCalled();
   });
 
-  it("sits beside the Updated to X note", () => {
+  it("include the Updated to X note, with its chat, on a row with no update badge", () => {
     const { draw, routeSet } = harness(
       {
         [ALPHA]: {
@@ -174,6 +158,7 @@ describe("a row's way into its run's chat", () => {
     );
     const root = draw();
 
+    expect(updateBadges(root)).toHaveLength(0);
     expect(allText(root)).toContain("Updated to v0.4.1.");
     press(pressable(root, "landing-update-open-chat"));
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
@@ -181,28 +166,21 @@ describe("a row's way into its run's chat", () => {
     });
   });
 
-  it("leaves the Updated to X note's chat to a newer run's own badge", () => {
+  it.each([
+    ["a newer release is scheduled", { is_scheduled: true, verdict: "UPDATED" }, true],
+    ["a newer run failed", { verdict: "STUCK", chat_agent_id: "agent-lead-11" }, false],
+  ] as const)("leave the Updated to X note out while the row's badge says %s", (_case, fields, isAuto) => {
     const { draw } = harness(
-      {
-        [ALPHA]: {
-          ...OUT_OF_DATE_UPDATE,
-          verdict: "STUCK",
-          success_note_version: "minds-v0.4.1",
-          chat_agent_id: "agent-lead-11",
-        },
-      },
-      false,
+      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, success_note_version: "minds-v0.4.1", ...fields } as UiWorkspaceUpdate },
+      isAuto,
     );
     const root = draw();
 
-    expect(allText(root)).toContain("Updated to v0.4.1.");
-    const openChats = collectVnodes(root).filter((vnode) =>
-      String(attrsOf(vnode).extra ?? "").includes("landing-update-open-chat"),
-    );
-    expect(openChats).toHaveLength(1);
+    expect(updateBadges(root)).toHaveLength(1);
+    expect(allText(root)).not.toContain("Updated to v0.4.1.");
   });
 
-  it("is not offered for an update that never went out", () => {
+  it("offer no chat for an update that never went out", () => {
     const { draw } = harness(
       {
         [ALPHA]: {

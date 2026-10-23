@@ -8,7 +8,6 @@ import {
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
-  rowUpdateShortcutFor,
   scheduleSkipLine,
   plainScheduleTargetRef,
   scheduledLine,
@@ -565,11 +564,10 @@ describe("auto-update's quiet surfaces", () => {
     expect(standingUpdateNotice(stopped, false, true)).toBe("out-of-date");
   });
 
-  it("says a machine that cannot be armed needs a sign-in, with the way to give it one", () => {
+  it("says a machine that cannot be armed needs a sign-in", () => {
     const refused = { ...OUT_OF_DATE_UPDATE, needs_sign_in: true };
     const badge = updateBadgeFor(refused, false, true);
     expect(badge).toMatchObject({ state: "needs-sign-in", label: "Needs sign-in to auto-update" });
-    expect(rowUpdateShortcutFor(refused, badge)).toBe("sign-in");
     expect(standingUpdateNotice(refused, false, true)).toBe("needs-sign-in");
     // A run in flight is the newer news.
     expect(standingUpdateNotice(refused, true, true)).toBe("none");
@@ -609,24 +607,8 @@ describe("a run that ended needing the user's decision", () => {
     expect(updateBadgeFor(PENDING, false)).toMatchObject({ state: "needs-decision", tone: "warn" });
   });
 
-  it("outranks the machine still reading behind, and puts its chat one click from the row", () => {
-    const badge = updateBadgeFor(PENDING, false, true);
-    expect(badge?.state).toBe("needs-decision");
-    expect(rowUpdateShortcutFor(PENDING, badge)).toBe("open-chat");
-  });
-});
-
-describe("rowUpdateShortcutFor", () => {
-  it("opens a failed run's chat, whoever started it", () => {
-    const failed = { ...OUT_OF_DATE_UPDATE, verdict: "STUCK" as const, chat_agent_id: "agent-lead", started_by: "SCHEDULED" as const };
-    expect(rowUpdateShortcutFor(failed, updateBadgeFor(failed, false))).toBe("open-chat");
-  });
-
-  it("offers no chat for an update that never went out, or a run whose chat is unknown", () => {
-    const notStarted = { ...OUT_OF_DATE_UPDATE, dispatch_failure: "Couldn't reach this workspace.", chat_agent_id: "agent-old" };
-    expect(rowUpdateShortcutFor(notStarted, updateBadgeFor(notStarted, false))).toBeNull();
-    const unknownChat = { ...OUT_OF_DATE_UPDATE, verdict: "STUCK" as const };
-    expect(rowUpdateShortcutFor(unknownChat, updateBadgeFor(unknownChat, false))).toBeNull();
+  it("outranks the machine still reading behind", () => {
+    expect(updateBadgeFor(PENDING, false, true)?.state).toBe("needs-decision");
   });
 });
 

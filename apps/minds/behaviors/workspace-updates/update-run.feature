@@ -123,7 +123,7 @@ Feature: Running an update
   Scenario: A run's chat is one click away from where its progress or outcome is reported
     A scheduled run shows no window of its own while it runs, so its report is the way in.
     Given a workspace whose last update landed or is waiting for a decision
-    Then the outcome on the workspace's row offers a button into the run's chat
+    Then the outcome on the workspace's row offers a button into the run's chat, itself or in the window it opens
     And the outcome over the workspace offers a button into the run's chat and a way to dismiss it
     Given a workspace whose update is preparing, applying, or waiting for the user, and whose run's chat exists
     Then the report over the workspace offers a button into the run's chat

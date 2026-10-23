@@ -230,6 +230,22 @@ describe("the update modal's verdict line", () => {
     expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
   });
 
+  it("offers an update over a machine of unknown version once its last run's note is dismissed", () => {
+    // A run to a branch leaves the machine's version unreadable; Dismiss clears the note, not the verdict.
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      availability: "UNKNOWN",
+      unknown_reason: "NO_MACHINE_VERSION",
+      current_version: "upstream/fake-catchup-848b",
+      verdict: "UPDATED",
+      success_note_version: "",
+    });
+    const root = draw();
+
+    expect(allText(root)).not.toContain("This workspace was updated");
+    expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
+  });
+
   it("settles a failed run before offering another: its chat and Dismiss, no update buttons", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
       ...OUT_OF_DATE_UPDATE,

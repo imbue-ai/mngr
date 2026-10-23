@@ -71,7 +71,6 @@ import {
   displayVersion,
   isBadgeOpeningRunChat,
   isUpdateOffered,
-  rowUpdateShortcutFor,
   updateBadgeFor,
   updateChatAgentIdFor,
 } from "../../models/updates";
@@ -453,8 +452,8 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The row's update badge and the one shortcut beside it, or null when
-   * the machine has nothing to say. */
+  /** The row's one update control, or null when the machine has nothing to
+   * say: the window it opens holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     const published = updates.publishedFor(entry.id);
@@ -491,14 +490,7 @@ export const LandingPage: m.ClosureComponent = () => {
         m(Icon16, { name: "chevron-right", size: "sm", extra: "opacity-70" }),
       ],
     );
-    const shortcut = rowUpdateShortcutFor(published, badge);
-    if (shortcut === null) return badgeButton;
-    return [
-      badgeButton,
-      shortcut === "open-chat"
-        ? openRunChatButton(entry.id, published?.chat_agent_id ?? "")
-        : signInButton(entry.id),
-    ];
+    return badgeButton;
   }
 
   /** Into the run's chat, wherever the run was started from: a run the
@@ -518,27 +510,13 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** Answer an update refused for want of a signed-in AI account. A refusal
-   * is said by the update modal, which has room for it. */
-  function signInButton(agentId: string): m.Children {
-    return m(
-      Button,
-      {
-        variant: "ghost",
-        extra: "landing-update-sign-in",
-        onclick: (event: MouseEvent) => {
-          event.stopPropagation();
-          getAppContext().shell.signInForUpdateOrExplain(agentId);
-        },
-      },
-      "Sign in",
-    );
-  }
-
   /** The dismissible "Updated to X" note, whether or not the run was watched.
    * Under the row rather than in it: it is news, not state. */
   function updatedNote(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
+    // A row says one thing about its updates: while it has a badge, the badge.
+    if (updateBadgeFor(updates.publishedFor(entry.id), updates.isUpdating(entry.id), updates.isAutoUpdateEnabled) !== null)
+      return null;
     const update = updates.forAgent(entry.id);
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
