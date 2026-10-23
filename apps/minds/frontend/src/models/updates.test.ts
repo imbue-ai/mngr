@@ -141,6 +141,7 @@ describe("UpdatesStore", () => {
         "agent-patch": { ...OUT_OF_DATE_UPDATE, availability: "PATCH_AVAILABLE" },
         "agent-running": { ...OUT_OF_DATE_UPDATE, activity: "RUNNING" },
         "agent-deciding": { ...OUT_OF_DATE_UPDATE, verdict: "NEEDS_DECISION", is_decision_pending: true },
+        "agent-landed": { ...OUT_OF_DATE_UPDATE, verdict: "UPDATED", success_note_version: "minds-v0.4.1" },
       }),
     );
 

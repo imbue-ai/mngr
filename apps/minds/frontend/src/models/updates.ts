@@ -691,7 +691,8 @@ export class UpdatesStore {
   }
 
   /** The machines the bulk actions cover: confirmed out of date, with nothing
-   * standing in the way of a fresh run. */
+   * standing in the way of a fresh run, and not one whose last run just landed
+   * this app's version, which its row does not offer either. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.keys()]
       .map((agentId) => [agentId, this.forAgent(agentId)] as const)
@@ -700,7 +701,8 @@ export class UpdatesStore {
           isUpdateOffered(update) &&
           !this.isUpdating(agentId) &&
           !(update.is_decision_pending ?? false) &&
-          !isUpdateSkipped(update),
+          !isUpdateSkipped(update) &&
+          !isLandedOnSupportedVersion(update),
       )
       .map(([agentId]) => agentId);
   }
