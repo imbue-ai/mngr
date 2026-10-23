@@ -151,8 +151,8 @@ _FALLING_BACK_TO_BARE_CREATE: Final[str] = "Falling back to `mngr create`"
 
 # The schedule fields the dispatcher writes; the rest are the app's. An arm keeps the marks from the
 # file it replaces and starts the others over.
-SCHEDULE_MARK_FIELDS: Final[tuple[str, ...]] = ("marked_chat", "marked_at", "window_seen_open_at")
-_DISPATCHER_SCHEDULE_FIELDS: Final[tuple[str, ...]] = SCHEDULE_MARK_FIELDS + (
+_SCHEDULE_MARK_FIELDS: Final[tuple[str, ...]] = ("marked_chat", "marked_at", "window_seen_open_at")
+_DISPATCHER_SCHEDULE_FIELDS: Final[tuple[str, ...]] = _SCHEDULE_MARK_FIELDS + (
     "pending_skip_reason",
     "next_attempt_at",
     "last_skip_reason",
@@ -1030,7 +1030,7 @@ def _save_schedule_marks(schedule: Mapping[str, object]) -> None:
         write_log_line("the schedule was cancelled while this tick worked; leaving it cancelled")
         return
     is_rearmed = current.get("armed_at") != schedule.get("armed_at")
-    fields = SCHEDULE_MARK_FIELDS if is_rearmed else _DISPATCHER_SCHEDULE_FIELDS
+    fields = _SCHEDULE_MARK_FIELDS if is_rearmed else _DISPATCHER_SCHEDULE_FIELDS
     current.update({key: schedule.get(key) for key in fields})
     write_json_atomically(SCHEDULE_FILE_PATH, current)
 
