@@ -12,6 +12,7 @@ from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
 from imbue.minds.envs.vault_reader import read_ssh_ca_public_key
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.envs.vault_reader import sign_ssh_public_key
+from imbue.minds.envs.vault_reader import write_vault_kv
 
 
 def _write_fake_vault(tmp_path: Path, body: str) -> Path:
@@ -275,3 +276,24 @@ def test_read_ssh_ca_public_key_returns_the_configured_ca(tmp_path: Path) -> Non
     empty = _make_ssh_vault_binary(tmp_path / "empty", write_stdout="", read_stdout=json.dumps({"data": {}}))
     with pytest.raises(VaultReadError, match="no data.public_key"):
         read_ssh_ca_public_key("minds-dev-ssh", vault_binary=str(empty))
+
+
+def test_write_vault_kv_keeps_the_value_off_argv_and_on_stdin(tmp_path: Path) -> None:
+    argv_path = tmp_path / "_put_argv.txt"
+    stdin_path = tmp_path / "_put_stdin.txt"
+    fake = _write_fake_vault(
+        tmp_path,
+        f'printf "%s\\n" "$@" > {shlex.quote(str(argv_path))}\n'
+        f"cat > {shlex.quote(str(stdin_path))}\n"
+        "echo '{\"data\": {}}'\n",
+    )
+    secret = "@starts-with-the-file-sigil-and-stays-secret"
+
+    write_vault_kv(VaultPath("secrets/minds/dev/smoke"), {"SMOKE_ACCOUNT_PASSWORD": secret}, vault_binary=str(fake))
+
+    argv = argv_path.read_text().splitlines()
+    assert argv[:3] == ["kv", "put", "-format=json"]
+    assert "minds/dev/smoke/SMOKE_ACCOUNT_PASSWORD" in argv
+    assert "value=-" in argv
+    assert all(secret not in argument for argument in argv)
+    assert stdin_path.read_text() == secret

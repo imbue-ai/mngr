@@ -1786,12 +1786,13 @@ Be sure to put tests in the right place (see below for the different types of te
 
 ## Types of tests
 
-There are 4 types of tests: unit tests, integration tests, acceptance tests, and release tests. Each type of test has its own purpose and its own location within the project structure:
+The types of tests are unit, integration, acceptance, release, and smoke. Each type of test has its own purpose and its own location within the project structure:
 
 1. unit tests: put them in `(src)/**/*_test.py`. They test small, isolated pieces of functionality (ex: a single function or method). They answer the question: "is this code mostly working?" Run locally and are super fast.
 2. integration tests: put them in `(src)/**/test_*.py`. They answer the question: "does our program behave in the way that we want?" by testing "end to end" functionality. Run locally with no network access, don't take too long, and are used for calculating coverage.
 3. acceptance tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.acceptance`. They answer the question: "does the application work under realistic conditions?" by testing with real dependencies (network access, credentials, etc). Run on all branches in CI.
 4. release tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.release`. They answer the question: "is the application ready for release?" These are more comprehensive acceptance-style tests that only run when pushing to release. The idea is to have them fixed up overnight/before release rather than as a precondition for merging PRs.
+5. smoke tests: mark them with `@pytest.mark.smoke`. They answer the question: "does what we just shipped work in production?" They run after a deploy or a release, against the published artifact and the deployed production environment, and never gate a release.
 
 ### Unit Tests
 
@@ -1933,6 +1934,31 @@ def test_full_end_to_end_workflow_with_all_providers() -> None:
 The full release testing suite is a superset of acceptance tests. When pushing to main, both acceptance and release tests are run. The idea is to have any failures fixed up overnight or before release, rather than blocking every PR merge.
 
 Release tests can sometimes be flaky. This is ok. Make it possible to easily retry and re-run them if they fail.
+
+### Smoke Tests
+
+Smoke tests run *after* a deploy or a release, against the published artifact and the deployed production environment. They answer the question: "does what we just shipped actually work for a real user?"
+
+Smoke tests never gate a release. They run after the fact to validate it; when one fails, the CI job fails and a knock-on process alerts us in Slack.
+
+Driving the running Electron app end to end is their primary modality. They also validate API endpoints and run on the web. That reach is the point: they cover the journeys that are hard to get at any other way -- account creation, signup, workspace creation, and sharing.
+
+Always mark smoke tests with `@pytest.mark.smoke`
+
+```python
+import pytest
+
+
+@pytest.mark.smoke
+def test_published_build_creates_and_shares_a_workspace() -> None:
+    """Drive the published build against the deployed production backend."""
+    # Runs after the release is published, so a failure alerts us instead of blocking the release
+    ...
+```
+
+Their default home is `apps/minds/smoke_tests/`, but the mark is what makes a test a smoke test, so a test that lives elsewhere can opt in by carrying it. The mark is excluded from every other test selection -- offload, `just test-quick`, the release jobs, and TMR -- so a smoke test is never collected by anything but a smoke run.
+
+Everything operational about the Imbue Studio smoke suite -- which artifact and which backend it targets, what triggers it, how its CI jobs are segmented, which credentials it holds, and how to run it locally -- lives in `apps/minds/docs/testing-overview.md`.
 
 ### Ratchet Tests
 

@@ -1206,6 +1206,16 @@ def test_full_end_to_end_workflow_with_all_providers() -> None:
 # === Example block 58 ===
 
 
+@pytest.mark.smoke
+def test_published_build_creates_and_shares_a_workspace() -> None:
+    """Drive the published build against the deployed production backend."""
+    # Runs after the release is published, so a failure alerts us instead of blocking the release
+    ...
+
+
+# === Example block 59 ===
+
+
 class TodoSyncError(TodoAppError):
     """Raised when sync operations fail."""
 
