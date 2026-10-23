@@ -142,6 +142,7 @@ Feature: Running an update
     Given a workspace whose last update failed
     Then the outcome over the workspace offers a way to see its details and a way to dismiss it
     And its details offer a button into the run's chat only while that chat exists
+    And so does the outcome on the workspace's row
 
   @stopped-agent-revived
   Scenario: An update whose agent stopped carries on
