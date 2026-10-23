@@ -114,7 +114,12 @@ def build_workspace_program_archive(program: ModuleType) -> bytes:
     return buffer.getvalue()
 
 
-def build_workspace_program_command(program: ModuleType, args: Sequence[str]) -> str:
+def build_workspace_program_command(
+    program: ModuleType,
+    args: Sequence[str],
+    # The shell words that start the workspace's python, with any environment assignments in front.
+    python_command: str = "python3",
+) -> str:
     """The shell command that runs ``program`` with argv ``args`` from the workspace's current directory.
 
     It exits with the program's own exit status, and removes the archive's temporary file either way.
@@ -123,7 +128,7 @@ def build_workspace_program_command(program: ModuleType, args: Sequence[str]) ->
     return (
         'minds_program=$(mktemp "${TMPDIR:-/tmp}/minds-program.XXXXXX") && '
         f"printf %s '{encoded}' | base64 -d > \"$minds_program\" && "
-        f'python3 "$minds_program" {shlex.join(args)}; '
+        f'{python_command} "$minds_program" {shlex.join(args)}; '
         'minds_program_exit=$?; rm -f "$minds_program"; exit $minds_program_exit'
     )
 
