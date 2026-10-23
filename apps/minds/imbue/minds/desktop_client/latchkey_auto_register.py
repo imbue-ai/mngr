@@ -368,16 +368,20 @@ class LatchkeyAutoRegister(MutableModel):
         """
         shutdown_event = self.concurrency_group.shutdown_event
         deadline = time.monotonic() + self.machine_watch_seconds
-        while not self._stop_event.is_set() and not shutdown_event.is_set() and time.monotonic() < deadline:
+        while True:
             self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
-            if self._stop_event.is_set():
-                break
-            # The watch leaves the watched set in the same lock hold that decides it is over, and before it
+            # Every way the watch ends is decided in the lock hold that leaves the watched set, and before it
             # schedules anything: a worker that re-holds the host from here on finds it unwatched and starts a new
             # watch, instead of relying on this one, which is about to exit.
             with self._push_lock:
                 agent_id = self._hosts_awaiting_machine.get(host_id)
-                if agent_id is None:
+                is_over = (
+                    agent_id is None
+                    or self._stop_event.is_set()
+                    or shutdown_event.is_set()
+                    or time.monotonic() >= deadline
+                )
+                if is_over:
                     self._hosts_watched_for_machine.discard(host_id)
                     return
             if self._has_machine(host_id):
@@ -388,8 +392,6 @@ class LatchkeyAutoRegister(MutableModel):
                 )
                 self._schedule_push(host_id, agent_id)
                 return
-        with self._push_lock:
-            self._hosts_watched_for_machine.discard(host_id)
 
     def _claim_pending_push(self, host_id: HostId) -> AgentId | None:
         """Take the change waiting for ``host_id``, releasing the host's worker when there is none."""
