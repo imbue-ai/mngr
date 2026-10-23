@@ -26,7 +26,6 @@ const BETA = "agent-cc33";
 
 interface Harness {
   draw: () => m.Children;
-  requests: string[];
   routeSet: ReturnType<typeof vi.fn>;
 }
 
@@ -44,13 +43,13 @@ function harness(
       { ...alpha, id: BETA, name: "beta", host_id: "host-dd44" },
     ],
   });
-  const { fetchImpl, requests } = recordingFetch();
+  const { fetchImpl } = recordingFetch();
   vi.stubGlobal("fetch", fetchImpl);
   const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   // A closure component, called bare as a router mount would with no attrs.
   const page = LandingPage as unknown as () => m.Component;
-  return { draw: () => renderRoot(page, {}), requests, routeSet };
+  return { draw: () => renderRoot(page, {}), routeSet };
 }
 
 function updateBadges(root: m.Children): AnyVnode[] {
