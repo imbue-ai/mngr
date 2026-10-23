@@ -59,7 +59,10 @@ package it imports (directly or through another), at their package paths. The
 archive is deterministic, so the same sources always give the same bytes.
 `build_workspace_program_command` sends it base64-encoded inside the
 `mngr exec` command, which writes it to a temporary file, runs
-`python3 <file> <args>`, and removes the file.
+`python3 <file> <args>`, and removes the file. A caller can put environment
+assignments in front of `python3`: the update program runs with the image's
+tools first on `PATH` and mngr's unknown config tolerated
+(`in_workspace_mngr.build_in_workspace_command`).
 
 The archive is also a standalone file: `python3 <archive> <args>` runs it from
 any file name. A program that must persist in the workspace (run later by cron,
