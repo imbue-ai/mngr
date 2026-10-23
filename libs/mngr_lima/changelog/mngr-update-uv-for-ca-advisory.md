@@ -1,0 +1,1 @@
+Lima VMs upgrade `ca-certificates` at provisioning (one best-effort attempt, so an offline start is not held up) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.

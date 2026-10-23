@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const { app } = require('electron');
 const { MINDS_APP_NAME, tierForRootName, platformRootsFor, legacyDataDirFor } = require('./platform-roots');
+const { certifiBundlePathFor } = require('./git-env');
 
 /**
  * Resolve paths to bundled resources, accounting for asar packaging,
@@ -326,6 +327,23 @@ function getVenvDir() {
   return path.join(getStateDir(), '.venv');
 }
 
+/**
+ * The certifi CA bundle in the Python environment the backend runs in: the
+ * venv under the state root when packaged, the checkout's workspace `.venv`
+ * in dev. Throws when it is missing.
+ */
+function getCertifiBundlePath() {
+  if (!isDev()) {
+    return certifiBundlePathFor(getVenvDir());
+  }
+  // Dev mode skips env-setup's `uv sync`, so a checkout that was never synced has no venv yet.
+  try {
+    return certifiBundlePathFor(path.join(getMonorepoRoot(), '.venv'));
+  } catch (err) {
+    throw new Error(`${err.message}. Run \`uv sync --all-packages\` in ${getMonorepoRoot()} and start again.`);
+  }
+}
+
 function getPyprojectDir() {
   if (isDev()) {
     return path.join(__dirname, 'pyproject');
@@ -369,6 +387,7 @@ module.exports = {
   getUvPythonDir,
   getLogDir,
   getVenvDir,
+  getCertifiBundlePath,
   getPyprojectDir,
   getMonorepoRoot,
   getBundledClientConfigPath,

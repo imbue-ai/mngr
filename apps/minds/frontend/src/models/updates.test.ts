@@ -141,11 +141,13 @@ describe("UpdatesStore", () => {
         "agent-unknown": { ...OUT_OF_DATE, availability: "UNKNOWN" },
         "agent-current": { ...OUT_OF_DATE, availability: "UP_TO_DATE" },
         "agent-patch": { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" },
+        "agent-security": { ...OUT_OF_DATE, availability: "SECURITY_UPDATE" },
+        "agent-security-running": { ...OUT_OF_DATE, availability: "SECURITY_UPDATE", activity: "RUNNING" },
         "agent-running": { ...OUT_OF_DATE, activity: "RUNNING" },
       }),
     );
 
-    expect(store.updatableAgentIds()).toEqual(["agent-stale"]);
+    expect(store.updatableAgentIds()).toEqual(["agent-stale", "agent-security"]);
   });
 
   it("reports a machine mid-apply so the health surfaces can defer to it", () => {
@@ -195,7 +197,8 @@ describe("update state predicates", () => {
 
   it("claims a machine has an update available only when it has read that it does", () => {
     expect(isUpdateOffered(OUT_OF_DATE)).toBe(true);
-    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND"] as const) {
+    expect(isUpdateOffered({ ...OUT_OF_DATE, availability: "SECURITY_UPDATE" })).toBe(true);
+    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND", "PATCH_AVAILABLE", "NEEDS_RECREATION"] as const) {
       expect(isUpdateOffered({ ...OUT_OF_DATE, availability })).toBe(false);
     }
   });
@@ -204,6 +207,13 @@ describe("update state predicates", () => {
     expect(standingUpdateNotice(OUT_OF_DATE, false)).toBe("out-of-date");
     expect(standingUpdateNotice(OUT_OF_DATE, true)).toBe("none");
     expect(standingUpdateNotice({ ...OUT_OF_DATE, availability: "UNKNOWN" }, false)).toBe("none");
+  });
+
+  it("says a machine below the security floor has a security update, until its run is in flight", () => {
+    const security = { ...OUT_OF_DATE, current_version: "minds-v0.9.0-rc.1", supported_version: "minds-v0.9.0", availability: "SECURITY_UPDATE" as const };
+    expect(standingUpdateNotice(security, false)).toBe("security-update");
+    expect(standingUpdateNotice(security, true)).toBe("none");
+    expect(isUpdateDispatchable(security)).toBe(true);
   });
 
   it("keeps saying a machine needs recreating: no run can silence a standing fact about it", () => {
@@ -317,6 +327,14 @@ describe("updateBadgeFor", () => {
   it("badges a machine below the in-place cutoff as needing recreation, not as an update offer", () => {
     const badge = updateBadgeFor({ ...OUT_OF_DATE, availability: "NEEDS_RECREATION", is_scheduled: true }, false);
     expect(badge).toMatchObject({ state: "needs-recreation", tone: "warn", label: "Recreate to update" });
+  });
+
+  it("badges a security update more strongly than an ordinary offer, and an armed one as scheduled", () => {
+    const security = { ...OUT_OF_DATE, availability: "SECURITY_UPDATE" as const };
+    expect(updateBadgeFor(security, false)).toMatchObject({ state: "security-update", tone: "error" });
+    expect(updateBadgeFor(OUT_OF_DATE, false)?.tone).toBe("warn");
+    expect(updateBadgeFor({ ...security, is_scheduled: true }, false)?.state).toBe("scheduled");
+    expect(updateBadgeFor({ ...security, activity: "RUNNING" }, true)?.state).toBe("updating");
   });
 
   it("distinguishes an armed schedule from a standing offer", () => {

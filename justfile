@@ -99,8 +99,8 @@ test-apt-mirror-worker:
 test-minds-js:
   # --ignore-scripts: the units load `semver`, read `electron-updater`'s
   # AppUpdater.js off disk, and are otherwise node builtins -- so the packages
-  # are needed but their postinstalls are not, and a plain install fetches the
-  # Electron binary and Playwright's browsers to run neither.
+  # are needed but their postinstalls are not, and a plain install fetches
+  # Playwright's browsers, which they never run.
   cd apps/minds && pnpm install --frozen-lockfile --ignore-scripts && pnpm test:unit
   # `generate` before `check`: src/generated/ is gitignored, so a fresh checkout
   # has no ui.ts and tsc would otherwise fail on the missing import rather than

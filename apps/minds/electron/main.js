@@ -1119,9 +1119,15 @@ const linkRouter = createLinkRouter({
 // The address is copied either way; the explanation is an in-app toast in
 // the window the click happened in (never a system notification: nothing
 // left the app, and the reader is right there).
-function notifyOpenFailed(url, wc) {
+async function notifyOpenFailed(url, wc) {
   const fallback = linkFallbackFor(url);
-  clipboard.writeText(fallback.clipboardText);
+  try {
+    await clipboard.writeText(fallback.clipboardText);
+  } catch (err) {
+    // The toast says the address was copied, so it is not shown when it wasn't.
+    console.warn('[external-link] could not copy the address to the clipboard:', err && err.message);
+    return;
+  }
   if (!wc || wc.isDestroyed()) return;
   try {
     wc.send('show-toast', { title: fallback.title, body: fallback.body });
@@ -3547,6 +3553,10 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
+// Electron opens a dialog given no defaultPath in Downloads rather than where
+// the OS last left it, so the picker carries the last location itself.
+let lastFilePickerDir = null;
+
 ipcMain.handle('show-file-picker', async (event, options) => {
   const bundle = getBundleFromEvent(event);
   const opts = options || {};
@@ -3554,6 +3564,8 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   const dialogOptions = { properties: [property] };
   if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
     dialogOptions.defaultPath = opts.defaultPath;
+  } else if (lastFilePickerDir) {
+    dialogOptions.defaultPath = lastFilePickerDir;
   }
   const result = bundle && bundle.window && !bundle.window.isDestroyed()
     ? await dialog.showOpenDialog(bundle.window, dialogOptions)
@@ -3561,6 +3573,7 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
     return null;
   }
+  lastFilePickerDir = path.dirname(result.filePaths[0]);
   return result.filePaths[0];
 });
 

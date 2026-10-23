@@ -178,7 +178,8 @@ def _build_provisioning_script(
     and optionally enabling key-based root login -- because mngr pins that key
     and connects with strict host-key checking, so it must not depend on any
     network-fetched package. Only then does it install the required packages
-    (with retries, to ride out transient apt mirror failures) and optionally
+    (with retries, to ride out transient apt mirror failures), try once to
+    upgrade ca-certificates, and optionally
     land the btrfs host-data disk at the canonical mount point.
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
@@ -291,6 +292,13 @@ test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt_get_retry update -qq
     apt_get_retry install -y -qq $PKGS_TO_INSTALL
+fi
+
+# Keep the CA bundle on the current Debian security release. Best effort and
+# tried once: this runs on every start, and an offline start must neither fail
+# nor wait out the retries over it.
+if ! {{ apt-get update -qq && apt-get install -y -qq --only-upgrade ca-certificates; }}; then
+    echo "WARNING: could not upgrade ca-certificates" >&2
 fi
 
 # Optional: if a btrfs additional disk was attached, format + mount it at the

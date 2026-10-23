@@ -89,22 +89,28 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 	&& apt install gh -y
 
 # Install uv (fast Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+RUN curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
 ENV PATH="/root/.local/bin:$PATH"
+
+# The CA bundle is upgraded in a layer of its own because the system-dependency
+# install above can come from a cached layer built before Debian distrusted a
+# compromised root.
+RUN apt-get update && apt-get install -y --only-upgrade ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install claude code (pass CLAUDE_CODE_VERSION as a build arg to pin a specific version).
 # The default must be kept in sync with default-workspace-template's
 # .mngr/settings.toml pin (`[agent_types.claude].version`). The release-test
 # `test_claude_code_version_matches_default_workspace_template_pin` enforces the
 # sync; bump both together when rolling a new claude release.
-ARG CLAUDE_CODE_VERSION="2.1.293"
+ARG CLAUDE_CODE_VERSION="2.1.307"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # Node.js, pinned to apps/minds/package.json's engines.node. Required by the
 # mngr_latchkey gateway's .mjs extensions (run under node) and by minds Python
 # tests that evaluate apps/minds/todesktop.js via `node -e`.
-ARG NODE_VERSION="24.15.0"
+ARG NODE_VERSION="24.22.1"
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
         "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" \

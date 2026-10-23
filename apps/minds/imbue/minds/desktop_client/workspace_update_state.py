@@ -2,7 +2,9 @@
 
 Detection is a positive read: OUT_OF_DATE only when both sides parse as ``minds-v*``
 and the workspace is on an earlier minor release; PATCH_AVAILABLE when it sorts below
-within the same minor release, which is never prompted for; NEEDS_RECREATION when the
+within the same minor release, which is never prompted for; SECURITY_UPDATE when the
+workspace sorts below the hardcoded security floor and the app's ceiling does not, which
+is prompted for even when the gap is only a patch; NEEDS_RECREATION when the
 workspace's own version sorts below the hardcoded in-place cutoff, whatever the app is
 pinned to; anything else is UNKNOWN, never reported as behind but still dispatchable (the agent reads
 the workspace's own upstream). The version comes from the workspace's own git. The
@@ -59,6 +61,14 @@ ORIGINAL_MINDS_VERSION_LABEL: Final[str] = "original_minds_version"
 # in to find that out.
 OLDEST_IN_PLACE_UPDATABLE_VERSION: Final[str] = "minds-v0.3.10"
 
+# The oldest template release with no known security issue. A workspace below
+# it is prompted to update however small the gap, but only by a build whose
+# ceiling is at or above it: a build that cannot deliver the fix does not claim
+# to. Raised to a release's own tag by the release that fixes a security issue
+# (docs/deploy/ops/app-release.md), never lowered. It stays above the in-place
+# cutoff, so a workspace that needs recreating is missing the fix as well.
+SECURITY_FLOOR_VERSION: Final[str] = "minds-v0.9.0"
+
 
 class UpdateDetection(FrozenModel):
     """One workspace's verdict against the app's ceiling, and why it is UNKNOWN when it is."""
@@ -91,11 +101,15 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
     about the workspace, not about this build. Past it, both sides must parse as
     ``minds-v*``; a branch ceiling (dev build) makes every workspace UNKNOWN. With
     neither side readable the missing ceiling is reported, since it explains every
-    row at once. Only a newer minor release is prompted for: a workspace behind by
-    patch or prerelease alone is PATCH_AVAILABLE.
+    row at once. A workspace below the security floor is SECURITY_UPDATE when the
+    ceiling is not, whatever the size of the gap. Otherwise only a newer minor
+    release is prompted for: a workspace behind by patch or prerelease alone is
+    PATCH_AVAILABLE.
     """
     workspace_version = parse_minds_version(workspace_ref)
     ceiling_version = parse_minds_version(ceiling_ref)
+    security_floor_version = parse_minds_version(SECURITY_FLOOR_VERSION)
+    assert security_floor_version is not None
     if is_below_in_place_update_floor(workspace_ref):
         return UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION)
     if ceiling_version is None:
@@ -106,6 +120,8 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
         return UpdateDetection(
             availability=UpdateAvailability.UNKNOWN, unknown_reason=UpdateUnknownReason.NO_MACHINE_VERSION
         )
+    if workspace_version < security_floor_version and not ceiling_version < security_floor_version:
+        return UpdateDetection(availability=UpdateAvailability.SECURITY_UPDATE)
     if workspace_version < ceiling_version:
         if workspace_version.is_same_minor_release(ceiling_version):
             return UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE)

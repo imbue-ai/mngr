@@ -1,5 +1,3 @@
-onlyBuiltDependencies:
-  - electron
 # Transitive deps of latchkey / @todesktop/cli whose install scripts the app
 # does not need; listing them silences pnpm's "Ignored build scripts / run
 # pnpm approve-builds" warning, which reads like a failed install.
@@ -26,6 +24,10 @@ minimumReleaseAgeExclude:
   # too-new playwright even though the lockfile already carries it.
   - playwright
   - playwright-core
+  # Electron 45 carries the blocklist for the compromised eMudhra
+  # intermediates (electron/electron#55126), so it ships inside its cooldown.
+  # CLEANUP: remove after 2026-11-04, when 45.0.0 clears the 14-day window.
+  - electron@45.0.0
 
 # ToDesktop builds every platform target from one host, but pnpm (like
 # npm) only installs optional deps matching the build host's
