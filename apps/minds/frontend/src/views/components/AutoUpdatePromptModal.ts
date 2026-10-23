@@ -11,12 +11,11 @@ import { Button } from "./Button";
 import { Modal } from "./Modal";
 import { Notice } from "./Notice";
 import { Spinner } from "./Spinner";
+import { renderUpdateWindowPicker } from "./UpdateWindowPicker";
 
 export interface AutoUpdatePromptModalAttrs {
   model: AutoUpdatePromptModel;
   trigger: AutoUpdatePromptTrigger;
-  /** The app's update window, as the machines list shows it. */
-  updateWindow: string;
 }
 
 function openingLine(trigger: AutoUpdatePromptTrigger): string {
@@ -28,8 +27,7 @@ function openingLine(trigger: AutoUpdatePromptTrigger): string {
 export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs> {
   return {
     view(vnode) {
-      const { model, trigger, updateWindow } = vnode.attrs;
-      const windowText = updateWindow ? ` (${updateWindow})` : "";
+      const { model, trigger } = vnode.attrs;
       return m(
         Modal,
         // Closing without an answer only puts it away for this session.
@@ -44,9 +42,22 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
           m(
             "p",
             { class: "type-body text-secondary" },
-            `With auto-updates on, Studio schedules each workspace's update for your update window${windowText} ` +
-              "whenever it falls behind. You can turn this off in Settings at any time.",
+            "With auto-updates on, Studio schedules each workspace's update for the window below " +
+              "whenever it falls behind. You can turn this off, or change the window, in Settings at any time.",
           ),
+          m("div", { class: "flex flex-col gap-1" }, [
+            renderUpdateWindowPicker({
+              idSuffix: "prompt",
+              startHour: model.startHour,
+              endHour: model.endHour,
+              onChange: (start, end) => model.setWindow(start, end),
+            }),
+            m(
+              "p",
+              { class: "type-helper text-tertiary" },
+              "A workspace must be running during the window for its update to start.",
+            ),
+          ]),
           m(
             "p",
             { class: "type-helper text-tertiary" },

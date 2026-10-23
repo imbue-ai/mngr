@@ -3,11 +3,13 @@
 // Asked once per install: after the first launch into a new app version, or
 // the first time a workspace reads as behind, whichever comes first, and only
 // while no answer is recorded. "Not now" is an answer -- the prompt does not
-// come back -- and "Turn on auto-updates" turns the setting on as well.
+// come back -- and "Turn on auto-updates" turns the setting on as well, and
+// saves the update window picked in the prompt.
 // Closing it without answering only puts it away for this window's session.
 
 import m from "mithril";
 import { electronBridge } from "../electron-bridge";
+import type { SettingsOverview } from "./settings";
 
 export type AutoUpdatePromptDecision = "accepted" | "declined";
 
@@ -36,9 +38,20 @@ export function autoUpdatePromptTriggerFor(
 
 type FetchLike = typeof fetch;
 
+/** What the prompt reads from the settings payload. */
+interface PromptSettings {
+  decision: AutoUpdatePromptDecision | null;
+  startHour: number;
+  endHour: number;
+}
+
 export class AutoUpdatePromptModel {
   isBusy = false;
   error = "";
+  /** The update window picked in the prompt, starting from the saved one;
+   * saved only by turning auto-update on. */
+  startHour = 0;
+  endHour = 0;
 
   /** Undefined until the settings payload has been read: an unread answer is
    * not "no answer", and asking before the read would ask a user who said no. */
@@ -76,8 +89,8 @@ export class AutoUpdatePromptModel {
   }
 
   private async readInputs(): Promise<void> {
-    const [decision, isFirstLaunch] = await Promise.all([
-      this.readDecision(),
+    const [settings, isFirstLaunch] = await Promise.all([
+      this.readSettings(),
       this.readIsFirstLaunchAfterAppUpdate().catch((error: unknown) => {
         console.warn(
           "Could not read whether this launch follows an app update",
@@ -86,15 +99,18 @@ export class AutoUpdatePromptModel {
         return false;
       }),
     ]);
-    this.decision = decision;
+    if (settings === undefined) {
+      this.loading = null;
+    } else {
+      this.decision = settings.decision;
+      this.startHour = settings.startHour;
+      this.endHour = settings.endHour;
+    }
     this.isFirstLaunchAfterAppUpdate = isFirstLaunch;
-    if (decision === undefined) this.loading = null;
     this.redraw();
   }
 
-  private async readDecision(): Promise<
-    AutoUpdatePromptDecision | null | undefined
-  > {
+  private async readSettings(): Promise<PromptSettings | undefined> {
     try {
       const response = await this.fetchImpl("/ui/api/settings", {
         credentials: "same-origin",
@@ -105,10 +121,17 @@ export class AutoUpdatePromptModel {
         );
         return undefined;
       }
-      const payload = (await response.json()) as {
-        auto_update_prompt_decision?: AutoUpdatePromptDecision | null;
+      const payload = (await response.json()) as Pick<
+        SettingsOverview,
+        | "auto_update_prompt_decision"
+        | "update_window_start_hour"
+        | "update_window_end_hour"
+      >;
+      return {
+        decision: payload.auto_update_prompt_decision ?? null,
+        startHour: payload.update_window_start_hour,
+        endHour: payload.update_window_end_hour,
       };
-      return payload.auto_update_prompt_decision ?? null;
     } catch (error) {
       console.warn("Could not read the auto-update prompt's answer", error);
       return undefined;
@@ -139,7 +162,14 @@ export class AutoUpdatePromptModel {
     return this.shownTrigger;
   }
 
-  /** Record the answer. A refused write keeps the prompt up with the reason. */
+  /** Pick the update window that turning auto-update on will save. */
+  setWindow(startHour: number, endHour: number): void {
+    this.startHour = startHour;
+    this.endHour = endHour;
+  }
+
+  /** Record the answer, with the picked window when it turns auto-update on.
+   * A refused write keeps the prompt up with the reason. */
   async choose(decision: AutoUpdatePromptDecision): Promise<void> {
     this.isBusy = true;
     this.error = "";
@@ -151,7 +181,17 @@ export class AutoUpdatePromptModel {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ decision }),
+          body: JSON.stringify(
+            decision === "accepted"
+              ? {
+                  decision,
+                  window: {
+                    start_hour: this.startHour,
+                    end_hour: this.endHour,
+                  },
+                }
+              : { decision },
+          ),
         },
       );
       if (response.ok) {

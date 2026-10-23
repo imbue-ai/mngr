@@ -4,34 +4,8 @@
 
 import m from "mithril";
 import type { SettingsModel } from "../../../models/settings";
-import { formatClockMinute } from "../../../models/updates";
 import { renderSwitch } from "../../components/Switch";
-
-/** Whole hours only: the setting means "while I am asleep". */
-const HOUR_OPTIONS: number[] = Array.from(
-  { length: 24 },
-  (_unused, hour) => hour,
-);
-
-function hourSelect(
-  id: string,
-  value: number,
-  onchange: (hour: number) => void,
-): m.Children {
-  return m(
-    "select",
-    {
-      id,
-      class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
-      value: String(value),
-      onchange: (event: Event) =>
-        onchange(Number((event.target as HTMLSelectElement).value)),
-    },
-    HOUR_OPTIONS.map((hour) =>
-      m("option", { value: String(hour) }, formatClockMinute(hour * 60)),
-    ),
-  );
-}
+import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
 
 /** Where the controls are drawn: the app's own settings, or one workspace's,
  * which says the values are shared. */
@@ -95,32 +69,13 @@ export function workspaceUpdateSettings(
           model.autoUpdateError,
         )
       : null,
-    m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
-      m(
-        "label",
-        {
-          class: "type-body text-primary",
-          for: `update-window-start-${scope}`,
-        },
-        "Between",
-      ),
-      hourSelect(
-        `update-window-start-${scope}`,
-        startHour,
-        (hour) => void model.setUpdateWindow(hour, endHour),
-      ),
-      m(
-        "label",
-        { class: "type-body text-primary", for: `update-window-end-${scope}` },
-        "and",
-      ),
-      hourSelect(
-        `update-window-end-${scope}`,
-        endHour,
-        (hour) => void model.setUpdateWindow(startHour, hour),
-      ),
-      m("span", { class: "type-helper text-tertiary" }, "local time"),
-    ]),
+    renderUpdateWindowPicker({
+      idSuffix: scope,
+      startHour,
+      endHour,
+      onChange: (start, end) => void model.setUpdateWindow(start, end),
+      class: "py-3 border-b border-subtle",
+    }),
     m(
       "p",
       { class: "type-helper text-tertiary mt-3" },

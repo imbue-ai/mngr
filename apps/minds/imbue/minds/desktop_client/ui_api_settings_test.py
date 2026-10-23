@@ -116,6 +116,44 @@ def test_answering_the_auto_update_offer_is_remembered_and_accepting_turns_it_on
     assert json.loads(client.get("/ui/api/settings").data)["auto_update_prompt_decision"] == str(decision)
 
 
+def test_accepting_the_auto_update_offer_saves_the_window_picked_in_it(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.post(
+        "/ui/api/settings/auto-update-prompt",
+        json={"decision": "accepted", "window": {"start_hour": 23, "end_hour": 3}},
+    )
+
+    assert response.status_code == 200
+    relaunched = MindsConfig(data_dir=tmp_path / "config")
+    assert relaunched.get_update_window() == (23, 3)
+    assert relaunched.get_auto_update_workspaces() is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"decision": "declined", "window": {"start_hour": 23, "end_hour": 3}}, id="declined-with-window"),
+        pytest.param({"decision": "accepted", "window": {"start_hour": 4, "end_hour": 4}}, id="empty-window"),
+    ],
+)
+def test_an_auto_update_answer_with_an_unusable_window_stores_nothing(tmp_path: Path, body: dict[str, object]) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.post("/ui/api/settings/auto-update-prompt", json=body)
+
+    assert response.status_code == 400
+    assert minds_config.get_auto_update_prompt_decision() is None
+    assert minds_config.get_auto_update_workspaces() is False
+    assert minds_config.get_update_window() == DEFAULT_UPDATE_WINDOW
+
+
 def test_an_unknown_auto_update_answer_is_rejected_without_being_stored(tmp_path: Path) -> None:
     minds_config = MindsConfig(data_dir=tmp_path / "config")
     client, _app, _auth_store = build_desktop_client_for_test(

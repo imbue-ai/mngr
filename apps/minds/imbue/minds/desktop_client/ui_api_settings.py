@@ -179,6 +179,9 @@ class UiAutoUpdatePromptWrite(FrozenModel):
     """Body of the auto-update offer's answer; accepting it also turns auto-update on."""
 
     decision: AutoUpdatePromptDecision = Field(description="How the user answered the offer")
+    window: UiUpdateWindowWrite | None = Field(
+        default=None, description="The update window chosen in the offer; only an acceptance carries one"
+    )
 
 
 class UiNotificationChannels(FrozenModel):
@@ -557,6 +560,10 @@ def _handle_browser_import_run() -> Response:
     )
 
 
+def _empty_update_window_response() -> Response:
+    return _error_response("The update window needs a start and end that differ", 400)
+
+
 def _handle_update_window_write() -> Response:
     """POST /ui/api/settings/update-window: set the local hours scheduled updates run in.
 
@@ -571,7 +578,7 @@ def _handle_update_window_write() -> Response:
     if isinstance(write, Response):
         return write
     if write.start_hour == write.end_hour:
-        return _error_response("The update window needs a start and end that differ", 400)
+        return _empty_update_window_response()
     minds_config.set_update_window(write.start_hour, write.end_hour)
     # Every armed workspace's file carries the window; the sweep rewrites them.
     _request_update_sweep()
@@ -617,7 +624,10 @@ def _handle_auto_update_write() -> Response:
 
 
 def _handle_auto_update_prompt_write() -> Response:
-    """POST /ui/api/settings/auto-update-prompt: record the answer to the one-time offer, so it never returns."""
+    """POST /ui/api/settings/auto-update-prompt: record the answer to the one-time offer, so it never returns.
+
+    Accepting it can carry the update window chosen in the offer, saved with the answer.
+    """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
     minds_config = get_state().minds_config
@@ -626,11 +636,18 @@ def _handle_auto_update_prompt_write() -> Response:
     write = _read_json_write(UiAutoUpdatePromptWrite)
     if isinstance(write, Response):
         return write
+    window = write.window
+    if window is not None:
+        if write.decision is not AutoUpdatePromptDecision.ACCEPTED:
+            return _error_response("Only turning auto-update on sets an update window", 400)
+        if window.start_hour == window.end_hour:
+            return _empty_update_window_response()
+        minds_config.set_update_window(window.start_hour, window.end_hour)
     minds_config.set_auto_update_prompt_decision(write.decision)
     if write.decision is AutoUpdatePromptDecision.ACCEPTED:
         minds_config.set_auto_update_workspaces(True)
         _request_update_sweep()
-    return _json_response(UiAutoUpdatePromptWrite(decision=write.decision))
+    return _json_response(UiAutoUpdatePromptWrite(decision=write.decision, window=window))
 
 
 def _handle_sign_in_browser_write() -> Response:

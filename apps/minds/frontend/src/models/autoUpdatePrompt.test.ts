@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import m from "mithril";
-import { attrsOf, byId, jsonResponse, renderRoot, settle } from "../testing";
+import {
+  attrsOf,
+  byId,
+  jsonResponse,
+  renderRoot,
+  settingsOverview,
+  settle,
+} from "../testing";
 import { AutoUpdatePromptModal } from "../views/components/AutoUpdatePromptModal";
 import { AutoUpdatePromptModel } from "./autoUpdatePrompt";
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
@@ -26,7 +33,13 @@ function backend(
     );
     if (url === "/ui/api/settings")
       return Promise.resolve(
-        jsonResponse({ auto_update_prompt_decision: decision }),
+        jsonResponse(
+          settingsOverview({
+            auto_update_prompt_decision: decision,
+            update_window_start_hour: 2,
+            update_window_end_hour: 5,
+          }),
+        ),
       );
     return Promise.resolve(writeAnswer());
   }) as typeof fetch;
@@ -80,9 +93,7 @@ describe("the auto-update prompt's triggers", () => {
     let isBackendUp = false;
     const fetchImpl = (() =>
       Promise.resolve(
-        isBackendUp
-          ? jsonResponse({ auto_update_prompt_decision: null })
-          : jsonResponse({}, 503),
+        isBackendUp ? jsonResponse(settingsOverview()) : jsonResponse({}, 503),
       )) as typeof fetch;
     const model = new AutoUpdatePromptModel(
       fetchImpl,
@@ -105,7 +116,6 @@ describe("answering the auto-update prompt", () => {
     const modal = renderRoot(AutoUpdatePromptModal, {
       model,
       trigger: "app-updated" as const,
-      updateWindow: "2:00 AM-5:00 AM",
     }) as unknown as m.Children;
 
     const decline = byId(modal, "auto-update-prompt-decline");
@@ -119,12 +129,29 @@ describe("answering the auto-update prompt", () => {
     expect(model.triggerFor(false, true)).toBeNull();
   });
 
-  it("records turning it on as acceptance", async () => {
+  it("records turning it on as acceptance, with the window picked in the prompt", async () => {
     const { model, requests } = backend(null, false);
     await model.load();
-    await model.choose("accepted");
+    const render = () =>
+      renderRoot(AutoUpdatePromptModal, {
+        model,
+        trigger: "out-of-date" as const,
+      }) as unknown as m.Children;
+
+    const start = byId(render(), "update-window-start-prompt");
+    if (start === undefined) throw new Error("no window start to pick");
+    // Starts from the saved window.
+    expect(attrsOf(start).value).toBe("2");
+    (attrsOf(start).onchange as (event: Event) => void)({
+      target: { value: "23" },
+    } as unknown as Event);
+    const accept = byId(render(), "auto-update-prompt-accept");
+    if (accept === undefined) throw new Error("no Turn on to press");
+    (attrsOf(accept).onclick as () => void)();
+    await settle();
+
     expect(requests).toContain(
-      'POST /ui/api/settings/auto-update-prompt {"decision":"accepted"}',
+      'POST /ui/api/settings/auto-update-prompt {"decision":"accepted","window":{"start_hour":23,"end_hour":5}}',
     );
     expect(model.triggerFor(false, true)).toBeNull();
   });

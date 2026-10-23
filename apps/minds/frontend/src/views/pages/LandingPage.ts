@@ -1184,11 +1184,7 @@ export const LandingPage: m.ClosureComponent = () => {
       hasOutOfDateWorkspace,
     );
     if (trigger === null) return null;
-    return m(AutoUpdatePromptModal, {
-      model: autoUpdatePrompt,
-      trigger,
-      updateWindow: updates.updateWindow,
-    });
+    return m(AutoUpdatePromptModal, { model: autoUpdatePrompt, trigger });
   }
 
   return {
