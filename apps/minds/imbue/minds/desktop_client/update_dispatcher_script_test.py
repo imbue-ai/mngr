@@ -566,6 +566,47 @@ def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
     assert (dispatch["chat_agent_name"], dispatch["chat_id"]) == (_LEAD, _LEAD_ID)
 
 
+@pytest.mark.parametrize(
+    ("attempt_target", "attempt_age_seconds", "leftover_state"),
+    [
+        ("minds-v0.8.0", 60, "RUNNING"),
+        ("minds-v0.9.0", 16 * 60, "RUNNING"),
+        ("minds-v0.9.0", 60, "STOPPED"),
+    ],
+    ids=("another-target", "too-old", "ended"),
+)
+def test_a_left_behind_chat_from_another_target_an_old_attempt_or_ended_is_not_adopted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program: ModuleType,
+    attempt_target: str,
+    attempt_age_seconds: int,
+    leftover_state: str,
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    old_attempt_id = "0" * 32
+    staged.write_state(
+        "dispatch-attempt.json",
+        {
+            "schema": 1,
+            "attempt_id": old_attempt_id,
+            "target_ref": attempt_target,
+            "attempted_at": _IN_WINDOW - attempt_age_seconds,
+        },
+    )
+    left_behind = {**_agent("update-to-old", leftover_state), "update_dispatch_attempt": old_attempt_id}
+    staged.set_agents([left_behind])
+
+    _tick(program, staged, _IN_WINDOW)
+
+    creates = staged.chat_creates()
+    assert len(creates) == 1
+    assert f"update_dispatch_attempt={old_attempt_id}" not in _create_labels(creates[0])
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None and schedule["marked_chat"] == _LEAD
+
+
 def _create_labels(create_argv: list[str]) -> list[str]:
     return [create_argv[index + 1] for index, token in enumerate(create_argv) if token == "--label"]
 

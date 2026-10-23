@@ -774,18 +774,28 @@ def _create_through_mngr(title, message, labels, account_args):
     return _create_result(OUTCOME_CREATED, "", name, _created_agent_id(created.stdout))
 
 
-def unreported_attempt_chat(agents):
-    """``(agent, attempt id)`` for a chat the last create made but did not report as made (it failed or
-    timed out after the chat existed); ``(None, "")`` when that create reported its chat or made none.
+def unreported_attempt_chat(agents, target_ref, now):
+    """``(agent, attempt id)`` for a live chat the last create made for ``target_ref`` but did not report
+    as made (it failed or timed out after the chat existed); ``(None, "")`` otherwise.
 
     Every create labels its chat with a fresh attempt id, written down before the create runs, and
-    an agent is listed with its labels from the start of its create.
+    an agent is listed with its labels from the start of its create. Only a recent attempt's chat is
+    taken: an older one may have run its update already, and is replaced as a reported chat would be.
     """
-    attempt_id = str((read_json(DISPATCH_ATTEMPT_PATH) or {}).get("attempt_id") or "")
-    if not attempt_id or (read_json(LAST_DISPATCH_PATH) or {}).get("attempt_id") == attempt_id:
+    attempt = read_json(DISPATCH_ATTEMPT_PATH) or {}
+    attempt_id = str(attempt.get("attempt_id") or "")
+    attempted_at = attempt.get("attempted_at")
+    if (
+        not attempt_id
+        or attempt.get("target_ref") != target_ref
+        or not isinstance(attempted_at, (int, float))
+        or isinstance(attempted_at, bool)
+        or now - attempted_at >= REDISPATCH_AFTER_SECONDS
+        or (read_json(LAST_DISPATCH_PATH) or {}).get("attempt_id") == attempt_id
+    ):
         return None, ""
     for agent in agents or []:
-        if agent.get("labels." + DISPATCH_ATTEMPT_LABEL) == attempt_id:
+        if agent.get("labels." + DISPATCH_ATTEMPT_LABEL) == attempt_id and not is_agent_ended(agent):
             return agent, attempt_id
     return None, ""
 
@@ -807,13 +817,16 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, acc
     message = render_message(
         target_ref, ceiling_ref, bool(override_ref), bool(schedule_like.get("is_backup_configured", True))
     )
-    leftover, attempt_id = unreported_attempt_chat(agents)
+    leftover, attempt_id = unreported_attempt_chat(agents, target_ref, now)
     if leftover is not None:
         result = _create_result(OUTCOME_CREATED, "", str(leftover.get("name") or ""), chat_id_of(leftover))
         log("adopted update chat %s, which an earlier create made but did not report" % result["chat_agent_name"])
     else:
         attempt_id = uuid.uuid4().hex
-        write_json(DISPATCH_ATTEMPT_PATH, {"schema": SCHEMA, "attempt_id": attempt_id, "attempted_at": now})
+        write_json(
+            DISPATCH_ATTEMPT_PATH,
+            {"schema": SCHEMA, "attempt_id": attempt_id, "target_ref": target_ref, "attempted_at": now},
+        )
         labels = {label: "true" for label in AUTO_OPEN_LABELS} if is_auto_open else {}
         labels[DISPATCH_ATTEMPT_LABEL] = attempt_id
         result = _create_through_message_chat(title, taken_names, message, labels)
