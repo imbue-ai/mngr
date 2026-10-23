@@ -16,6 +16,7 @@ import shlex
 
 import pytest
 
+from imbue.minds.desktop_client.testing import armed_update_schedule_file
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
 from imbue.minds.desktop_client.update_workspace_command import UtcUpdateWindow
 from imbue.minds.desktop_client.update_workspace_command import build_read_arguments
@@ -81,23 +82,9 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
     account signed in to the workspace, which the snapshot's need not have; its window is empty, so
     the tick dispatches nothing.
     """
-    armed_schedule = {
-        "schema": 1,
-        "armed_at": 0.0,
-        "ceiling": "minds-v0.0.1",
-        "window_start_minute_utc": 0,
-        "window_length_minutes": 0,
-        "override_ref": "",
-        "is_auto_armed": False,
-        "is_backup_configured": True,
-        "marked_chat": "",
-        "marked_at": None,
-        "window_seen_open_at": None,
-        "pending_skip_reason": "",
-        "next_attempt_at": None,
-        "last_skip_reason": "",
-        "last_skip_at": None,
-    }
+    armed_schedule = armed_update_schedule_file(
+        ceiling_ref="minds-v0.0.1", window_start_minute_utc=0, window_length_minutes=0
+    )
     settings = UpdateWorkspaceSettings(
         ceiling_ref="minds-v0.0.2",
         window=UtcUpdateWindow(start_minute_utc=60, length_minutes=0),
