@@ -13,7 +13,9 @@ converter's unit tests and the shell-level tests, which JSON-encode them.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -201,3 +203,24 @@ def code_action_event(conv_id: str, step_index: int, content: Any, status: str =
 def conversation_history_event(conv_id: str, step_index: int) -> dict[str, Any]:
     """SYSTEM/CONVERSATION_HISTORY bookkeeping, which the converter must drop."""
     return transcript_event(conv_id=conv_id, step_index=step_index, source="SYSTEM", type_="CONVERSATION_HISTORY")
+
+
+def agent_env(state_dir: Path) -> dict[str, str]:
+    """The environment an agy agent's shell commands see, for an agent whose state dir is ``state_dir``."""
+    # Drop TMUX so the wait-for sub-shell can't reach a real tmux server during
+    # tests; the `|| true` guard makes it a no-op regardless.
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    env["MNGR_AGENT_STATE_DIR"] = str(state_dir)
+    return env
+
+
+def run_statusline(state_dir: Path, payload: str) -> subprocess.CompletedProcess[str]:
+    """Run ``statusline.sh`` for an agent whose state dir is ``state_dir``, with ``payload`` on stdin."""
+    return subprocess.run(
+        ["bash", str(Path(__file__).parent / "statusline.sh")],
+        input=payload,
+        env=agent_env(state_dir),
+        capture_output=True,
+        text=True,
+        check=True,
+    )

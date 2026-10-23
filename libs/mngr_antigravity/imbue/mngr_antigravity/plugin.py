@@ -96,6 +96,7 @@ from pathlib import Path
 from typing import Any
 from typing import ClassVar
 from typing import Final
+from typing import assert_never
 
 import click
 from loguru import logger
@@ -270,6 +271,9 @@ _PROCESS_STARTED_MARKER_FILENAME: Final[str] = "antigravity_process_started"
 # leave this behind forever.
 _ACTIVE_MARKER_FILENAME: Final[str] = "active"
 
+# The model mirror statusline.sh rewrites on every run whose payload reports a model, idle or busy.
+_MODEL_STATE_FILENAME: Final[str] = "model_state.json"
+
 # OS-specific subpath (under ``$HOME``) of agy's ms-playwright-go cache. agy
 # downloads heavy playwright + browser binaries there on first real use; a fully
 # isolated per-agent ``$HOME`` would make every agent re-download them, so each
@@ -311,6 +315,14 @@ def _load_antigravity_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_antigravity resources package."""
     resource_files = importlib.resources.files(_antigravity_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+def _state_file_changed_probe(name: str, env_command_prefix: str, file_name: str) -> SubmissionEvidenceProbe:
+    """A probe that confirms once ``file_name`` in the agent's state dir appears or its mtime advances."""
+    token_command = (
+        f"{env_command_prefix} {{ " + build_file_mtime_token_command(f'"$MNGR_AGENT_STATE_DIR/{file_name}"') + " ; }"
+    )
+    return build_changed_token_probe(name, token_command)
 
 
 # An mngr agent's per-agent agy conversation store lives at
@@ -452,7 +464,7 @@ class AntigravityAgentConfig(AgentTypeConfig):
     # structured schema that could drift from agy's native format, and naturally
     # covers ``permissions`` ({allow, deny, ask}; precedence Deny > Ask > Allow),
     # ``toolPermission`` (e.g. "proceed-in-sandbox"), ``model`` (an ``agy
-    # models`` display name, e.g. "Gemini 3.5 Flash (Medium)"), etc.
+    # models`` display name, e.g. "Gemini 3.8 Flash (Medium)"), etc.
     #
     # File/url targets in ``permissions`` must be canonical (macOS /tmp ->
     # /private/tmp); a wrong target fails open to Ask rather than erroring.
@@ -463,7 +475,7 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default_factory=dict,
         description="Key-value overrides merged last into the per-agent settings.json. "
         "Common keys: permissions ({allow, deny, ask}), toolPermission, model (a display "
-        'name like "Gemini 3.5 Flash (Medium)"). Example: '
+        'name like "Gemini 3.8 Flash (Medium)"). Example: '
         '{"permissions": {"allow": ["command(git)"], "deny": ["command(rm -rf)"]}, "model": "..."}.',
     )
     # sync_home_settings mirrors mngr_claude's flag: a *data-source* choice
@@ -591,7 +603,7 @@ class AntigravityAgent(
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
     ) -> Sequence[SubmissionEvidenceProbe]:
-        """Confirm submission via the ``active`` marker advancing past its pre-Enter state.
+        """Confirm submission via the ``active`` marker, or for a slash command also ``model_state.json``, advancing.
 
         agy's ``statusLine`` command touches the ``active`` marker on every
         busy-state sample -- i.e. once it starts processing the just-submitted
@@ -600,18 +612,28 @@ class AntigravityAgent(
         wait-for signal the statusline also fires (which mngr no longer
         trusts: an unconsumed signal latches on the tmux server and would
         instantly false-confirm a later send). agy records no per-message
-        acceptance event, so the marker is the only evidence, for slash
-        commands and normal messages alike; it exists on agents created by
-        older mngr versions too. (Known edge, unchanged from the signal era: a
+        acceptance event, so the marker is the evidence for a normal message; it
+        exists on agents created by older mngr versions too. A slash command such
+        as ``/model`` runs without agy ever going busy, so the marker never moves;
+        agy does re-run the statusLine once it has handled the command, which
+        rewrites ``model_state.json``, so that file's mtime advancing also
+        confirms a slash command. (Known edge, unchanged from the signal era: a
         model that *refuses* the prompt -- e.g. quota exhausted -- never
         enters a busy state, so a strict send times out even though the prompt
         was enqueued.)
         """
         env_command_prefix = self.host.build_source_env_prefix(self)
-        active_marker_token_command = (
-            f"{env_command_prefix} {{ " + build_file_mtime_token_command('"$MNGR_AGENT_STATE_DIR/active"') + " ; }"
-        )
-        return [build_changed_token_probe("active-marker", active_marker_token_command)]
+        active_marker_probe = _state_file_changed_probe("active-marker", env_command_prefix, _ACTIVE_MARKER_FILENAME)
+        match policy:
+            case SubmissionConfirmationPolicy.STRICT:
+                return [active_marker_probe]
+            case SubmissionConfirmationPolicy.RELAXED:
+                return [
+                    active_marker_probe,
+                    _state_file_changed_probe("model-state", env_command_prefix, _MODEL_STATE_FILENAME),
+                ]
+            case _ as unreachable:
+                assert_never(unreachable)
 
     @property
     def is_common_transcript_enabled(self) -> bool:

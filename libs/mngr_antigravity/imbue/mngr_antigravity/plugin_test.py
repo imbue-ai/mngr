@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -55,6 +56,8 @@ from imbue.mngr_antigravity.plugin import _resolve_adopt_session
 from imbue.mngr_antigravity.plugin import on_before_create
 from imbue.mngr_antigravity.plugin import register_agent_aliases
 from imbue.mngr_antigravity.plugin import register_agent_type
+from imbue.mngr_antigravity.resources.testing import agent_env
+from imbue.mngr_antigravity.resources.testing import run_statusline
 
 
 def test_antigravity_agent_config_has_correct_defaults() -> None:
@@ -122,6 +125,23 @@ def test_antigravity_agent_implements_submission_evidence_probes() -> None:
     assert "_build_submission_evidence_probes" not in AntigravityAgent.__abstractmethods__
 
 
+def _probe_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> AntigravityAgent:
+    """An agent to build submission-evidence probes from; nothing is provisioned."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return AntigravityAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-antigravity"),
+        agent_type=AgentTypeName("antigravity"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostName(LOCAL_HOST_NAME),
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=AntigravityAgentConfig(),
+        host=FakeHost(host_dir=tmp_path / "host"),
+    )
+
+
 def test_submission_evidence_probes_watch_the_active_marker(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -132,19 +152,7 @@ def test_submission_evidence_probes_watch_the_active_marker(
     latches a signal fired with no waiter, which is exactly the false-confirm
     mechanism the durable-evidence design removed.
     """
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent = AntigravityAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-antigravity"),
-        agent_type=AgentTypeName("antigravity"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=HostName(LOCAL_HOST_NAME),
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=AntigravityAgentConfig(),
-        host=FakeHost(),
-    )
+    agent = _probe_agent(local_provider, tmp_path)
     probes = agent._build_submission_evidence_probes("hello", SubmissionConfirmationPolicy.STRICT)
     assert len(probes) == 1
     probe = probes[0]
@@ -153,9 +161,37 @@ def test_submission_evidence_probes_watch_the_active_marker(
     assert "stat -c %y" in probe.poll_command
     assert "stat -f %Fm" in probe.poll_command
     assert "wait-for" not in probe.poll_command
-    # Slash commands use the same (only) evidence agy has.
     relaxed_probes = agent._build_submission_evidence_probes("/model", SubmissionConfirmationPolicy.RELAXED)
-    assert [p.name for p in relaxed_probes] == ["active-marker"]
+    assert [p.name for p in relaxed_probes] == ["active-marker", "model-state"]
+
+
+def test_slash_command_is_confirmed_by_statusline_rewriting_model_state(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A `/model` leaves agy idle, so its send is confirmed by the statusLine run that follows it.
+
+    Runs the relaxed model-state probe and the real statusline.sh against one state dir: the
+    probe's token must change once agy re-runs the statusLine after the command.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    probes = _probe_agent(local_provider, tmp_path)._build_submission_evidence_probes(
+        "/model gemini-3.8-flash-low", SubmissionConfirmationPolicy.RELAXED
+    )
+    probe = next(p for p in probes if p.name == "model-state")
+    env = agent_env(state_dir)
+
+    def run_probe(command: str) -> str:
+        return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, check=True).stdout
+
+    run_statusline(state_dir, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (High)","effort":"high"}}')
+    baseline = run_probe(probe.baseline_command)
+    assert run_probe(probe.poll_command) == baseline
+
+    run_statusline(state_dir, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (Low)","effort":"low"}}')
+    polled = run_probe(probe.poll_command)
+    assert polled != ""
+    assert polled != baseline
 
 
 def test_register_agent_type_returns_antigravity_class_and_config() -> None:
