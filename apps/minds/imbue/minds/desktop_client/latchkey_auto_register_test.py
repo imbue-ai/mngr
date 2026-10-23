@@ -10,6 +10,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -533,3 +534,33 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
 
     assert recorder.pushed_workspace_agent_ids == []
     assert host_id in auto_register._hosts_awaiting_machine
+
+
+def test_a_push_scheduled_while_the_app_shuts_down_is_kept_without_a_worker(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A group that is shutting down refuses the push worker, and the refusal stays inside the auto-register.
+
+    The schedule runs on the resolver's callback thread, which lets anything
+    but ``OSError`` and ``RuntimeError`` through, so the group's refusal must
+    not escape the change that registered the agent.
+    """
+    host_id = HostId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    recorder = _PushRecorder()
+    auto_register = build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=recorder.push
+    )
+    auto_register.start()
+    root_concurrency_group.shutdown()
+
+    agent_id = AgentId.generate()
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    assert recorder.pushed_workspace_agent_ids == []
+    assert auto_register._hosts_awaiting_push == {host_id: agent_id}
+    assert host_id not in auto_register._hosts_being_pushed

@@ -41,8 +41,9 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -291,20 +292,43 @@ class LatchkeyAutoRegister(MutableModel):
             self._deferred_pairs.discard((host_id, agent_id))
 
     def _schedule_push(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Mark ``host_id``'s file as changed and make sure a worker will carry it over."""
+        """Mark ``host_id``'s file as changed and make sure a worker will carry it over.
+
+        A group that can no longer run work (the app shutting down) gets no
+        worker: the change stays marked and the worker slot is released, so
+        nothing escapes onto the resolver's callback thread or the watch's.
+        """
         with self._push_lock:
             self._hosts_awaiting_machine.pop(host_id, None)
             self._hosts_awaiting_push[host_id] = agent_id
             if host_id in self._hosts_being_pushed:
                 return
             self._hosts_being_pushed.add(host_id)
-        start_mngr_thread(
-            self.concurrency_group,
+        is_started = self._start_thread_unless_group_is_ending(
             target=self._push_until_settled,
             args=(host_id,),
             name=f"latchkey-auto-register-push-{host_id}",
-            is_checked=False,
         )
+        if not is_started:
+            with self._push_lock:
+                self._hosts_being_pushed.discard(host_id)
+
+    def _start_thread_unless_group_is_ending(
+        self, target: Callable[..., None], args: tuple[object, ...], name: str
+    ) -> bool:
+        """Start ``target`` on the group, unchecked; ``False`` when the group can no longer run work.
+
+        An exited group raises ``ConcurrencyGroupError``, one that is shutting
+        down raises ``ConcurrencyExceptionGroup``, and the interpreter on its
+        way out ``RuntimeError``/``OSError`` -- the families every thread start
+        on the app's group names. Any of them means the app is shutting down.
+        """
+        try:
+            start_mngr_thread(self.concurrency_group, target=target, args=args, name=name, is_checked=False)
+        except (OSError, RuntimeError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as e:
+            logger.debug("Started no thread {}: the app is shutting down ({})", name, e)
+            return False
+        return True
 
     def _push_until_settled(self, host_id: HostId) -> None:
         """Push ``host_id``'s policy to its machine until no change is left waiting.
@@ -354,18 +378,14 @@ class LatchkeyAutoRegister(MutableModel):
     def _start_machine_watch(self, host_id: HostId) -> None:
         """Start the watch for ``host_id``'s machine; a group that is already ending (the app shutting down) gets
         none, and the push stays held for the resolver-change path."""
-        try:
-            start_mngr_thread(
-                self.concurrency_group,
-                target=self._watch_for_machine,
-                args=(host_id,),
-                name=f"latchkey-auto-register-machine-watch-{host_id}",
-                is_checked=False,
-            )
-        except InvalidConcurrencyGroupStateError as e:
+        is_started = self._start_thread_unless_group_is_ending(
+            target=self._watch_for_machine,
+            args=(host_id,),
+            name=f"latchkey-auto-register-machine-watch-{host_id}",
+        )
+        if not is_started:
             with self._push_lock:
                 self._hosts_watched_for_machine.discard(host_id)
-            logger.debug("Started no machine watch for host {}: the app is shutting down ({})", host_id, e)
 
     def _watch_for_machine(self, host_id: HostId) -> None:
         """Poll for ``host_id``'s machine key while its push is held, and carry the push once the key is there.
