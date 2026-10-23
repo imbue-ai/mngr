@@ -376,27 +376,30 @@ class LatchkeyAutoRegister(MutableModel):
         lifetime. A push still held when the watch ends waits for a resolver
         change, as before the watch existed. The watch also ends with
         :meth:`stop` and with the group's shutdown.
+
+        Scheduling the push takes it out of the held set, so the poll after a
+        carry is what ends the watch (:meth:`_held_agent_after_a_poll`) --
+        unless the worker has held the push again by then, in which case this
+        watch goes on polling for it.
         """
         deadline = time.monotonic() + self.machine_watch_seconds
         while (agent_id := self._held_agent_after_a_poll(host_id, deadline)) is not None:
             if self._has_machine(host_id):
-                with self._push_lock:
-                    self._hosts_watched_for_machine.discard(host_id)
                 logger.debug(
                     "Carrying the held latchkey permissions push for host {}: its machine key appeared", host_id
                 )
                 self._schedule_push(host_id, agent_id)
-                return
 
     def _held_agent_after_a_poll(self, host_id: HostId, deadline: float) -> AgentId | None:
         """Wait one poll interval, then the agent ``host_id``'s held push is addressed by while its watch goes on,
         or ``None`` once the watch is over: the push is no longer held, :meth:`stop` or the group's shutdown
         happened, or ``deadline`` passed.
 
-        Every way the watch ends is decided in the lock hold that leaves the
-        watched set, and before the watch schedules anything: a worker that
-        re-holds the host from here on finds it unwatched and starts a new
-        watch, instead of relying on this one, which is about to exit.
+        This lock hold is the only place a watch leaves the watched set, and it
+        does so with nothing of the watch's left to run: a resolver change or a
+        worker that finds the host held and unwatched can rely on no watch
+        acting on it, and a worker that re-holds the host from here on starts a
+        new watch instead of relying on this one, which is about to exit.
         """
         self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
         with self._push_lock:
