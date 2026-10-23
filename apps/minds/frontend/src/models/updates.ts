@@ -528,7 +528,7 @@ export function rowUpdateShortcutFor(update: UiWorkspaceUpdate | null, badge: Up
 const MINUTES_PER_DAY = 24 * 60;
 
 /** A minute of the day as a clock reads it, e.g. "2:00 AM" or "8:30 PM". */
-function formatClockMinute(minuteOfDay: number): string {
+export function formatClockMinute(minuteOfDay: number): string {
   const hour = Math.floor(minuteOfDay / 60);
   const minute = String(minuteOfDay % 60).padStart(2, "0");
   return `${hour % 12 || 12}:${minute} ${hour < 12 ? "AM" : "PM"}`;

@@ -4,6 +4,7 @@
 
 import m from "mithril";
 import type { SettingsModel } from "../../../models/settings";
+import { formatClockMinute } from "../../../models/updates";
 import { renderSwitch } from "../../components/Switch";
 
 /** Whole hours only: the setting means "while I am asleep". */
@@ -11,11 +12,6 @@ const HOUR_OPTIONS: number[] = Array.from(
   { length: 24 },
   (_unused, hour) => hour,
 );
-
-function formatHour(hour: number): string {
-  const suffix = hour < 12 ? "AM" : "PM";
-  return `${hour % 12 || 12}:00 ${suffix}`;
-}
 
 function hourSelect(
   id: string,
@@ -32,7 +28,7 @@ function hourSelect(
         onchange(Number((event.target as HTMLSelectElement).value)),
     },
     HOUR_OPTIONS.map((hour) =>
-      m("option", { value: String(hour) }, formatHour(hour)),
+      m("option", { value: String(hour) }, formatClockMinute(hour * 60)),
     ),
   );
 }
