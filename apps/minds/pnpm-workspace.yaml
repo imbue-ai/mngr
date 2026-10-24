@@ -1,11 +1,6 @@
 # Transitive deps of latchkey / @todesktop/cli whose install scripts the app
 # does not need; listing them silences pnpm's "Ignored build scripts / run
 # pnpm approve-builds" warning, which reads like a failed install.
-ignoredBuiltDependencies:
-  - "@firebase/util"
-  - dtrace-provider
-  - protobufjs
-
 # Supply-chain hardening: refuse to install any version published less than
 # 14 days ago (20160 minutes), including transitive dependencies. A
 # freshly-compromised release therefore cannot be pulled in until it has had
@@ -28,6 +23,7 @@ minimumReleaseAgeExclude:
   # intermediates (electron/electron#55126), so it ships inside its cooldown.
   # CLEANUP: remove after 2026-11-04, when 45.0.0 clears the 14-day window.
   - electron@45.0.0
+  - zod@4.6.7
 # Refuse a release whose publish-trust evidence (trusted publisher, provenance)
 # is weaker than an earlier release of the same package had.
 trustPolicy: no-downgrade
@@ -51,3 +47,7 @@ supportedArchitectures:
   os: [current, darwin, linux, win32]
   cpu: [current, x64, arm64]
   libc: [current, glibc, musl]
+allowBuilds:
+  '@firebase/util': true
+  dtrace-provider: true
+  protobufjs: true

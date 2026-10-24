@@ -21,8 +21,8 @@ importers:
         specifier: 6.8.9
         version: 6.8.9
       latchkey:
-        specifier: ^3.19.3
-        version: 3.19.3
+        specifier: ^3.19.4
+        version: 3.19.4
       semver:
         specifier: ^7.6.3
         version: 7.7.4
@@ -1574,8 +1574,8 @@ packages:
   keyv@3.1.0:
     resolution: {integrity: sha512-9ykJ/46SN/9KPM/sichzQ7OvXyGDYKGTaDlKMGCAlg2UK8KRy4jb0d8sFc+0Tt0YYnThq8X2RZgCg74RPxgcVA==}
 
-  latchkey@3.19.3:
-    resolution: {integrity: sha512-nkBeiO4gX+aRD/xT4Bi37kRrRNVPTlhO37f/G9FgD8d0gyRvI/j0DqcEmMMZDJKMOxkKekWUcrXAQMSFAcDJdg==}
+  latchkey@3.19.4:
+    resolution: {integrity: sha512-gQhEd/Y3GzV4D5DpK5k/MvcvgmXI4rnoUS1C7L+5MqFCL+a9GecNjLQvCpOke0VyTZN5QhlN6KJ7HcJFT+3M5Q==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2314,8 +2314,8 @@ packages:
     resolution: {integrity: sha512-zK7YHHz4ZXpW89AHXUPbQVGKI7uvkd3hzusTdotCg1UxyaVtg0zFJSTfW/Dq5f7OBBVnq6cZIaC8Ti4hb6dtCA==}
     engines: {node: '>= 14'}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -4156,7 +4156,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.0
 
-  latchkey@3.19.3:
+  latchkey@3.19.4:
     dependencies:
       '@imbue-ai/detent': 1.16.0
       '@napi-rs/keyring': 1.2.0
@@ -4164,7 +4164,7 @@ snapshots:
       playwright: 1.63.0
       playwright-core: 1.63.0
       semver: 7.8.5
-      zod: 3.25.76
+      zod: 4.6.7
 
   latest-version@5.1.0:
     dependencies:
@@ -4830,4 +4830,4 @@ snapshots:
       compress-commons: 6.0.2
       readable-stream: 4.7.0
 
-  zod@3.25.76: {}
+  zod@4.6.7: {}

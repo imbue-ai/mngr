@@ -21,11 +21,14 @@ import re
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 _APP_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _PACKAGE_JSON_PATH: Final[Path] = _APP_ROOT / "package.json"
 _PNPM_LOCK_PATH: Final[Path] = _APP_ROOT / "pnpm-lock.yaml"
 
 _EXACT_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d+\.\d+\.\d+$")
+_PEER_SUFFIX_PATTERN: Final[str] = r"(?:\(.*\))?"
 
 
 def _read_exact_dependency_pin(dependencies: dict[str, str], name: str) -> str:
@@ -49,9 +52,16 @@ def _read_locked_builder_util_runtime_for(electron_updater_version: str, lockfil
     ``packages:`` (with ``resolution:``) and once under ``snapshots:`` (with
     ``dependencies:``). Only the latter names its resolved dependencies, so the
     match anchors on the ``dependencies:`` line directly under the key.
+
+    pnpm appends the resolved peer dependencies to snapshot keys and to the
+    versions listed under them, e.g. ``electron-updater@6.8.9(supports-color@7.2.0)``
+    and ``builder-util-runtime: 9.7.0(supports-color@7.2.0)``, whenever an
+    optional peer somewhere below the package happens to be linked. Whether that
+    suffix is present depends on the rest of the graph, so both forms are accepted.
     """
     snapshot_pattern = re.compile(
-        rf"^  electron-updater@{re.escape(electron_updater_version)}:\n    dependencies:\n((?:      .*\n)+)",
+        rf"^  electron-updater@{re.escape(electron_updater_version)}{_PEER_SUFFIX_PATTERN}:\n"
+        rf"    dependencies:\n((?:      .*\n)+)",
         flags=re.MULTILINE,
     )
     snapshot_match = snapshot_pattern.search(lockfile_text)
@@ -60,7 +70,9 @@ def _read_locked_builder_util_runtime_for(electron_updater_version: str, lockfil
         "dependencies block. Refresh the lockfile (`pnpm install --lockfile-only`) after changing "
         "the electron-updater pin."
     )
-    dependency_match = re.search(r"^      builder-util-runtime: (\S+)$", snapshot_match.group(1), flags=re.MULTILINE)
+    dependency_match = re.search(
+        rf"^      builder-util-runtime: ([^\s(]+){_PEER_SUFFIX_PATTERN}$", snapshot_match.group(1), flags=re.MULTILINE
+    )
     assert dependency_match is not None, (
         f"electron-updater@{electron_updater_version} in {_PNPM_LOCK_PATH} no longer depends on "
         "builder-util-runtime. If electron-updater dropped it, drop the direct pin in package.json "
@@ -84,3 +96,35 @@ def test_direct_builder_util_runtime_pin_matches_the_locked_electron_updater_dep
         "copy, so a mismatch makes every Linux update download fail at the final rename with "
         "`retry is not a function`. Set the direct pin to the locked version and refresh the lockfile."
     )
+
+
+_BARE_SNAPSHOT: Final[str] = """\
+snapshots:
+
+  electron-updater@6.8.9:
+    dependencies:
+      builder-util-runtime: 9.7.0
+      fs-extra: 10.1.0
+    transitivePeerDependencies:
+      - supports-color
+
+  electron@45.0.0: {}
+"""
+
+_PEER_SUFFIXED_SNAPSHOT: Final[str] = """\
+snapshots:
+
+  electron-updater@6.8.9(supports-color@7.2.0):
+    dependencies:
+      builder-util-runtime: 9.7.0(supports-color@7.2.0)
+      fs-extra: 10.1.0
+    transitivePeerDependencies:
+      - supports-color
+
+  electron@45.0.0(supports-color@7.2.0): {}
+"""
+
+
+@pytest.mark.parametrize("lockfile_text", [_BARE_SNAPSHOT, _PEER_SUFFIXED_SNAPSHOT])
+def test_locked_builder_util_runtime_is_read_with_or_without_peer_suffixes(lockfile_text: str) -> None:
+    assert _read_locked_builder_util_runtime_for("6.8.9", lockfile_text) == "9.7.0"
