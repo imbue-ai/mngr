@@ -1,0 +1,1 @@
+Corrected the start-flow description in `docs/desktop-app.md`: signing up already sends the verification email, so the flow's own send is a resend (suppressed by the connector's cooldown when it comes right after signup). The doc still said signing up sent none.
