@@ -70,12 +70,9 @@ import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
 import {
   displayVersion,
   isBadgeOpeningRunChat,
-  isUpdateOffered,
   updateBadgeFor,
   updateChatAgentIdFor,
 } from "../../models/updates";
-import { autoUpdatePrompt } from "../../models/autoUpdatePrompt";
-import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 
 const BADGE_CLASS =
   "inline-flex items-center px-2 py-0.5 rounded-md type-label";
@@ -1142,24 +1139,8 @@ export const LandingPage: m.ClosureComponent = () => {
     }
   }
 
-  /** The one-time auto-update offer, when it is due. */
-  function autoUpdatePromptModal(): m.Children {
-    const { stores } = getAppContext();
-    const updates = stores.updates;
-    const hasOutOfDateWorkspace = stores.workspaces.workspaces.some((entry) =>
-      isUpdateOffered(updates.forAgent(entry.id)),
-    );
-    const trigger = autoUpdatePrompt.triggerFor(
-      updates.hasReceivedUpdates ? updates.isAutoUpdateEnabled : null,
-      hasOutOfDateWorkspace,
-    );
-    if (trigger === null) return null;
-    return m(AutoUpdatePromptModal, { model: autoUpdatePrompt });
-  }
-
   return {
     oninit() {
-      void autoUpdatePrompt.load();
       loadExtras(state);
       state.unsubscribe = getAppContext().stores.workspaces.onChanged(() =>
         loadExtras(state),
@@ -1399,7 +1380,6 @@ export const LandingPage: m.ClosureComponent = () => {
           // The panel re-renders from the next providers frame (the materializer bounces discovery).
           onAccountAdded: () => m.redraw(),
         }),
-        autoUpdatePromptModal(),
         m("div", { class: "h-20", "aria-hidden": "true" }),
         m(
           "div",

@@ -9,6 +9,7 @@ import type { WorkspaceHealth } from "../../models/health";
 import type { UiChannelClient } from "../../channel/client";
 import type { RequestVerdict, ResolvedRequest } from "../../models/inbox";
 import type { NotificationsUiController } from "../../models/notificationsUi";
+import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UpdateActionResult } from "../../models/updates";
 import {
   accentSourceForRoute,
@@ -109,6 +110,9 @@ export type ChromeAnchor = "workspace-switcher" | "permissions" | "settings" | "
 
 export class ShellState {
   readonly stores: AppStores;
+  /** The one-time auto-update offer, one per window, so its answer and a
+   * put-away hold across every surface the window shows. */
+  readonly autoUpdatePrompt: AutoUpdatePromptModel;
   private readonly webLogin: WebLoginModel;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
@@ -238,9 +242,14 @@ export class ShellState {
    * request was in. */
   private waitingRequestList: WaitingRequestList | null = null;
 
-  constructor(stores: AppStores, webLoginModel: WebLoginModel = webLogin) {
+  constructor(
+    stores: AppStores,
+    webLoginModel: WebLoginModel = webLogin,
+    autoUpdatePrompt: AutoUpdatePromptModel = new AutoUpdatePromptModel(),
+  ) {
     this.stores = stores;
     this.webLogin = webLoginModel;
+    this.autoUpdatePrompt = autoUpdatePrompt;
   }
 
   /** Whether this window's workspace frame is showing the workspace named. */

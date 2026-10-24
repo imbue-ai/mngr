@@ -28,6 +28,7 @@ import { PopoutChrome } from "./PopoutChrome";
 import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import { noticeBandFor } from "./notice-band";
 import {
+  isUpdateOffered,
   standingUpdateNotice,
   updateChatAgentIdFor,
   updateRunOutcome,
@@ -56,6 +57,7 @@ import {
 } from "./update-ready";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
+import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
@@ -172,12 +174,26 @@ export interface ShellAttrs {
 }
 
 export function Shell(): m.Component<ShellAttrs> {
+  let promptLoadedForRoutePath: string | null = null;
+
+  /** Read the auto-update prompt's answer, again on each navigation: a read
+   * that failed is retried there rather than on every redraw. */
+  function loadAutoUpdatePrompt({ shell, routePath }: ShellAttrs): void {
+    if (routePath === promptLoadedForRoutePath) return;
+    promptLoadedForRoutePath = routePath;
+    void shell.autoUpdatePrompt.load();
+  }
+
   // Escape is handled by the app's single in-document listener (index.ts),
   // which routes through ShellState.handleEscape -- not here, so the Shell
   // never competes with it for the same keypress.
   return {
-    oncreate() {
+    oncreate(vnode) {
       watchUpdateStatus(() => m.redraw());
+      loadAutoUpdatePrompt(vnode.attrs);
+    },
+    onupdate(vnode) {
+      loadAutoUpdatePrompt(vnode.attrs);
     },
     view(vnode) {
       const {
@@ -446,6 +462,27 @@ export function Shell(): m.Component<ShellAttrs> {
         workspaceParam !== null &&
         agentScoped !== null &&
         shell.stores.updates.isApplying(agentScoped);
+      // The one-time auto-update offer goes over Home or a machine in the main
+      // window -- a launch can restore straight into a machine -- and waits out
+      // any of the Shell's own modals rather than stacking on one.
+      const isAutoUpdatePromptPlaceable =
+        popout === null &&
+        (routePath === "/" ||
+          (workspaceParam !== null && !isWorkspaceOverlayPath(routePath))) &&
+        overlay === null &&
+        !isRecoveryOpen &&
+        !isApplyCovering &&
+        updateModalAgentId === null;
+      const autoUpdatePromptTrigger = isAutoUpdatePromptPlaceable
+        ? shell.autoUpdatePrompt.triggerFor(
+            shell.stores.updates.hasReceivedUpdates
+              ? shell.stores.updates.isAutoUpdateEnabled
+              : null,
+            shell.stores.workspaces.workspaces.some((workspace) =>
+              isUpdateOffered(shell.stores.updates.forAgent(workspace.id)),
+            ),
+          )
+        : null;
 
       return m("div", { style: "display: contents" }, [
         popout === null
@@ -506,6 +543,9 @@ export function Shell(): m.Component<ShellAttrs> {
               openingFailure: shell.updateModalOpeningFailure(),
               onClose: () => shell.closeUpdateModal(),
             })
+          : null,
+        autoUpdatePromptTrigger !== null
+          ? m(AutoUpdatePromptModal, { model: shell.autoUpdatePrompt })
           : null,
         // The creation page's crossing into the workspace; it outlives that
         // page's route, so the shell owns it.

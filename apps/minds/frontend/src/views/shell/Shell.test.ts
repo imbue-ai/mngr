@@ -10,14 +10,19 @@ import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { PopoutDropOverlay } from "./PopoutDropOverlay";
+import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
+import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
   collectVnodes,
+  jsonResponse,
   notificationEntry,
   renderRoot,
+  settingsOverview,
+  settle,
 } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
@@ -86,6 +91,7 @@ function updatesStoreStub(
     isApplying: () => isApplying,
     isUpdating: () => isUpdating,
     isAutoUpdateEnabled,
+    hasReceivedUpdates: true,
   };
 }
 
@@ -103,6 +109,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     stores: {
       requests: { hasPendingForWorkspace: () => false },
       workspaces: {
+        workspaces: [],
         toAgentScopedId: (anyId: string) => anyId,
         entryByAnyId: () => null,
       },
@@ -120,6 +127,8 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     },
     isRecoveryModalOpenFor: () => false,
     openUpdateModalAgentId: () => null,
+    // Never loaded, so it never offers: suites not about it see no prompt.
+    autoUpdatePrompt: new AutoUpdatePromptModel(),
     ...overrides,
   } as unknown as ShellState;
   return { state };
@@ -440,6 +449,7 @@ describe("Shell notifications overlay", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -779,6 +789,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -822,6 +833,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -865,6 +877,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -897,6 +910,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -934,6 +948,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({ name: "oldie" }),
         },
@@ -971,6 +986,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1003,6 +1019,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1041,6 +1058,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
             id: WORKSPACE_ID,
@@ -1079,6 +1097,7 @@ describe("Shell notice band wiring", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
             id: WORKSPACE_ID,
@@ -1127,6 +1146,7 @@ describe("Shell toast layer", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1172,6 +1192,7 @@ describe("Shell toast layer", () => {
       stores: {
         requests: { hasPendingForWorkspace: () => false },
         workspaces: {
+          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1263,5 +1284,152 @@ describe("Shell on the popout route", () => {
     } as unknown as Partial<ShellState>);
     const popoutRoot = renderShell(popout.state, POPOUT_PATH, m("div#popout-page"));
     expect(collectVnodes(popoutRoot).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(false);
+  });
+});
+
+describe("Shell auto-update prompt", () => {
+  /** A prompt on the first launch into a new app version, with no answer
+   * recorded; `isBackendUp` says whether the settings read succeeds. */
+  function firstLaunchPrompt(isBackendUp: () => boolean = () => true): {
+    model: AutoUpdatePromptModel;
+    settingsReads: () => number;
+  } {
+    let reads = 0;
+    const fetchImpl = (() => {
+      reads += 1;
+      return Promise.resolve(
+        isBackendUp()
+          ? jsonResponse(
+              settingsOverview({ auto_update_prompt_decision: null }),
+            )
+          : jsonResponse({}, 503),
+      );
+    }) as typeof fetch;
+    const model = new AutoUpdatePromptModel(
+      fetchImpl,
+      () => Promise.resolve(true),
+      () => undefined,
+    );
+    return { model, settingsReads: () => reads };
+  }
+
+  function hasPrompt(root: AnyVnode): boolean {
+    return collectVnodes(root).some(
+      (vnode) => vnode.tag === AutoUpdatePromptModal,
+    );
+  }
+
+  it("offers it over the machine a launch restored straight into", async () => {
+    const { model } = firstLaunchPrompt();
+    await model.load();
+    const { state } = makeShell({
+      autoUpdatePrompt: model,
+    } as unknown as Partial<ShellState>);
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#surface"),
+    );
+    expect(
+      collectVnodes(root).some((vnode) => vnode.tag === WorkspaceFrame),
+    ).toBe(true);
+    expect(hasPrompt(root)).toBe(true);
+  });
+
+  it("offers it over Home, but not over the other pages or a popout window", async () => {
+    const { model } = firstLaunchPrompt();
+    await model.load();
+    const { state } = makeShell({
+      autoUpdatePrompt: model,
+      currentRouteSearch: () => "",
+    } as unknown as Partial<ShellState>);
+    expect(
+      hasPrompt(
+        renderShell(state, "/", m("div#home"), { workspaceParam: null }),
+      ),
+    ).toBe(true);
+    expect(
+      hasPrompt(
+        renderShell(state, "/create", m("div#create"), {
+          workspaceParam: null,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasPrompt(
+        renderShell(state, `/popout/${WORKSPACE_ID}/win-0123`, m("div#popout")),
+      ),
+    ).toBe(false);
+  });
+
+  it("waits out one of the Shell's own modals over the machine, then comes up", async () => {
+    const { model } = firstLaunchPrompt();
+    await model.load();
+    let isRecoveryOpen = true;
+    const { state } = makeShell({
+      autoUpdatePrompt: model,
+      isRecoveryModalOpenFor: () => isRecoveryOpen,
+      isRecoveryModalAutoRaised: () => false,
+    } as unknown as Partial<ShellState>);
+    const path = `/workspace/${WORKSPACE_ID}`;
+    expect(hasPrompt(renderShell(state, path, m("div#surface")))).toBe(false);
+    expect(hasPrompt(renderShell(state, "/settings", m("div#settings")))).toBe(
+      false,
+    );
+    isRecoveryOpen = false;
+    expect(hasPrompt(renderShell(state, path, m("div#surface")))).toBe(true);
+  });
+
+  it("reads its answer when the window opens, and again on the next navigation after a failed read", async () => {
+    let isBackendUp = false;
+    const { model, settingsReads } = firstLaunchPrompt(() => isBackendUp);
+    const { state } = makeShell({
+      autoUpdatePrompt: model,
+    } as unknown as Partial<ShellState>);
+    vi.stubGlobal("window", { location: { search: "" } });
+    const instance = Shell() as unknown as m.Component;
+    const lifecycle = (routePath: string): m.Vnode =>
+      ({
+        attrs: {
+          shell: state,
+          routePath,
+          workspaceParam: WORKSPACE_ID,
+          content: null,
+          homeContent: null,
+          behindContent: null,
+          optionsContent: null,
+        },
+      }) as unknown as m.Vnode;
+    const path = `/workspace/${WORKSPACE_ID}`;
+    const view = (routePath: string) =>
+      (instance.view as unknown as (v: m.Vnode) => AnyVnode).call(
+        instance,
+        lifecycle(routePath),
+      );
+
+    (instance.oncreate as unknown as (v: m.Vnode) => void).call(
+      instance,
+      lifecycle(path),
+    );
+    await settle();
+    expect(settingsReads()).toBe(1);
+    expect(hasPrompt(view(path))).toBe(false);
+
+    isBackendUp = true;
+    // A redraw on the same route does not read again.
+    (instance.onupdate as unknown as (v: m.Vnode) => void).call(
+      instance,
+      lifecycle(path),
+    );
+    await settle();
+    expect(settingsReads()).toBe(1);
+
+    (instance.onupdate as unknown as (v: m.Vnode) => void).call(
+      instance,
+      lifecycle("/"),
+    );
+    await settle();
+    expect(settingsReads()).toBe(2);
+    expect(hasPrompt(view("/"))).toBe(true);
   });
 });
