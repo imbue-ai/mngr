@@ -26,6 +26,7 @@ import type {
   PopoutOpenRequest,
   TearOutReport,
   WorkspaceLinkHandlingReport,
+  WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
 
@@ -136,8 +137,9 @@ export interface EmbedHandlerDeps {
   workspaceAgentId: () => string;
   openRequestPopup: (requestId: string | null) => void;
   /** The mounted page announced that its endpoint is listening, and whether
-   * it opens the links main hands back (minds:open-link). */
-  onWorkspaceReady: (opensLinks: boolean) => void;
+   * it opens the links main hands back (minds:open-link), custom-scheme ones
+   * included. */
+  onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
@@ -228,13 +230,17 @@ export function buildEmbedHandlers(
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
-    onWorkspaceReady(message.opensLinks === true);
+    onWorkspaceReady({
+      opensLinks: message.opensLinks === true,
+      opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,
+    });
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
+      opensCustomSchemeLinks: deps.openExternalLink !== null,
     });
   };
   const openExternalLink = deps.openExternalLink;
@@ -323,14 +329,16 @@ export async function pushResolutionSnapshot(
   if (entries !== null && entries.length > 0) send(entries);
 }
 
+const NO_LINK_PROMISES: WorkspaceLinkPromises = { opensLinks: false, opensCustomSchemeLinks: false };
+
 /** What main is told about the mounted frame's link handling, and the gate on
  * handing its page a link main caught. Only the page's own announcement sets
- * `opensLinks`, so sending the frame to a new page forgets it until that page
- * announces: a URL sent before a page listens is lost. Repeated reports of
- * the same state are not sent again. */
+ * its promises, so sending the frame to a new page forgets them until that
+ * page announces: a URL sent before a page listens is lost. Repeated reports
+ * of the same state are not sent again. */
 export class FrameLinkHandling {
   private workspaceId: string | null = null;
-  private opensLinks = false;
+  private promises: WorkspaceLinkPromises = NO_LINK_PROMISES;
   private lastReport: WorkspaceLinkHandlingReport | null | undefined = undefined;
   private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
   private readonly sendOpenLink: (url: string) => void;
@@ -347,27 +355,27 @@ export class FrameLinkHandling {
    * when that sent the frame to a new page. */
   frameArmed(workspaceId: string, isNavigating: boolean): void {
     this.workspaceId = workspaceId;
-    if (isNavigating) this.opensLinks = false;
+    if (isNavigating) this.promises = NO_LINK_PROMISES;
     this.publish();
   }
 
   /** The frame's page announced that it is listening. */
-  pageReady(opensLinks: boolean): void {
-    this.opensLinks = opensLinks;
+  pageReady(promises: WorkspaceLinkPromises): void {
+    this.promises = promises;
     this.publish();
   }
 
   /** The frame is no longer mounted. */
   unmounted(): void {
     this.workspaceId = null;
-    this.opensLinks = false;
+    this.promises = NO_LINK_PROMISES;
     this.publish();
   }
 
   /** Main handed back a link (a popup's or a frame navigation's URL): it goes
    * to a page that announced it opens links, and nowhere otherwise. */
   openLink(url: string): void {
-    if (this.workspaceId === null || !this.opensLinks) {
+    if (this.workspaceId === null || !this.promises.opensLinks) {
       const why = this.workspaceId === null ? "no workspace is mounted" : "its page has not announced opensLinks";
       console.warn(`[link-routing] dropped a link main handed back, since ${why}: ${url}`);
       return;
@@ -377,13 +385,15 @@ export class FrameLinkHandling {
 
   private publish(): void {
     const next =
-      this.workspaceId === null ? null : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
+      this.workspaceId === null ? null : { workspaceId: this.workspaceId, ...this.promises };
     const last = this.lastReport;
     const isUnchanged =
       last !== undefined &&
       (last === null || next === null
         ? last === next
-        : last.workspaceId === next.workspaceId && last.opensLinks === next.opensLinks);
+        : last.workspaceId === next.workspaceId &&
+          last.opensLinks === next.opensLinks &&
+          last.opensCustomSchemeLinks === next.opensCustomSchemeLinks);
     if (isUnchanged) return;
     this.lastReport = next;
     this.report(next);
@@ -535,9 +545,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
           },
-          onWorkspaceReady: (opensLinks) => {
+          onWorkspaceReady: (promises) => {
             isMountedPageReady = true;
-            linkHandling.pageReady(opensLinks);
+            linkHandling.pageReady(promises);
             // A message held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingWorkspaceMessage();

@@ -255,11 +255,18 @@ export interface PopoutReattachAsk {
   frame: PopoutFrame | null;
 }
 
-/** The workspace a window's frame shows, as main routes that window's popups:
- * whether the workspace announced it opens links (minds:open-link). */
-export interface WorkspaceLinkHandlingReport {
-  workspaceId: string;
+/** What a workspace's page promised when it announced readiness: that it
+ * opens the links main hands back (minds:open-link), and custom-scheme ones
+ * among them. */
+export interface WorkspaceLinkPromises {
   opensLinks: boolean;
+  opensCustomSchemeLinks: boolean;
+}
+
+/** The workspace a window's frame shows, as main routes that window's popups,
+ * with what its page promised. */
+export interface WorkspaceLinkHandlingReport extends WorkspaceLinkPromises {
+  workspaceId: string;
 }
 
 declare global {
@@ -481,8 +488,8 @@ export const electronBridge = {
   get opensExternalLinks(): boolean {
     return native()?.openExternalLink !== undefined;
   },
-  /** Open an external link the mounted workspace handed over outside the app (minds:open-external); a mailto: or
-   * tel: link asks the user first. */
+  /** Open an external link the mounted workspace handed over outside the app (minds:open-external); a mailto:,
+   * tel: or custom-scheme link asks the user first. */
   openExternalLink(url: string): void {
     native()?.openExternalLink?.(url);
   },

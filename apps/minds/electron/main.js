@@ -87,7 +87,8 @@ const {
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
 const { formatGpuProcessGone } = require('./gpu-diagnostics');
-const { createExternalOpener, createLinkRouter, isExternalUrl } = require('./link-routing');
+const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
+const { createExternalLinkPermissions } = require('./external-link-permissions');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
@@ -1072,15 +1073,29 @@ function registerShortcutsFor(bundle, wc) {
   });
 }
 
-// A mailto: or tel: link asks first, in a dialog owned by the window the link
-// came from; see externalOpenPrompt.
+// A mailto:, tel: or custom-scheme link asks first, in a dialog owned by the
+// window the link came from; see externalOpenPrompt.
+const externalLinkPermissions = createExternalLinkPermissions(paths.getStateDir(), (message) => console.warn(message));
 const openExternal = createExternalOpener({
-  confirm: async (prompt, wc) => {
+  confirm: async ({ message, detail, rememberLabel }, wc) => {
     const win = wc && !wc.isDestroyed() ? BrowserWindow.fromWebContents(wc) : null;
-    const options = { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 0, cancelId: 1, ...prompt };
-    const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
-    return response === 0;
+    const options = {
+      type: 'question',
+      buttons: ['Open', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message,
+      detail,
+      ...(rememberLabel !== null ? { checkboxLabel: rememberLabel } : {}),
+    };
+    const { response, checkboxChecked } = win
+      ? await dialog.showMessageBox(win, options)
+      : await dialog.showMessageBox(options);
+    return { accepted: response === 0, remember: checkboxChecked };
   },
+  // Linux names the handler by its desktop entry (`paseo.desktop`).
+  appNameFor: (url) => app.getApplicationNameForProtocol(url).replace(/\.desktop$/, ''),
+  permissions: externalLinkPermissions,
   open: (url, wc) => {
     shell.openExternal(url).catch((err) => {
       console.warn('[external-link] failed to open', url, err);
@@ -1092,9 +1107,9 @@ const openExternal = createExternalOpener({
 // See ./link-routing for the rule. Each window's page reports the workspace it
 // mounted over 'workspace-link-handling'.
 const linkRouter = createLinkRouter({
-  openExternal: (url, wc) => {
+  openExternal: (url, wc, workspaceId) => {
     setImmediate(() => {
-      openExternal(url, wc).catch((err) => console.warn('[external-link] failed to open', url, err));
+      openExternal(url, wc, workspaceId).catch((err) => console.warn('[external-link] failed to open', url, err));
     });
   },
   forward: (wc, url) => {
@@ -1731,8 +1746,9 @@ ipcMain.on('shell-event', (event, evt) => {
 });
 
 // The window's page mounted a workspace frame (or unmounted it), and whether
-// that workspace announced it opens links: `{ workspaceId, opensLinks }`, or
-// null for none. Only the trusted SPA page may say so.
+// that workspace announced it opens links and custom-scheme links:
+// `{ workspaceId, opensLinks, opensCustomSchemeLinks }`, or null for none.
+// Only the trusted SPA page may say so.
 ipcMain.on('workspace-link-handling', (event, report) => {
   if (!trustedShellEventSenderBundle(event)) {
     console.warn('[link-routing] dropped a mount report from an untrusted sender frame');
@@ -1745,17 +1761,19 @@ ipcMain.on('workspace-link-handling', (event, report) => {
 
 // A workspace asked for an external link no app of its own takes to open
 // outside the app (minds:open-external, relayed by the window's page). Only
-// the trusted SPA page may ask, and only for an external URL.
+// the trusted SPA page may ask, and only for an external or custom-scheme URL.
 ipcMain.on('open-external-link', (event, url) => {
   if (!trustedShellEventSenderBundle(event)) {
     console.warn('[link-routing] dropped an external link from an untrusted sender frame');
     return;
   }
-  if (typeof url !== 'string' || !isExternalUrl(url)) {
+  if (typeof url !== 'string' || !(isExternalUrl(url) || isCustomSchemeUrl(url))) {
     console.warn('[link-routing] dropped an external link that is not one:', url);
     return;
   }
-  openExternal(url, event.sender).catch((err) => console.warn('[external-link] failed to open', url, err));
+  openExternal(url, event.sender, linkRouter.workspaceOf(event.sender)).catch((err) =>
+    console.warn('[external-link] failed to open', url, err),
+  );
 });
 
 const WORKSPACE_HTTP_TIMEOUT_MS = 10000;
@@ -2162,6 +2180,16 @@ async function onReady() {
   // in ./link-routing.
   app.on('web-contents-created', (_event, contents) => {
     linkRouter.install(contents);
+  });
+  // Every permission is granted, as with no handler, but openExternal: a page
+  // launching another app goes through the link router's ask-first opener.
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+    if (permission !== 'openExternal') {
+      callback(true);
+      return;
+    }
+    callback(false);
+    linkRouter.openExternalRequested(wc, details);
   });
   registerAppImageDesktopEntry();
   installApplicationMenu();
