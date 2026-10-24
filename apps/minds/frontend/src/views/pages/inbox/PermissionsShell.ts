@@ -109,6 +109,10 @@ function manualCredentialsForm(model: InboxModel): m.Children {
 export interface PermissionsShellAttrs {
   model: InboxModel;
   headerLabel: string;
+  /** Shown on hover over the header. The header is one line and gets cut
+   * short, so a kind whose label can run long (a file path) hands over the
+   * whole thing here. */
+  headerTooltip?: string;
   /** Glyph for the header's 32px square: the service's brand mark, or the
    * category fallback for the kinds that name no service. */
   mark: m.Children;
@@ -126,7 +130,7 @@ export interface PermissionsShellAttrs {
 export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
   return {
     view(vnode) {
-      const { model, headerLabel, mark, rationale, account, progressLabel, body } = vnode.attrs;
+      const { model, headerLabel, headerTooltip, mark, rationale, account, progressLabel, body } = vnode.attrs;
       const approveLabel = vnode.attrs.approveLabel ?? "Approve";
       // A credential form with no inputs is a dead end (Imbue Studio cannot work out
       // what to ask for), so Approve goes away entirely.
@@ -144,7 +148,14 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
             },
             mark,
           ),
-          m("h2", { class: "min-w-0 flex-1 truncate type-heading-lg text-primary" }, headerLabel),
+          m(
+            "h2",
+            {
+              class: "min-w-0 flex-1 truncate type-heading-lg text-primary",
+              ...(headerTooltip === undefined ? {} : { "data-tooltip": headerTooltip }),
+            },
+            headerLabel,
+          ),
         ]),
         account ?? null,
         rationale

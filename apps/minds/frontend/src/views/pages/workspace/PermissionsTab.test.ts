@@ -1358,6 +1358,16 @@ describe("PermissionsTab shared paths", () => {
     remove();
   });
 
+  it("shows the whole path in a hover tooltip, since the pill cuts a long one short", async () => {
+    const { root, remove } = await renderLocalFiles(
+      permissionsView({ shared_paths: [sharedPath({ path: "/home/me/notes", path_label: "~/notes" })] }),
+    );
+    const pills = collectVnodes(pathRows(root)[0]).filter((node) => node.tag === "code");
+    expect(pills).toHaveLength(1);
+    expect(attrsOf(pills[0])["data-tooltip"]).toBe("/home/me/notes");
+    remove();
+  });
+
   it("says on the remove button when removing would take files with it", async () => {
     // The copy goes with the grant, and this is the only place that can be
     // said in every case -- a path whose copy is gone draws no notice at all.

@@ -76,11 +76,12 @@ function modelWithDetail(detail: PredefinedPermissionDetail): InboxModel {
   return model;
 }
 
-function renderShell(model: InboxModel, account: m.Children = null): ElementVnode[] {
+function renderShell(model: InboxModel, account: m.Children = null, headerTooltip?: string): ElementVnode[] {
   const instance = PermissionsShell() as unknown as m.Component;
   const attrs = {
     model,
     headerLabel: "AWS",
+    headerTooltip,
     mark: m("span", { id: "permissions-mark-glyph" }),
     rationale: "list the buckets",
     account,
@@ -144,6 +145,15 @@ describe("PermissionsShell layout", () => {
     const positions = order.map((id) => indexOfId(nodes, id));
     expect(positions.every((position) => position > -1)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("puts the full label in a hover tooltip on the header only when a kind hands one over", () => {
+    const model = modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null });
+    const header = (nodes: ElementVnode[]) => flatten(nodes).find((node) => node.tag === "h2");
+    expect(header(renderShell(model))?.attrs?.["data-tooltip"]).toBeUndefined();
+
+    const withTooltip = renderShell(model, null, "/home/user/a/very/long/path");
+    expect(header(withTooltip)?.attrs?.["data-tooltip"]).toBe("/home/user/a/very/long/path");
   });
 
   it("closes with Deny then Approve, right-aligned and in their answer colors", () => {

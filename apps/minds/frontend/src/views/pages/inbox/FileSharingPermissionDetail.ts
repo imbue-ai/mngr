@@ -64,6 +64,7 @@ export function FileSharingPermissionDetailView(): m.Component<FileSharingPermis
         // The requested path IS the request -- "Local files" said nothing. It
         // stays the original ask even while the input below is edited.
         headerLabel: collapseSharePathHome(detail.file_path, detail.home_dir),
+        headerTooltip: detail.file_path,
         mark: m(Icon16, { name: "folder", extra: "text-primary" }),
         rationale: detail.rationale,
         progressLabel: "Granting permission...",

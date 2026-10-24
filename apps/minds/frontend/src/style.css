@@ -559,7 +559,8 @@ body:has(#notice-band) .workspace-surface {
  * max-width + whitespace/pointer-events keep it a compact, non-interactive
  * label. The max-width is generous enough that short button labels (e.g.
  * "Open in new window") stay on one line; ``text-center`` centers the lines
- * when a longer label does wrap.
+ * when a longer label does wrap, and ``wrap-anywhere`` lets a label with no
+ * spaces in it (a file path) break at the max-width instead of running past it.
  *
  * The opacity/transform transition is the enter/leave motion the SPA
  * controller (views/shell/tooltips.ts) drives by toggling the from/to states;
@@ -568,7 +569,7 @@ body:has(#notice-band) .workspace-surface {
  * prefers-reduced-motion collapses it to none, making those toggles instant.
  */
 .minds-tooltip {
-  @apply bg-surface-inverse text-inverse-primary type-helper shadow-overlay pointer-events-none inline-flex max-w-[400px] items-center gap-1.5 rounded-md px-2 py-1 text-center whitespace-normal;
+  @apply bg-surface-inverse text-inverse-primary type-helper shadow-overlay pointer-events-none inline-flex max-w-[400px] items-center gap-1.5 rounded-md px-2 py-1 text-center whitespace-normal wrap-anywhere;
   transition:
     opacity 80ms ease,
     transform 80ms ease;
