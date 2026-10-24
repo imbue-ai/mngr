@@ -2470,6 +2470,112 @@ describe("SharePanelModel invitations", () => {
       canReinvite: true,
     });
   });
+
+  it("tells whether each person has opened the workspace, from the visits the outcomes route reports", async () => {
+    const { model } = invitablePanel(undefined, [
+      {
+        kind: "user",
+        value: "user-2",
+        app: WHOLE,
+        outcome: "joined",
+        joined_at: "2026-09-28T00:00:00+00:00",
+        last_visited_at: "2026-09-29T00:00:00+00:00",
+      },
+    ]);
+    await model.load();
+    await settle();
+
+    expect(
+      model.workspaceAccessFor(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toEqual({ kind: "accessed", at: "2026-09-29T00:00:00+00:00" });
+    // The address had no account when it was granted, which is all the panel
+    // ever learns about accounts (spec O3).
+    expect(
+      model.workspaceAccessFor(
+        WHOLE,
+        rowOf(model, WHOLE, "friend@example.com"),
+      ),
+    ).toEqual({ kind: "not_a_user" });
+    expect(
+      model.workspaceAccessFor(WHOLE, rowOf(model, WHOLE, "acme.example")),
+    ).toBeNull();
+  });
+
+  it("counts an invited address as having opened the workspace once its owner has visited", async () => {
+    const { model } = invitablePanel(undefined, [
+      {
+        kind: "email",
+        value: "friend@example.com",
+        app: WHOLE,
+        outcome: "joined",
+        joined_at: "2026-09-30T00:00:00+00:00",
+        last_visited_at: null,
+      },
+    ]);
+    await model.load();
+    await settle();
+
+    expect(
+      model.workspaceAccessFor(
+        WHOLE,
+        rowOf(model, WHOLE, "friend@example.com"),
+      ),
+    ).toEqual({ kind: "accessed", at: "2026-09-30T00:00:00+00:00" });
+  });
+
+  it("says an account never opened the workspace only once the outcomes route has answered", async () => {
+    let isOutcomesReadable = false;
+    const { model } = makeSharePanel((url) => {
+      if (url.endsWith("/invitation-outcomes"))
+        return isOutcomesReadable
+          ? okResult({ outcomes: [] })
+          : { ok: false, status: 502, body: {} };
+      return okResult(
+        sharingResponse({
+          grants: grantsDocument({ users: ["user-2"] }),
+          identities: {
+            "user-2": {
+              user_id: "user-2",
+              email: "carol@example.com",
+              display_name: "Carol",
+              profile_picture_url: null,
+            },
+          },
+          grants_synced: true,
+        }),
+      );
+    });
+    await model.load();
+    await settle();
+
+    expect(
+      model.workspaceAccessFor(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toBeNull();
+
+    isOutcomesReadable = true;
+    await model.load();
+    await settle();
+
+    expect(
+      model.workspaceAccessFor(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toEqual({ kind: "never" });
+  });
+
+  it("says nothing about a person whose row is still being saved", async () => {
+    const { model } = makeSharePanel((url, init) =>
+      url === RESOLVE_USER_URL || init?.method === "PUT"
+        ? new Promise<FetchResult>(() => undefined)
+        : okResult(sharingResponse({ grants_synced: true })),
+    );
+    await model.load();
+    await settle();
+
+    model.addGrant(WHOLE, "email", "newcomer@example.com");
+
+    const row = rowOf(model, WHOLE, "newcomer@example.com");
+    expect(row.status.state).toBe("saving");
+    expect(model.workspaceAccessFor(WHOLE, row)).toBeNull();
+  });
 });
 
 describe("what the panel calls a target", () => {

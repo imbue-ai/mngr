@@ -21,6 +21,7 @@ import type {
   MobileLinkState,
   SharePanelModel,
   VisitingAgentInviteState,
+  WorkspaceAccess,
 } from "../../../models/sharePanel";
 import type { VisitingAgentEntry } from "../../../models/workspaceOptions";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
@@ -117,13 +118,21 @@ const LINK_BOX_CLASS =
   "flex flex-1 min-w-0 items-center gap-2 rounded-md border border-default " +
   "bg-fill-subtle px-3 py-2 type-body text-tertiary";
 
-// Every row's first line is the same height whatever it holds, so a long list
-// scans as a single column.
-const ROW_LINE_CLASS = "flex h-10 items-center gap-2";
+// A one-line row, for an entry with nothing to say under its name.
+const ROW_CLASS =
+  "flex h-10 flex-none items-center gap-2 overflow-hidden rounded-md border px-3";
 
-const ROW_BOX_CLASS = "flex-none overflow-hidden rounded-md border px-3";
+// A person's card. Its first line is the same height on every card, so a long
+// list scans as a single column; the lines under it wrap rather than cut
+// anything short.
+const CARD_CLASS =
+  "flex flex-none flex-col gap-0.5 overflow-hidden rounded-md border px-3 py-2";
 
-const ROW_CLASS = ROW_LINE_CLASS + " " + ROW_BOX_CLASS;
+const CARD_NAME_LINE_CLASS = "flex h-6 items-center gap-2";
+
+// pl-8 is the lead's width plus the line's gap, which starts the words where
+// the name starts.
+const CARD_DETAIL_CLASS = "pl-8 type-helper";
 
 // A domain row's outline is mixed from its surface, so the two read as one
 // mark.
@@ -839,7 +848,8 @@ function inheritedSummary(count: number): string {
 }
 
 /**
- * One grant, as a row.
+ * One grant, as a card: who it names on the first line, and what is known
+ * about them on the lines under it.
  *
  * `isOwned` is false for a row this pane only inherits: it belongs to the
  * whole workspace, and the controls that would change it are left off rather
@@ -858,31 +868,27 @@ function renderGrantRow(
     share.currentTarget,
     grant,
   );
+  // An inherited row's grant, and so its visits, belong to the whole workspace.
+  const access = share.workspaceAccessFor(
+    isOwned ? share.currentTarget : share.wholeService,
+    grant,
+  );
   return m(
     "div",
     {
       key: grant.key,
       "data-grant-row": grant.key,
       class:
-        ROW_BOX_CLASS +
+        CARD_CLASS +
         " " +
         rowSurfaceClass(share, isDomain) +
         (isJustAdded(share, grant) ? " grant-row-added" : ""),
-      // Nobody is told about a domain grant; the row admits people the granter
-      // has never named.
-      ...(isDomain
-        ? {
-            "data-tooltip":
-              `People at ${grantee.value} will not hear about this ` +
-              "unless you send them the link yourself",
-          }
-        : {}),
     },
     [
-      m("div", { class: ROW_LINE_CLASS }, [
+      m("div", { class: CARD_NAME_LINE_CLASS }, [
         renderGrantLead(share, grant),
-        // The name takes the row's slack and truncates under pressure, so the status indicator and the
-        // remove control to its right always keep their place inside the row.
+        // The name takes the line's slack and truncates under pressure, so the
+        // remove control to its right always keeps its place.
         m(
           "span",
           {
@@ -898,7 +904,7 @@ function renderGrantRow(
               },
               text.primary,
             ),
-            // The note gives way first: the name is who the row is about.
+            // The email gives way first: the name is who the card is about.
             text.secondary === null
               ? null
               : m(
@@ -911,8 +917,6 @@ function renderGrantRow(
                 ),
           ],
         ),
-        renderInvitationStatusIndicator(share, grant, invitation),
-        renderGrantState(share, grant),
         isOwned
           ? m(
               "button",
@@ -933,6 +937,7 @@ function renderGrantRow(
             // inherited row lines up with the pane's own rows below it.
             m("span", { class: "h-6 w-6 shrink-0" }),
       ]),
+      renderGrantDetails(share, grant, access, invitation),
       renderInvitationRefusal(grant, invitation),
     ],
   );
@@ -945,29 +950,128 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
   return isDomain ? ROW_DOMAIN_CLASS : ROW_PERSON_CLASS;
 }
 
-/** The one typed thing the row's invitation status indicator shows (the model reduces the request, the
- * refusal, and the outcome to a single value, so exactly one is ever on screen): a fixed-height
- * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
- * be requested, an "Invite again" control. A refusal's words are the exception, said on a line of
- * their own under the name. The first invitation is automatic, so there is no first "Invite"
- * button here. */
-function renderInvitationStatusIndicator(
+/** What is known about the card's person, as short facts joined by dots, or
+ * the card's own save state while it has one. */
+function renderGrantDetails(
   share: SharePanelModel,
   grant: Grant,
-  state: InvitationStatusIndicator,
+  access: WorkspaceAccess | null,
+  invitation: InvitationStatusIndicator,
 ): m.Children {
+  const pieces = grantDetailPieces(share, grant, access, invitation);
+  if (pieces.length === 0) return null;
+  // Each dot is bound to the fact after it, so a wrap never strands one at the
+  // end of a line.
+  const line = pieces.map((piece, index) =>
+    index === 0
+      ? piece
+      : m("span", { class: "inline-flex items-center gap-1.5" }, [
+          m("span", { "aria-hidden": "true" }, "·"),
+          piece,
+        ]),
+  );
   return m(
-    "span",
+    "div",
     {
-      "data-slot": "invitation",
-      class: "flex h-6 min-w-0 shrink items-center gap-1.5 type-helper",
+      "data-grant-details": grant.key,
+      class:
+        CARD_DETAIL_CLASS +
+        " flex flex-wrap items-center gap-x-1.5 text-tertiary",
     },
-    invitationStatusIndicatorContents(share, grant, state),
+    line,
   );
 }
 
-/** A refusal is written as a sentence: on the first line it would be cut short
- * or push the name out of the row, so it wraps under the name instead. */
+function grantDetailPieces(
+  share: SharePanelModel,
+  grant: Grant,
+  access: WorkspaceAccess | null,
+  invitation: InvitationStatusIndicator,
+): m.Children[] {
+  const status = grant.status;
+  if (status.state === "saving")
+    return [
+      m("span", { class: "flex items-center gap-1.5" }, [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        SAVING_LABEL,
+      ]),
+    ];
+  if (status.state === "failed")
+    return [
+      m("span", { class: "text-important" }, status.failureMessage),
+      textButton("Retry", () =>
+        share.retryGrant(share.currentTarget, grant.key),
+      ),
+    ];
+  const grantee = grant.grantee;
+  // Nobody is told about a domain grant; the card admits people the granter
+  // has never named.
+  if (grantee.kind === "email_domain")
+    return [
+      m(
+        "span",
+        `People at ${grantee.value} will not hear about this unless you ` +
+          "send them the link yourself.",
+      ),
+    ];
+  const pieces: m.Children[] = [];
+  if (access !== null) pieces.push(renderWorkspaceAccess(access));
+  const invitationStatus = renderInvitationStatus(invitation);
+  if (invitationStatus !== null) pieces.push(invitationStatus);
+  if (isReinviteOffered(invitation)) pieces.push(reinviteButton(share, grant));
+  return pieces;
+}
+
+/** Where the person's invitation stands, or null when the details have nothing
+ * to say about it: none was asked for, a refusal is said in full on a line of
+ * its own, and someone who joined is already said to have opened the
+ * workspace. The first invitation is automatic, so there is no first "Invite"
+ * control. */
+function renderInvitationStatus(state: InvitationStatusIndicator): m.Children {
+  switch (state.kind) {
+    case "inviting":
+      return m(
+        "span",
+        { "data-slot": "invitation", class: "flex items-center gap-1.5" },
+        [m(Spinner, { size: "sm", extra: "shrink-0" }), "Inviting"],
+      );
+    case "invited":
+      return m(
+        "span",
+        {
+          "data-slot": "invitation",
+          ...(state.at === null
+            ? {}
+            : { "data-tooltip": `Invited ${localeTime(state.at)}` }),
+        },
+        state.at === null
+          ? "Invited"
+          : `Invited ${formatRelativeAgo(state.at, Date.now())}`,
+      );
+    case "could_not_invite":
+      return m(
+        "span",
+        { "data-slot": "invitation", class: "text-warning" },
+        "Could not invite",
+      );
+    case "none":
+    case "refused":
+    case "joined":
+      return null;
+  }
+}
+
+function isReinviteOffered(state: InvitationStatusIndicator): boolean {
+  return (
+    (state.kind === "invited" ||
+      state.kind === "could_not_invite" ||
+      state.kind === "refused") &&
+    state.canReinvite
+  );
+}
+
+/** A refusal is written as a sentence, so it gets a line of its own, where it
+ * wraps rather than being cut short. */
 function renderInvitationRefusal(
   grant: Grant,
   state: InvitationStatusIndicator,
@@ -977,139 +1081,71 @@ function renderInvitationRefusal(
     "p",
     {
       "data-invite-refusal": grant.key,
-      // pl-8 is the lead's width plus the line's gap, which starts the words
-      // where the name starts.
-      class: "-mt-1 pb-2 pl-8 type-helper text-important",
+      class: CARD_DETAIL_CLASS + " text-important",
     },
     state.message,
   );
 }
 
 function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
-  return m(
-    Button,
-    {
-      variant: "ghost",
-      size: "icon",
-      "data-invite": grant.key,
-      "aria-label": "Invite again",
-      onclick: () => void share.invite(share.currentTarget, grant.key),
-    },
+  return textButton(
     "Invite again",
+    () => void share.invite(share.currentTarget, grant.key),
+    { "data-invite": grant.key, "aria-label": "Invite again" },
   );
 }
 
-function indicatorText(
-  classes: string,
-  text: string,
-  tooltip: string | null,
+/** A control set in a card's details, as words among the other words. */
+function textButton(
+  label: string,
+  onclick: () => void,
+  attrs: Record<string, string> = {},
 ): m.Children {
+  return m(
+    "button",
+    {
+      type: "button",
+      class: "cursor-pointer font-semibold text-primary hover:underline",
+      onclick,
+      ...attrs,
+    },
+    label,
+  );
+}
+
+/** Whether the card's person has opened the workspace, with the time of their
+ * latest visit on hover once they have. */
+function renderWorkspaceAccess(access: WorkspaceAccess): m.Children {
+  const text = workspaceAccessText(access, Date.now());
   return m(
     "span",
     {
-      class: `min-w-0 truncate ${classes}`,
-      ...(tooltip === null ? {} : { "data-tooltip": tooltip }),
+      "data-grant-access": access.kind,
+      ...(access.kind === "accessed" && access.at !== null
+        ? { "data-tooltip": `Accessed ${localeTime(access.at)}` }
+        : {}),
     },
     text,
   );
 }
 
-function invitationStatusIndicatorContents(
-  share: SharePanelModel,
-  grant: Grant,
-  state: InvitationStatusIndicator,
-): m.Children {
-  const nowMs = Date.now();
-  switch (state.kind) {
-    case "none":
-      return null;
-    case "inviting":
-      return [
-        m(Spinner, { size: "sm", extra: "shrink-0" }),
-        indicatorText("text-tertiary", "Inviting", null),
-      ];
-    case "invited":
-      return [
-        indicatorText(
-          "text-tertiary",
-          state.at === null
-            ? "Invited"
-            : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
-          state.at === null ? null : `Invited ${localeTime(state.at)}`,
-        ),
-        state.canReinvite ? reinviteButton(share, grant) : null,
-      ];
-    case "could_not_invite":
-      return [
-        indicatorText("text-warning", "Could not invite", null),
-        state.canReinvite ? reinviteButton(share, grant) : null,
-      ];
-    case "refused":
-      return state.canReinvite ? reinviteButton(share, grant) : null;
-    case "joined":
-      return indicatorText(
-        "text-success",
-        state.firstAt === null
-          ? "Joined"
-          : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
-        visitsTooltip(state.firstAt, state.lastAt),
-      );
+function workspaceAccessText(access: WorkspaceAccess, nowMs: number): string {
+  switch (access.kind) {
+    case "not_a_user":
+      return "Hasn't signed up for Imbue Studio yet";
+    case "never":
+      return "Never accessed your workspace";
+    case "accessed": {
+      const ago = access.at === null ? "" : formatRelativeAgo(access.at, nowMs);
+      return ago === ""
+        ? "Accessed your workspace"
+        : `Accessed your workspace ${ago}`;
+    }
   }
-}
-
-function visitsTooltip(
-  firstAt: string | null,
-  lastAt: string | null,
-): string | null {
-  const parts: string[] = [];
-  if (firstAt !== null) parts.push(`First visited ${localeTime(firstAt)}`);
-  if (lastAt !== null) parts.push(`last visited ${localeTime(lastAt)}`);
-  return parts.length === 0 ? null : parts.join(", ");
 }
 
 function localeTime(iso: string): string {
   return new Date(iso).toLocaleString();
-}
-
-function renderGrantState(share: SharePanelModel, grant: Grant): m.Children {
-  const status = grant.status;
-  if (status.state === "saving")
-    return m(
-      "span",
-      {
-        // The address beside this never yields: it cannot shrink below its own
-        // text, so something has to give when a long one leaves no room. This
-        // does, down to the spinner alone, rather than pushing the address out
-        // of the row.
-        class:
-          "flex min-w-0 items-center gap-1.5 overflow-hidden " +
-          "type-helper text-tertiary",
-      },
-      [
-        m(Spinner, { size: "sm", extra: "shrink-0" }),
-        m("span", { class: "min-w-0 truncate" }, SAVING_LABEL),
-      ],
-    );
-  if (status.state !== "failed") return null;
-  return m("span", { class: "flex min-w-0 items-center gap-1.5" }, [
-    m(
-      "span",
-      {
-        class: "min-w-0 truncate type-helper text-important",
-        "data-tooltip": status.failureMessage,
-      },
-      status.failureMessage,
-    ),
-    m(
-      Button,
-      {
-        variant: "ghost",
-        size: "icon",
-        onclick: () => share.retryGrant(share.currentTarget, grant.key),
-      },
-      "Retry",
-    ),
-  ]);
 }
 
 /** The box every row leads with, so the names line up down the list. */
@@ -1157,13 +1193,7 @@ function grantText(
   if (grantee.kind === "email_domain")
     return { primary: `Anyone at ${grantee.value}`, secondary: null };
   if (grantee.kind === "email")
-    return {
-      primary: grantee.value,
-      // Only a row the workspace has taken back can say this: until the account
-      // lookup has answered, nobody knows whether they have signed up.
-      secondary:
-        grant.status.state === "settled" ? "(hasn't signed up yet)" : null,
-    };
+    return { primary: grantee.value, secondary: null };
   const record = share.identityFor(grantee.userId);
   const email = record?.email ?? grantee.value;
   const name = record?.display_name ?? "";
