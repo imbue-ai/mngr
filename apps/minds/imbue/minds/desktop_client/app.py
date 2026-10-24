@@ -3120,6 +3120,7 @@ def start_system_interface_health_probe_loop(
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
+    mngr_forward_ca_cert_path: Path | None,
     root_concurrency_group: ConcurrencyGroup | None,
     sleep_tracker: SleepTracker | None = None,
 ) -> None:
@@ -3140,15 +3141,21 @@ def start_system_interface_health_probe_loop(
     envelope only enrolls an agent as suspect, and STUCK is reached solely
     through probe failures observed here.
 
-    Probing is skipped entirely when the plugin port or preauth cookie are
-    unset (e.g. Imbue Studio running without the plugin) -- without a working
-    plugin route there is no way to ask whether the workspace is reachable.
+    Probing is skipped entirely when the plugin port, preauth cookie or CA
+    certificate are unset (e.g. Imbue Studio running without the plugin) --
+    without a working plugin route there is no way to ask whether the
+    workspace is reachable.
 
     Each pass ticks ``sleep_tracker`` before it reads anything, so the failure
     runs it is about to age are aged against a wake this loop has established
     for itself rather than one the heartbeat thread may not have recorded yet.
     """
-    if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
+    if (
+        mngr_forward_port == 0
+        or not mngr_forward_preauth_cookie
+        or mngr_forward_ca_cert_path is None
+        or root_concurrency_group is None
+    ):
         return
 
     root_concurrency_group.start_new_thread(
@@ -3158,6 +3165,7 @@ def start_system_interface_health_probe_loop(
             backend_resolver,
             mngr_forward_port,
             mngr_forward_preauth_cookie,
+            mngr_forward_ca_cert_path,
             root_concurrency_group,
             sleep_tracker,
         ),
@@ -3171,6 +3179,7 @@ def _run_system_interface_health_probe_loop(
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str,
+    mngr_forward_ca_cert_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     sleep_tracker: SleepTracker | None,
 ) -> None:
@@ -3189,6 +3198,7 @@ def _run_system_interface_health_probe_loop(
     with make_workspace_probe_client(
         preauth_cookie=mngr_forward_preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+        ca_cert_path=mngr_forward_ca_cert_path,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
             if sleep_tracker is not None:
@@ -3215,11 +3225,9 @@ def _run_system_interface_health_probe_loop(
                 # up, or the agent gone) answers with its 503 loader, which
                 # records as a failure below.
                 outcome = probe_workspace_through_plugin(
+                    probe_client=probe_client,
                     mngr_forward_port=mngr_forward_port,
-                    preauth_cookie=mngr_forward_preauth_cookie,
                     workspace_id=str(aid),
-                    probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-                    client=probe_client,
                 )
                 if outcome.is_ready:
                     probe_log_gate.forget(aid)

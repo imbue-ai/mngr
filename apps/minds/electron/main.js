@@ -26,6 +26,7 @@ const {
   isSandboxRelaunched,
 } = require('./linux-sandbox');
 const { startRelaunchAfterExit } = require('./linux-relaunch');
+const { createCertificateVerifyProc, loadForwardProxyCa } = require('./forward-proxy-trust');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -2961,35 +2962,31 @@ ipcMain.handle('open-full-disk-access-settings', () => {
   return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
 });
 
-// Trust the forward proxy's CA-signed leaf certs for its loopback origins.
-// The CA is local to this machine (under the plugin state dir) and only
-// Imbue Studio's own loopback origins use it; every real https origin still gets
-// Chromium's default verification (cb(-3)).
-function isLoopbackHostname(hostname) {
-  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';
-}
-
-function trustLoopbackCerts() {
-  session.defaultSession.setCertificateVerifyProc((request, callback) => {
-    if (isLoopbackHostname(request.hostname)) {
-      callback(0); // trust
-    } else {
-      callback(-3); // defer to Chromium's default verification
-    }
-  });
-  console.log('[startup] Trusting forward-proxy loopback certs (HTTP/2 on)');
+// Trust the forward proxy's leaf certs for its loopback origins by the local
+// CA that signed them (see forward-proxy-trust.js); every other origin keeps
+// Chromium's default verification.
+function trustForwardProxyCerts(caCertPath) {
+  session.defaultSession.setCertificateVerifyProc(createCertificateVerifyProc(loadForwardProxyCa(caCertPath)));
+  console.log('[startup] Trusting the forward proxy\'s local CA for its loopback origins (HTTP/2 on)');
 }
 
 async function handleMngrForwardStarted(event) {
   const port = event.mngr_forward_port;
   const preauth = event.preauth_cookie;
-  if (!port || !preauth) {
-    console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
+  const caCertPath = event.ca_cert_path;
+  if (!port || !preauth || !caCertPath) {
+    console.warn('[startup] mngr_forward_started missing port, preauth_cookie or ca_cert_path:', event);
     return;
   }
   const url = `https://localhost:${port}`;
   mngrForwardBaseUrl = url;
-  trustLoopbackCerts();
+  try {
+    trustForwardProxyCerts(caCertPath);
+  } catch (err) {
+    // Without the CA every workspace origin fails TLS, which the first
+    // navigation reports; nothing here can stand in for it.
+    console.warn('[startup] Failed to read the forward proxy CA at', caCertPath, err);
+  }
   // The workspace iframe is cross-site to the chrome page, so the pre-set
   // cookie must be SameSite=None (Electron: 'no_restriction') + Secure to be
   // sent from inside it -- matching the attributes the plugin itself sets.

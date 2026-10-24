@@ -58,6 +58,7 @@ from imbue.minds.desktop_client.agent_creator import is_default_workspace_templa
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
+from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
@@ -87,6 +88,7 @@ from imbue.minds.desktop_client.testing import install_stub_on_path
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import vault_kv_stub_body
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
@@ -1315,11 +1317,17 @@ def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> Non
     assert (dest / "f").read_text() == "on branch\n"
 
 
+def _forward_ca_cert_path(tmp_path: Path) -> Path:
+    """Where a test's plugin stand-in writes its CA certificate and the creator under test pins it."""
+    return tmp_path / "forward-ca.pem"
+
+
 def _make_test_creator(
     tmp_path,
     *,
     mngr_forward_port: int = 0,
     preauth_cookie: str = "",
+    is_forward_ca_configured: bool = True,
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
@@ -1342,6 +1350,7 @@ def _make_test_creator(
         report_backup_setup_failure=report_backup_setup_failure,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        mngr_forward_ca_cert_path=_forward_ca_cert_path(tmp_path) if is_forward_ca_configured else None,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
@@ -1404,9 +1413,20 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     assert log_sink.appended_line_count == 0
 
 
+def test_wait_for_workspace_ready_short_circuits_without_a_ca_certificate(tmp_path) -> None:
+    """No CA certificate to verify the plugin against also disables the probe."""
+    creator = _make_test_creator(
+        tmp_path, mngr_forward_port=8421, preauth_cookie="anything", is_forward_ca_configured=False
+    )
+    log_sink = CreateAttemptLogSink()
+    aid = AgentId.generate()
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+    assert log_sink.appended_line_count == 0
+
+
 def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     """The probe stops as soon as the (subdomain) endpoint returns 200."""
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=2) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1447,7 +1467,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1482,11 +1502,7 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     workspace_id = AgentId.generate()
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(workspace_id),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(workspace_id)
         )
 
     assert outcome.is_ready
@@ -1515,11 +1531,7 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert not outcome.is_ready
@@ -1551,16 +1563,33 @@ def test_probe_workspace_through_plugin_names_the_transport_failure(raised: Exce
 
     with httpx.Client(transport=httpx.MockTransport(_fail)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert not outcome.is_ready
     assert outcome.status_code is None
     assert outcome.summary == expected_summary
+
+
+def test_probe_client_refuses_a_proxy_signed_by_another_ca(tmp_path: Path) -> None:
+    """The probe client trusts the CA at its path and nothing else, so an impostor on the port gets no cookie.
+
+    The preauth cookie the client carries is accepted by the plugin as the
+    owner, which is what makes verifying the proxy matter even on loopback.
+    """
+    other_ca_cert_path = tmp_path / "other-ca.pem"
+    write_forward_ca_for_test(other_ca_cert_path)
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
+        with make_workspace_probe_client(
+            preauth_cookie="any-preauth", probe_timeout_seconds=5.0, ca_cert_path=other_ca_cert_path
+        ) as client:
+            outcome = probe_workspace_through_plugin(
+                probe_client=client, mngr_forward_port=port, workspace_id=str(AgentId.generate())
+            )
+
+    assert not outcome.is_ready
+    assert outcome.status_code is None
+    assert "CERTIFICATE_VERIFY_FAILED" in outcome.summary, outcome.summary
 
 
 def test_probe_workspace_uses_https_scheme() -> None:
@@ -1578,11 +1607,7 @@ def test_probe_workspace_uses_https_scheme() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert captured[0].url.scheme == "https"
@@ -1630,7 +1655,9 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
         poll_until(lambda: calls_path.read_text() != "", poll_interval=0.01)
 
     with scripted_workspace_probe_server(
-        not_ready_count=0, on_first_request=_hold_until_the_follow_recorded_its_call
+        ca_cert_path=_forward_ca_cert_path(tmp_path),
+        not_ready_count=0,
+        on_first_request=_hold_until_the_follow_recorded_its_call,
     ) as port:
         creator = _make_test_creator(
             tmp_path,
@@ -1656,7 +1683,7 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
-    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2418,7 +2445,7 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
     install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
     # The readiness probe never answers 200, so the create attempt sits in
     # WAITING_FOR_READY for the whole (short) ready window.
-    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2475,7 +2502,7 @@ def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions
         if info is not None and info.agent_id == aid:
             is_host_file_present_by_canonical_notification.append(host_permissions_path.is_file())
 
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2509,7 +2536,7 @@ def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_pat
         finished.append((create_attempt_id, agent_id))
         is_finished.set()
 
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path, mngr_forward_port=port, preauth_cookie="any-preauth", on_create_attempt_done=on_done
         )

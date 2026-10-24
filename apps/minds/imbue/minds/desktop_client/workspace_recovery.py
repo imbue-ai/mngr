@@ -101,6 +101,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
+from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
@@ -835,6 +836,7 @@ def _await_system_interface_ready(
     tracker: SystemInterfaceHealthTracker,
     mngr_forward_port: int,
     preauth_cookie: str,
+    ca_cert_path: Path,
     wait_seconds: float,
     concurrency_group: ConcurrencyGroup,
 ) -> RecoveryReadinessResult:
@@ -867,6 +869,7 @@ def _await_system_interface_ready(
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+        ca_cert_path=ca_cert_path,
     ) as probe_client:
         while time.monotonic() < deadline:
             if concurrency_group.is_shutting_down():
@@ -878,11 +881,9 @@ def _await_system_interface_ready(
                 )
                 return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.READY, last_probe=last_outcome)
             outcome = probe_workspace_through_plugin(
+                probe_client=probe_client,
                 mngr_forward_port=mngr_forward_port,
-                preauth_cookie=preauth_cookie,
                 workspace_id=str(workspace_agent_id),
-                probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-                client=probe_client,
             )
             last_outcome = outcome
             if outcome.is_ready:
@@ -1596,6 +1597,8 @@ def run_host_recovery_sequence(
         tracker,
         mngr_forward_port,
         mngr_forward_preauth_cookie,
+        # The proxy runs under the same host dir as the start's mngr calls.
+        local_ca_cert_path(mngr_host_dir),
         startup_wait_seconds,
         concurrency_group,
     )

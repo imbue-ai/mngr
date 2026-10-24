@@ -614,7 +614,7 @@ export class NotificationsUiController {
           );
       },
       (error) =>
-        console.warn(`The notification feed action ${path} failed`, error),
+        console.warn("The notification feed action %s failed", path, error),
     );
   }
 

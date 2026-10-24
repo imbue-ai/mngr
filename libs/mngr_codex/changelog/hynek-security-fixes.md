@@ -1,0 +1,1 @@
+The `codex app-server` socket directory name now hashes the agent's codex home with `hashlib.sha1(..., usedforsecurity=False)`, marking the hash as a path shortener rather than a security control. This resolves Bandit's B324 (`hashlib`) finding on `get_codex_app_server_socket_path`; the socket path itself is unchanged.

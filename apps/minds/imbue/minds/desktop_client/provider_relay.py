@@ -29,6 +29,7 @@ from enum import StrEnum
 from enum import auto
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -566,6 +567,9 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
 
     mngr_forward_port: int = Field(frozen=True, description="Port the local mngr forward plugin listens on")
     preauth_cookie: str = Field(frozen=True, description="The plugin's preauth session cookie")
+    ca_cert_path: Path = Field(
+        frozen=True, description="The plugin's local CA certificate, which its TLS is verified against"
+    )
     workspace_id: AgentId = Field(frozen=True, description="The workspace whose chat app runs the flow")
     chat_service_label: str = Field(frozen=True, description="The chat app's origin label in that workspace")
     flow_id: str = Field(frozen=True, description="The chat app's sign-in flow the callback belongs to")
@@ -574,7 +578,9 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
         url = f"https://127.0.0.1:{self.mngr_forward_port}/api/accounts/flow/{self.flow_id}/callback"
         host = f"{self.chat_service_label}.{self.workspace_id}.localhost"
         with make_workspace_probe_client(
-            preauth_cookie=self.preauth_cookie, probe_timeout_seconds=_WORKSPACE_FORWARD_TIMEOUT_SECONDS
+            preauth_cookie=self.preauth_cookie,
+            probe_timeout_seconds=_WORKSPACE_FORWARD_TIMEOUT_SECONDS,
+            ca_cert_path=self.ca_cert_path,
         ) as client:
             try:
                 response = client.post(url, headers={"Host": host}, json={"path_and_query": path_and_query})

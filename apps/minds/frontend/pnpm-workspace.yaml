@@ -8,5 +8,15 @@ packages:
 # including transitive dependencies. Only bites during resolution; frozen
 # installs replay the existing lockfile unaffected.
 minimumReleaseAge: 20160
+# Refuse a release whose publish-trust evidence (trusted publisher, provenance)
+# is weaker than an earlier release of the same package had.
+trustPolicy: no-downgrade
+trustPolicyExclude:
+  # Hand-published (with provenance) by a Tailwind Labs maintainer between
+  # releases that went out through trusted publishing.
+  - "prettier-plugin-tailwindcss@0.7.4"
+# Refuse transitive dependencies resolved from git repositories or tarball
+# URLs rather than the registry.
+blockExoticSubdeps: true
 onlyBuiltDependencies:
   - esbuild

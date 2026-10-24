@@ -46,6 +46,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_forward.errors import ForwardTLSError
+from imbue.mngr_forward.primitives import forward_plugin_state_dir
 
 # HTTP/2 first, HTTP/1.1 fallback. WebSocket upgrades negotiate http/1.1 on
 # their own connection via this same list; h2 carries the plain HTTP requests
@@ -60,6 +61,7 @@ _LEAF_VALIDITY_DAYS: Final[int] = 825
 _CA_VALIDITY_DAYS: Final[int] = 3650
 _RSA_KEY_SIZE: Final[int] = 2048
 
+_CA_DIR_NAME: Final[str] = "ca"
 CA_CERT_FILENAME: Final[str] = "ca_cert.pem"
 _CA_KEY_FILENAME: Final[str] = "ca_key.pem"
 
@@ -71,9 +73,12 @@ _MAX_MINTED_CONTEXTS: Final[int] = 1024
 
 # X.509 caps the CommonName attribute at 64 characters. Deep service origins
 # (e.g. ``uuid.openvscode.host-<32hex>.localhost``) exceed that, so certs for
-# long names are SAN-only (empty subject) -- clients verify against SANs and
-# ignore the CN anyway.
+# long names carry a fixed subject instead of the name -- clients verify
+# against SANs and ignore the subject anyway. The subject is never left empty:
+# RFC 5280 only allows that with a critical SAN, and a verifier that enforces
+# the rule (or any other empty-subject rule) would refuse the leaf outright.
 _MAX_COMMON_NAME_LENGTH: Final[int] = 64
+_LONG_NAME_LEAF_SUBJECT: Final[str] = "mngr forward local service"
 
 
 class LocalCertificateAuthority(FrozenModel):
@@ -135,6 +140,20 @@ def _build_ca_certificate(ca_key: rsa.RSAPrivateKey) -> bytes:
     return certificate.public_bytes(serialization.Encoding.PEM)
 
 
+def local_ca_dir(mngr_host_dir: Path) -> Path:
+    """Where the persistent local CA lives for the proxy run under ``mngr_host_dir``."""
+    return forward_plugin_state_dir(mngr_host_dir) / _CA_DIR_NAME
+
+
+def local_ca_cert_path(mngr_host_dir: Path) -> Path:
+    """The local CA's certificate: the trust anchor a client pins to verify the proxy's TLS.
+
+    The proxy creates the CA before it listens, so a client that has learned
+    the proxy's port can rely on the certificate being there.
+    """
+    return local_ca_dir(mngr_host_dir) / CA_CERT_FILENAME
+
+
 def load_or_create_local_ca(ca_dir: Path) -> LocalCertificateAuthority:
     """Load the persistent local CA from ``ca_dir``, creating it on first use.
 
@@ -172,7 +191,7 @@ def _build_leaf_certificate(
     if len(dns_names[0]) <= _MAX_COMMON_NAME_LENGTH:
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_names[0])])
     else:
-        subject = x509.Name([])
+        subject = x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, _LONG_NAME_LEAF_SUBJECT)])
     ca_certificate = x509.load_pem_x509_certificate(ca.cert_pem)
     ca_key = _load_rsa_key(ca.key_pem)
     now = datetime.now(timezone.utc)

@@ -852,8 +852,9 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
         path = f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat"
         handed_over.append(clients[0].post(path, json=_welcome_chat_body()).status_code)
 
+    ca_cert_path = tmp_path / "forward-ca.pem"
     with scripted_workspace_probe_server(
-        not_ready_count=0, on_first_request=hand_over_while_waiting_for_the_workspace
+        not_ready_count=0, ca_cert_path=ca_cert_path, on_first_request=hand_over_while_waiting_for_the_workspace
     ) as port:
         creator = AgentCreator(
             paths=InstallationPaths(data_dir=tmp_path / "minds"),
@@ -861,6 +862,7 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
             mngr_forward_port=port,
             mngr_forward_preauth_cookie="any-preauth",
+            mngr_forward_ca_cert_path=ca_cert_path,
             on_create_attempt_done=seeder.seed_held,
         )
         client, _app, _auth_store = build_desktop_client_for_test(

@@ -687,9 +687,9 @@ def _run_test_ssh_server(
     allowed_username: str,
     allowed_public_key_blob: str,
     allow_sessions: bool,
+    host_key: paramiko.RSAKey,
 ) -> Generator[int, None, None]:
-    """Run a loopback SSH server in a background thread, yielding its port."""
-    host_key = paramiko.RSAKey.generate(bits=1024)
+    """Run a loopback SSH server presenting ``host_key`` in a background thread, yielding its port."""
     listening_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listening_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listening_sock.bind(("127.0.0.1", 0))
@@ -710,34 +710,104 @@ def _run_test_ssh_server(
         accept_thread.join(timeout=2.0)
 
 
+def _write_test_known_hosts(tmp_path: Path, port: int, host_key: paramiko.PKey) -> Path:
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text(
+        f"{format_as_known_hosts_address('127.0.0.1', port)} {host_key.get_name()} {host_key.get_base64()}\n"
+    )
+    return known_hosts_path
+
+
 def test_wait_for_sshd_with_retry_succeeds_when_server_accepts_auth_and_sessions(tmp_path: Path) -> None:
     """The probe must authenticate as the given username (not the local OS user) and open a session."""
     private_key_path, public_key_path = save_ssh_keypair(tmp_path)
     public_key_blob = public_key_path.read_text().split()[1]
+    host_key = paramiko.RSAKey.generate(bits=1024)
 
-    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=True) as port:
-        wait_for_sshd_with_retry("127.0.0.1", port, 10.0, private_key_path, username=_TEST_SSH_USERNAME)
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, True, host_key) as port:
+        known_hosts_path = _write_test_known_hosts(tmp_path, port, host_key)
+        wait_for_sshd_with_retry(
+            "127.0.0.1", port, 10.0, private_key_path, username=_TEST_SSH_USERNAME, known_hosts_path=known_hosts_path
+        )
 
 
 def test_wait_for_sshd_with_retry_times_out_when_username_is_rejected(tmp_path: Path) -> None:
     """A server that rejects the probe's username must produce the session-open timeout error."""
     private_key_path, public_key_path = save_ssh_keypair(tmp_path)
     public_key_blob = public_key_path.read_text().split()[1]
+    host_key = paramiko.RSAKey.generate(bits=1024)
 
-    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=True) as port:
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, True, host_key) as port:
+        known_hosts_path = _write_test_known_hosts(tmp_path, port, host_key)
         with pytest.raises(MngrError, match="could not open sessions"):
-            wait_for_sshd_with_retry("127.0.0.1", port, 1.0, private_key_path, username="mngr-wrong-ssh-user")
+            wait_for_sshd_with_retry(
+                "127.0.0.1",
+                port,
+                1.0,
+                private_key_path,
+                username="mngr-wrong-ssh-user",
+                known_hosts_path=known_hosts_path,
+            )
 
 
 def test_wait_for_sshd_with_retry_times_out_when_sessions_are_refused(tmp_path: Path) -> None:
     """Auth succeeding is not enough: a server that refuses session channels must time out."""
     private_key_path, public_key_path = save_ssh_keypair(tmp_path)
     public_key_blob = public_key_path.read_text().split()[1]
+    host_key = paramiko.RSAKey.generate(bits=1024)
 
-    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=False) as port:
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, False, host_key) as port:
+        known_hosts_path = _write_test_known_hosts(tmp_path, port, host_key)
         with allow_warnings(match="Administratively prohibited"):
             with pytest.raises(MngrError, match="could not open sessions"):
-                wait_for_sshd_with_retry("127.0.0.1", port, 1.0, private_key_path, username=_TEST_SSH_USERNAME)
+                wait_for_sshd_with_retry(
+                    "127.0.0.1",
+                    port,
+                    1.0,
+                    private_key_path,
+                    username=_TEST_SSH_USERNAME,
+                    known_hosts_path=known_hosts_path,
+                )
+
+
+def test_wait_for_sshd_with_retry_rejects_a_host_key_that_differs_from_the_pin(tmp_path: Path) -> None:
+    """A server presenting a key other than the pinned one fails at once, well before the timeout."""
+    private_key_path, public_key_path = save_ssh_keypair(tmp_path)
+    public_key_blob = public_key_path.read_text().split()[1]
+    pinned_host_key = paramiko.RSAKey.generate(bits=1024)
+    presented_host_key = paramiko.RSAKey.generate(bits=1024)
+
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, True, presented_host_key) as port:
+        known_hosts_path = _write_test_known_hosts(tmp_path, port, pinned_host_key)
+        with pytest.raises(MngrError, match="does not match the one pinned"):
+            wait_for_sshd_with_retry(
+                "127.0.0.1",
+                port,
+                60.0,
+                private_key_path,
+                username=_TEST_SSH_USERNAME,
+                known_hosts_path=known_hosts_path,
+            )
+
+
+def test_wait_for_sshd_with_retry_never_connects_to_a_server_with_no_pinned_key(tmp_path: Path) -> None:
+    """With no pin for the server, the probe must refuse it rather than trust and record its key."""
+    private_key_path, public_key_path = save_ssh_keypair(tmp_path)
+    public_key_blob = public_key_path.read_text().split()[1]
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("")
+
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, True, paramiko.RSAKey.generate(bits=1024)) as port:
+        with pytest.raises(MngrError, match="could not open sessions"):
+            wait_for_sshd_with_retry(
+                "127.0.0.1",
+                port,
+                1.0,
+                private_key_path,
+                username=_TEST_SSH_USERNAME,
+                known_hosts_path=known_hosts_path,
+            )
+    assert known_hosts_path.read_text() == ""
 
 
 # parse_openssh_public_key_blob / wait_for_expected_host_key

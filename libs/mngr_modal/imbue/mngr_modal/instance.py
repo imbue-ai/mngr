@@ -1284,7 +1284,14 @@ class ModalProviderInstance(BaseProviderInstance):
     ) -> None:
         """Wait for sshd to be ready to accept connections."""
         private_key_path, _ = self._get_ssh_keypair(host_id)
-        wait_for_sshd_with_retry(hostname, port, timeout_seconds, private_key_path, username=DEFAULT_SSH_USER)
+        wait_for_sshd_with_retry(
+            hostname,
+            port,
+            timeout_seconds,
+            private_key_path,
+            username=DEFAULT_SSH_USER,
+            known_hosts_path=self._known_hosts_path,
+        )
 
     def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""

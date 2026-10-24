@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -99,6 +100,7 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
@@ -584,6 +586,7 @@ def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answe
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with (
         ConcurrencyGroup(name="test-restart") as cg,
         capture_error_logs() as error_records,
@@ -641,6 +644,7 @@ def test_run_host_recovery_sequence_completes_when_the_shell_is_seen_answering_t
         )
         tracker.record_forwarded_answer(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-answered") as cg, capture_error_logs() as error_records:
         cg.start_new_thread(target=_answer_once_the_wait_begins, name="test-forwarded-answer")
         started = time.monotonic()
@@ -683,6 +687,7 @@ def test_run_host_recovery_sequence_ignores_an_answer_from_before_its_commands_r
     # The renderer's traffic during the stop, reported by the plugin before the worker runs.
     tracker.record_forwarded_answer(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-early-answer") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2033,6 +2038,7 @@ def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: P
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2061,6 +2067,7 @@ def test_a_start_that_really_booted_the_host_keeps_the_restart_framing(tmp_path:
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2096,6 +2103,7 @@ def test_a_failure_the_probe_outranked_ends_the_operation_as_a_caveat(tmp_path: 
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
     registry = _started_registry(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2151,7 +2159,7 @@ def test_run_host_recovery_sequence_recovers_a_workspace_that_boots_slowly(tmp_p
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    with scripted_workspace_probe_server(not_ready_count=2, ca_cert_path=local_ca_cert_path(tmp_path)) as port:
         with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
             run_host_recovery_sequence(
                 workspace_agent_id=workspace_agent,
@@ -2175,30 +2183,33 @@ def test_run_host_recovery_sequence_recovers_a_workspace_that_boots_slowly(tmp_p
     assert error_records == []
 
 
-def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None:
+def test_await_system_interface_ready_reports_a_slow_boot_that_answers(tmp_path: Path) -> None:
     """The wait polls past not-ready responses and reports READY on the first 200."""
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    with scripted_workspace_probe_server(not_ready_count=2, ca_cert_path=ca_cert_path) as port:
         with ConcurrencyGroup(name="test-wait") as cg:
             readiness = _await_system_interface_ready(
-                AgentId.generate(), SystemInterfaceHealthTracker(), port, "cookie", 30.0, concurrency_group=cg
+                AgentId.generate(), SystemInterfaceHealthTracker(), port, "cookie", ca_cert_path, 30.0, cg
             )
     assert readiness.outcome is RecoveryReadinessOutcome.READY
     assert readiness.last_probe_summary == "HTTP 200"
 
 
-def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> None:
+def test_await_system_interface_ready_times_out_when_nothing_ever_answers(tmp_path: Path) -> None:
     """A budget that elapses with no answer is a TIMED_OUT verdict (the real failure)."""
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with ConcurrencyGroup(name="test-wait") as cg:
         # Port 1 refuses connections, so every poll fails fast.
         readiness = _await_system_interface_ready(
-            AgentId.generate(), SystemInterfaceHealthTracker(), 1, "cookie", 0.1, concurrency_group=cg
+            AgentId.generate(), SystemInterfaceHealthTracker(), 1, "cookie", ca_cert_path, 0.1, cg
         )
     assert readiness.outcome is RecoveryReadinessOutcome.TIMED_OUT
     # The refused connection is the whole diagnosis, and rides on the verdict.
     assert readiness.last_probe_summary.startswith("ConnectError"), readiness.last_probe_summary
 
 
-def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
+def test_await_system_interface_ready_gives_up_promptly_on_shutdown(tmp_path: Path) -> None:
     """A shutdown cuts the wait short well inside the cold-boot budget, and is not a timeout.
 
     The budget spans a full cold boot -- far longer than the concurrency group's
@@ -2206,6 +2217,8 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
     parked until the budget expires. Sleeping on the shutdown event rather than a
     bare timer is what bounds it.
     """
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with ConcurrencyGroup(name="test-wait") as cg:
         cg.shutdown()
         started = time.monotonic()
@@ -2215,6 +2228,7 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
             SystemInterfaceHealthTracker(),
             1,
             "cookie",
+            ca_cert_path,
             _HOST_RECOVERY_STARTUP_WAIT_SECONDS,
             concurrency_group=cg,
         )
@@ -2224,7 +2238,7 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
     assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s past a shutdown"
 
 
-def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_elsewhere() -> None:
+def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_elsewhere(tmp_path: Path) -> None:
     """A shell answer the plugin reported ends the wait at once, whatever its own probes are getting back.
 
     The wait's probes and the renderer's traffic go through the same plugin,
@@ -2237,12 +2251,14 @@ def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_el
     tracker.mark_recovering(agent_id, HostRecoveryKind.RESTART)
     tracker.mark_awaiting_readiness(agent_id)
     results: list[RecoveryReadinessResult] = []
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
 
     with capture_loguru(level="INFO") as log_output, ConcurrencyGroup(name="test-wait-answered") as cg:
         cg.start_new_thread(
             # Port 1 refuses connections, so only the tracker can end this inside the budget.
             target=lambda: results.append(
-                _await_system_interface_ready(agent_id, tracker, 1, "cookie", 30.0, concurrency_group=cg)
+                _await_system_interface_ready(agent_id, tracker, 1, "cookie", ca_cert_path, 30.0, cg)
             ),
             name="test-readiness-wait",
         )
@@ -2279,7 +2295,9 @@ def test_run_host_recovery_sequence_does_not_report_a_failure_when_shutdown_cuts
         # Quit at the first readiness probe: by then ``mngr start`` has already
         # run, so this lands the shutdown inside the wait -- the real ordering --
         # rather than before the sequence's subprocess steps.
-        with scripted_workspace_probe_server(not_ready_count=10**6, on_first_request=cg.shutdown) as port:
+        with scripted_workspace_probe_server(
+            not_ready_count=10**6, ca_cert_path=local_ca_cert_path(tmp_path), on_first_request=cg.shutdown
+        ) as port:
             with capture_error_logs() as error_records:
                 run_host_recovery_sequence(
                     workspace_agent_id=workspace_agent,
@@ -2777,6 +2795,7 @@ def test_a_readiness_wait_that_times_out_while_offline_is_downgraded_too(
     resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-offline-wait") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2811,6 +2830,7 @@ def test_a_readiness_wait_that_times_out_on_a_working_network_still_error_logs(
     detector, _prober = build_stub_connectivity_detector(root_concurrency_group)
     assert detector.probe_now().environment_block is EnvironmentBlock.NONE
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-online-wait") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,

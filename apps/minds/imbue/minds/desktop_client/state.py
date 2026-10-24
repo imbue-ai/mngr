@@ -90,9 +90,9 @@ class DesktopClientState(MutableModel):
         default=None,
         description=(
             "HTTP client for the share-URL readiness probe (its only consumer), created by the "
-            "runtime with TLS verification disabled -- Python's ssl cannot wildcard-match "
-            "underscore hostnames like system_interface--..., so a verifying probe never goes "
-            "ready on links browsers accept. Injected in tests."
+            "runtime verifying certificate chains but not hostnames -- Python's ssl cannot match "
+            "the underscore labels (system_interface-<rand>) of workspaces built before labels "
+            "became strict hostname labels. Injected in tests."
         ),
     )
     agent_creator: AgentCreator | None = Field(

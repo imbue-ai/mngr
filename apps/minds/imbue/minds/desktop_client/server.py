@@ -33,6 +33,7 @@ server inside it.
 """
 
 import signal
+import ssl
 import threading
 from collections.abc import Iterator
 from collections.abc import Sequence
@@ -60,6 +61,26 @@ from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 # Hard timeout for the shared HTTP client used by the share-readiness probe
 # (mirrors the old FastAPI lifespan's httpx client timeout).
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+def _share_probe_ssl_context() -> ssl.SSLContext:
+    """TLS for the share-URL readiness probe: the chain is verified against the system roots, the hostname is not.
+
+    Workspaces built before service labels became strict hostname labels
+    still serve their shell at ``system_interface-<rand>.<domain>``, and
+    Python's ssl refuses to match any certificate against a label containing
+    an underscore, so a hostname check would report those shares as never
+    ready on links every browser accepts. The probe sends nothing and reads
+    only the response status, so a trusted certificate for the wrong name
+    can at most fake "ready"; the user's browser still fully verifies the
+    real link.
+    """
+    # CLEANUP: drop this context (httpx's default verifies the hostname) once no supported workspace
+    # predates the default-workspace-template release that mints hyphenated service labels.
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    return context
+
 
 # Worker-thread pool size for the cheroot server. This is a HARD cap, not a
 # floor: cheroot's ThreadPool.grow() runs exactly once at startup with this
@@ -106,16 +127,9 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
     which case the runtime neither creates nor closes it.
     """
     if not is_externally_managed_client:
-        # TLS verification is deliberately OFF: this client's only consumer is
-        # the share-URL readiness probe, and Python's ssl refuses to match a
-        # wildcard certificate against a hostname label containing an
-        # underscore (e.g. ``system_interface--...``), which browsers accept.
-        # A verifying probe therefore reports "certificate verify failed"
-        # forever on share links that work fine in every browser. The probe
-        # reads only the redirect status/location (the Access-app "live"
-        # signal) and transfers nothing sensitive; the user's browser still
-        # fully verifies the real link.
-        state.http_client = httpx.Client(follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=False)
+        state.http_client = httpx.Client(
+            follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=_share_probe_ssl_context()
+        )
     # Kick off the one-shot IP-geolocation lookup in the background so the create
     # form can default each provider's region to the user's nearest datacenter.
     if state.root_concurrency_group is not None:

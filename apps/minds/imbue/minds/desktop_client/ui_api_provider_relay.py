@@ -32,6 +32,7 @@ from imbue.minds.desktop_client.ui_models import UiBringAppToFrontMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.tls import local_ca_cert_path
 
 _FLOW_ID_PATTERN: Final[str] = r"^[A-Za-z0-9_-]{1,128}$"
 _MAX_SIGN_IN_URL_LENGTH: Final[int] = 8192
@@ -126,6 +127,7 @@ def _handle_provider_relay() -> Response:
         forwarder=WorkspaceChatSignInForwarder(
             mngr_forward_port=state.mngr_forward_port,
             preauth_cookie=state.mngr_forward_preauth_cookie,
+            ca_cert_path=local_ca_cert_path(state.mngr_host_dir),
             workspace_id=relay_request.workspace_id,
             chat_service_label=chat_service_label,
             flow_id=relay_request.flow_id,

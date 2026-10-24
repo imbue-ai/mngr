@@ -3,6 +3,7 @@ import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
@@ -24,6 +25,7 @@ from imbue.minds.desktop_client.provider_relay import decide_relay_request
 from imbue.minds.desktop_client.provider_relay import page_for_result
 from imbue.minds.desktop_client.provider_relay import parse_provider_sign_in_url
 from imbue.minds.desktop_client.testing import scripted_chat_callback_server
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import find_free_port
@@ -482,25 +484,29 @@ def test_registry_rate_limits_opening_sign_in_pages_per_workspace() -> None:
     assert claims == [True, False, True]
 
 
-def _forwarder(port: int) -> WorkspaceChatSignInForwarder:
+def _forwarder(port: int, ca_cert_path: Path) -> WorkspaceChatSignInForwarder:
     return WorkspaceChatSignInForwarder(
         mngr_forward_port=port,
         preauth_cookie="preauth-7d20",
+        ca_cert_path=ca_cert_path,
         workspace_id=_WORKSPACE_ID,
         chat_service_label="chat-k3m9",
         flow_id=_FLOW_ID,
     )
 
 
-def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and_reads_how_the_sign_in_ended() -> None:
+def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and_reads_how_the_sign_in_ended(
+    tmp_path: Path,
+) -> None:
     answer = {
         "state": "failed",
         "detail": "You didn't approve access.",
         "account_id": None,
         "provider_name": "Anthropic",
     }
-    with scripted_chat_callback_server(200, json.dumps(answer).encode()) as (port, recorded):
-        result = _forwarder(port).forward(f"/callback?error=access_denied&state={_STATE}")
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    with scripted_chat_callback_server(200, json.dumps(answer).encode(), ca_cert_path) as (port, recorded):
+        result = _forwarder(port, ca_cert_path).forward(f"/callback?error=access_denied&state={_STATE}")
 
     assert result == SignInCallbackResult(
         outcome=SignInOutcome.FAILED, provider_name="Anthropic", detail="You didn't approve access."
@@ -520,19 +526,25 @@ def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and
         pytest.param(200, b'{"state": "exploded", "provider_name": "Anthropic"}', id="unknown-state"),
     ],
 )
-def test_workspace_forwarder_raises_when_the_chat_app_does_not_answer_the_callback(status: int, body: bytes) -> None:
-    with scripted_chat_callback_server(status, body) as (port, _recorded):
+def test_workspace_forwarder_raises_when_the_chat_app_does_not_answer_the_callback(
+    status: int, body: bytes, tmp_path: Path
+) -> None:
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    with scripted_chat_callback_server(status, body, ca_cert_path) as (port, _recorded):
         with pytest.raises(SignInForwardError):
-            _forwarder(port).forward("/callback")
+            _forwarder(port, ca_cert_path).forward("/callback")
 
 
-def test_workspace_forwarder_reports_a_callback_the_chat_app_no_longer_takes() -> None:
+def test_workspace_forwarder_reports_a_callback_the_chat_app_no_longer_takes(tmp_path: Path) -> None:
     body = b'{"detail": "that sign-in is no longer active"}'
-    with scripted_chat_callback_server(409, body) as (port, _recorded):
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    with scripted_chat_callback_server(409, body, ca_cert_path) as (port, _recorded):
         with pytest.raises(SignInCallbackRefusedError, match="no longer active"):
-            _forwarder(port).forward("/callback")
+            _forwarder(port, ca_cert_path).forward("/callback")
 
 
-def test_workspace_forwarder_raises_when_the_workspace_is_unreachable() -> None:
+def test_workspace_forwarder_raises_when_the_workspace_is_unreachable(tmp_path: Path) -> None:
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with pytest.raises(SignInForwardError, match="could not be reached"):
-        _forwarder(find_free_port()).forward("/callback")
+        _forwarder(find_free_port(), ca_cert_path).forward("/callback")

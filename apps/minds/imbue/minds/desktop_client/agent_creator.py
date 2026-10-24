@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import tempfile
 import threading
 import time
@@ -122,6 +123,7 @@ from imbue.mngr.utils.progress import ProgressEvent
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.progress import parse_progress_event
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
+from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -130,13 +132,6 @@ from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-
-# Inlined to avoid pulling the ``imbue-mngr-forward`` package into Imbue Studio's
-# import graph -- Imbue Studio spawns the plugin as a subprocess and otherwise has
-# no Python-level dependency on it. The constant is a stable wire-format
-# contract; if the plugin ever renames its session cookie, both sides update
-# together.
-_MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 # Path the workspace-readiness / health probes hit through the plugin. We probe
 # ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
@@ -151,44 +146,57 @@ _WORKSPACE_PROBE_PATH: Final[str] = "/"
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
-def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
+def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float, ca_cert_path: Path) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
 
     Callers that probe in a tight poll loop should construct one of these and
-    pass it to ``probe_workspace_through_plugin`` on each iteration, instead
-    of letting the helper construct a one-shot client per call.
+    pass it to ``probe_workspace_through_plugin`` on each iteration.
 
-    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
-    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
-    hostname verification could never pass, and the cert is a self-signed
-    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
+    The proxy serves TLS (HTTP/2) under a leaf signed by its persistent local
+    CA, whose certificate is at ``ca_cert_path`` (see
+    ``imbue.mngr_forward.tls.local_ca_cert_path``). The client trusts that CA
+    and nothing else, so the preauth cookie, which the plugin accepts as the
+    owner, only ever reaches the proxy that minted the CA. The probes dial
+    ``127.0.0.1``, which the leaf names among its SANs, so hostname
+    verification stays on; the workspace vhost rides the ``Host`` header.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
-        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
-        verify=False,
+        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=ssl.create_default_context(cafile=str(ca_cert_path)),
     )
 
 
-def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> WorkspaceProbeOutcome:
-    """Issue a single GET through ``probe_client`` and report what came back.
+def probe_workspace_through_plugin(
+    probe_client: httpx.Client, mngr_forward_port: int, workspace_id: str
+) -> WorkspaceProbeOutcome:
+    """Issue a single probe through the plugin to the workspace's inner web server.
 
-    ``probe_url`` targets loopback directly; ``host_header`` carries the
-    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
-    as an explicit ``Host`` header rather than in the URL keeps the probe from
-    depending on ``*.localhost`` name resolution, which is not available on a
-    bare Linux host (only loopback ``localhost`` itself reliably resolves).
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``) with a client from
+    ``make_workspace_probe_client``. Reports the HTTP status observed (a 200
+    means some web server is up and answering on the inner port), or the
+    transport failure that produced no response (connect error, mid-stream
+    EOF, read timeout). This is the one definition of "ready" Imbue Studio
+    has, which is what makes every readiness check in it agree on the answer.
 
-    A failure at the transport layer (connect error, mid-stream EOF, read
-    timeout) is reported by name rather than swallowed: it is the only record
-    of *why* a probe never saw a 200, and a probe that fails while the
-    renderer is connected through the same plugin cannot be diagnosed without
-    it. Module-private helper used by ``probe_workspace_through_plugin``;
-    hoisted out to satisfy the Imbue Studio project's no-inner-functions ratchet.
+    ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
+    agent's id) -- the canonical vhost the plugin routes workspace origins on.
+    Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
+    redirects or refuses those, so they can never answer 200. The vhost rides
+    an explicit ``Host`` header while the URL targets loopback directly, which
+    keeps the probe from depending on ``*.localhost`` name resolution (not
+    available on a bare Linux host, where only ``localhost`` itself reliably
+    resolves).
+
+    A failure at the transport layer is reported by name rather than
+    swallowed: it is the only record of *why* a probe never saw a 200, and a
+    probe that fails while the renderer is connected through the same plugin
+    cannot be diagnosed without it.
     """
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     try:
-        response = probe_client.get(probe_url, headers={"Host": host_header})
+        response = probe_client.get(probe_url, headers={"Host": f"{workspace_id}.localhost"})
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
         # httpx leaves ReadError and every TimeoutException without a message,
         # so the class name is all there is to report for those.
@@ -196,41 +204,6 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
         failure = f"{type(e).__name__}: {message}" if message else type(e).__name__
         return WorkspaceProbeOutcome(status_code=None, failure=failure)
     return WorkspaceProbeOutcome(status_code=response.status_code)
-
-
-def probe_workspace_through_plugin(
-    mngr_forward_port: int,
-    preauth_cookie: str,
-    workspace_id: str,
-    probe_timeout_seconds: float,
-    client: httpx.Client | None = None,
-) -> WorkspaceProbeOutcome:
-    """Issue a single probe through the plugin to the workspace's inner web server.
-
-    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Reports the HTTP status
-    observed (a 200 means some web server is up and answering on the inner
-    port), or the transport failure that produced no response (connect error,
-    mid-stream EOF, read timeout). This is the one definition of "ready" Imbue Studio
-    has, which is what makes every readiness check in it agree on the answer.
-
-    ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
-    agent's id) -- the canonical vhost the plugin routes workspace origins on.
-    Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
-    redirects or refuses those, so they can never answer 200.
-
-    Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
-    to reuse the connection pool across a tight poll loop. When omitted, a
-    one-shot client is constructed for this single probe -- fine for
-    one-off / sporadic callers but wasteful in a loop.
-    """
-    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
-    host_header = f"{workspace_id}.localhost"
-    if client is not None:
-        return _probe_once(client, probe_url, host_header)
-    with make_workspace_probe_client(
-        preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
-    ) as one_shot:
-        return _probe_once(one_shot, probe_url, host_header)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -2130,6 +2103,15 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    mngr_forward_ca_cert_path: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The ``mngr forward`` plugin's local CA certificate, which readiness probes verify the "
+            "plugin's TLS against (see ``imbue.mngr_forward.tls.local_ca_cert_path``). None disables "
+            "readiness probing alongside ``mngr_forward_port=0``."
+        ),
+    )
     system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
         frozen=True,
         description=(
@@ -3430,14 +3412,16 @@ class AgentCreator(MutableModel):
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
-        Best-effort: if probing is unconfigured (``mngr_forward_port=0`` or
-        empty preauth, e.g. tests that bypass the plugin) we return immediately.
+        Best-effort: if probing is unconfigured (``mngr_forward_port=0``, empty
+        preauth or no CA certificate, e.g. tests that bypass the plugin) we
+        return immediately.
         On timeout we log + emit to the log queue and let the caller publish
         the redirect anyway -- the user lands on the plugin's auto-refresh
         retry page, which is better than spinning forever in the create attempt UI.
         """
-        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie:
-            logger.debug("Machine readiness probe disabled (port=0 or empty preauth); skipping")
+        ca_cert_path = self.mngr_forward_ca_cert_path
+        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie or ca_cert_path is None:
+            logger.debug("Machine readiness probe disabled (port=0, empty preauth or no CA certificate); skipping")
             return
 
         deadline = time.monotonic() + timeout_seconds
@@ -3456,13 +3440,18 @@ class AgentCreator(MutableModel):
         if bootstrap_tail is not None:
             bootstrap_tail.start()
         try:
-            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds)
+            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds, ca_cert_path)
         finally:
             if bootstrap_tail is not None:
                 bootstrap_tail.stop()
 
     def _probe_until_ready(
-        self, agent_id: AgentId, log_sink: CreateAttemptLogSink, deadline: float, timeout_seconds: float
+        self,
+        agent_id: AgentId,
+        log_sink: CreateAttemptLogSink,
+        deadline: float,
+        timeout_seconds: float,
+        ca_cert_path: Path,
     ) -> None:
         """The readiness loop proper: probe the system interface until it answers 200 or the deadline passes."""
         last_outcome: WorkspaceProbeOutcome | None = None
@@ -3470,15 +3459,14 @@ class AgentCreator(MutableModel):
         with make_workspace_probe_client(
             preauth_cookie=self.mngr_forward_preauth_cookie,
             probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+            ca_cert_path=ca_cert_path,
         ) as probe_client:
             while time.monotonic() < deadline:
                 attempt += 1
                 outcome = probe_workspace_through_plugin(
+                    probe_client=probe_client,
                     mngr_forward_port=self.mngr_forward_port,
-                    preauth_cookie=self.mngr_forward_preauth_cookie,
                     workspace_id=str(agent_id),
-                    probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
-                    client=probe_client,
                 )
                 last_outcome = outcome
                 if outcome.is_ready:

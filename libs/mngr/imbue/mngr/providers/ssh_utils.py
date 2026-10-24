@@ -471,6 +471,7 @@ def _can_authenticate_to_server(
     port: int,
     private_key_path: Path,
     username: str,
+    known_hosts_path: Path,
     timeout_seconds: float,
 ) -> bool:
     """Check if we can authenticate and open a session to the SSH server.
@@ -482,11 +483,16 @@ def _can_authenticate_to_server(
     protocol banner is the shared SSH_BANNER_TIMEOUT_SECONDS rather than the
     per-attempt budget because degraded tunnels (e.g. Modal) are slow specifically
     at sending that banner.
+
+    The server must present the host key pinned for it in ``known_hosts_path``.
+    A different key raises ``MngrError`` at once rather than being retried: it
+    will not change by waiting, and it is exactly what an impostor would present.
     """
     client = None
     try:
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_host_keys(str(known_hosts_path))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client.connect(
             hostname=hostname,
             port=port,
@@ -501,6 +507,11 @@ def _can_authenticate_to_server(
             return False
         transport.open_session(timeout=timeout_seconds)
         return True
+    except paramiko.BadHostKeyException as e:
+        raise MngrError(
+            f"SSH server at {hostname}:{port} presented a host key that does not match the one pinned in "
+            f"{known_hosts_path}: {e}"
+        ) from e
     except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError) as e:
         logger.trace("SSH session-open probe to {}:{} as user {} failed: {}", hostname, port, username, e)
         return False
@@ -519,6 +530,7 @@ def wait_for_sshd_with_retry(
     private_key_path: Path | None = None,
     *,
     username: str,
+    known_hosts_path: Path,
 ) -> None:
     """Wait for sshd to be ready, optionally verifying it can open sessions.
 
@@ -526,13 +538,14 @@ def wait_for_sshd_with_retry(
     the server can actually open authenticated sessions. This absorbs
     cold-start latency where the tunnel is available but sshd is still
     initializing. ``username`` is the SSH user the private key authenticates
-    as (only used when ``private_key_path`` is given).
+    as and ``known_hosts_path`` holds the server's pinned host key (both only
+    used when ``private_key_path`` is given).
     """
     wait_for_sshd(hostname, port, timeout_seconds)
 
     if private_key_path is not None:
         if not poll_until(
-            lambda: _can_authenticate_to_server(hostname, port, private_key_path, username, 5.0),
+            lambda: _can_authenticate_to_server(hostname, port, private_key_path, username, known_hosts_path, 5.0),
             timeout=timeout_seconds,
             poll_interval=0.5,
         ):

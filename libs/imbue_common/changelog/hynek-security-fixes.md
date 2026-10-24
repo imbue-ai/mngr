@@ -1,0 +1,1 @@
+The trailing-comments ratchet no longer counts Bandit's scoped `# nosec BNNN` suppression as a trailing comment. Bandit only honors the directive on the flagged line, as `ty` does with `# ty: ignore[...]`, which the ratchet already exempted. A bare `# nosec` (suppressing every check on the line) is still counted.

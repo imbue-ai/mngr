@@ -434,6 +434,10 @@ Both package managers are configured to refuse any distribution published less t
 
 The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. ToDesktop's build agents are not frozen: they run `pnpm install --no-frozen-lockfile`, which re-resolves on every build, so a version the cooldown refuses fails every desktop build at "Configuring App" even while CI is green. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`. The current exceptions are `latchkey`, `@imbue-ai/detent`, and `playwright` / `playwright-core` (latchkey pins playwright to an exact version, so a latchkey bump can otherwise land a playwright still inside the window).
 
+### Trust policy and registry-only subdependencies
+
+`apps/minds/pnpm-workspace.yaml` (and the frontend's) also set `trustPolicy: no-downgrade`, which refuses a release whose publish-trust evidence (trusted publisher, provenance) is weaker than an earlier-published release of the same package had -- a possible sign of a package takeover -- and `blockExoticSubdeps: true`, which refuses transitive dependencies resolved from git repositories or tarball URLs. Like the cooldown, both only bite during resolution, so they can fail a ToDesktop build or a `pnpm add` while frozen installs pass. When pnpm reports `ERR_PNPM_TRUST_DOWNGRADE`, check the version's publish history on the registry; if the downgrade is legitimate (typically a maintainer hand-publishing a backport), add that exact `name@version` to `trustPolicyExclude`. The current exceptions are `semver@6.3.1` here and `prettier-plugin-tailwindcss@0.7.4` in the frontend.
+
 ### Running locally
 
 ```bash

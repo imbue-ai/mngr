@@ -350,5 +350,5 @@ def text_step_id(prefix: ProgressStepId, text: str) -> ProgressStepId:
     """
     words = re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
     slug = "_".join(words[:_STEP_ID_SLUG_WORDS])[:_STEP_ID_SLUG_MAX_LENGTH].rstrip("_") or "step"
-    digest = hashlib.sha1(text.encode()).hexdigest()[:_STEP_ID_HASH_LENGTH]
+    digest = hashlib.sha1(text.encode(), usedforsecurity=False).hexdigest()[:_STEP_ID_HASH_LENGTH]
     return ProgressStepId(f"{prefix}.{slug}_{digest}")

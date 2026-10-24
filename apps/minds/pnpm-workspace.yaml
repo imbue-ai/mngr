@@ -28,6 +28,16 @@ minimumReleaseAgeExclude:
   # intermediates (electron/electron#55126), so it ships inside its cooldown.
   # CLEANUP: remove after 2026-11-04, when 45.0.0 clears the 14-day window.
   - electron@45.0.0
+# Refuse a release whose publish-trust evidence (trusted publisher, provenance)
+# is weaker than an earlier release of the same package had.
+trustPolicy: no-downgrade
+trustPolicyExclude:
+  # The CVE-2022-25883 backport, hand-published by an npm maintainer after the
+  # 7.x line had started shipping with provenance.
+  - "semver@6.3.1"
+# Refuse transitive dependencies resolved from git repositories or tarball
+# URLs rather than the registry.
+blockExoticSubdeps: true
 
 # ToDesktop builds every platform target from one host, but pnpm (like
 # npm) only installs optional deps matching the build host's

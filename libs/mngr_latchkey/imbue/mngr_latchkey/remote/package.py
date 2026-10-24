@@ -291,9 +291,12 @@ def _build_template_environment() -> Environment:
     shipping an empty string on a machine. A value that can carry arbitrary
     text (a message) is rendered through ``shquote``, so an apostrophe in it
     can never break the script that carries it; the paths and names, which
-    this build fixes, are rendered inside literal single quotes.
+    this build fixes, are rendered inside literal single quotes. Jinja's
+    autoescaping is HTML escaping, and nothing here is HTML: it would turn
+    those quotes into entities and corrupt every script, so it stays off
+    (Bandit's B701 is suppressed for that reason).
     """
-    environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True, autoescape=False)
+    environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True, autoescape=False)  # nosec B701
     environment.filters["shquote"] = shlex.quote
     return environment
 

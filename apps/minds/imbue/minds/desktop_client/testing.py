@@ -134,6 +134,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import make_in_memory_test_ca
+from imbue.mngr_forward.tls import LocalCertificateAuthority
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -929,9 +930,22 @@ class _ScriptedWorkspaceProbeHandler(BaseHTTPRequestHandler):
         del format, args
 
 
+def write_forward_ca_for_test(ca_cert_path: Path) -> LocalCertificateAuthority:
+    """Mint a fresh in-memory CA and write its certificate to ``ca_cert_path``, as the proxy does before it listens.
+
+    The probe clients pin the certificate at that path, so a stand-in for the
+    proxy serves a leaf signed by the CA this returns, and a test of a probe
+    that never reaches a server still needs the file to build its client.
+    """
+    ca = make_in_memory_test_ca()
+    ca_cert_path.parent.mkdir(parents=True, exist_ok=True)
+    ca_cert_path.write_bytes(ca.cert_pem)
+    return ca
+
+
 @contextmanager
 def scripted_workspace_probe_server(
-    not_ready_count: int, on_first_request: Callable[[], None] | None = None
+    not_ready_count: int, ca_cert_path: Path, on_first_request: Callable[[], None] | None = None
 ) -> Iterator[int]:
     """Serve a plugin stand-in on loopback, yielding its port.
 
@@ -943,7 +957,8 @@ def scripted_workspace_probe_server(
 
     Speaks TLS with the proxy's own CA-backed cert helpers: Imbue Studio always runs
     ``mngr forward`` with HTTP/2, so a readiness probe dials https and would fail
-    the handshake against a plain-HTTP socket.
+    the handshake against a plain-HTTP socket. The CA's certificate is written to
+    ``ca_cert_path``, where the probe under test pins it.
     """
     handler_cls = type(
         "_ScopedWorkspaceProbeHandler",
@@ -958,7 +973,7 @@ def scripted_workspace_probe_server(
         },
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    ca = make_in_memory_test_ca()
+    ca = write_forward_ca_for_test(ca_cert_path)
     chain_pem, key_pem = generate_server_credentials(ca)
     server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1007,12 +1022,13 @@ class _ScriptedChatCallbackHandler(BaseHTTPRequestHandler):
 
 @contextmanager
 def scripted_chat_callback_server(
-    answer_status: int, answer_body: bytes
+    answer_status: int, answer_body: bytes, ca_cert_path: Path
 ) -> Iterator[tuple[int, list[RecordedCallbackRequest]]]:
     """Serve a TLS stand-in for the forward plugin fronting a chat app's callback route.
 
     Every POST is recorded and answered with ``answer_status`` and ``answer_body``. Yields the
-    port and the live list of recorded requests.
+    port and the live list of recorded requests. The CA's certificate is written to
+    ``ca_cert_path``, where the forwarder under test pins it.
     """
     recorded: list[RecordedCallbackRequest] = []
     handler_cls = type(
@@ -1021,7 +1037,7 @@ def scripted_chat_callback_server(
         {"answer_status": answer_status, "answer_body": answer_body, "recorded": recorded},
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    ca = make_in_memory_test_ca()
+    ca = write_forward_ca_for_test(ca_cert_path)
     chain_pem, key_pem = generate_server_credentials(ca)
     server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()

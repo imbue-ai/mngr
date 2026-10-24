@@ -1,0 +1,1 @@
+The wait for a new sandbox's sshd now checks the sandbox's host key against the key mngr pinned for it in the provider's known_hosts file. Previously the probe accepted whatever key the endpoint presented. If the sandbox presents a different key, sandbox creation now fails immediately with an error naming the mismatch.
