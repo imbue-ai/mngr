@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "9";
+export const CONTRACT_VERSION = "10";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -52,12 +52,14 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 // Share tab, focused on that app. Payload: { serviceName }.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
-// the embedder held for it can be sent now. Payload: { opensLinks? }. Sent
-// once per page load, after the workspace registers its handlers. Without it
-// the embedder cannot tell a loaded frame from one whose page has not run its
-// listener yet, since a send into a not-yet-listening document is simply lost.
-// `opensLinks: true` promises the page handles OPEN_LINK, external links
-// included; `false` or absent means it does not.
+// the embedder held for it can be sent now. Payload: { opensLinks?,
+// opensCustomSchemeLinks? }. Sent once per page load, after the workspace
+// registers its handlers. Without it the embedder cannot tell a loaded frame
+// from one whose page has not run its listener yet, since a send into a
+// not-yet-listening document is simply lost. `opensLinks: true` promises the
+// page handles OPEN_LINK, external links included; `false` or absent means it
+// does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme
+// links (`slack:`, `vscode:`) in OPEN_LINK too.
 export const WORKSPACE_READY = "minds:workspace-ready";
 // workspace -> embedder: a provider sign-in (Claude, ChatGPT) is waiting on
 // the user in a browser; relay its loopback callback into the workspace and
@@ -97,11 +99,12 @@ export const WINDOW_DRAG_ENDED = "minds:window-drag-ended";
 // changes; a popout closes itself when its own window is absent.
 export const DETACHED_WINDOWS = "minds:detached-windows";
 // workspace -> embedder: open an external link outside the workspace: an
-// absolute http(s) URL in the user's browser, a mailto: or tel: URL in the
-// app the system has for it (after the user confirms). Payload: { url }. The
-// workspace sends it for a link no app of its own takes, and only to an
-// embedder that said `opensExternalLinks` with EMBEDDER_CAPABILITIES or for an
-// external link that embedder handed over with OPEN_LINK.
+// absolute http(s) URL in the user's browser, a mailto:, tel: or custom-scheme
+// URL in the app the system has for it (after the user confirms). Payload:
+// { url }. The workspace sends it for a link no app of its own takes, and only
+// to an embedder that said `opensExternalLinks` with EMBEDDER_CAPABILITIES
+// (and, for a custom-scheme link, `opensCustomSchemeLinks`) or for an external
+// link that embedder handed over with OPEN_LINK.
 export const OPEN_EXTERNAL = "minds:open-external";
 // workspace -> embedder: pulse a ring around one of the chrome's own controls
 // while the workspace's tour talks about it, or clear the ring. Payload:
@@ -136,10 +139,12 @@ export const FOCUS_CHAT = "minds:focus-chat";
 // With no chrome no ack arrives, which the workspace treats as false.
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
-// WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks? }:
-// `opensExternalLinks: true` says it takes OPEN_EXTERNAL. A workspace that
-// never receives it (an older chrome, a plain browser) keeps its pull-out
-// gesture off and opens external links itself.
+// WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
+// opensCustomSchemeLinks? }: `opensExternalLinks: true` says it takes
+// OPEN_EXTERNAL, and `opensCustomSchemeLinks: true` that it takes custom-scheme
+// links there too. A workspace that never receives it (an older chrome, a
+// plain browser) keeps its pull-out gesture off and opens external links
+// itself.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -158,16 +163,18 @@ export const REATTACH_WINDOW = "minds:reattach-window";
 // the shell's own release of the drag still stands (see WINDOW_DRAG_ENDED).
 export const TEAR_OUT = "minds:tear-out";
 // embedder -> workspace: open a link inside the workspace. Payload: { url },
-// an absolute http(s), mailto: or tel: URL. The embedder caught a popup or a
-// frame navigation the workspace's page asked for (a `target="_blank"` link,
-// `window.open`, an external link with no target) and hands its URL back
-// instead of opening it itself; the workspace routes it (a local URL on an
-// app's `<label>.localhost` host, or on a bare local host name at the port an
-// app registered, as that app's window, else in the in-workspace browser; the
-// app's own window for one of its app addresses, its share addresses
-// included; a refusal notice for another workspace's; an external link to the
-// app registered for it, else back out with OPEN_EXTERNAL). Sent only to a
-// page that announced WORKSPACE_READY with `opensLinks: true`.
+// an absolute http(s), mailto:, tel: or custom-scheme URL (the last only to a
+// page that announced `opensCustomSchemeLinks: true`). The embedder caught a
+// popup or a frame navigation the workspace's page asked for (a
+// `target="_blank"` link, `window.open`, an external link with no target) and
+// hands its URL back instead of opening it itself; the workspace routes it (a
+// local URL on an app's `<label>.localhost` host, or on a bare local host name
+// at the port an app registered, as that app's window, else in the
+// in-workspace browser; the app's own window for one of its app addresses, its
+// share addresses included; a refusal notice for another workspace's; an
+// external link to the app registered for it, else back out with
+// OPEN_EXTERNAL). Sent only to a page that announced WORKSPACE_READY with
+// `opensLinks: true`.
 export const OPEN_LINK = "minds:open-link";
 
 // The chrome controls a workspace may ask to have ringed (HIGHLIGHT_CHROME):
@@ -247,8 +254,28 @@ function isFrameValid(value) {
   });
 }
 
+// Schemes a browser loads, or refuses, itself; a link of any other scheme
+// (`slack:`, `vscode:`) is a custom-scheme link, which another app opens.
+const IN_BROWSER_SCHEMES = [
+  'http:',
+  'https:',
+  'ws:',
+  'wss:',
+  'file:',
+  'data:',
+  'blob:',
+  'about:',
+  'javascript:',
+  'filesystem:',
+  'chrome:',
+  'chrome-untrusted:',
+  'chrome-extension:',
+  'devtools:',
+  'view-source:',
+];
 const LINK_SCHEMES = ['http:', 'https:', 'mailto:', 'tel:'];
 
+// An absolute http(s), mailto:, tel: or custom-scheme URL.
 function isLinkUrlValid(value) {
   if (typeof value !== 'string' || value.length > MAX_OPEN_LINK_URL_LENGTH) return false;
   let parsed;
@@ -257,7 +284,11 @@ function isLinkUrlValid(value) {
   } catch (e) {
     return false;
   }
-  return LINK_SCHEMES.indexOf(parsed.protocol) !== -1;
+  return LINK_SCHEMES.indexOf(parsed.protocol) !== -1 || IN_BROWSER_SCHEMES.indexOf(parsed.protocol) === -1;
+}
+
+function isOptionalBoolean(value) {
+  return value === undefined || typeof value === 'boolean';
 }
 
 function isOptionalIdValid(value, pattern) {
@@ -285,7 +316,7 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName);
   },
   [WORKSPACE_READY]: function (data) {
-    return data.opensLinks === undefined || typeof data.opensLinks === 'boolean';
+    return isOptionalBoolean(data.opensLinks) && isOptionalBoolean(data.opensCustomSchemeLinks);
   },
   [PROVIDER_SIGN_IN]: function (data) {
     return isSignInUrlShapeValid(data.url) && typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
@@ -344,7 +375,7 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   },
   [EMBEDDER_CAPABILITIES]: function (data) {
     if (typeof data.canPopOut !== 'boolean') return false;
-    return data.opensExternalLinks === undefined || typeof data.opensExternalLinks === 'boolean';
+    return isOptionalBoolean(data.opensExternalLinks) && isOptionalBoolean(data.opensCustomSchemeLinks);
   },
   [REATTACH_WINDOW]: function (data) {
     return isWindowIdValid(data.windowId) && isFrameValid(data.frame);

@@ -263,9 +263,7 @@ def test_a_desktop_is_tried_however_long_ago_it_announced_itself(tmp_path: Path)
         gone_status, gone_body = http_request(
             f"{gateway_url}/permissions/self", headers=_caller_headers("desktop-gone")
         )
-        default_status, default_body = http_request(
-            f"{gateway_url}/minds-api-proxy/api/schema", headers=_caller_headers()
-        )
+        default_status, default_body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers())
 
     assert (unknown_status, json.loads(unknown_body)["error"]) == (
         503,
@@ -762,7 +760,7 @@ def test_only_the_desktop_owned_route_families_and_devices_are_taken(tmp_path: P
         with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
             taken_paths = (
                 "/permissions",
-                "/permissions/rules",
+                "/permissions/self",
                 "/permission-requests",
                 "/permission-requests/abc",
                 "/minds-api-proxy",
@@ -779,77 +777,10 @@ def test_only_the_desktop_owned_route_families_and_devices_are_taken(tmp_path: P
 
 def test_a_gateway_told_of_no_desktops_says_so() -> None:
     with node_extension_gateway(_EXTENSION_PATH, {}) as gateway_url:
-        status, body = http_request(f"{gateway_url}/permissions/rules", headers=_caller_headers())
+        status, body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers())
         devices_status, devices_body = http_request(f"{gateway_url}/devices")
 
     assert status == 503
     assert DEVICES_DIR_ENV_VAR in json.loads(body)["error"]
     assert devices_status == 503
     assert DEVICES_DIR_ENV_VAR in json.loads(devices_body)["error"]
-
-
-_ENFORCED_POLICY: Final[dict[str, Any]] = {
-    "rules": [{"github-git:octo": ["github-git-write"]}, {"github-rest-api:octo": ["github-write-all"]}],
-}
-
-
-def _enforced_policy_file(tmp_path: Path, text: str | None = None) -> Path:
-    """The policy this machine's gateway enforces, as the desktop's last snapshot left it."""
-    path = tmp_path / "enforced" / "permissions.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_ENFORCED_POLICY) if text is None else text)
-    return path
-
-
-def test_permissions_self_answers_from_the_policy_this_machine_enforces(tmp_path: Path) -> None:
-    """Reading the caller's own permissions needs no desktop: the machine holds the policy it applies."""
-    policy = _enforced_policy_file(tmp_path)
-    with _desktop_gateway("a") as (port_a, server_a):
-        _announce(tmp_path, "desktop-a", port_a)
-        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path), policy) as gateway_url:
-            status, body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers())
-
-    assert (status, json.loads(body)) == (200, _ENFORCED_POLICY)
-    assert server_a.received == []
-
-
-def test_permissions_self_is_answered_with_no_desktop_reachable_or_configured(tmp_path: Path) -> None:
-    policy = _enforced_policy_file(tmp_path)
-    _announce(tmp_path, "desktop-gone", 1, seconds_ago=3600)
-    with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path), policy) as gateway_url:
-        gone_status, gone_body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers())
-    with node_extension_gateway(_EXTENSION_PATH, {}, policy) as gateway_url:
-        unconfigured_status, unconfigured_body = http_request(f"{gateway_url}/permissions/self/")
-
-    assert (gone_status, json.loads(gone_body)) == (200, _ENFORCED_POLICY)
-    assert (unconfigured_status, json.loads(unconfigured_body)) == (200, _ENFORCED_POLICY)
-
-
-def test_permissions_self_reports_a_missing_or_malformed_policy(tmp_path: Path) -> None:
-    missing = tmp_path / "missing" / "permissions.json"
-    malformed = _enforced_policy_file(tmp_path, text="[not a policy")
-    with node_extension_gateway(_EXTENSION_PATH, {}, missing) as gateway_url:
-        missing_status, missing_body = http_request(f"{gateway_url}/permissions/self")
-    with node_extension_gateway(_EXTENSION_PATH, {}, malformed) as gateway_url:
-        malformed_status, malformed_body = http_request(f"{gateway_url}/permissions/self")
-
-    assert missing_status == 404
-    assert str(missing) in json.loads(missing_body)["error"]
-    assert malformed_status == 500
-    assert str(malformed) in json.loads(malformed_body)["error"]
-
-
-def test_a_desktops_own_view_of_permissions_self_is_still_forwarded_when_named(tmp_path: Path) -> None:
-    """Naming a desktop asks for that desktop's copy, so the request goes there as before."""
-    policy = _enforced_policy_file(tmp_path)
-    with _desktop_gateway("a") as (port_a, server_a):
-        _announce(tmp_path, "desktop-a", port_a)
-        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path), policy) as gateway_url:
-            status, body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers("desktop-a"))
-            post_status, post_body = http_request(
-                f"{gateway_url}/permissions/self", method="POST", headers=_caller_headers(), body=b"{}"
-            )
-
-    assert (status, json.loads(body)["served_by"]) == (200, "a")
-    assert (post_status, json.loads(post_body)["served_by"]) == (200, "a")
-    assert [received.method for received in server_a.received] == ["GET", "POST"]

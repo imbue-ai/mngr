@@ -51,7 +51,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.api_models import IdentityRecordResponse
-from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
@@ -134,6 +133,7 @@ THIRTEEN_GRANTS: Final[SharingGrantsDocument] = SharingGrantsDocument(
 # Grant row keys, as SharePanelModel builds them (kind plus normalized value,
 # or the account id for a grant already stored under one).
 CAROL_ROW: Final[str] = "user:user-carol"
+ACME_ROW: Final[str] = "email_domain:acme.example"
 BOB_ROW: Final[str] = "email:bob@example.org"
 DAN_ROW: Final[str] = "email:dan@example.org"
 ERIN_ROW: Final[str] = "email:erin@example.org"
@@ -266,10 +266,6 @@ class ShareRouteStubs(MutableModel):
         if path == f"{share_base}/agents":
             # No frame invites an agent, so the section under the list is empty.
             _fulfill(route, VisitingAgentsResponse(agents=()).model_dump_json())
-            return
-        if path == f"{share_base}/invitation-outcomes":
-            # Nobody in these frames has been invited or has visited yet.
-            _fulfill(route, InvitationOutcomesResponse(outcomes=()).model_dump_json())
             return
         if path == share_base:
             self._handle_share_state(route)
@@ -422,6 +418,7 @@ def _drive_published(page: Page) -> None:
     page.wait_for_function(
         "(scroller) => document.querySelector(scroller).scrollTop === 0", arg=_PANE_SCROLLER, timeout=5000
     )
+    _hover_for_tooltip(page, f'[data-grant-row="{ACME_ROW}"]')
 
 
 def _open_inherited(page: Page) -> None:

@@ -1026,19 +1026,6 @@ def test_build_start_agent_shell_command_includes_additional_windows(
     assert "htop" in result
 
 
-def test_build_start_agent_shell_command_escapes_trailing_semicolon_of_additional_window_command(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """A window command ending in `;` is typed with its `;`, which tmux would otherwise take as a separator."""
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    additional_commands = [NamedCommand(command=CommandString("make watch;"), window_name="build")]
-    result = _build_command_with_defaults(agent, temp_host_dir, additional_commands=additional_commands)
-
-    assert "-l -- 'make watch\\;'" in result
-
-
 def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,

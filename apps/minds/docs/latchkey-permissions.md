@@ -503,10 +503,7 @@ therefore knows the user's desktops, and lets a workspace address them:
   carries the `X-Latchkey-Multiple-Desktops-Matched: true` response header.
   Without the header the request goes to the most recently announced
   desktop, which is what every workspace built before the header did, so
-  nothing has to change at once. The exception is `GET /permissions/self`:
-  without the header the workspace's machine answers it itself, from the
-  policy it enforces, so an agent can read its permissions while no desktop
-  is reachable. A desktop that has gone to sleep is refused
+  nothing has to change at once. A desktop that has gone to sleep is refused
   quickly rather than waited on: the machine's sshd drops its tunnel within 90
   seconds of it going quiet.
 

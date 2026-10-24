@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const {
   POPUP_ACTIONS,
   isExternalUrl,
+  isCustomSchemeUrl,
   decidePopup,
   decideFrameNavigation,
   externalOpenPrompt,
@@ -25,8 +26,10 @@ const APP_ORIGINS = [BACKEND_ORIGIN, FORWARDER_ORIGIN];
 const AGENT = 'agent-0a1b2c3d4e5f';
 const HOST = 'host-9f8e7d6c5b4a';
 const OTHER_AGENT = 'agent-77aa88bb99cc';
-const ANNOUNCING = { workspaceIds: [AGENT, HOST], opensLinks: true };
-const SILENT = { workspaceIds: [AGENT, HOST], opensLinks: false };
+const ANNOUNCING = { workspaceIds: [AGENT, HOST], opensLinks: true, opensCustomSchemeLinks: false };
+const TAKES_SCHEMES = { workspaceIds: [AGENT, HOST], opensLinks: true, opensCustomSchemeLinks: true };
+const SILENT = { workspaceIds: [AGENT, HOST], opensLinks: false, opensCustomSchemeLinks: false };
+const CUSTOM_SCHEME_URLS = ['paseo://open?workspace=1', 'slack://channel?id=C1', 'vscode://file/tmp/a.txt'];
 
 const workspaceAddress = (id, app = 'web') => `https://${app}.${id}.localhost:8421/notes?x=1`;
 const shellAddress = (id) => `https://${id}.localhost:8421/`;
@@ -36,10 +39,11 @@ function decide(url, { referrer = '', mount = ANNOUNCING } = {}) {
   return decidePopup({ url, referrer, appOrigins: APP_ORIGINS, mount });
 }
 
-test('isExternalUrl answers every shared externality vector', () => {
+test('isExternalUrl and isCustomSchemeUrl answer every shared externality vector', () => {
   assert.ok(EXTERNALITY_VECTORS.length > 0);
   for (const vector of EXTERNALITY_VECTORS) {
     assert.equal(isExternalUrl(vector.url), vector.isExternal, `${vector.url}: ${vector.note}`);
+    assert.equal(isCustomSchemeUrl(vector.url), vector.isCustomScheme, `${vector.url}: ${vector.note}`);
   }
 });
 
@@ -147,11 +151,20 @@ function makeWebContents() {
   };
 }
 
+// Stand-ins for Electron's WebFrameMain: a disposed one throws on `url`.
+const liveFrame = (url) => ({ url, isDestroyed: () => false });
+const disposedFrame = () => ({
+  get url() {
+    throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+  },
+  isDestroyed: () => true,
+});
+
 function makeRouter() {
   const opened = [];
   const forwarded = [];
   const router = createLinkRouter({
-    openExternal: (url, webContents) => opened.push([url, webContents]),
+    openExternal: (url, webContents, workspaceId) => opened.push([url, webContents, workspaceId]),
     forward: (webContents, url) => forwarded.push([webContents, url]),
     appOrigins: () => APP_ORIGINS,
     workspaceAliases: (id) => (id === AGENT ? [AGENT, HOST] : [id]),
@@ -165,8 +178,8 @@ test("the router denies a forwarded popup and hands its URL to the page of the w
   const popoutWindow = makeWebContents();
   router.install(mainWindow);
   router.install(popoutWindow);
-  assert.equal(router.recordMount(mainWindow, { workspaceId: AGENT, opensLinks: true }), true);
-  assert.equal(router.recordMount(popoutWindow, { workspaceId: OTHER_AGENT, opensLinks: false }), true);
+  assert.equal(router.recordMount(mainWindow, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false }), true);
+  assert.equal(router.recordMount(popoutWindow, { workspaceId: OTHER_AGENT, opensLinks: false, opensCustomSchemeLinks: false }), true);
 
   assert.deepEqual(mainWindow.openPopup(workspaceAddress(AGENT)), { action: 'deny' });
   // The host-keyed alias of the mounted workspace, through the aliases main knows.
@@ -179,19 +192,22 @@ test("the router denies a forwarded popup and hands its URL to the page of the w
     [mainWindow, workspaceAddress(AGENT)],
     [mainWindow, LOCAL_URL],
   ]);
-  assert.deepEqual(opened, [['https://example.com/', mainWindow]]);
+  assert.deepEqual(opened, [['https://example.com/', mainWindow, null]]);
 });
 
 test('the router forgets a mount when the page reports none or goes away', () => {
   const { router, forwarded } = makeRouter();
   const wc = makeWebContents();
   router.install(wc);
-  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true });
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
   router.recordMount(wc, null);
   assert.deepEqual(wc.openPopup(workspaceAddress(AGENT)), { action: 'allow' });
-  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true });
+  assert.equal(router.workspaceOf(wc), null);
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
+  assert.equal(router.workspaceOf(wc), AGENT);
   router.forgetMount(wc);
   assert.deepEqual(wc.openPopup(workspaceAddress(AGENT)), { action: 'allow' });
+  assert.equal(router.workspaceOf(wc), null);
   assert.deepEqual(forwarded, []);
 });
 
@@ -199,13 +215,15 @@ test('the router ignores an off-shape mount report and keeps the last good one',
   const { router } = makeRouter();
   const wc = makeWebContents();
   router.install(wc);
-  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true });
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
   for (const report of [
     undefined,
     'agent-0a1b',
     { workspaceId: '../escape', opensLinks: true },
     { workspaceId: 'agent-xyz', opensLinks: true },
-    { workspaceId: AGENT, opensLinks: 'yes' },
+    { workspaceId: AGENT, opensLinks: 'yes', opensCustomSchemeLinks: false },
+    { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: 'yes' },
+    { workspaceId: AGENT, opensLinks: true },
     { workspaceId: AGENT },
   ]) {
     assert.equal(router.recordMount(wc, report), false, JSON.stringify(report));
@@ -219,28 +237,58 @@ test('an in-place navigation to an external site opens in the browser instead', 
   router.install(wc);
   const prevented = [];
   const navigate = (url) =>
-    wc.listeners['will-frame-navigate']({ url, isMainFrame: false, frame: { url: shellAddress(AGENT) }, preventDefault: () => prevented.push(url) });
+    wc.listeners['will-frame-navigate']({ url, isMainFrame: false, frame: liveFrame(shellAddress(AGENT)), preventDefault: () => prevented.push(url) });
   navigate('https://example.com/');
   navigate(workspaceAddress(AGENT));
   navigate(LOCAL_URL);
   assert.deepEqual(prevented, ['https://example.com/']);
-  assert.deepEqual(opened, [['https://example.com/', wc]]);
+  assert.deepEqual(opened, [['https://example.com/', wc, null]]);
 });
 
 test("an announcing workspace's in-place navigation to an external site goes to the workspace", () => {
   const { router, opened, forwarded } = makeRouter();
   const wc = makeWebContents();
   router.install(wc);
-  assert.equal(router.recordMount(wc, { workspaceId: AGENT, opensLinks: true }), true);
+  assert.equal(router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false }), true);
   const prevented = [];
   const navigate = (url, frameUrl, isMainFrame = false) =>
-    wc.listeners['will-frame-navigate']({ url, isMainFrame, frame: { url: frameUrl }, preventDefault: () => prevented.push(url) });
+    wc.listeners['will-frame-navigate']({ url, isMainFrame, frame: liveFrame(frameUrl), preventDefault: () => prevented.push(url) });
   navigate('mailto:someone@example.com', workspaceAddress(AGENT, 'notes'));
   navigate('https://example.com/a', 'https://example.org/embed');
   navigate('https://example.com/b', `${BACKEND_ORIGIN}/`, true);
   assert.deepEqual(prevented, ['mailto:someone@example.com', 'https://example.com/a', 'https://example.com/b']);
   assert.deepEqual(forwarded, [[wc, 'mailto:someone@example.com']]);
-  assert.deepEqual(opened, [['https://example.com/a', wc], ['https://example.com/b', wc]]);
+  // The window's own page is not the workspace's.
+  assert.deepEqual(opened, [['https://example.com/a', wc, AGENT], ['https://example.com/b', wc, null]]);
+});
+
+test('a navigation of a disposed frame is decided as one from an unknown page of the workspace', () => {
+  const { router, opened, forwarded } = makeRouter();
+  const wc = makeWebContents();
+  router.install(wc);
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
+  const prevented = [];
+  const navigate = (url) =>
+    wc.listeners['will-frame-navigate']({ url, isMainFrame: false, frame: disposedFrame(), preventDefault: () => prevented.push(url) });
+  navigate('paseo://open?workspace=1');
+  navigate('https://example.com/');
+  assert.deepEqual(prevented, ['https://example.com/']);
+  assert.deepEqual(opened, [['https://example.com/', wc, AGENT]]);
+  assert.deepEqual(forwarded, []);
+});
+
+test("a launch of another app Chromium asks permission for goes through the opener, the workspace's unless the window's own page asked", () => {
+  const { router, opened } = makeRouter();
+  const wc = makeWebContents();
+  router.install(wc);
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
+  // A frame of the workspace (a navigation or a server redirect), and the window's own page.
+  router.openExternalRequested(wc, { externalURL: 'slack://channel?id=C1', isMainFrame: false, requestingUrl: 'about:blank' });
+  router.openExternalRequested(wc, { externalURL: 'mailto:someone@example.com', isMainFrame: true, requestingUrl: `${BACKEND_ORIGIN}/` });
+  assert.deepEqual(opened, [
+    ['slack://channel?id=C1', wc, AGENT],
+    ['mailto:someone@example.com', wc, null],
+  ]);
 });
 
 test('a frame navigation is forwarded only for an external URL in a frame of the announcing workspace', () => {
@@ -257,34 +305,189 @@ test('a frame navigation is forwarded only for an external URL in a frame of the
   assert.equal(navigation(workspaceAddress(AGENT, 'files'), workspaceAddress(AGENT)), ALLOW);
 });
 
-test('a mailto or tel link asks before it opens, naming the address or number; a web link does not ask', () => {
-  assert.deepEqual(externalOpenPrompt('mailto:someone@example.com?subject=Hi%20there'), {
-    message: 'Open this email address in your mail app?',
-    detail: 'someone@example.com',
-  });
-  assert.deepEqual(externalOpenPrompt('tel:+1%20555%20123%204567'), {
-    message: 'Call this number with your phone app?',
-    detail: '+1 555 123 4567',
-  });
-  assert.equal(externalOpenPrompt('mailto:?to=someone@example.com').detail, 'mailto:?to=someone@example.com');
-  assert.equal(externalOpenPrompt('https://example.com/'), null);
+test('a custom-scheme popup opens outside the app instead of a window when no workspace that takes them is mounted', () => {
+  for (const url of CUSTOM_SCHEME_URLS) {
+    for (const mount of [ANNOUNCING, SILENT, null]) {
+      assert.equal(decide(url, { mount, referrer: shellAddress(AGENT) }), OPEN_EXTERNALLY, url);
+      assert.equal(decide(url, { mount, referrer: `${BACKEND_ORIGIN}/` }), OPEN_EXTERNALLY, url);
+    }
+  }
+  // Schemes the app loads itself are not another app's.
+  for (const url of ['data:text/plain,hi', 'javascript:void(0)', 'ws://localhost:8000/socket']) {
+    assert.equal(decide(url, { referrer: shellAddress(AGENT) }), ALLOW, url);
+  }
 });
 
-test('the external opener opens a web link at once and a mailto or tel link only once the user agrees', async () => {
+test('a custom-scheme popup goes to a workspace that takes them when its own pages, or a noreferrer link, asked for it', () => {
+  const mount = TAKES_SCHEMES;
+  for (const url of CUSTOM_SCHEME_URLS) {
+    assert.equal(decide(url, { mount, referrer: shellAddress(AGENT) }), FORWARD, url);
+    assert.equal(decide(url, { mount, referrer: workspaceAddress(HOST, 'chat') }), FORWARD, url);
+    // The Imbue Studio page opens no custom-scheme link itself, so a noreferrer one is the workspace's.
+    assert.equal(decide(url, { mount, referrer: '' }), FORWARD, url);
+    assert.equal(decide(url, { mount, referrer: `${BACKEND_ORIGIN}/` }), OPEN_EXTERNALLY, url);
+    assert.equal(decide(url, { mount, referrer: shellAddress(OTHER_AGENT) }), OPEN_EXTERNALLY, url);
+  }
+  // Any other external link with no referrer (a mailto: link) is still the Imbue Studio page's own.
+  assert.equal(decide('mailto:someone@example.com', { mount, referrer: '' }), OPEN_EXTERNALLY);
+});
+
+test("a custom-scheme navigation of any frame but the window's own page goes to a workspace that takes them", () => {
+  const navigation = (url, { frameUrl = 'about:blank', isMainFrame = false, mount = TAKES_SCHEMES } = {}) =>
+    decideFrameNavigation({ url, frameUrl, isMainFrame, mount });
+  for (const url of CUSTOM_SCHEME_URLS) {
+    // A workspace app's hidden launcher frame, a page of the workspace, and a frame it embeds.
+    assert.equal(navigation(url), FORWARD, url);
+    assert.equal(navigation(url, { frameUrl: workspaceAddress(AGENT) }), FORWARD, url);
+    assert.equal(navigation(url, { frameUrl: 'https://example.org/embed' }), FORWARD, url);
+    // Otherwise Chromium hands it to its app, asking through openExternalRequested.
+    assert.equal(navigation(url, { isMainFrame: true }), ALLOW, url);
+    assert.equal(navigation(url, { mount: ANNOUNCING }), ALLOW, url);
+    assert.equal(navigation(url, { mount: null }), ALLOW, url);
+  }
+});
+
+test('the router hands a custom-scheme launch to a workspace that takes them, from a navigation or a server redirect', () => {
+  const { router, opened, forwarded } = makeRouter();
+  const wc = makeWebContents();
+  router.install(wc);
+  assert.equal(router.recordMount(wc, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: true }), true);
+  const prevented = [];
+  wc.listeners['will-frame-navigate']({
+    url: 'slack://channel?id=C1',
+    isMainFrame: false,
+    frame: liveFrame('about:blank'),
+    preventDefault: () => prevented.push('slack://channel?id=C1'),
+  });
+  router.openExternalRequested(wc, { externalURL: 'vscode://file/a', isMainFrame: false, requestingUrl: 'about:blank' });
+  // A redirected mailto link, and a launch from the window's own page, still ask.
+  router.openExternalRequested(wc, { externalURL: 'mailto:someone@example.com', isMainFrame: false, requestingUrl: 'about:blank' });
+  router.openExternalRequested(wc, { externalURL: 'paseo://open', isMainFrame: true, requestingUrl: `${BACKEND_ORIGIN}/` });
+  assert.deepEqual(prevented, ['slack://channel?id=C1']);
+  assert.deepEqual(forwarded, [
+    [wc, 'slack://channel?id=C1'],
+    [wc, 'vscode://file/a'],
+  ]);
+  assert.deepEqual(opened, [
+    ['mailto:someone@example.com', wc, AGENT],
+    ['paseo://open', wc, null],
+  ]);
+});
+
+test("an external popup is the workspace's to always allow only when its own pages asked for it", () => {
+  const { router, opened } = makeRouter();
+  const wc = makeWebContents();
+  router.install(wc);
+  router.recordMount(wc, { workspaceId: AGENT, opensLinks: false, opensCustomSchemeLinks: false });
+  wc.openPopup('paseo://open', shellAddress(AGENT));
+  wc.openPopup('slack://open', `${BACKEND_ORIGIN}/`);
+  wc.openPopup('mailto:someone@example.com', workspaceAddress(HOST, 'chat'));
+  // The Imbue Studio page opens no custom-scheme link, but noreferrer mailto links of its own.
+  wc.openPopup('vscode://file/a', '');
+  wc.openPopup('mailto:support@example.com', '');
+  assert.deepEqual(opened, [
+    ['paseo://open', wc, AGENT],
+    ['slack://open', wc, null],
+    ['mailto:someone@example.com', wc, AGENT],
+    ['vscode://file/a', wc, AGENT],
+    ['mailto:support@example.com', wc, null],
+  ]);
+});
+
+test('a mailto, tel or custom-scheme link asks before it opens, naming the address, number or app; a web link does not ask', () => {
+  const mailto = externalOpenPrompt('mailto:someone@example.com?subject=Hi%20there', '');
+  assert.equal(mailto.detail, 'someone@example.com');
+  assert.equal(externalOpenPrompt('tel:+1%20555%20123%204567', '').detail, '+1 555 123 4567');
+  assert.equal(externalOpenPrompt('mailto:?to=someone@example.com', '').detail, 'mailto:?to=someone@example.com');
+  assert.equal(externalOpenPrompt('paseo://open?workspace=1', 'Paseo').message, 'Open this link in Paseo?');
+  assert.equal(externalOpenPrompt('paseo://open?workspace=1', 'Paseo').detail, 'paseo://open?workspace=1');
+  assert.equal(externalOpenPrompt('paseo://open?workspace=1', '').message, 'Open this link in another app?');
+  assert.notEqual(externalOpenPrompt('paseo://open', 'Paseo').rememberLabel, mailto.rememberLabel);
+  assert.equal(externalOpenPrompt('https://example.com/', ''), null);
+});
+
+function makeOpener({ answer = { accepted: false, remember: false }, allowed = [] } = {}) {
   const opened = [];
   const asked = [];
-  let answer = false;
+  const stored = new Set(allowed);
+  const state = { answer };
   const openExternal = createExternalOpener({
     confirm: async (prompt, webContents) => {
-      asked.push([prompt.detail, webContents]);
-      return answer;
+      asked.push([prompt.detail, prompt.rememberLabel !== null, webContents]);
+      return state.answer;
     },
     open: (url) => opened.push(url),
+    appNameFor: (url) => (url.startsWith('paseo:') ? 'Paseo' : ''),
+    permissions: {
+      isAllowed: (workspaceId, scheme) => stored.has(`${workspaceId} ${scheme}`),
+      allow: (workspaceId, scheme) => stored.add(`${workspaceId} ${scheme}`),
+    },
   });
-  await openExternal('https://example.com/', 'wc');
-  await openExternal('mailto:someone@example.com', 'wc');
-  answer = true;
-  await openExternal('tel:+15551234567', 'wc');
-  assert.deepEqual(asked, [['someone@example.com', 'wc'], ['+15551234567', 'wc']]);
-  assert.deepEqual(opened, ['https://example.com/', 'tel:+15551234567']);
+  return { openExternal, opened, asked, stored, state };
+}
+
+test('the external opener opens a web link at once and any other only once the user agrees', async () => {
+  const { openExternal, opened, asked, state } = makeOpener();
+  await openExternal('https://example.com/', 'wc', AGENT);
+  await openExternal('mailto:someone@example.com', 'wc', null);
+  await openExternal('paseo://open', 'wc', AGENT);
+  state.answer = { accepted: true, remember: false };
+  await openExternal('tel:+15551234567', 'wc', null);
+  await openExternal('paseo://open', 'wc', AGENT);
+  // Always-allow is offered only for a link a workspace asked for.
+  assert.deepEqual(asked, [
+    ['someone@example.com', false, 'wc'],
+    ['paseo://open', true, 'wc'],
+    ['+15551234567', false, 'wc'],
+    ['paseo://open', true, 'wc'],
+  ]);
+  assert.deepEqual(opened, ['https://example.com/', 'tel:+15551234567', 'paseo://open']);
+});
+
+test("an always-allowed scheme opens without asking, for that workspace only", async () => {
+  const { openExternal, opened, asked, stored, state } = makeOpener({ answer: { accepted: true, remember: true } });
+  await openExternal('paseo://open?a', 'wc', AGENT);
+  assert.deepEqual([...stored], [`${AGENT} paseo:`]);
+  await openExternal('paseo://open?b', 'wc', AGENT);
+  await openExternal('mailto:someone@example.com', 'wc', AGENT);
+  state.answer = { accepted: false, remember: true };
+  await openExternal('paseo://open?c', 'wc', OTHER_AGENT);
+  await openExternal('paseo://open?d', 'wc', null);
+  assert.deepEqual(
+    asked.map(([detail]) => detail),
+    ['paseo://open?a', 'someone@example.com', 'paseo://open?c', 'paseo://open?d'],
+  );
+  assert.deepEqual(opened, ['paseo://open?a', 'paseo://open?b', 'mailto:someone@example.com']);
+  // Remembering from no workspace stores nothing; a declined prompt stores nothing either.
+  state.answer = { accepted: true, remember: true };
+  await openExternal('slack://open', 'wc', null);
+  assert.deepEqual([...stored], [`${AGENT} paseo:`, `${AGENT} mailto:`]);
+});
+
+test('a window gets one question per scheme at a time; launches while it is open are dropped', async () => {
+  const opened = [];
+  const asked = [];
+  const pendingAnswers = [];
+  const openExternal = createExternalOpener({
+    confirm: (prompt, webContents) => {
+      asked.push([prompt.detail, webContents]);
+      return new Promise((resolve) => pendingAnswers.push(resolve));
+    },
+    open: (url) => opened.push(url),
+    appNameFor: () => 'Paseo',
+    permissions: { isAllowed: () => false, allow: () => {} },
+  });
+  const first = openExternal('paseo://open?a', 'wc', AGENT);
+  const dropped = openExternal('paseo://open?b', 'wc', AGENT);
+  const otherScheme = openExternal('mailto:someone@example.com', 'wc', AGENT);
+  const otherWindow = openExternal('paseo://open?c', 'other-wc', AGENT);
+  await dropped;
+  assert.deepEqual(asked, [['paseo://open?a', 'wc'], ['someone@example.com', 'wc'], ['paseo://open?c', 'other-wc']]);
+  for (const answer of pendingAnswers.splice(0)) answer({ accepted: true, remember: false });
+  await Promise.all([first, otherScheme, otherWindow]);
+  // Once answered, the next launch asks again.
+  const next = openExternal('paseo://open?d', 'wc', AGENT);
+  for (const answer of pendingAnswers.splice(0)) answer({ accepted: true, remember: false });
+  await next;
+  assert.deepEqual(opened, ['paseo://open?a', 'mailto:someone@example.com', 'paseo://open?c', 'paseo://open?d']);
 });

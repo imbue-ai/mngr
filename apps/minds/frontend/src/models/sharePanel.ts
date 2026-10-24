@@ -260,14 +260,6 @@ export interface GrantOutcome {
   readonly lastVisitedAt: string | null;
 }
 
-/** Whether the person a row names has opened the workspace: what a granter
- * wants to know about someone they invited. */
-export type WorkspaceAccess =
-  | { readonly kind: "not_a_user" }
-  | { readonly kind: "never" }
-  /** `at` is the latest visit. */
-  | { readonly kind: "accessed"; readonly at: string | null };
-
 export type InviteState =
   | { readonly state: "idle" }
   | { readonly state: "inviting" }
@@ -418,9 +410,6 @@ export class SharePanelModel {
   private isDisposed = false;
   // Keyed by target and grantee, as the outcomes route lists them.
   private outcomeByKey = new Map<string, GrantOutcome>();
-  /** Whether the outcomes route has answered: until it has, no row's missing
-   * outcome means its person never visited. */
-  private isOutcomesKnown = false;
   private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
   // What the mobile-link control is doing. One per panel rather than per
   // target: the message carries the whole workspace's link, whichever target
@@ -752,24 +741,6 @@ export class SharePanelModel {
   outcomeFor(target: string, grant: Grant): GrantOutcome | null {
     const key = outcomeKey(target, grant.grantee);
     return key === null ? null : (this.outcomeByKey.get(key) ?? null);
-  }
-
-  /** Whether the row's person has opened the workspace, or null when the row
-   * can say nothing: a domain names no one, a row being saved has no settled
-   * person yet, and an account's visits are unknown until the outcomes route
-   * has answered. An address had no account when it was granted, and that
-   * grant-time lookup is all the panel ever learns about accounts (spec O3). */
-  workspaceAccessFor(target: string, grant: Grant): WorkspaceAccess | null {
-    if (grant.grantee.kind === "email_domain") return null;
-    if (grant.status.state !== "settled") return null;
-    const outcome = this.outcomeFor(target, grant);
-    if (outcome?.kind === "joined")
-      return {
-        kind: "accessed",
-        at: outcome.lastVisitedAt ?? outcome.joinedAt,
-      };
-    if (grant.grantee.kind === "email") return { kind: "not_a_user" };
-    return this.isOutcomesKnown ? { kind: "never" } : null;
   }
 
   inviteStateFor(key: GrantKey): InviteState {
@@ -1238,7 +1209,6 @@ export class SharePanelModel {
     this.adoptedOutcomesSequence = sequence;
     const entries = (result.body as InvitationOutcomesResponse).outcomes ?? [];
     this.outcomeByKey = outcomesByKey(entries);
-    this.isOutcomesKnown = true;
     this.redraw();
   }
 

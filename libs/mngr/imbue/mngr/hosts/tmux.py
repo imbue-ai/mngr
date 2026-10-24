@@ -19,19 +19,6 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
 
 
-@pure
-def quote_tmux_text_argument(text: str) -> str:
-    r"""Shell-quote ``text`` as one tmux argument that tmux delivers exactly as written.
-
-    tmux splits its own argv into commands at any argument ending in ``;`` and drops that ``;``,
-    so ``send-keys -l -- 'hello;'`` types ``hello``. An argument ending in ``\;`` is kept, with
-    its final ``\;`` read as ``;``. A backslash before a trailing ``;`` therefore round-trips
-    every text, including one that itself ends in ``\;`` (``find ... -exec ... \;``).
-    """
-    escaped = text[:-1] + "\\;" if text.endswith(";") else text
-    return shlex.quote(escaped)
-
-
 class TmuxSessionTarget(FrozenModel):
     """Structured tmux ``-t`` target for commands whose target resolves as a session.
 
