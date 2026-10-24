@@ -76,6 +76,7 @@ from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import quote_tmux_text_argument
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
@@ -4077,7 +4078,7 @@ def _parse_porcelain_line(line: str) -> list[str]:
 @pure
 def _build_pane_send_keys_steps(quoted_exact_window: str, typed_command: str) -> list[str]:
     return [
-        f"tmux send-keys -t {quoted_exact_window} -l -- {shlex.quote(typed_command)}",
+        f"tmux send-keys -t {quoted_exact_window} -l -- {quote_tmux_text_argument(typed_command)}",
         f"tmux send-keys -t {quoted_exact_window} Enter",
     ]
 

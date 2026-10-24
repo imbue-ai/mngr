@@ -37,6 +37,7 @@ from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
+from imbue.mngr.hosts.tmux import quote_tmux_text_argument
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
@@ -859,7 +860,9 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         with self._message_lock(), log_span("Pressing key chord {} to agent {}", key, self.name):
             target_arg = self._send_target_arg(self.tmux_target)
             self._clear_pane_modes(target_arg)
-            self._run_send_command(f"tmux send-keys -t {target_arg} {shlex.quote(key)}", f"tmux send-keys {key}")
+            self._run_send_command(
+                f"tmux send-keys -t {target_arg} {quote_tmux_text_argument(key)}", f"tmux send-keys {key}"
+            )
 
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
@@ -926,7 +929,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         clear_pane_modes = build_clear_pane_modes_tmux_subcommand(target_arg)
         if len(message) < LONG_MESSAGE_THRESHOLD:
             self._run_send_command(
-                f"tmux {clear_pane_modes} \\; send-keys -t {target_arg} -l -- {shlex.quote(message)}",
+                f"tmux {clear_pane_modes} \\; send-keys -t {target_arg} -l -- {quote_tmux_text_argument(message)}",
                 "tmux send-keys",
             )
         else:

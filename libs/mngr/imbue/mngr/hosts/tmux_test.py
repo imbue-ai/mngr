@@ -14,6 +14,7 @@ from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.hosts.tmux import quote_tmux_text_argument
 from imbue.mngr.hosts.tmux import upgrade_literal_session_name_argument
 
 
@@ -72,6 +73,21 @@ def test_build_tmux_capture_pane_command_with_scrollback() -> None:
 def test_build_tmux_capture_pane_command_with_styles() -> None:
     result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_styles=True)
     assert result == "tmux capture-pane -t =mngr-my-agent:0 -e -p"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("hello", "hello"),
+        ("hello;", "'hello\\;'"),
+        ("a;b;", "'a;b\\;'"),
+        (";", "'\\;'"),
+        ("find . -exec echo {} \\;", "'find . -exec echo {} \\\\;'"),
+        ("it's;", "'it'\"'\"'s\\;'"),
+    ],
+)
+def test_quote_tmux_text_argument_escapes_only_a_trailing_semicolon(text: str, expected: str) -> None:
+    assert quote_tmux_text_argument(text) == expected
 
 
 _SUPERVISOR_LAUNCH = "( bash $MNGR_AGENT_STATE_DIR/commands/supervisor.sh"

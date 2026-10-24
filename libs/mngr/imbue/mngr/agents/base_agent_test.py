@@ -514,6 +514,58 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
         cleanup_tmux_session(session_name)
 
 
+def _start_echoing_pane(agent: SendKeysAgent) -> TmuxWindowTarget:
+    """Start the agent's session with `cat` in its primary window, so whatever is typed shows on screen."""
+    session_name = f"{agent.mngr_ctx.config.prefix}{agent.name}"
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
+    agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' -x 200 -y 24 'cat'",
+        timeout_seconds=5.0,
+    )
+    return agent.tmux_target
+
+
+def _wait_for_pane_line(agent: SendKeysAgent, expected_line: str) -> None:
+    """Wait until the pane's last non-blank line is exactly ``expected_line``."""
+
+    def _last_line() -> str:
+        content = agent.capture_pane_content() or ""
+        lines = [line for line in content.splitlines() if line.strip()]
+        return lines[-1] if lines else ""
+
+    wait_for(
+        lambda: _last_line() == expected_line, error_message=f"Expected the pane to show exactly {expected_line!r}"
+    )
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize("message", ["hello;", "a;b;", ";", "find . -exec echo {} \\;"])
+def test_send_tmux_literal_keys_keeps_trailing_semicolon(test_agent: BaseAgent, message: str) -> None:
+    """A short message ending in `;` must reach the pane with its `;`, not read by tmux as a command separator."""
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    tmux_target = _start_echoing_pane(send_keys_agent)
+    try:
+        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
+        _wait_for_pane_line(send_keys_agent, message)
+    finally:
+        cleanup_tmux_session(tmux_target.session_name)
+
+
+@pytest.mark.tmux
+def test_press_key_chord_presses_semicolon_key(test_agent: BaseAgent) -> None:
+    """Pressing the `;` key must type `;`, not hand tmux an empty command separator."""
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    tmux_target = _start_echoing_pane(send_keys_agent)
+    try:
+        send_keys_agent.press_key_chord("x")
+        send_keys_agent.press_key_chord(";")
+        _wait_for_pane_line(send_keys_agent, "x;")
+    finally:
+        cleanup_tmux_session(tmux_target.session_name)
+
+
 @pytest.mark.tmux
 def test_send_tmux_literal_keys_long_message_arrives_as_one_bracketed_paste(
     test_agent: BaseAgent,
