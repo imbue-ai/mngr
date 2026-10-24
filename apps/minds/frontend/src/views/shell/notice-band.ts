@@ -42,6 +42,7 @@ export interface NoticePayload {
     | "workspace-retired"
     | "workspace-update-preparing"
     | "workspace-update-applying"
+    | "workspace-update-finishing"
     | "workspace-update-waiting"
     | "workspace-update-outcome"
     | "workspace-out-of-date"
@@ -350,7 +351,8 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
 /**
  * What a run in flight says over the machine it is running in, or null.
  * Preparing touches nothing; applying takes the services away, so it says so
- * before the reader starts wondering; waiting names what for, when the run said.
+ * before the reader starts wondering; finishing says the machine is already
+ * updated; waiting names what for, when the run said.
  * The run's chat is where it reports itself, so that is the button once the
  * chat exists; the apply's own chat may be down with the services, so the
  * apply keeps the modal.
@@ -368,6 +370,13 @@ function updateRunNotice(
         variant: "info",
         message: "Updating this workspace. Its services restart while the update lands.",
         actions: [SEE_UPDATE],
+      };
+    case "finishing":
+      return {
+        key: "workspace-update-finishing",
+        variant: "info",
+        message: "This workspace is updated. Its update agent is finishing its checks.",
+        actions: chatActions,
       };
     case "preparing":
       return {

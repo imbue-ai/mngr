@@ -104,6 +104,8 @@ class UpdateActivity(UpperCaseStrEnum):
     whose chat is busy (a turn in flight or a background task pending) is not idle."""
     APPLYING = auto()
     """The merge-and-reveal is landing. The system-interface outage this causes is expected."""
+    FINISHING = auto()
+    """The apply has landed and the run's chat is finishing its checks before it records a verdict."""
     STALLED = auto()
     """A probe found no live update agent and no apply under way: the run is gone without a verdict.
 
@@ -112,7 +114,13 @@ class UpdateActivity(UpperCaseStrEnum):
 
 # Named once so the surfaces' read and the store's run-slot claim cannot disagree about what "in flight" means.
 IN_FLIGHT_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
-    {UpdateActivity.STARTING, UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
+    {
+        UpdateActivity.STARTING,
+        UpdateActivity.RUNNING,
+        UpdateActivity.WAITING,
+        UpdateActivity.APPLYING,
+        UpdateActivity.FINISHING,
+    }
 )
 
 
@@ -228,6 +236,11 @@ class UpdateRunStatus(FrozenModel):
     apply_updated_at: datetime | None = Field(
         default=None, description="When the apply last moved (UTC); None when no apply is under way or unreadable"
     )
+    applied_at: datetime | None = Field(
+        default=None,
+        description="When this run's apply went live (UTC); None before it lands, for a rolled-back apply, "
+        "or from a workspace whose skill predates the field",
+    )
     verdict: UpdateVerdict | None = Field(default=None, description="The terminal verdict, None while the run goes")
     detail: str = Field(default="", description="One-line human-readable summary, for the modal")
     resulting_ref: str = Field(default="", description="Ref the workspace is on now (success verdicts)")
@@ -244,6 +257,11 @@ class UpdateRunStatus(FrozenModel):
     def is_apply_in_progress(self) -> bool:
         """Whether the record says the apply is landing right now."""
         return bool(self.apply_phase)
+
+    @property
+    def is_landed(self) -> bool:
+        """Whether the record says this run's apply went live."""
+        return self.applied_at is not None
 
 
 def parse_update_epoch(value: object) -> datetime | None:
@@ -301,6 +319,7 @@ def parse_update_run_record(raw: object) -> UpdateRunStatus | None:
         hold_detail=str(record.get("hold_detail") or ""),
         apply_phase=str(record.get("apply_phase") or ""),
         apply_updated_at=parse_update_epoch(record.get("apply_updated_at")),
+        applied_at=parse_update_epoch(record.get("applied_at")),
         verdict=verdict,
         detail=str(record.get("detail") or ""),
         resulting_ref=str(record.get("resulting_ref") or ""),

@@ -323,14 +323,16 @@ describe("noticeBandFor, an update run", () => {
   });
 
   it("opens the run's chat from a run in flight once the chat exists", () => {
-    const kinds = (phase: "preparing" | "waiting" | "applying", isUpdateChatKnown: boolean): string[] =>
+    const kinds = (phase: "preparing" | "finishing" | "waiting" | "applying", isUpdateChatKnown: boolean): string[] =>
       (noticeBandFor("healthy", "healthy", true, { updateRunPhase: phase, isUpdateChatKnown })?.actions ?? []).map(
         (action) => action.kind,
       );
     expect(kinds("preparing", true)).toEqual(["open-update-chat"]);
+    expect(kinds("finishing", true)).toEqual(["open-update-chat"]);
     expect(kinds("waiting", true)).toEqual(["open-update-chat"]);
     // Before the chat exists there is nothing to open; a wait with no chat keeps the modal, which can say what for.
     expect(kinds("preparing", false)).toEqual([]);
+    expect(kinds("finishing", false)).toEqual([]);
     expect(kinds("waiting", false)).toEqual(["update-workspace"]);
     // The apply takes the chat's services down with the rest.
     expect(kinds("applying", true)).toEqual(["update-workspace"]);
@@ -348,6 +350,12 @@ describe("noticeBandFor, an update run", () => {
   ] as const)("offers a %s outcome (chat known: %s) the buttons that settle it", (outcome, isUpdateChatKnown, kinds) => {
     const band = noticeBandFor("healthy", "healthy", true, { updateRunOutcome: outcome, isUpdateChatKnown });
     expect(band?.actions.map((action) => action.kind)).toEqual(kinds);
+  });
+
+  it("says a landed update is finishing rather than preparing again", () => {
+    const finishing = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "finishing" });
+    expect(finishing?.key).toBe("workspace-update-finishing");
+    expect(finishing?.message).toContain("is updated");
   });
 
   it("lets the apply speak over the machine's own health, because it explains it", () => {

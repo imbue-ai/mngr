@@ -236,6 +236,14 @@ Feature: Running an update
       Then the app reports that workspace as applying its update
       And the app reports that update over that workspace as applying
 
+    @landed-apply-is-finishing
+    Example: A run whose apply has landed is reported as finishing until it ends
+      The workspace is already on the new version while the run completes its own checks, so it is not reported as preparing again.
+      Given a workspace whose update's apply has landed
+      And that run has not yet recorded how it ended
+      Then the app reports that update as finishing
+      And the app reports that update over that workspace as finishing
+
     @run-outcome-reported-over-the-workspace
     Example: A run that ended with a note for the user says so over the workspace
       The update landed, so the note is reported as news rather than as a fault.

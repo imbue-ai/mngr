@@ -240,6 +240,17 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
             ),
             UpdateActivity.RUNNING,
         ),
+        # Its agent is running again after its apply landed: the update is finishing, not preparing again.
+        (
+            MngrCallResult(
+                returncode=0,
+                stdout=update_run_probe_stdout(
+                    run=json.dumps({"chat_agent_name": "update-old", "applied_at": time.time()}) + "\n",
+                    agents=f"update-old\tRUNNING\t{_RUN_CHAT_ID}\t\n",
+                ),
+            ),
+            UpdateActivity.FINISHING,
+        ),
         # Still stopped with nothing to restart it.
         (_STALLING_PROBE, UpdateActivity.STALLED),
         # Its chat was deleted.
@@ -261,7 +272,15 @@ _MAX_POLLS_BEFORE_A_STALLED_RUN_IS_PROBED = 100
         # The workspace could not be reached: no evidence either way.
         (_HOST_OFFLINE, UpdateActivity.STALLED),
     ],
-    ids=["running-again", "stopped-watchdog-back", "still-stopped", "deleted", "verdict-recorded", "unreachable"],
+    ids=[
+        "running-again",
+        "stopped-watchdog-back",
+        "landed-running-again",
+        "still-stopped",
+        "deleted",
+        "verdict-recorded",
+        "unreachable",
+    ],
 )
 @pytest.mark.witnesses("workspace-updates.stalled-run-resumes")
 def test_a_stalled_run_is_reported_as_updating_again_only_once_its_lead_is_back(
@@ -543,6 +562,50 @@ def test_an_apply_sighting_windows_the_apply_before_any_probe_fails(
 
     assert service.state_store.get(agent_id).activity is UpdateActivity.APPLYING
     assert service.apply_window.is_window_open(agent_id) is True
+
+
+@pytest.mark.witnesses(
+    "workspace-updates.landed-apply-is-finishing",
+    partial="the row's activity only; the surfaces' wording is the frontend's tests'",
+)
+@pytest.mark.parametrize(
+    ("is_landed", "prior_activity", "expected_activity"),
+    [
+        (True, UpdateActivity.APPLYING, UpdateActivity.FINISHING),
+        (True, UpdateActivity.WAITING, UpdateActivity.FINISHING),
+        (True, UpdateActivity.RUNNING, UpdateActivity.FINISHING),
+        (False, UpdateActivity.APPLYING, UpdateActivity.RUNNING),
+    ],
+)
+def test_a_landed_apply_reads_as_finishing_until_the_verdict(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    is_landed: bool,
+    prior_activity: UpdateActivity,
+    expected_activity: UpdateActivity,
+) -> None:
+    """After the apply lands, the agent still composing its results is finishing, not preparing again.
+
+    Without the record's landing, an apply that is no longer under way may have rolled back, so the
+    row goes back to running.
+    """
+    record: dict[str, object] = {"chat_agent_name": "update-x"}
+    if is_landed:
+        record["applied_at"] = time.time()
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=update_run_probe_stdout(run=json.dumps(record) + "\n", agents="update-x\tRUNNING\n"),
+        )
+    )
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
+    service.state_store.set_activity(agent_id, prior_activity)
+
+    service.poll_in_flight_runs()
+
+    assert service.state_store.get(agent_id).activity is expected_activity
 
 
 @pytest.mark.witnesses("workspace-updates.hold-is-reported-with-its-detail")

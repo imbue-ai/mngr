@@ -16,7 +16,11 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -30,6 +34,48 @@ def _make_jsonl_line(uuid: str | None = None) -> str:
     """Create a minimal Claude session JSONL line with a uuid field."""
     line_uuid = uuid if uuid is not None else uuid4().hex
     return json.dumps({"uuid": line_uuid, "type": "assistant", "timestamp": "2026-01-01T00:00:00Z"})
+
+
+def _iso_z_timestamp(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _make_user_record_line(content: Any, timestamp_epoch: float | None) -> str:
+    """Create a raw session line for a `user` record with the given message content."""
+    record: dict[str, Any] = {
+        "uuid": uuid4().hex,
+        "type": "user",
+        "message": {"role": "user", "content": content},
+    }
+    if timestamp_epoch is not None:
+        record["timestamp"] = _iso_z_timestamp(timestamp_epoch)
+    return json.dumps(record)
+
+
+def _make_interrupt_sentinel_line(
+    timestamp_epoch: float | None, sentinel_text: str = "[Request interrupted by user]"
+) -> str:
+    """Create a raw session line for the `user` record claude appends when a turn is interrupted."""
+    return _make_user_record_line([{"type": "text", "text": sentinel_text}], timestamp_epoch)
+
+
+def _make_assistant_record_line(timestamp_epoch: float) -> str:
+    """Create a raw session line for an `assistant` record (a reply calling a tool)."""
+    return json.dumps(
+        {
+            "uuid": uuid4().hex,
+            "type": "assistant",
+            "timestamp": _iso_z_timestamp(timestamp_epoch),
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash"}]},
+        }
+    )
+
+
+def _make_queue_operation_line(operation: str, timestamp_epoch: float) -> str:
+    """Create a raw session line for a `queue-operation` record (Claude's prompt queue)."""
+    return json.dumps(
+        {"type": "queue-operation", "operation": operation, "timestamp": _iso_z_timestamp(timestamp_epoch)}
+    )
 
 
 def _write_lines(path: Path, lines: list[str]) -> None:
@@ -59,12 +105,14 @@ class ScriptRunner:
     def __init__(self, tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
+        self.host_dir = tmp_path / "host"
         # Fake HOME so ~/.claude/projects/ resolves to our test dir
         self.fake_home = tmp_path / "fakehome"
         self.claude_projects_dir = self.fake_home / ".claude" / "projects"
 
         # Create directory structure
         self.agent_state_dir.mkdir(parents=True)
+        self.host_dir.mkdir(parents=True)
         self.claude_projects_dir.mkdir(parents=True)
         (self.agent_state_dir / "commands").mkdir(parents=True)
         (self.agent_state_dir / "events" / "logs" / "stream_transcript").mkdir(parents=True)
@@ -115,6 +163,20 @@ class ScriptRunner:
     def get_output_uuids(self) -> list[str]:
         return _extract_uuids(self.get_output_lines())
 
+    def set_current_session(self, session_id: str) -> None:
+        """Write the claude_session_id marker the SessionStart hook maintains."""
+        (self.agent_state_dir / "claude_session_id").write_text(session_id + "\n")
+
+    def create_active_marker(self, mtime_epoch: float) -> Path:
+        """Create the agent's `active` marker with its mtime pinned to mtime_epoch."""
+        marker = self.agent_state_dir / "active"
+        marker.touch()
+        os.utime(marker, (mtime_epoch, mtime_epoch))
+        return marker
+
+    def get_activity_event_lines(self) -> list[str]:
+        return _read_lines(self.host_dir / "events" / "mngr" / "activity" / "events.jsonl")
+
     def run_single_pass(
         self, timeout: float = 10.0, path_prefix: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -122,6 +184,7 @@ class ScriptRunner:
         env = {
             **os.environ,
             "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir),
+            "MNGR_HOST_DIR": str(self.host_dir),
             "HOME": str(self.fake_home),
             "CLAUDE_CONFIG_DIR": str(self.fake_home / ".claude"),
         }
@@ -544,3 +607,213 @@ def test_multiple_sessions_partial_reconciliation(
     assert output_uuids == set(uuids_a + uuids_b)
     assert runner.get_offset("sess-a") == 4
     assert runner.get_offset("sess-b") == 4
+
+
+# Claude fires no hook when a turn is interrupted in the terminal (Esc), so the
+# `active` marker created at prompt submit is stranded. The streamer heals it
+# when the current session's last record is an interrupt sentinel that postdates
+# the marker. These tests require jq (like the hooks the heal mirrors).
+
+_REQUIRES_JQ = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq is required by the interrupt-stranded marker heal"
+)
+
+
+def _assert_single_pass_leaves_marker(runner: ScriptRunner, marker: Path) -> None:
+    """Run one pass and check the heal was skipped: the marker stays and no activity event is emitted."""
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert marker.exists()
+    assert runner.get_activity_event_lines() == []
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize(
+    "sentinel_text", ["[Request interrupted by user]", "[Request interrupted by user for tool use]"]
+)
+@pytest.mark.parametrize("is_string_content", [False, True])
+def test_single_pass_heals_marker_stranded_by_trailing_interrupt_sentinel(
+    tmp_path: Path,
+    stub_mngr_log_sh: str,
+    mngr_transcript_lib_sh: str,
+    sentinel_text: str,
+    is_string_content: bool,
+) -> None:
+    """Both sentinel shapes, in both content forms, clear the stranded markers and emit one activity event."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    content: Any = sentinel_text if is_string_content else [{"type": "text", "text": sentinel_text}]
+    runner.add_session("sess-cur", [_make_jsonl_line(), _make_user_record_line(content, now)])
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now - 300.0)
+    permissions_marker = runner.agent_state_dir / "permissions_waiting"
+    permissions_marker.touch()
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    assert not marker.exists()
+    assert not permissions_marker.exists()
+    # Like every other idle path, so idle-time consumers (auto-compaction) see the agent idle.
+    assert (runner.agent_state_dir / "idle_since").read_text().strip().endswith("Z")
+    event_lines = runner.get_activity_event_lines()
+    assert len(event_lines) == 1
+    event = json.loads(event_lines[0])
+    assert event["type"] == "activity"
+    assert event["reason"] == "interrupt_heal"
+    # The sentinel line itself still streams into the output like any other line.
+    assert len(runner.get_output_lines()) == 2
+
+
+@_REQUIRES_JQ
+def test_single_pass_keeps_marker_touched_after_the_interrupt(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A marker at/after the sentinel belongs to a newer turn (an immediate resubmit): keep it."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    sentinel = _make_interrupt_sentinel_line(now - 30.0)
+    runner.add_session("sess-cur", [sentinel])
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+def test_single_pass_ignores_tool_result_quoting_the_sentinel(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A trailing tool_result that merely quotes the sentinel (e.g. an agent grepping its own session) never heals."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    quoting_tool_result = _make_user_record_line(
+        [{"type": "tool_result", "tool_use_id": "tool-1", "content": "[Request interrupted by user]"}], now
+    )
+    runner.add_session("sess-cur", [quoting_tool_result])
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now - 300.0)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+def test_single_pass_heal_without_marker_emits_nothing(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A trailing sentinel with no marker (the turn already settled) heals nothing and emits no event."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    sentinel = _make_interrupt_sentinel_line(time.time())
+    runner.add_session("sess-cur", [sentinel])
+    runner.set_current_session("sess-cur")
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    assert not (runner.agent_state_dir / "active").exists()
+    assert runner.get_activity_event_lines() == []
+
+
+@_REQUIRES_JQ
+def test_single_pass_ignores_sentinel_in_non_current_session(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """Only the CURRENT session's tail heals: an old session's interrupt is history."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    old_sentinel = _make_interrupt_sentinel_line(now)
+    runner.add_session("sess-old", [old_sentinel])
+    runner.add_session("sess-new", [_make_jsonl_line()])
+    runner.set_current_session("sess-new")
+    marker = runner.create_active_marker(now - 300.0)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+def test_single_pass_survives_an_empty_session_id_marker(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """An empty claude_session_id names no session to heal from, and must not take the streamer down."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    sentinel = _make_interrupt_sentinel_line(now)
+    runner.add_session("sess-cur", [sentinel])
+    runner.set_current_session("")
+    marker = runner.create_active_marker(now - 300.0)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+def test_single_pass_ignores_sentinel_without_timestamp(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A sentinel record with no parseable timestamp is skipped: the heal acts only on positive evidence."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    sentinel = _make_interrupt_sentinel_line(None)
+    runner.add_session("sess-cur", [sentinel])
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(time.time() - 300.0)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize("is_prompt_ahead_of_sentinel", [False, True])
+def test_single_pass_keeps_marker_while_an_interrupt_flushes_a_queued_prompt(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str, is_prompt_ahead_of_sentinel: bool
+) -> None:
+    """An interrupt with a prompt queued dequeues it around the sentinel and starts its turn with no hook.
+
+    The marker dates from the enqueue (UserPromptSubmit fires then), so only the dequeue after the
+    interrupted turn's last reply tells this from a plain interrupt. Claude writes the flushed prompt on
+    either side of the sentinel; both orders were seen live.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    flushed_prompt = _make_user_record_line("Queued follow-up: run sleep 21", now - 0.03)
+    tool_result = _make_user_record_line(
+        [{"type": "tool_result", "tool_use_id": "tool-1", "content": ""}], now - 0.004
+    )
+    sentinel = _make_interrupt_sentinel_line(now, "[Request interrupted by user for tool use]")
+    interrupted_turn = [
+        _make_user_record_line("Run sleep 44 in the foreground", now - 10.5),
+        _make_assistant_record_line(now - 10.0),
+        _make_queue_operation_line("enqueue", now - 5.6),
+        _make_queue_operation_line("dequeue", now - 0.07),
+    ]
+    tail = [flushed_prompt, tool_result, sentinel] if is_prompt_ahead_of_sentinel else [tool_result, sentinel]
+    runner.add_session("sess-cur", interrupted_turn + tail)
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now - 5.5)
+
+    _assert_single_pass_leaves_marker(runner, marker)
+
+
+@_REQUIRES_JQ
+def test_single_pass_heals_an_interrupted_turn_that_a_dequeued_prompt_started(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A turn started from the queue (a background task's notification) and then interrupted still heals."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    now = time.time()
+    runner.add_session(
+        "sess-cur",
+        [
+            _make_queue_operation_line("enqueue", now - 5.1),
+            _make_queue_operation_line("dequeue", now - 5.07),
+            _make_user_record_line("<task-notification>Background command completed</task-notification>", now - 5.05),
+            _make_assistant_record_line(now - 2.9),
+            _make_user_record_line([{"type": "tool_result", "tool_use_id": "tool-1", "content": "rejected"}], now),
+            _make_interrupt_sentinel_line(now, "[Request interrupted by user for tool use]"),
+        ],
+    )
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now - 4.9)
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    assert not marker.exists()
+    assert len(runner.get_activity_event_lines()) == 1

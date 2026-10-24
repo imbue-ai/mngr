@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -29,6 +31,7 @@ from imbue.minds.desktop_client.update_apply_window import build_update_run_prob
 from imbue.minds.desktop_client.update_apply_window import parse_update_run_probe
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
@@ -37,6 +40,7 @@ from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_until
 
 _CHAT = "update-abc123"
 
@@ -71,8 +75,9 @@ def _make_manager(
     mngr_caller: RecordingMngrCaller | None = None,
     fallback_window_seconds: float = 300.0,
     backend_resolver: MngrCliBackendResolver | None = None,
+    stuck_threshold_seconds: float = 0.0,
 ) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RecoveryRecorder]:
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=stuck_threshold_seconds)
     store = make_update_state_store(tmp_path)
     recoveries = _RecoveryRecorder()
     manager = UpdateApplyWindowManager(
@@ -645,6 +650,21 @@ def test_expiry_with_a_healthy_machine_hands_the_row_back_without_a_recovery(
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
 
+def test_expiry_hands_a_run_whose_apply_landed_back_as_finishing(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The poll cannot move an APPLYING row to WAITING, so an idle agent's landed run is still APPLYING here."""
+    manager, _, store, _ = _make_manager(root_concurrency_group, tmp_path, fallback_window_seconds=-100.0)
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    store.adopt_run_record(agent_id, UpdateRunStatus(chat_agent_name=_CHAT, applied_at=datetime.now(timezone.utc)))
+
+    manager.run_expiry_pass()
+
+    assert store.get(agent_id).activity is UpdateActivity.FINISHING
+
+
 @pytest.mark.witnesses("workspace-updates.wedged-apply-recovered", partial="failure accounting restarts from nothing")
 def test_an_expired_window_stops_suppressing_failure_accounting(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
@@ -706,3 +726,107 @@ def test_the_run_probe_reaches_its_machine_by_the_host_discovery_placed_it_on(
     caller = manager.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     assert caller.calls[0][:3] == ["exec", "--agent", f"{agent_id}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"]
+
+
+@pytest.mark.witnesses("workspace-updates.apply-seen-at-the-outage-onset")
+def test_an_apply_begun_between_polls_is_windowed_at_the_outages_first_failure(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The apply's services go down within a second of it starting, so the record is read at the first failure.
+
+    Read alone, without the agent listing or the busy-chat read, the slow parts of the probe.
+    """
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=applying_record_json()))
+    )
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=60.0
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+    assert manager.is_window_open(agent_id) is True
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    ((*_, script, _no_start),) = caller.calls
+    assert RUN_STATUS_PATH in script
+    assert "list" not in script
+
+
+@pytest.mark.witnesses("workspace-updates.prepare-outage-is-real", partial="an outage first seen while a run prepares")
+def test_an_outage_onset_with_no_apply_under_way_is_still_convicted_once_the_record_answers(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0, stdout=update_run_probe_stdout(run=json.dumps({"chat_agent_name": _CHAT}) + "\n")
+        )
+    )
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    def is_stuck_after_another_failure() -> bool:
+        tracker.record_probe_failure(agent_id)
+        return tracker.get_health(agent_id) is AgentHealth.STUCK
+
+    assert poll_until(is_stuck_after_another_failure, timeout=5.0)
+    assert manager.is_window_open(agent_id) is False
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+def test_an_outage_onset_with_no_update_in_flight_asks_the_workspace_nothing(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_APPLYING_STDOUT))
+    manager, tracker, _, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=60.0
+    )
+    agent_id = AgentId.generate()
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert caller.calls == []
+    assert manager.is_window_open(agent_id) is False
+
+
+@pytest.mark.witnesses("workspace-updates.apply-seen-at-the-outage-onset")
+def test_an_outage_outlasting_the_stuck_threshold_while_its_record_is_read_is_not_convicted(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The read can take longer than the stuck threshold on a remote workspace; the outage waits for its answer."""
+    release_read = threading.Event()
+    caller = HookedMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=applying_record_json()))
+    )
+
+    def hold_the_read(_argv: Sequence[str]) -> None:
+        release_read.wait(timeout=10.0)
+
+    caller.set_on_call(hold_the_read)
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    read_started_at = time.monotonic()
+    assert poll_until(lambda: time.monotonic() - read_started_at > 0.05, timeout=1.0)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY

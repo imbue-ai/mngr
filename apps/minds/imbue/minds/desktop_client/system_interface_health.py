@@ -284,6 +284,7 @@ class HostRecoveryKind(LowerCaseStrEnum):
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
 OnRecoveryCallback = Callable[[AgentId], None]
 OnStuckEdgeCallback = Callable[[AgentId], None]
+OnFailureRunOnsetCallback = Callable[[AgentId], None]
 
 
 class BackendOutageObservation(FrozenModel):
@@ -546,6 +547,7 @@ class SystemInterfaceHealthTracker(MutableModel):
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
     _on_recovery_callbacks: list[OnRecoveryCallback] = PrivateAttr(default_factory=list)
     _on_stuck_edge_callbacks: list[OnStuckEdgeCallback] = PrivateAttr(default_factory=list)
+    _on_failure_run_onset_callbacks: list[OnFailureRunOnsetCallback] = PrivateAttr(default_factory=list)
     # agent_id_str -> purpose -> time.monotonic() deadline of a probe-grace window.
     _probe_grace_deadlines_by_agent: dict[str, dict[ProbeGracePurpose, float]] = PrivateAttr(default_factory=dict)
     # Agents stopped from inside the app. Their interface is legitimately
@@ -617,6 +619,16 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         with self._lock:
             self._on_stuck_edge_callbacks.append(callback)
+
+    def add_on_failure_run_onset_callback(self, callback: OnFailureRunOnsetCallback) -> None:
+        """Register a callback fired on the first probe failure of a HEALTHY agent's failure run.
+
+        For a consumer that can explain an outage before it convicts: the stuck threshold is
+        the time it has. Fired on the probe loop's thread, so a callback that does slow work
+        must hand it off.
+        """
+        with self._lock:
+            self._on_failure_run_onset_callbacks.append(callback)
 
     def remove_on_change_callback(self, callback: OnChangeCallback) -> None:
         """Unregister a previously registered change callback.
@@ -932,6 +944,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         fire_health: AgentHealth | None = None
         stuck_after_seconds: float | None = None
         is_run_restarted_at_wake = False
+        is_run_onset = False
         held_onset_delay_seconds: float | None = None
         with self._lock:
             # An expected outage suppresses failure accounting entirely; once
@@ -948,7 +961,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             is_run_restarted_at_wake = (
                 record.failure_run_started_at is not None and self._is_run_interrupted_by_sleep_locked(record)
             )
-            if record.failure_run_started_at is None or is_run_restarted_at_wake:
+            is_run_onset = record.failure_run_started_at is None
+            if is_run_onset or is_run_restarted_at_wake:
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = now_wall
                 record.is_wake_shadow_hold_logged = False
@@ -978,6 +992,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             ):
                 record.is_wake_shadow_hold_logged = True
                 held_onset_delay_seconds = onset_delay_seconds
+        if is_run_onset and fire_health is None:
+            self._fire_on_failure_run_onset(agent_id)
         # A restarted run is the sleep signal actually changing an outcome, and
         # the only trace of a conviction that did not happen.
         if is_run_restarted_at_wake:
@@ -1436,6 +1452,17 @@ class SystemInterfaceHealthTracker(MutableModel):
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("SystemInterfaceHealthTracker on-recovery callback failed for {}: {}", agent_id, e)
+
+    def _fire_on_failure_run_onset(self, agent_id: AgentId) -> None:
+        with self._lock:
+            callbacks = list(self._on_failure_run_onset_callbacks)
+        for callback in callbacks:
+            try:
+                callback(agent_id)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning(
+                    "SystemInterfaceHealthTracker failure-run onset callback failed for {}: {}", agent_id, e
+                )
 
     def _fire_on_stuck_edge(self, agent_id: AgentId) -> None:
         with self._lock:

@@ -23,7 +23,8 @@ export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
     update.activity === "STARTING" ||
     update.activity === "RUNNING" ||
     update.activity === "WAITING" ||
-    update.activity === "APPLYING"
+    update.activity === "APPLYING" ||
+    update.activity === "FINISHING"
   );
 }
 
@@ -170,14 +171,16 @@ export function plainScheduleTargetRef(update: UiWorkspaceUpdate): string | null
 }
 
 /** Which part of a run a machine is in. Preparing is split from applying
- * because only the apply touches the live machine (its services go down). */
-export type UpdateRunPhase = "none" | "preparing" | "applying" | "waiting";
+ * because only the apply touches the live machine (its services go down), and
+ * finishing from both because the machine is already on the new version. */
+export type UpdateRunPhase = "none" | "preparing" | "applying" | "finishing" | "waiting";
 
 /** One producer for the row badge and the shell's band. */
 export function updateRunPhase(update: UiWorkspaceUpdate | null, isUpdating: boolean): UpdateRunPhase {
   if (!isUpdating) return "none";
   if (update?.activity === "WAITING") return "waiting";
   if (update?.activity === "APPLYING") return "applying";
+  if (update?.activity === "FINISHING") return "finishing";
   // STARTING, RUNNING, and a dispatch with no pushed reading yet: none has
   // touched the live machine.
   return "preparing";
@@ -240,6 +243,11 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
     case "APPLYING":
       return {
         message: `Updating this workspace${target ? ` to ${target}` : ""}. Its services restart while the update lands.`,
+        isWaiting: false,
+      };
+    case "FINISHING":
+      return {
+        message: `The update${target ? ` to ${target}` : ""} is in place. The update agent is finishing its checks in the update chat.`,
         isWaiting: false,
       };
     case "STARTING":
@@ -390,6 +398,15 @@ export function updateBadgeFor(
         ? "The update is waiting for your go-ahead — open this workspace to continue"
         : "The update agent has stopped and is waiting in its chat — open this workspace to continue",
       isSpinnerShown: false,
+    };
+  }
+  if (phase === "finishing") {
+    return {
+      state: "updating",
+      tone: "neutral",
+      label: "Finishing update…",
+      tooltip: "The update is in place; the update agent is finishing its checks",
+      isSpinnerShown: true,
     };
   }
   if (phase !== "none") {

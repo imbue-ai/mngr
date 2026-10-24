@@ -16,10 +16,17 @@
 # backwards through the session file to find the last line that actually
 # made it into the output.
 #
+# Each cycle also clears the 'active' marker a terminal interrupt strands
+# (see "Interrupt-stranded marker heal" below).
+#
 # Usage: stream_transcript.sh
 #
 # Requires environment variables:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
+#
+# Optional environment variables:
+#   MNGR_HOST_DIR         - the host directory the heal emits its activity
+#                           event under; the heal is skipped when unset
 
 set -euo pipefail
 
@@ -257,6 +264,154 @@ _initialize() {
     _MNGR_TRANSCRIPT_ID_SET=()
 }
 
+# Interrupt-stranded marker heal
+#
+# Claude fires NO hook when the user interrupts a turn in the terminal (Esc):
+# not at interrupt time, and not the idle_prompt Notification afterwards. The
+# 'active' marker the UserPromptSubmit hook created is therefore stranded: the
+# lifecycle reports RUNNING and the activity updater keeps refreshing
+# activity/agent while the terminal sits idle at its prompt. The interrupt
+# sentinel record claude appends to its session JSONL is the only on-disk
+# evidence that the turn died, and this streamer already tails those files, so
+# it clears the markers the same way the idle hooks do (rm both markers + one
+# activity event). Guarded by the marker's mtime so a turn submitted after the
+# interrupt is never un-marked, and by the prompt queue so a turn the interrupt
+# itself started is not either (see _is_interrupt_flushing_queued_prompt). It
+# runs every cycle, the Stop hook's single-pass flush included; a turn that
+# reached Stop did not end on an interrupt, so that pass never heals.
+
+# Shared opening of both sentinel shapes ("[Request interrupted by user]" and
+# the mid-tool "[Request interrupted by user for tool use]" variant).
+_INTERRUPT_SENTINEL_PREFIX='[Request interrupted by user'
+
+# How much older than the sentinel the marker's mtime must be before the heal
+# clears it. Errs toward NOT clearing: a wrongly skipped heal leaves the stuck
+# RUNNING state until the next turn or restart, while a wrong clear would hide
+# a live turn.
+_INTERRUPT_HEAL_GUARD_SECONDS=1
+
+# Print the mtime of $1 as epoch seconds (GNU stat, then BSD stat).
+_epoch_mtime() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# Print the epoch timestamp of a raw session line iff it is an interrupt
+# sentinel record: a `user` record whose TEXT blocks -- never a tool_result
+# quoting the sentinel, whose text is not extracted -- start with the sentinel
+# prefix. Prints nothing for anything else. jq's fromdateiso8601 rejects
+# fractional seconds, so they are stripped before parsing.
+_interrupt_sentinel_epoch() {
+    printf '%s' "$1" | jq -r --arg prefix "$_INTERRUPT_SENTINEL_PREFIX" '
+        select(type == "object" and .type == "user")
+        | ((.message? | objects | .content?) // "") as $content
+        | (if ($content | type) == "string" then $content
+           elif ($content | type) == "array" then
+               ([$content[] | objects | select(.type == "text") | .text? | strings | select(. != "")] | join("\n"))
+           else "" end) as $text
+        | select($text | sub("^\\s+"; "") | startswith($prefix))
+        | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601
+    ' 2>/dev/null
+}
+
+# How many trailing session lines the queued-prompt check reads. The dequeue it
+# looks for is written within a few records of the sentinel.
+_INTERRUPT_QUEUE_WINDOW_LINES=500
+
+# Succeed iff the interrupt is flushing a queued prompt into a new turn. An
+# interrupt with a prompt queued dequeues it around the sentinel and starts its
+# turn, and no hook fires for that turn: the marker it runs under dates from the
+# enqueue (UserPromptSubmit fires then), so it is older than the sentinel, and
+# the sentinel stays the session's tail until the new turn's first reply. The
+# dequeue is the tell: one after the interrupted turn's last assistant record is
+# the next turn's. A dequeue that started the interrupted turn precedes that
+# turn's replies. A session that cannot be read also succeeds, so the heal it
+# guards is skipped rather than let through.
+_is_interrupt_flushing_queued_prompt() {
+    local verdict
+    verdict=$(tail -n "$_INTERRUPT_QUEUE_WINDOW_LINES" "$1" 2>/dev/null | jq -R -s -r '
+        [split("\n")[] | fromjson? | objects] as $records
+        | ([$records[] | select(.type == "queue-operation" and .operation == "dequeue") | .timestamp // empty] | max) as $dequeued_at
+        | ([$records[] | select(.type == "assistant") | .timestamp // empty] | max) as $replied_at
+        | if $dequeued_at != null and ($replied_at == null or $dequeued_at > $replied_at) then "flushing" else "" end
+    ' 2>/dev/null) || return 0
+    [ "$verdict" = "flushing" ]
+}
+
+# Clear the 'active' (and 'permissions_waiting') marker stranded by a terminal
+# interrupt: only when the CURRENT session's last record is an interrupt
+# sentinel that postdates the marker's mtime by more than the guard band.
+# Best-effort and positive-evidence-only -- anything unreadable or unparseable
+# (including a partially-written last line, complete on the next cycle) skips
+# the heal rather than failing the streamer.
+_heal_interrupt_stranded_marker() {
+    local marker="$MNGR_AGENT_STATE_DIR/active"
+    if [ -z "${MNGR_HOST_DIR:-}" ] || [ ! -f "$marker" ]; then
+        return 0
+    fi
+
+    # Only the current session's tail can prove the marker's turn is dead. The
+    # sid must already be tracked (the same hook maintains the sid marker and
+    # the history this script tracks), so an unknown sid is skipped rather than
+    # force-resolved -- _try_resolve_file would register it without an offset.
+    local sid
+    sid=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null) || return 0
+    # An empty key is a fatal "bad array subscript" under set -u.
+    if [ -z "$sid" ]; then
+        return 0
+    fi
+    local session_file="${_FILE_BY_SID[$sid]:-}"
+    if [ -z "$session_file" ] || [ ! -f "$session_file" ]; then
+        return 0
+    fi
+
+    # Substring pre-filter before the jq parse: almost no tail line contains
+    # the sentinel opening, and the jq fork is not free at a 1s poll interval.
+    local last_line
+    last_line=$(tail -n 1 "$session_file" 2>/dev/null) || return 0
+    case "$last_line" in
+        *"$_INTERRUPT_SENTINEL_PREFIX"*) ;;
+        *) return 0 ;;
+    esac
+
+    local sentinel_epoch
+    sentinel_epoch=$(_interrupt_sentinel_epoch "$last_line") || return 0
+    case "$sentinel_epoch" in
+        '' | *[!0-9]*) return 0 ;;
+    esac
+
+    if _is_interrupt_flushing_queued_prompt "$session_file"; then
+        return 0
+    fi
+
+    # Read last, right before the rm, so a turn submitted while the checks
+    # above ran is caught by the guard.
+    local marker_mtime
+    marker_mtime=$(_epoch_mtime "$marker") || return 0
+    case "$marker_mtime" in
+        '' | *[!0-9]*) return 0 ;;
+    esac
+
+    # A marker touched at/after the interrupt belongs to a turn started after
+    # it; the band also absorbs marker-mtime vs transcript-timestamp skew.
+    if [ "$marker_mtime" -ge $((sentinel_epoch - _INTERRUPT_HEAL_GUARD_SECONDS)) ]; then
+        return 0
+    fi
+
+    # The same clear, idle stamp and activity event the idle hooks run (see
+    # _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT in claude_config.py and
+    # mark_inactive in wait_for_stop_hook.sh); the event makes `mngr observe`
+    # re-probe promptly. The event write is best-effort: the markers are
+    # already cleared, so a failure only delays observers until their next poll.
+    rm -f "$marker" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+    date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since"
+    {
+        mkdir -p "$MNGR_HOST_DIR/events/mngr/activity" &&
+            echo '{"source": "mngr/activity", "type": "activity", "event_id": "evt-'"$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'", "reason": "interrupt_heal"}' \
+                >> "$MNGR_HOST_DIR/events/mngr/activity/events.jsonl"
+    } || log_warn "Failed to emit activity event after healing interrupt-stranded marker"
+    log_info "Cleared active marker stranded by a terminal interrupt (session $sid)"
+}
+
 # Poll cycle (shared by main loop and single-pass mode)
 
 _run_one_cycle() {
@@ -286,6 +441,8 @@ _run_one_cycle() {
 
         _emit_new_lines "$sid"
     done
+
+    _heal_interrupt_stranded_marker
 }
 
 # Main

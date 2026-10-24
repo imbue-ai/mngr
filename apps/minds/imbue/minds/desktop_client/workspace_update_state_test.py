@@ -812,10 +812,12 @@ def _run_record(
     started_at: datetime | None = None,
     verdict: UpdateVerdict | None = None,
     resulting_ref: str = "",
+    applied_at: datetime | None = None,
 ) -> UpdateRunStatus:
     return UpdateRunStatus(
         chat_agent_name=chat,
         started_at=started_at if started_at is not None else datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc),
+        applied_at=applied_at,
         verdict=verdict,
         resulting_ref=resulting_ref,
         verdict_at=datetime(2026, 8, 26, 3, 20, tzinfo=timezone.utc) if verdict is not None else None,
@@ -832,6 +834,16 @@ def test_a_verdictless_record_enters_the_row_as_a_running_run(tmp_path: Path) ->
     state = store.get(agent_id)
     assert state.activity is UpdateActivity.RUNNING
     assert state.chat_agent_name == "update-abc123"
+    assert state.is_run_in_flight is True
+
+
+def test_a_verdictless_record_whose_apply_landed_enters_the_row_as_finishing(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    store.observe_run_record(agent_id, _run_record(applied_at=datetime(2026, 8, 26, 3, 10, tzinfo=timezone.utc)))
+
+    state = store.get(agent_id)
+    assert state.activity is UpdateActivity.FINISHING
     assert state.is_run_in_flight is True
 
 

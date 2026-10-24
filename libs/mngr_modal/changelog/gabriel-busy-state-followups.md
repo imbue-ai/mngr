@@ -1,0 +1,1 @@
+The CI safety-net sweep of old Modal test environments no longer fails when another run deletes an environment first: `modal environment delete` reports that as "No such environment", which now counts as already gone, as "not found" did.

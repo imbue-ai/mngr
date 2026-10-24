@@ -50,6 +50,7 @@ from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # Written by ``update_self.py run-status``; relative to the work_dir ``mngr exec`` lands in.
 RUN_STATUS_PATH: Final[str] = RUN_RECORD_PATH
@@ -93,6 +94,11 @@ BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
 # The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
 # 10s reading before it falls back to the marker files. One cut off prints nothing, so no chat reads busy.
 _BACKGROUND_TASKS_TIMEOUT_SECONDS: Final[int] = 10
+
+# The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
+_RUN_RECORD_READ_SCRIPT: Final[str] = (
+    f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}"
+)
 
 
 class UpdateAgentLiveness(UpperCaseStrEnum):
@@ -164,7 +170,7 @@ class UpdateRunProbe(FrozenModel):
 def build_update_run_probe_args(workspace_address: str) -> list[str]:
     """Build the ``mngr`` CLI args for the combined run-status + agent + busy-chat probe.
 
-    One exec for every fact because this runs on the stuck-edge callback thread. The
+    The liveness poll needs every fact for every run, so they share one exec. The
     listing is unfiltered and matched app-side so a chat name never lands in a CEL filter.
     """
     inner_list = build_in_workspace_mngr_command(["list", "--format", "{name}\t{state}\t{id}\t{labels.chat_id}"])
@@ -179,9 +185,8 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
             "tsv",
         ]
     )
-    # The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
     script = (
-        f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}; "
+        f"{_RUN_RECORD_READ_SCRIPT}; "
         f"echo {AGENTS_BEGIN_SENTINEL}; "
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
         f"echo {AGENTS_END_SENTINEL}; "
@@ -191,6 +196,16 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
         f"test -f {shlex.quote(LIVE_CRON_DIRECTORY + '/' + DISPATCHER_CRON_NAME)} && echo {WATCHDOG_INSTALLED_SENTINEL}; true"
     )
     return ["exec", "--agent", workspace_address, script, "--no-start"]
+
+
+def build_update_run_record_args(workspace_address: str) -> list[str]:
+    """Build the ``mngr`` CLI args that read only the run record, for the reads that must be quick.
+
+    The agent listing and the busy-chat read are the slow parts of the full probe (an in-workspace
+    ``mngr`` and a chat app that may be restarting with the services), and these readers only ask
+    whether an apply is under way.
+    """
+    return ["exec", "--agent", workspace_address, _RUN_RECORD_READ_SCRIPT, "--no-start"]
 
 
 def _section(lines: list[str], begin: str, end: str) -> list[str] | None:
@@ -384,8 +399,57 @@ class UpdateApplyWindowManager(MutableModel):
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _deadline_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    _onset_check_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_started: bool = PrivateAttr(default=False)
+
+    def model_post_init(self, __context: object) -> None:
+        self.tracker.add_on_failure_run_onset_callback(self._on_outage_onset)
+
+    def _on_outage_onset(self, agent_id: AgentId) -> None:
+        """Read the run record at an outage's first failure, off the probe loop's thread.
+
+        An apply takes the services down within a second of starting, long before the poll
+        can see it, so without this the machine reads as stuck until the stuck edge asks.
+        The outage is held back while the read is out, since a remote read can outlast the
+        stuck threshold; an outage with no apply under way is convicted once it answers.
+        """
+        aid_str = str(agent_id)
+        if not self.store.get(agent_id).is_run_in_flight:
+            return
+        with self._lock:
+            if self._is_window_open_locked(aid_str) or aid_str in self._onset_check_agent_ids:
+                return
+            self._onset_check_agent_ids.add(aid_str)
+            # Under the lock so a window opening meanwhile arms its own, longer grace after this one.
+            self.tracker.begin_probe_grace(
+                agent_id, ProbeGracePurpose.UPDATE_APPLY, time.monotonic() + _RUN_PROBE_TIMEOUT_SECONDS
+            )
+        start_mngr_thread(
+            self.concurrency_group,
+            target=self._check_apply_at_outage_onset,
+            args=(agent_id,),
+            name=f"update-apply-onset-{aid_str}",
+            daemon=True,
+            # The check logs its own failures; a crash must not poison the root group.
+            is_checked=False,
+        )
+
+    def _check_apply_at_outage_onset(self, agent_id: AgentId) -> None:
+        aid_str = str(agent_id)
+        try:
+            probe = self.probe_run_record(agent_id)
+            if probe.is_apply_in_progress:
+                logger.info("Saw the update apply under way in {} at its outage's first failure", agent_id)
+                self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
+        except (MindError, MngrError, OSError, RuntimeError, ValueError) as e:
+            logger.opt(exception=e).warning("Reading the update run record of {} at its outage failed", agent_id)
+        finally:
+            # Under the lock so a window another path opens meanwhile keeps its grace.
+            with self._lock:
+                self._onset_check_agent_ids.discard(aid_str)
+                if aid_str not in self._deadline_by_agent:
+                    self.tracker.end_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY)
 
     def start(self) -> None:
         """Start the expiry pass strand. Idempotent."""
@@ -447,7 +511,11 @@ class UpdateApplyWindowManager(MutableModel):
     def is_window_open(self, agent_id: AgentId) -> bool:
         """Whether an unexpired window is armed for ``agent_id``."""
         with self._lock:
-            deadline = self._deadline_by_agent.get(str(agent_id))
+            return self._is_window_open_locked(str(agent_id))
+
+    def _is_window_open_locked(self, aid_str: str) -> bool:
+        """Whether an unexpired window is armed for ``aid_str``. Must hold ``self._lock``."""
+        deadline = self._deadline_by_agent.get(aid_str)
         return deadline is not None and time.monotonic() < deadline
 
     def should_decline_recovery_dispatch(self, agent_id: AgentId) -> bool:
@@ -456,7 +524,7 @@ class UpdateApplyWindowManager(MutableModel):
             return True
         if not self.store.get(agent_id).is_run_in_flight:
             return False
-        probe = self.probe_run(agent_id)
+        probe = self.probe_run_record(agent_id)
         if probe.is_apply_in_progress:
             logger.info("Declined unattended recovery for {}: its update's apply is under way", agent_id)
             self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
@@ -488,9 +556,16 @@ class UpdateApplyWindowManager(MutableModel):
 
     def probe_run(self, agent_id: AgentId) -> UpdateRunProbe:
         """Ask the workspace whether an update is still happening in it."""
+        return self._probe(agent_id, build_update_run_probe_args)
+
+    def probe_run_record(self, agent_id: AgentId) -> UpdateRunProbe:
+        """Read only the workspace's run record; nothing else is asked, so the agent liveness reads UNKNOWN."""
+        return self._probe(agent_id, build_update_run_record_args)
+
+    def _probe(self, agent_id: AgentId, build_args: Callable[[str], list[str]]) -> UpdateRunProbe:
         state = self.store.get(agent_id)
         result = self.mngr_caller.call(
-            build_update_run_probe_args(build_agent_address(agent_id, self.backend_resolver)),
+            build_args(build_agent_address(agent_id, self.backend_resolver)),
             timeout=_RUN_PROBE_TIMEOUT_SECONDS,
         )
         probe = parse_update_run_probe(result.stdout, state.chat_agent_name, state.chat_agent_id)
@@ -525,8 +600,7 @@ class UpdateApplyWindowManager(MutableModel):
         A machine still STUCK gets its recovery dispatched here: the stuck edge fires once
         per episode and was already declined, so nothing else would.
         """
-        if self.store.get(agent_id).activity is UpdateActivity.APPLYING:
-            self.store.set_activity(agent_id, UpdateActivity.RUNNING, only_from=frozenset({UpdateActivity.APPLYING}))
+        self.store.end_apply(agent_id)
         if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
             return
         logger.warning(

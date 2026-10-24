@@ -504,6 +504,21 @@ class WorkspaceUpdateStateStore(MutableModel):
         self._fire_on_change()
         return True
 
+    def end_apply(self, agent_id: AgentId) -> bool:
+        """Move an APPLYING row back to its agent's work: FINISHING once its record says the apply landed, else RUNNING.
+
+        Nothing for a row that is not APPLYING; the return says whether it moved.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str)
+            if facts is None or facts.activity is not UpdateActivity.APPLYING:
+                return False
+            activity = UpdateActivity.FINISHING if facts.record.is_landed else UpdateActivity.RUNNING
+            self._run_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().activity, activity))
+        self._fire_on_change()
+        return True
+
     def try_begin_run(self, agent_id: AgentId, *, target_override: str) -> bool:
         """Claim the run slot for ``agent_id``, returning whether this caller won it.
 
@@ -693,7 +708,10 @@ class WorkspaceUpdateStateStore(MutableModel):
                 if is_same_run or not status.chat_agent_name:
                     return
                 new_facts = facts.model_copy_update(
-                    to_update(facts.field_ref().activity, UpdateActivity.RUNNING),
+                    to_update(
+                        facts.field_ref().activity,
+                        UpdateActivity.FINISHING if status.is_landed else UpdateActivity.RUNNING,
+                    ),
                     to_update(facts.field_ref().record, status),
                     to_update(facts.field_ref().target_override, ""),
                 )

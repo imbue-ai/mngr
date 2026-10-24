@@ -262,7 +262,7 @@ describe("a stopped machine's update state", () => {
 
 describe("update state predicates", () => {
   it("counts every live phase of a run as in flight, waiting included", () => {
-    for (const activity of ["STARTING", "RUNNING", "WAITING", "APPLYING"] as const) {
+    for (const activity of ["STARTING", "RUNNING", "WAITING", "APPLYING", "FINISHING"] as const) {
       expect(isRunInFlight({ ...OUT_OF_DATE_UPDATE, activity })).toBe(true);
     }
     for (const activity of ["IDLE", "STALLED"] as const) {
@@ -356,6 +356,11 @@ describe("updateBadgeFor", () => {
     const applying = updateBadgeFor({ ...OUT_OF_DATE_UPDATE, activity: "APPLYING" }, true);
     expect(preparing?.label).toBe("Preparing update…");
     expect(applying?.label).toBe("Updating…");
+  });
+
+  it("says a landed update is finishing, not preparing again, until its verdict", () => {
+    const badge = updateBadgeFor({ ...OUT_OF_DATE_UPDATE, activity: "FINISHING" }, true);
+    expect(badge).toMatchObject({ state: "updating", label: "Finishing update…", isSpinnerShown: true });
   });
 
   it("says a recorded hold is waiting on a decision, and leads with the run's own line", () => {
@@ -457,7 +462,14 @@ describe("updateActivityNotice", () => {
     expect(updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "STARTING" }).isWaiting).toBe(true);
   });
 
-  it.each(["RUNNING", "WAITING", "STALLED"] as const)(
+  it("says a landed update is in place while its agent finishes, not that it is preparing again", () => {
+    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "FINISHING" });
+    expect(notice.isWaiting).toBe(false);
+    expect(notice.message).toContain("is in place");
+    expect(notice.message).not.toContain("Preparing");
+  });
+
+  it.each(["RUNNING", "WAITING", "FINISHING", "STALLED"] as const)(
     "never names a %s run's chat by its agent's internal name, which the chat list does not show",
     (activity) => {
       const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity, chat_agent_name: "Update-to-v041" });

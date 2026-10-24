@@ -75,8 +75,11 @@ _WAITING_POLLS_BEFORE_SURFACING: Final[int] = 2
 # APPLYING is polled too: the probe runs over ``mngr exec``, which works while
 # the interface is down, and each sighting keeps the apply window extended.
 _POLLED_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
-    {UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
+    {UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING, UpdateActivity.FINISHING}
 )
+
+# What a run reads as while its agent is working, before or after the apply: the states it may stop to wait from.
+_MOVING_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset({UpdateActivity.RUNNING, UpdateActivity.FINISHING})
 
 # A stalled run's lead rarely comes back, so its row is probed at about the detection sweep's pace, not every pass.
 _POLLS_BETWEEN_STALLED_PROBES: Final[int] = 15
@@ -597,8 +600,9 @@ class WorkspaceUpdateService(MutableModel):
         Authority order: a verdict naming this run's chat ends it; apply fields
         open or extend the window; a recorded hold goes WAITING at once with its
         detail; otherwise the agent's lifecycle state decides (gone is STALLED,
-        idle for consecutive polls is WAITING, moving again is RUNNING). An
-        unanswered probe moves nothing.
+        idle for consecutive polls is WAITING, moving again is RUNNING, or
+        FINISHING once the record says the apply landed). An unanswered probe
+        moves nothing.
 
         STARTING is not probed: the chat may not exist yet. STALLED is probed
         now and then, for a lead that came back.
@@ -622,7 +626,7 @@ class WorkspaceUpdateService(MutableModel):
             self._poll_one_run(AgentId(agent_id_str), state)
 
     def _poll_stalled_run(self, agent_id: AgentId, state: UiWorkspaceUpdate) -> None:
-        """Report a stalled run as running again once its lead is back, with no verdict recorded.
+        """Report a stalled run as under way again once its lead is back, with no verdict recorded.
 
         Only an answered probe moves it, and only for a lead listed running, or stopped where the
         workspace's watchdog restarts it. A verdict landing meanwhile is the sweep's to observe.
@@ -642,10 +646,15 @@ class WorkspaceUpdateService(MutableModel):
         is_lead_back = probe.agent_liveness is UpdateAgentLiveness.ALIVE or (
             probe.agent_liveness is UpdateAgentLiveness.STOPPED and probe.is_watchdog_installed
         )
+        resumed_activity = UpdateActivity.FINISHING if status.is_landed else UpdateActivity.RUNNING
         if is_lead_back and self.state_store.set_activity(
-            agent_id, UpdateActivity.RUNNING, only_from=frozenset({UpdateActivity.STALLED})
+            agent_id, resumed_activity, only_from=frozenset({UpdateActivity.STALLED})
         ):
-            logger.info("The stalled update run in machine {} is under way again; reporting it as running", agent_id)
+            logger.info(
+                "The stalled update run in machine {} is under way again; reporting it as {}",
+                agent_id,
+                resumed_activity,
+            )
 
     def _poll_one_run(self, agent_id: AgentId, state: UiWorkspaceUpdate) -> None:
         aid_str = str(agent_id)
@@ -677,9 +686,7 @@ class WorkspaceUpdateService(MutableModel):
         if is_records_run and status is not None and status.is_holding:
             # No debounce for a recorded hold.
             self._waiting_streak_by_agent.pop(aid_str, None)
-            if self.state_store.set_activity(
-                agent_id, UpdateActivity.WAITING, only_from=frozenset({UpdateActivity.RUNNING})
-            ):
+            if self.state_store.set_activity(agent_id, UpdateActivity.WAITING, only_from=_MOVING_ACTIVITIES):
                 logger.info("The update in machine {} is holding for the user; saying so", agent_id)
             return
         # The watchdog restarts a stopped lead only once that lead has put its run on the record.
@@ -696,7 +703,7 @@ class WorkspaceUpdateService(MutableModel):
             # Under the surfacing threshold the streak accrues and the row stays as it is; a hold the
             # record has since cleared already came off with the record's adoption above.
             if streak >= _WAITING_POLLS_BEFORE_SURFACING and self.state_store.set_activity(
-                agent_id, UpdateActivity.WAITING, only_from=frozenset({UpdateActivity.RUNNING})
+                agent_id, UpdateActivity.WAITING, only_from=_MOVING_ACTIVITIES
             ):
                 logger.info("The update agent in machine {} is waiting in its chat; saying so", agent_id)
         elif probe.is_probe_answered and probe.agent_liveness in (
@@ -704,14 +711,23 @@ class WorkspaceUpdateService(MutableModel):
             UpdateAgentLiveness.STOPPED,
         ):
             self._waiting_streak_by_agent.pop(aid_str, None)
-            # Post-apply, the agent is composing its results; the window is left
-            # to close on its own (a verdict, the tracker's probe, or its deadline).
-            # A stopped lead that reached here is one the workspace's watchdog is restarting.
-            self.state_store.set_activity(
-                agent_id,
-                UpdateActivity.RUNNING,
-                only_from=frozenset({UpdateActivity.WAITING, UpdateActivity.APPLYING}),
-            )
+            # Moving again. Once the record says the apply landed, the agent is finishing its
+            # checks; without that, an apply no longer under way may have rolled back, so the
+            # run is preparing. The window is left to close on its own (a verdict, the tracker's
+            # probe, or its deadline). A stopped lead that reached here is one the workspace's
+            # watchdog is restarting.
+            if is_records_run and status is not None and status.is_landed:
+                self.state_store.set_activity(
+                    agent_id,
+                    UpdateActivity.FINISHING,
+                    only_from=frozenset({UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}),
+                )
+            else:
+                self.state_store.set_activity(
+                    agent_id,
+                    UpdateActivity.RUNNING,
+                    only_from=frozenset({UpdateActivity.WAITING, UpdateActivity.APPLYING}),
+                )
         else:
             # An unanswered probe is not evidence; the row and its streak stay put.
             pass
