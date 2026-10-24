@@ -32,6 +32,13 @@
 # defaulted, because every build ToDesktop made before Linux packaging landed
 # carries a Linux manifest whose binaries cannot run there, so a channel serving
 # such a build lists `["mac"]` alone.
+#
+# `mac_minimum_system_version` (optional) is published in the mac manifest as
+# electron-updater's `minimumSystemVersion`, so an install on an older macOS is
+# not offered the build. It is a Darwin release, not a macOS version: macOS 13 is
+# "22.0.0", 14 is "23.0.0", 15 is "24.0.0", 26 is "25.0.0". Set it whenever the
+# build needs a newer macOS than the build the channel serves now (its
+# LSMinimumSystemVersion); Squirrel.Mac installs an update without checking.
 
 [channels.stable]
 build_id = "2610066k8bzbhej"

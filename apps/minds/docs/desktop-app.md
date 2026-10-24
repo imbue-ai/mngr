@@ -238,6 +238,10 @@ Raw is also what `desync` chunks, so publishing raw means the assembled bytes ar
 
 Raw costs no extra disk. On the real 20 GiB image the sparse raw occupies **4.9 GiB** on disk versus **5.1 GiB** for the qcow2: qcow2's L1/L2 and refcount tables, plus its 64 KiB cluster granularity, cost more than the filesystem's 4 KiB-granular holes. Only the apparent size differs (`ls` reports 20 GiB, `du` reports what is allocated), so tools that do not understand sparse files will inflate it.
 
+### macOS 13 or later
+
+From 0.9.0 the app needs macOS 13 (Ventura) or later: Electron 44 dropped macOS 12, and the build's `LSMinimumSystemVersion` says 13.0. Every Apple silicon Mac can run macOS 13. Each channel entry for such a build sets `mac_minimum_system_version` ([deploy/ops/app-release.md](./deploy/ops/app-release.md), step 9), so an older Mac is not offered it: a macOS 12 install stays on its 0.8.x build, without that release's fixes, until macOS is updated, and then updates itself.
+
 ### macOS Intel (x86_64) is not supported
 
 Only the arm64 mac artifacts are built: the Intel (x64) and universal mac targets are disabled in the ToDesktop dashboard (the config schema exposes no arch selection, so the dashboard is where that decision lives), and `.github/workflows/minds-launch-to-msg.yml` fetches and verifies arm64 only. Supporting Intel would need a `darwin-x64` entry in `SHIPPED_TARGETS` plus either a per-arch `extraResources` mapping or `lipo`-merged universal binaries, and a pre-baked x86_64 Lima image, without which an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM anyway.

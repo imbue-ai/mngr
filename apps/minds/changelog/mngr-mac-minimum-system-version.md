@@ -1,0 +1,1 @@
+- `docs/desktop-app.md` states that from 0.9.0 the app needs macOS 13 or later and that an older Mac stays on its 0.8.x build until macOS is updated; `release-channels.toml` and `docs/deploy/ops/app-release.md` (step 9) document the new `mac_minimum_system_version` entry field that keeps it there.
