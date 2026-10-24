@@ -4,10 +4,11 @@
 //
 // These use node's built-in test runner (zero extra deps). The parsing logic
 // is the pure electron/deeplink.js module, deliberately split out of main.js
-// (which can't be required outside Electron) so it is testable here. What is
-// NOT covered (main.js wiring, verified manually): protocol registration,
-// open-url / second-instance event delivery, the pending-deeplink queue and
-// its flush ordering against startup, and window focus semantics.
+// (which can't be required outside Electron) so it is testable here, as is
+// which protocol registrations a run makes. What is NOT covered (main.js
+// wiring, verified manually): the registration calls themselves, open-url /
+// second-instance event delivery, the pending-deeplink queue and its flush
+// ordering against startup, and window focus semantics.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,11 +16,11 @@ const {
   parseDeeplink,
   deeplinkTargetPath,
   extractDeeplinkUrlFromArgv,
+  protocolClientRegistrations,
+  declaredUrlSchemes,
   DEEPLINK_SCHEMES,
   MAX_DEEPLINK_LENGTH,
 } = require('../../electron/deeplink');
-
-// -- parseDeeplink / deeplinkTargetPath --
 
 test('the primary scheme comes first and the previous one is still accepted', () => {
   assert.deepEqual([...DEEPLINK_SCHEMES], ['imbue-studio', 'minds']);
@@ -180,8 +181,6 @@ test('allowlist property: output is null or starts with /create', () => {
   }
 });
 
-// -- extractDeeplinkUrlFromArgv --
-
 test('finds the URL among binary path, app path, and switches', () => {
   const argv = ['/usr/bin/electron', '--no-sandbox', '.', 'imbue-studio://create?git_url=x'];
   assert.equal(extractDeeplinkUrlFromArgv(argv), 'imbue-studio://create?git_url=x');
@@ -212,4 +211,112 @@ test('non-array and non-string entries are tolerated', () => {
   assert.equal(extractDeeplinkUrlFromArgv(undefined), null);
   assert.equal(extractDeeplinkUrlFromArgv('minds://a'), null);
   assert.equal(extractDeeplinkUrlFromArgv([42, null, 'minds://ok']), 'minds://ok');
+});
+
+const PATCHED_INFO_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.imbue.minds.dev</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Imbue Studio Deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>imbue-studio</string>
+				<string>minds</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>`;
+
+const BARE_INFO_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.github.Electron</string>
+	<key>CFBundleName</key>
+	<string>minds</string>
+</dict>
+</plist>`;
+
+test('a bundle declares the url schemes its Info.plist lists', () => {
+  assert.deepEqual([...declaredUrlSchemes(PATCHED_INFO_PLIST)].sort(), ['imbue-studio', 'minds']);
+  assert.deepEqual([...declaredUrlSchemes(BARE_INFO_PLIST)], []);
+  assert.deepEqual([...declaredUrlSchemes('')], []);
+});
+
+test('a packaged app registers itself for every scheme', () => {
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    assert.deepEqual(
+      protocolClientRegistrations({
+        isDefaultApp: false,
+        platform,
+        execPath: '/x/Imbue Studio',
+        appPath: null,
+        bundleSchemes: new Set(),
+      }),
+      [['imbue-studio'], ['minds']],
+    );
+  }
+});
+
+test('a dev run on Windows registers the electron binary with the app path to load', () => {
+  assert.deepEqual(
+    protocolClientRegistrations({
+      isDefaultApp: true,
+      platform: 'win32',
+      execPath: 'C:\\node_modules\\electron\\electron.exe',
+      appPath: 'C:\\minds\\electron',
+      bundleSchemes: new Set(),
+    }),
+    [
+      ['imbue-studio', 'C:\\node_modules\\electron\\electron.exe', ['C:\\minds\\electron']],
+      ['minds', 'C:\\node_modules\\electron\\electron.exe', ['C:\\minds\\electron']],
+    ],
+  );
+});
+
+test('a dev run on macOS registers only the schemes its own bundle declares', () => {
+  const devRun = {
+    isDefaultApp: true,
+    platform: 'darwin',
+    execPath: '/repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+    appPath: '/repo/apps/minds/electron',
+  };
+  assert.deepEqual(protocolClientRegistrations({ ...devRun, bundleSchemes: declaredUrlSchemes(BARE_INFO_PLIST) }), []);
+  assert.deepEqual(
+    protocolClientRegistrations({ ...devRun, bundleSchemes: declaredUrlSchemes(PATCHED_INFO_PLIST) }),
+    [['imbue-studio'], ['minds']],
+  );
+  assert.deepEqual(protocolClientRegistrations({ ...devRun, bundleSchemes: new Set(['minds']) }), [['minds']]);
+});
+
+test('a dev run on Linux registers nothing, since linux only honors a packaged app', () => {
+  assert.deepEqual(
+    protocolClientRegistrations({
+      isDefaultApp: true,
+      platform: 'linux',
+      execPath: '/x/electron',
+      appPath: '/repo/apps/minds/electron',
+      bundleSchemes: new Set(),
+    }),
+    [],
+  );
+});
+
+test('a dev run on Windows with no app path to hand the binary registers nothing', () => {
+  assert.deepEqual(
+    protocolClientRegistrations({
+      isDefaultApp: true,
+      platform: 'win32',
+      execPath: 'C:\\electron.exe',
+      appPath: null,
+      bundleSchemes: new Set(),
+    }),
+    [],
+  );
 });

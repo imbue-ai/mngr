@@ -4,6 +4,7 @@
  *
  * Endpoints:
  *   GET /devices                    -> every desktop this gateway knows, connected or not
+ *   GET /permissions/self           -> the policy this machine enforces for the caller
  *   ANY /permissions...             \
  *   ANY /permission-requests...      > forwarded to a desktop gateway
  *   ANY /minds-api-proxy...         /
@@ -71,11 +72,19 @@
  * ``mngr-latchkey forget-request``, which sends that very DELETE to every
  * desktop through this gateway.
  *
+ * ``GET /permissions/self`` naming no desktop is answered here, from the
+ * permissions file the gateway applied to the caller (the extension context's
+ * ``permissionsConfigPath``): the policy this machine enforces, which every
+ * desktop's edit reaches before the desktop reports it. Reading it needs no
+ * desktop, so an agent can tell what it may do while the user's computer is
+ * asleep or offline. Naming a desktop asks for that desktop's copy, and is
+ * forwarded like every other ``/permissions`` request.
+ *
  * Every other URL is left for the next extension.
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { homedir } from 'node:os';
@@ -94,6 +103,7 @@ const MULTIPLE_DESKTOPS_MATCHED_HEADER = 'X-Latchkey-Multiple-Desktops-Matched';
 const GATEWAY_PASSWORD_HEADER = 'X-Latchkey-Gateway-Password';
 const PERMISSIONS_OVERRIDE_HEADER = 'X-Latchkey-Gateway-Permissions-Override';
 const DEVICES_ROUTE = '/devices';
+const PERMISSIONS_SELF_ROUTE = '/permissions/self';
 const PERMISSION_REQUESTS_ROUTE = '/permission-requests';
 const PERMISSION_REQUEST_ITEM_PATH_PREFIX = `${PERMISSION_REQUESTS_ROUTE}/`;
 const PROXY_PATH_PREFIXES = ['/permissions', PERMISSION_REQUESTS_ROUTE, '/minds-api-proxy'];
@@ -660,14 +670,49 @@ async function routeToDesktops(request, response, buffered = null) {
   }
 }
 
-export default async function desktopGatewayProxyExtension(request, response) {
+/** The policy file the gateway applied to this caller, as this machine enforces it. */
+function answerPermissionsSelf(response, context) {
+  const filePath = context?.permissionsConfigPath;
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw new DesktopRoutingError(500, 'Extension context did not provide permissionsConfigPath.');
+  }
+  if (!existsSync(filePath)) {
+    throw new DesktopRoutingError(404, `permissions.json not found at ${filePath}`);
+  }
+  let raw;
+  try {
+    raw = readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DesktopRoutingError(500, `permissions.json at ${filePath} cannot be read: ${message}`);
+  }
+  let policy;
+  try {
+    policy = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DesktopRoutingError(500, `permissions.json at ${filePath} is malformed: not valid JSON: ${message}`);
+  }
+  if (typeof policy !== 'object' || policy === null || Array.isArray(policy)) {
+    throw new DesktopRoutingError(500, `permissions.json at ${filePath} is malformed: top-level value is not an object`);
+  }
+  sendJson(response, 200, policy);
+}
+
+function isPermissionsSelfRoute(pathOnly) {
+  return pathOnly === PERMISSIONS_SELF_ROUTE || pathOnly === `${PERMISSIONS_SELF_ROUTE}/`;
+}
+
+export default async function desktopGatewayProxyExtension(request, response, context) {
   const pathOnly = new URL(request.url ?? '', 'http://placeholder.invalid').pathname;
   const isDevicesRoute = pathOnly === DEVICES_ROUTE;
   if (!isDevicesRoute && !isProxyRoute(pathOnly)) return false;
   const method = (request.method ?? 'GET').toUpperCase();
 
   try {
-    if (isDevicesRoute) {
+    if (method === 'GET' && isPermissionsSelfRoute(pathOnly) && parseDeviceHeader(request).kind === 'default') {
+      answerPermissionsSelf(response, context);
+    } else if (isDevicesRoute) {
       if (method !== 'GET') {
         throw new DesktopRoutingError(405, `${DEVICES_ROUTE} only answers GET.`);
       }

@@ -11,7 +11,7 @@ const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
-const { DEEPLINK_SCHEMES, deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
+const { declaredUrlSchemes, deeplinkTargetPath, extractDeeplinkUrlFromArgv, protocolClientRegistrations } = require('./deeplink');
 const {
   SCHEME_MIME_TYPES,
   DESKTOP_ENTRY_FILENAME,
@@ -2041,14 +2041,27 @@ function fetchAppStatus(timeoutMs = 25000) {
   });
 }
 
-for (const scheme of DEEPLINK_SCHEMES) {
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      app.setAsDefaultProtocolClient(scheme, process.execPath, [path.resolve(process.argv[1])]);
-    }
-  } else {
-    app.setAsDefaultProtocolClient(scheme);
+// The schemes the running bundle's own Info.plist declares: what a macOS dev
+// run may register (see protocolClientRegistrations).
+function runningBundleUrlSchemes() {
+  if (process.platform !== 'darwin' || !process.defaultApp) return new Set();
+  const infoPlistPath = path.join(path.dirname(process.execPath), '..', 'Info.plist');
+  try {
+    return declaredUrlSchemes(fs.readFileSync(infoPlistPath, 'utf-8'));
+  } catch (err) {
+    console.warn(`[deeplink] could not read ${infoPlistPath}, so registering no url schemes: ${err.message}`);
+    return new Set();
   }
+}
+
+for (const registration of protocolClientRegistrations({
+  isDefaultApp: Boolean(process.defaultApp),
+  platform: process.platform,
+  execPath: process.execPath,
+  appPath: process.argv.length >= 2 ? path.resolve(process.argv[1]) : null,
+  bundleSchemes: runningBundleUrlSchemes(),
+})) {
+  app.setAsDefaultProtocolClient(...registration);
 }
 
 app.on('open-url', (event, url) => {

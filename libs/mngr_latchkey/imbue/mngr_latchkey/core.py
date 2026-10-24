@@ -211,9 +211,6 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 # ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files.
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
-# The desktop and VPS gateways intentionally load disjoint extension sets. The
-# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the transparent
-# forwarder that sends those endpoint families back to the desktop gateway.
 # The catalog the gateway extensions validate against. Named because it is the
 # one bundled file that is not shipped verbatim: custom services are overlaid
 # onto it at materialization time (see ``overlaid_services_catalog_content``).
@@ -226,6 +223,11 @@ SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
 # :func:`merge_minds_latchkey_config` writes this package's half of both;
 # :func:`read_registered_services` reads the latter back.
 CONFIG_FILENAME: Final[str] = "config.json"
+
+# The desktop and VPS gateways intentionally load disjoint extension sets. The
+# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the
+# forwarder that sends those endpoint families back to the desktop gateway (and
+# answers an agent's read of its own permissions from the policy the VPS enforces).
 DESKTOP_GATEWAY_EXTENSION_FILENAMES: Final[tuple[str, ...]] = (
     "device_list.mjs",
     "minds_api_proxy.mjs",
