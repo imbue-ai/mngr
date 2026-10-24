@@ -1,1 +1,0 @@
-The `while True` and inline-import ratchet checks take `excluded_patterns`, as the bare-print check already did, so a project can exempt modules that carry a program as a string to run elsewhere.

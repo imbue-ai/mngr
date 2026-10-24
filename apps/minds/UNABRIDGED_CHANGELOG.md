@@ -4,6 +4,241 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+The Electron end-to-end runner's provider-chooser sign-in now ends when the chooser closes itself after the API key is accepted, and no longer clicks the success screen's Done button. The template shows that success screen only while it reloads the account list, then closes the chooser on its own, so a Done click aimed at it could land after the chooser was gone and time out (`Frame.click: Timeout 20000ms exceeded. waiting for locator("[data-e2e=done]")`). This was the most common flake of `test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` (MIND-365).
+
+Each person in the share panel now carries a note saying whether they have opened your workspace, instead of "(hasn't signed up yet)": "Hasn't signed up for Imbue Studio yet" for an address that had no account when it was granted, "Never accessed your workspace" for an account with no visits, and "Accessed your workspace 3 hours ago" (with that visit's exact time on hover) for someone who has visited. Accounts say nothing until the panel has read their visits, so a row never claims "never" on missing data. The visit times come from the invitation outcomes the panel already reads.
+
+Each person in the share panel is now a two-line card. The first line is who they are and the remove control; the line under it says what is known about them, joined by dots: whether they have opened your workspace, where their invitation stands ("Invited 5 hours ago", "Could not invite"), and "Invite again", or the card's own "Securely granting access" or failure with "Retry" while it has one. A refused invitation gets a third line, so nothing on a card cuts anything else short. A domain card says on the card itself, rather than in a tooltip, that nobody there will hear about it unless you send them the link. The separate "Joined" status is gone, since "Accessed your workspace" already says it.
+
+`apps/minds/scripts/share_panel_renders.py` answers the invitation-outcomes request, so account rows in its frames show their note too, and no longer hovers the domain row for a tooltip it no longer has.
+
+- Smoke tests are now a documented test category for Imbue Studio: tests that
+  run after a deploy or a release, against the published artifact and the
+  deployed production environment, marked `@pytest.mark.smoke` and homed in
+  `apps/minds/smoke_tests/`. They never gate a release; a failure fails its CI
+  job, which alerts Slack. `apps/minds/docs/testing-overview.md` gained section
+  1.10 covering everything operational about them -- the target (`binary` and
+  `backend` fixtures, (alpha, production) in CI), the post-deploy trigger, the
+  `setup`/`test`/`teardown`/`notify_slack` job split, the two accounts, the
+  production Vault keys each job holds, and `just minds-smoke <tier>` for local
+  runs.
+
+- The `minds_services` deployment test `test_logged_in_smoke` is now
+  `test_logged_in_routes` (in `test_logged_in_routes.py`). It is a pre-release
+  check that a shared ci env's customer-facing routes answer, which is a
+  different thing from the new smoke category, so it no longer borrows the name.
+
+- The smoke suite's shared helpers now exist at `apps/minds/imbue/minds/smoke_tests/`:
+  the env-var contract and Vault layout of a smoke run (`primitives.py`), the
+  frozen types it passes between its jobs (`data_types.py`, whose
+  `SmokeRunHandoff` round-trips through env vars, a JSON state file, and Vault
+  leaves), the resolution of the environment under test from a tier's committed
+  `client.toml` and `deploy.toml` (`backend.py`), the connector and pool-DB
+  calls its accounts and cleanup need (`accounts.py`, every request labelled
+  `imbue-studio-smoke-test/1`), the per-run handoff's storage (`handoff.py`),
+  the manifest a test records what it created in (`manifest.py`), and the
+  finder for smoke accounts earlier runs left behind (`stale.py`). The suite
+  itself lands separately.
+
+- The mail.tm account lifecycle moved out of the deployment-tests orchestrator
+  into `imbue/minds/deployment_tests/_mailtm.py` (`create_mailtm_account`,
+  `delete_mailtm_account`), so both orchestrators create and delete a mailbox
+  the same way; the caller now chooses the mailbox's local part, and a deletion
+  reports whether the mailbox was still there (mail.tm answers an
+  already-deleted account's JWT with a 401, which now counts as already gone).
+  The SuperTokens user-listing pagination behind the stale-user sweep is now a
+  shared generator, `iter_supertokens_users`.
+
+- The smoke suite itself now exists at `apps/minds/smoke_tests/` (`@pytest.mark.smoke`,
+  run with `just minds-smoke <tier>`): the journey test launches the Imbue Studio
+  build under test, signs in through the app's web-login flow (completing the
+  hosted page in the suite's own Chromium), creates an Imbue Cloud workspace,
+  has its agent build and register a hello-world web app, shares the workspace
+  from the Share tab and opens the app's route through the share as the owner,
+  turns sharing off, and destroys the workspace; the signup test verifies the
+  run's throwaway account's email through mail.tm and checks the download page
+  lists installers; the probes cover the connector, the LLM proxy, the hosted
+  accounts pages, the web chrome, the legacy redirects, the download redirect,
+  and the release feed. Fixtures resolve the backend (`MINDS_SMOKE_TIER`), the
+  build (`MINDS_SMOKE_CHANNEL` downloads and unpacks the channel's Linux `.deb`;
+  `MINDS_SMOKE_BINARY_PATH`; `MINDS_SMOKE_DEV_CHECKOUT=1`), the persistent
+  account (env or the tier's Vault leaves), the throwaway account (the handoff
+  from env, the new `MINDS_SMOKE_HANDOFF_FILE`, or Vault), the run manifest, and
+  the launched app; each skips with a sentence naming its missing input. The
+  helper package gained `feed.py` (channel manifests), `binary.py` (build
+  resolution and launch), `browser.py` (the hosted sign-in page), and
+  `app_flows.py` (the journey's steps inside the app).
+
+- `e2e_workspace_runner.electron_app_session` takes an `ElectronLaunchTarget`
+  (an executable plus the main script a bare Electron needs), so the same CDP
+  launch machinery drives a packaged build; a `None` template path leaves the
+  create form on the app's published defaults, and a `base_env` replaces the
+  environment the app would otherwise inherit from the test process.
+  `wait_for_workspace_ready_or_failure` and `chat_frame` (the workspace's
+  welcome chat, returned before its composer renders) are public. The
+  verification-email resend loop of the signup e2e test moved into `_mailtm.py`
+  as `wait_for_verification_token_with_resends`.
+
+- The journey launches the app the way an installed one is launched, because
+  the build under test is whatever the channel published and so cannot carry an
+  accommodation for being driven by a test: from an empty directory outside any
+  checkout, on an environment the launcher composes rather than inherits. Every
+  `PYTEST_*` variable of the test process is dropped -- pytest's own marker,
+  which mngr's config guard reads and which would otherwise have the app's mngr
+  refuse every config it loads, and the resource guards' per-test switches,
+  which would make a guarded binary the app shells out to exit 127 -- along with
+  its `MNGR_*` and `MINDS_*` variables, the `UV_*` switches the mngr test
+  harness sets (`UV_OFFLINE` would forbid the app's first-launch `uv sync` the
+  managed CPython it downloads), the test venv, and the guard shims on `PATH`; `MINDS_DATA_HOME`, `MINDS_ROOT_NAME`,
+  the tier's client config, `DISPLAY` and a no-op `BROWSER` are set explicitly.
+  The no-op `BROWSER` keeps the app's web-login out of the operator's own
+  browser, whose signed-in account would otherwise be handed to the app; the
+  suite completes the hosted sign-in page in its own headless Chromium.
+
+- A fresh workspace boots with no AI credentials, so the journey gives it the
+  account's own: it mints the LiteLLM key through the desktop's AI-keys route
+  and posts the blob to the workspace's
+  `POST /api/claude-auth/submit-credentials` -- the endpoint that blob is minted
+  for -- requiring the workspace to report back the proxied `imbue` auth mode,
+  so a credential read as a plain Anthropic key fails there rather than at the
+  first reply. The prompt then goes to a chat started from the desktop's
+  launcher, which the chat app mints on the account signed in by then, once
+  that chat appears in the app's own `GET /api/chats` -- a create answers as
+  soon as the chat has an id and its composer renders at once, but a send
+  before mngr has registered the chat's agent is refused with "Chat '<id>' not
+  found". The seeded welcome chat cannot take it: a workspace that booted
+  without credentials renders the no-provider notice in place of its composer,
+  its page reads the account list only as it boots, and the reload that would
+  render the composer loses the welcome chat's own creation, so its send is
+  refused the same way.
+
+- `MINDS_SMOKE_CHANNEL` also resolves a channel's published build on an Apple
+  Silicon Mac: the `-arm64-mac.zip` the channel's `mac` manifest lists, unpacked
+  with `ditto` and launched from the bundle, so `just minds-smoke` vets a channel
+  from a developer laptop as well as from the Linux CI lane.
+
+- A local run's manifest is one file per run,
+  `.test_output/smoke/run-manifest-<run id>.jsonl`, which
+  `just minds-smoke-teardown` reads by default, so a teardown only ever
+  releases its own run's resources.
+
+- A channel's downloaded archive is fetched inside the directory it unpacks
+  into and deleted once unpacked, so its name derives from nothing and two
+  builds can never share one.
+
+- A channel's published build is cached per machine under
+  `~/Library/Caches/imbue-studio-smoke/builds` (`$XDG_CACHE_HOME`, else
+  `~/.cache`, on Linux) rather than under the system temp directory, which
+  macOS prunes by access time: a swept bundle kept the executable the cache
+  check looked for while losing the helpers Electron needs, so a run days later
+  launched a build that could not start and failed as a CDP timeout.
+
+- The cache key now carries the manifest's `sha512`, and a download is verified
+  against it before being unpacked, so a channel that republishes a version
+  fetches afresh instead of reusing the old tree, and a truncated or
+  substituted download is refused rather than launched.
+
+- Teardown deletes the run's throwaway account through the connector's own
+  `DELETE /account`, signed in as that account, so every run exercises the
+  deletion path a real user takes; ending its grace period early is the one
+  operator call left. The stale sweep, which finds accounts by address and
+  holds no password for them, uses the operator delete and finalize routes.
+  Nothing shells out to `scripts/delete_accounts.py` any more, and the teardown
+  job no longer needs LiteLLM or analytics credentials at all -- the connector
+  does that removal itself.
+
+A folder sync whose workspace was not running no longer stays "stopped" until you press "Try again".
+
+- At launch, a remembered sync whose workspace is not running (quitting often stops it) waits for it instead of failing, and starts as soon as Imbue Studio reports the workspace running again, which is usually seconds after launch, when Studio starts it. A sync with a workspace left running while Studio was closed starts at once, as before.
+
+- When a workspace comes back, every sync with it that had stopped is started once more: when Studio sees the workspace's machine start (for any kind of workspace, local or cloud), and when a workspace that stopped answering answers again. A sync you turned off is left off, and a sync that stops again for a reason of its own stays stopped until you retry it.
+
+Long file paths in the file-sharing permission dialog header and on the Local files cards in workspace permissions now show the full path in a hover tooltip (the same tooltip the rest of the app uses), where before they were cut short with no way to see the rest. The tooltip bubble wraps unbroken text such as paths instead of running past its edge.
+
+On a Mac, Imbue Studio now appears in System Settings > Privacy & Security > Full Disk Access on its own, unchecked, so a user who goes there to turn it on (for the Chrome cookie import, or for an agent that reads Apple Notes or Photos) finds it in the list instead of having to add it with the "+" button. macOS lists an application there only after a process it is responsible for has been refused a protected read, so the desktop client, which the app spawns, reads one byte of the per-user TCC database (`~/Library/Application Support/com.apple.TCC/TCC.db`) on a background thread at startup. Nothing waits for the read and nothing shows its outcome yet; it is only logged at debug level. Off macOS nothing is read.
+
+Corrected the start-flow description in `docs/desktop-app.md`: signing up already sends the verification email, so the flow's own send is a resend (suppressed by the connector's cooldown when it comes right after signup). The doc still said signing up sent none.
+
+- Cut the minds 0.9.0 release: the app version is 0.9.0 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.0`, carrying everything that landed on `main` since `minds-v0.8.7`. It is a minor release, so existing workspaces are prompted to update, and it meets the security floor (`minds-v0.9.0`), so every older workspace is offered the emSign/eMudhra CA fix as a security update. Highlights for workspace owners: workspaces can update themselves unattended with an auto-update setting, the desktop app moves to Electron 45 (which drops macOS 12), workspace links to other apps ask before opening them, a first workspace opens on a "Main" chat with a show-around tour, and workspaces gain Routines for scheduled work and a System Monitor app.
+
+- Imbue Studio now asks before a workspace opens a custom-scheme link such as `paseo://`, `slack://` or `vscode://`. Before, any page in a workspace could launch any app registered on your computer without a word. The question names the app the link opens in ("Open this link in Paseo?"). It also has an "Always allow" checkbox that stops asking for that scheme's links from that workspace. The checkbox now appears on the `mailto:` and `tel:` questions too, and a `mailto:` or `tel:` link a page reaches through a server redirect now asks as well instead of opening unasked. The choices are kept in `external-link-permissions.json` in the app's data directory. A page that launches links in a loop gets one question at a time, not a stack of them. A custom-scheme link opened with `window.open` or a `target="_blank"` link now goes to its app too, instead of to an empty window. When no app handles the link, it is copied to the clipboard with a notice, as `mailto:` and `tel:` links already were.
+
+- A workspace app can now take custom-scheme links itself. When the workspace's template says it handles them, Imbue Studio hands a custom-scheme link from the workspace to the workspace, as it already did for web, `mailto:` and `tel:` links, so an app registered for that scheme (`open:slack`, `open:paseo`) opens it. A link no app of the workspace takes comes back out and gets the question above. Workspaces on older templates are unchanged.
+
+- Fixed a "JavaScript error occurred in the main process" dialog ("Render frame was disposed before WebFrameMain could be accessed"). Since 0.8.6 it appeared when a workspace app opened a custom-scheme link a second time through the hidden iframe it reuses for them (work list's "Open in Paseo" did this). Electron hands that iframe's next navigation a frame it has already disposed, and the link router crashed reading the frame's URL. The router now treats such a frame's page as unknown.
+
+- Running the dev app on macOS no longer takes over the `imbue-studio://` and `minds://` links from an installed Imbue Studio. macOS ignores the executable and arguments a dev run registers with and registers the running bundle, the bare Electron.app from `node_modules`, so every Open in Imbue Studio link opened an empty Electron window. A dev run on macOS now registers only the schemes its own bundle's Info.plist declares, so a bundle patched for deeplink testing (see `docs/desktop-app.md`) still works. A dev run on Linux registers nothing, since Linux honors a scheme only for a packaged app; packaged apps, and dev runs on Windows, register as before.
+
+- The latchkey end-to-end release test reaches the desktops for `/permissions/self` by naming them, since a read naming none is now answered by the workspace's machine, and checks that a read naming none returns exactly the permissions file the machine enforces, which a read forwarded to a desktop cannot match.
+
+The onboarding's second pass (`specs/new-onboarding/spec.md`).
+
+- The start flow's opener reads "Imbue Studio is a new kind of personal computer. It is honest software."; the error-reporting "See more" opens with why we ask first; the where-to-run question drops its sentence about what a workspace is.
+
+- The creation page replaces the reading material and the three numbered ways to start. For the first workspace (and any create whose form had "Use onboarding questions?" on), the agent asks while the workspace is built whether you know what to build ("I'm not sure", "No", "Yes"), and if not, whether to see examples of what others have made or describe a problem; the loading box stays hidden until the answer. A workspace ready by then is entered at once; one still being built gets "Great, let me just finish setting up your workspace..." with the box under it. Other creates show the box at once. The ready line stands a double gap over what precedes it, and the settings you chose are folded behind a "Details" chevron in your own turn.
+
+- The create form's advanced view gains "Use onboarding questions?" (`is_onboarding_driven_by_agent` on `POST /api/v1/workspaces`, off by default; the start flow's creates turn it on), kept by a retry and by a reload of the creation page.
+
+- The seeded welcome chat carries the questions and your answers, and closes on a welcome written for them: "Your workspace is ready." over an invitation to say what you want to build, or to describe what is annoying, overwhelming, or tedious (with one example complaint), for a reader who asked to see examples too, who saw one short recording of a to-do list app others have built on the creation page right after that answer (the chat's transcript carries it as a markdown image).
+
+- The loading box's expandable log can be scrolled while a workspace is being created: it stays pinned to its end only while you are reading its end, instead of being reset to the end on every redraw.
+
+- The desktop client seeds a workspace's welcome chat from the latest conversation the creation page handed over, not the first: a page left with an onboarding question open and answered on a later visit, before the workspace is ready, opens the workspace on the answer.
+
+- The recordings are hosted on the new `onboarding-media` R2 bucket (`https://onboarding-media.imbueminds.com`) under content-addressed names, referenced from `apps/minds/frontend/src/models/onboardingMedia.ts`; nothing is committed. Provisioning the bucket and publishing to it is `docs/deploy/setup/onboarding-media.md`.
+
+- Embed contract v9 adds `minds:highlight-chrome` (workspace to embedder): the workspace's tour asks the chrome to pulse a ring around the workspace switcher, a workspace tab, or the help button while a card talks about it, and to clear it with `null`. The titlebar draws the ring; the frame clears it when it navigates or unmounts.
+
+- The onboarding's words follow the v2 copy document: the opener ("Studio is a new kind of personal computer, built on honest software."), the five manifesto details, the error-reporting "See more" and its buttons ("No thanks", "Yes, send reports"), the where-to-run question and the Imbue Cloud bullets ("Use it from your phone", "Easy to share with others", in the create form's card too), the returning-user link ("I have an account (log in)"), the account question (the reply to Use Imbue Cloud while signed out now opens "Great."), the sign-in window's intros, the setup line, the to-do list showcase's description, the ready line ("You're all set."), and the welcome's two lines. The loading box is headed by one bold "Setting up your workspace" beside its dot, without the workspace's name, and its status line steps through "Getting things ready", "Building your workspace", "Installing your tools", and "Almost there" on every launch mode. The fallback consent page shares the "See more" words.
+
+Security update for the emSign/eMudhra CA compromise (eight intermediates chained to `emSign ECC Root CA - G3` whose private keys are trivially recoverable).
+
+- Electron 40.10.1 -> 45.0.0, whose built-in blocklist rejects the compromised intermediates in Chromium and in the Node that runs latchkey. macOS 12 is no longer supported. Two Electron breaking changes are handled: `clipboard.writeText` is awaited before the "copied" toast, and the file picker remembers its last directory instead of opening in Downloads.
+
+- The bundled uv is 0.13.4, and the app's Python environment pins certifi 2026.10.19. Both drop the bad root. The app's environment project (`electron/pyproject`) requires uv 0.13.4 or later, as the repo root does.
+
+- Desktop git verifies TLS against the app environment's certifi bundle on every platform (`GIT_SSL_CAINFO`). It used to rely on dugite's own pem on Linux and on `/etc/ssl/cert.pem` on macOS. On macOS a chain that fails the bundle still falls back to the system trust store, so keychain-only corporate CAs keep working. A dev checkout with no `.venv` now fails at backend start, with a message telling you to run `uv sync --all-packages`.
+
+- On macOS, latchkey's curls verify TLS against the same certifi bundle (`CURL_CA_BUNDLE`). Unmarked requests run the system `/usr/bin/curl`, which used to trust the stale `/etc/ssl/cert.pem`. Apple's curl falls back to the system trust store when a chain fails the bundle, so a Mac whose system trust store still trusts the compromised chain stays exposed there, and desktop git has the same limit. Marked (Chrome-impersonating) requests now trust only the bundle instead of the system trust store, so keychain-only CAs, such as a corporate TLS-inspecting proxy's, no longer work for them. Unmarked requests keep reaching keychain CAs through Apple curl's fallback. Linux is unchanged. Because the app now overrides any `CURL_CA_BUNDLE` it is launched with, the launch-to-msg e2e (`scripts/launch_to_msg_e2e.py`) passes its slack mock's CA bundle through a `curl` wrapper placed first on `PATH`, where the curl router finds it, instead of through the environment.
+
+- The Linux source installer (`scripts/install-linux.sh`) upgrades uv to 0.13.4 when the installed one is older, instead of keeping any uv it finds, since the checkout refuses an older uv.
+
+- Workspace updates gain a security floor (`SECURITY_FLOOR_VERSION = "minds-v0.9.0"`). A workspace below it shows a "Security update" badge, an error-styled band ("An update for this workspace is available, which includes a critical security fix."), an update modal whose "See details" disclosure explains the emSign compromise, and is included in "Update all", even when it is only a patch behind. Workspaces too old to update in place keep the recreation notice, which now says they are missing security fixes. The floor takes effect from the first release whose template is at or above it. The release runbook says a security release raises the floor to its own tag.
+
+- Node 24.15.0 -> 24.22.1 (`.nvmrc`, `engines.node`). `pnpm install` refuses other versions.
+
+## 2026-10-22
+
+The Python programs Imbue Studio runs inside a workspace for backups (the backup-service check, the busy-chat gate probe, the backup-service update, and the in-place restore) are now real modules under `imbue/minds/workspace_programs/` instead of string literals, so ruff, ty and the ratchets check them like the rest of the app. Behavior is unchanged.
+
+- Each program ships as a self-contained zip application built from the package's own source files: the program's module as `__main__.py`, plus the package modules it imports. `mngr exec` decodes it to a temporary file, runs it with the workspace's `python3`, and removes the file. The archive is deterministic and runs standalone from any file name, so a program can also be copied into a workspace and run later (for example by cron).
+
+- Constants the app and a program share (the answer markers and the `official` remote) are defined once in the package and imported by both, replacing the duplicated values a unit test used to keep in step. The status, code-state and service-state values a program answers with are stdlib `StrEnum`s there; the app parses an answer into them (a missing or unrecognized status reads as failed) and matches on them exhaustively.
+
+- Each program's entry point is `main(argv)`, which reads its flags once and passes the values down, so a program can also be called in-process with chosen arguments. The restore program's cleanup state is created per run instead of living in a module-global, and the shell command the app runs to bring a dead restore's services back now sits in `backup_restore.py` beside the logic it mirrors. Each program's archive is built once per app process.
+
+- A new project ratchet fails if a module in `workspace_programs/` imports anything outside the standard library and its own package. The bare-print and direct-subprocess ratchets exempt only that package, and the `time.sleep` count rises by one for the programs' shared `poll_until` helper, which replaces the three polling loops the scripts carried.
+
+- `running_workspace` (in `apps/minds/conftest.py`) and `run_workspace_program_in_container` (in `imbue/minds/testing.py`) run a program inside the minds-snapshot sandbox's real default-workspace-template container; `test_workspace_programs_e2e.py` uses them to run the gate probe there.
+
+## 2026-10-20
+
+Workspace updates now run inside the workspace, so a scheduled update no longer needs Imbue Studio open or the laptop awake.
+
+- **Scheduling moves into the workspace.** "Schedule" installs a schedule file, a dispatcher (`data/.state/update-apply/dispatcher.pyz`, a checked Python zip application like the backup programs) and a cron line in the workspace, whose own cron starts the update inside the window and records why when a window passes without one. The window is written in UTC, converted from your local hours whenever Studio writes or reads the workspace, so it follows your time zone (half-hour zones and daylight-saving changes included) whatever the workspace's clock says. A workspace has to be running during the window; Studio no longer starts or stops workspaces for a schedule, and no longer holds an update back while chats are working.
+
+- **"Update now"** creates the update chat inside the workspace in one step, and a stopped workspace stays running afterwards. The chat is named for its release ("Update to v0.9.0"), and its first message carries the release and the app's version ceiling, so the update never has to ask the app. On a workspace whose update flow predates unattended updates, that message also has it save uncommitted work in one commit instead of stopping for it. A scheduled update that a tick holds back (another update under way, a held update lease, no account signed in, the update chat failing to start) now says why in the workspace's `dispatcher.log`, once per reason.
+
+- **Auto-update setting**, off until you choose it. A one-time prompt offers it, with the update window to use; when it is on, Studio schedules every workspace that falls a release behind and quiets the out-of-date notices, and a workspace it cannot schedule (no cron, too old, unreachable) says why on its row. You can still schedule any update by hand, and auto-update leaves a schedule you made alone. "Skip v0.9.0", after a confirmation, holds one workspace back until the next release.
+
+- **Updates finish unattended.** A watchdog in the workspace reminds an idle update agent and closes out one that is gone, releasing its leases and keeping its worker's branch. An update whose chat stopped (a workspace restart stops every chat) is started again and carries on, giving up as stuck only if it keeps stopping. An update Studio reported as failed because its chat stopped with nothing to restart it shows as running again once its chat is back. To cancel an update, delete its chat or tell its agent to stop.
+
+- **Clearer update states.** The update window shows one situation at a time with only the buttons it needs, and a workspace whose update is running cannot be scheduled. An update that cannot keep something you built ends waiting for your answer, with a button into its chat; dismissing it skips that release. A running update's badge opens its chat directly, an update whose chat was deleted says so, and a workspace with no AI account signed in says so, with a "Sign in" button in its update window. Each workspace row shows one update control: its badge, whose window holds the actions, with the "Updated to" note shown only on a row with no badge, and the window of a landed update offering its chat, its Dismiss clearing that note too. A stopped workspace shows no update status until it is running again, except for an update that is landing, one Studio is starting it for, one that never went out, and a workspace too old to update in place.
+
+- A stuck update now reads "The update ran into a problem it couldn't recover from.", and a refused one "The update wasn't applied.", replacing wording that described neither accurately.
+
 ## 2026-10-22
 
 Imbue Studio no longer pins a CPU core when a workspace keeps re-announcing its apps.

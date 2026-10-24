@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `smoke` pytest marker registered in the shared markers list, so any project can mark tests that run after a deploy or release.
+
+### Changed
+
+- Changed: The `while True` and inline-import ratchet checks accept `excluded_patterns`.
+
 ## [v0.1.21] - 2026-10-22
 
 ### Added

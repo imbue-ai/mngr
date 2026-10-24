@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+A remote workspace's gateway now answers `GET /permissions/self` itself, from the permissions file it enforces, instead of forwarding the read to the user's desktop. Reading what an agent may do no longer fails with `Desktop <device> (<hostname>) is unreachable` while the user's computer is asleep, offline, or has Imbue Studio closed, and the answer is the policy the machine applies to the agent's requests (every desktop edit reaches the machine before the desktop reports it). It leaves out the per-agent Studio API rule, which only the desktop applies, to forwarded `/minds-api-proxy` requests. A request that names a desktop with `X-Latchkey-Device`, and every other `/permissions`, `/permission-requests` and `/minds-api-proxy` request, is still forwarded.
+
 ## 2026-10-21
 
 Bump Latchkey to 3.19.3.

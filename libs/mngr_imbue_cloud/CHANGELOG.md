@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Security
+
+- Security: Gen-2 slice VMs upgrade `ca-certificates` at provisioning, so a VM built from an older image drops the compromised `emSign ECC Root CA - G3` root.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

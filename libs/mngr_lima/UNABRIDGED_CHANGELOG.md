@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+Lima VMs upgrade `ca-certificates` at provisioning (one best-effort attempt, so an offline start is not held up) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-18
 
 The Lima provider reports its create steps through mngr's structured progress stream (`--format jsonl`): `lima.start_vm`, `lima.wait_cloud_init`, and `lima.wait_ssh` under the create's `creating_host` phase. The VM start advances through limactl's own "requirement k of n" counter as the guest boots.

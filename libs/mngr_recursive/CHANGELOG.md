@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Security
+
+- Security: Recursive provisioning installs uv 0.13.4 from its versioned installer, dropping the compromised `emSign ECC Root CA - G3` root.
+
 ## [v0.2.0] - 2026-10-22
 
 ## [v0.1.14] - 2026-06-18

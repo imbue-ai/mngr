@@ -1,1 +1,0 @@
-Long file paths in the file-sharing permission dialog header and on the Local files cards in workspace permissions now show the full path in a hover tooltip (the same tooltip the rest of the app uses), where before they were cut short with no way to see the rest. The tooltip bubble wraps unbroken text such as paths instead of running past its edge.

@@ -6,6 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: `mngr message` and typed key chords now preserve a trailing `;` instead of dropping it (tmux read it as a command separator).
+- Fixed: An extra tmux window whose launch command exceeds the pty line limit now runs (sourced from a file), so the ttyd web terminal starts on macOS again.
+
+### Security
+
+- Security: The mngr Docker image drops the compromised `emSign ECC Root CA - G3` root (uv 0.13.4, Node 24.22.1, Claude Code 2.1.307, upgraded `ca-certificates`).
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

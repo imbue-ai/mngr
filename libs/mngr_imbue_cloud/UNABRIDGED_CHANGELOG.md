@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+Gen-2 slice VMs upgrade `ca-certificates` at provisioning (best effort, with retries) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-22
 
 Added: `ImbueCloudConnectorClient.admin_delete_account(admin_api_key, email)` and `admin_finalize_account(admin_api_key, email)`, the client's forms of the connector's two operator account-deletion routes (`POST /admin/accounts/{email}/delete` and `/finalize`, `specs/account-deletion.md`), shaped like `admin_unsuspend_account`: each returns the route's JSON answer. `scripts/delete_accounts.py` is their caller.

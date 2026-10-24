@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+Messages sent to an agent now keep a trailing `;`. tmux reads an argument that ends in `;` as a command separator and drops the `;`, so `mngr message` with `hello;` used to type `hello`, and a `;` key chord typed nothing. The same applied to an additional window's command (`find . -exec ... \;` lost its backslash). Short messages, key chords and typed window commands now escape a trailing `;` the way tmux expects; long messages were never affected, since they go through a paste buffer.
+
+Added `running_in_own_process_group` to `imbue.mngr.utils.testing` (MIND-377). It is a context manager that runs a command as the leader of a new process group and, on exit, leaves nothing in that group running.
+
+On exit it sends SIGKILL to the group again and again until every process in it has exited, rather than once. CI runs tests in Modal sandboxes, which use gVisor (a user-space Linux kernel), and gVisor lets a child that is being forked at the moment of the kill join the group after the signal has gone out, so a single kill can miss it. Every process in the group inherits the write end of a pipe that nothing writes to, and that pipe reaches end-of-file only once the last of them has exited, which is how the helper knows the group is empty. The group leader is reaped only after that, because its pid is the group id and reaping it earlier would let an unrelated group reuse the number.
+
+The claude and codex `common_transcript.sh` tests use it to stop their background watchers. Test utility only; no change to `mngr` behaviour.
+
+- Regenerated `docs/commands/secondary/tmr.md` so its example minds invocation
+  excludes the new `smoke` mark, matching `mngr tmr --help`.
+
+Fixed an additional tmux window whose command is too long to type never running it. `mngr` types
+each additional window's command into the pane with `send-keys`, and a pane's pty is still in
+canonical mode when those keys arrive -- on macOS it keeps the first 1024 bytes of the line and
+discards the rest along with the newline, while tmux reports success. The command was left sitting
+truncated at the prompt with nothing logged. The `terminal` window that the ttyd plugin configures
+on every `mngr create` is 1221 bytes, so on a macOS host the web terminal never started and no
+terminal URL was ever registered. Linux hosts buffer far more and were unaffected.
+
+An additional window's command is now written to `launch_window_<n>.sh` in the agent's state dir
+and sourced when it is at or above 512 bytes, the same route the agent's own command already takes.
+Commands under that bound are still typed verbatim, so they stay visible in the pane, re-runnable
+with up-arrow, and interpreted by the pane's own shell whatever dialect that is. A command at or
+above the bound is now sourced with the POSIX `.`, so a tmux `default-command` shell without a `.`
+builtin (elvish, for instance) cannot run one -- it could not have run it typed either, since it
+never arrived intact.
+
+Already-running agents keep their truncated window until they are stopped and started again;
+`mngr start` returns early when the tmux session already exists.
+
+The mngr Docker image (offload sandboxes, the schedule image, local docker hosts) installs uv 0.13.4 from its versioned installer instead of whatever `install.sh` resolved to, Node 24.22.1 (was 24.15.0) and Claude Code 2.1.307 (was 2.1.293). It also upgrades `ca-certificates`. These drop the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-22
 
 `mngr event` reads and replays an event history a piece at a time instead of holding all of it in memory.

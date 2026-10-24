@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+- Registered a repo-wide `smoke` pytest marker in the shared markers list, so
+  any project can mark a test that runs after a deploy or a release against the
+  published artifact and the deployed production environment. See
+  `style_guide.md` ("Types of tests") for the category.
+
+## 2026-10-20
+
+The `while True` and inline-import ratchet checks take `excluded_patterns`, as the bare-print check already did, so a project can exempt modules that carry a program as a string to run elsewhere.
+
 ## 2026-10-19
 
 The inline-imports ratchet (`PREVENT_INLINE_IMPORTS`) now requires a bare `import` to be the whole statement (modules, aliases, then at most a trailing comment or a `;`-separated statement such as `import pdb; pdb.set_trace()`), so an indented prose line in a docstring that happens to start with the word "import" no longer counts as a violation. `from ... import` matching is unchanged.

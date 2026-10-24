@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: `GET /permissions/self` no longer fails when the user's desktop is asleep, offline, or closed; the remote workspace gateway now answers it from the permissions file it enforces.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

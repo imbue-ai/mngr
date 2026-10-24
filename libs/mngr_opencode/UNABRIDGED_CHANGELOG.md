@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23
+
+The `update_policy` help text (and the README table generated from it) now says what `"autoupdate": false` does on current opencode. From opencode 1.19.0 updates are never installed automatically, so NEVER only turns off the update check and its notice; on earlier versions it also stops opencode updating itself on launch. Behavior is unchanged.
+
 ## 2026-10-20
 
 `mngr list` no longer reports a `plugin.opencode.waiting_reason` field on agents of other types. The opencode field generator ran for every listed agent, so a `command` or `codex` agent showed `END_OF_TURN` under `plugin.opencode` (the marker it reads is one such an agent never writes), at the cost of one remote `path_exists` call per agent per `mngr list`. The generator now returns nothing for an agent that is not a OpenCodeAgent, as the codex generator already did. Reported by 19 mappers in the 2026-10-13 TMR run.

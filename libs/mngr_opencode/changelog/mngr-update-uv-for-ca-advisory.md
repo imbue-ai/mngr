@@ -1,1 +1,0 @@
-The `update_policy` help text (and the README table generated from it) now says what `"autoupdate": false` does on current opencode. From opencode 1.19.0 updates are never installed automatically, so NEVER only turns off the update check and its notice; on earlier versions it also stops opencode updating itself on launch. Behavior is unchanged.
