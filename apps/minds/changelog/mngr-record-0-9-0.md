@@ -1,0 +1,3 @@
+- Recorded the Imbue Studio 0.9.0 release in `docs/deploy/history/minds-v0.9.0.md` (the tag pair and build, every verification run, the staging and production deploys and bakes, the macOS 12 decision, the CA fix's operator follow-ups and the channel moves) and reset `docs/deploy/next_deploy.md` after it.
+
+- Corrected the release runbooks where 0.9.0 found them short: the release machine needs the desktop's pinned Node and pnpm to start the rehearsal app, and `services.md` now says how to reach a relay, that frps must be restarted to take a trust-store update, and that a share is probed on its per-app hostnames.
