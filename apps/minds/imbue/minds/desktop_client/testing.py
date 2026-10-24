@@ -1310,7 +1310,27 @@ def mngr_create_stub_body(agent_id: AgentId, host_id: HostId) -> str:
 FAKE_WORKSPACE_HOME: Final[str] = "/home/agent"
 
 
-def write_fake_mngr_pair_script(directory: Path, argv_record_path: Path) -> Path:
+class OneMachineBackendResolver(StaticBackendResolver):
+    """A static resolver that places every known agent on one machine, whose state the test sets."""
+
+    host_id: HostId = Field(frozen=True, description="The machine every known agent runs on")
+    _host_state: HostState | None = PrivateAttr(default=None)
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        if agent_id not in self.list_known_agent_ids():
+            return None
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.host_id))
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        return self._host_state if host_id == self.host_id else None
+
+    def set_host_state(self, state: HostState | None) -> None:
+        self._host_state = state
+
+
+def write_fake_mngr_pair_script(
+    directory: Path, argv_record_path: Path, unanswered_exec_count_path: Path | None = None
+) -> Path:
     """A stand-in ``mngr`` for folder-sync tests: records its argv, then waits.
 
     It answers the two commands a folder sync runs. ``mngr exec`` (which makes
@@ -1321,14 +1341,25 @@ def write_fake_mngr_pair_script(directory: Path, argv_record_path: Path) -> Path
     until it is signalled -- which is how a real ``mngr pair`` spends the sync.
     Because ``FolderSyncManager.start`` waits for that event, the argv file is
     always on disk by the time ``start`` returns.
+
+    With ``unanswered_exec_count_path``, that file holds how many more
+    ``mngr exec`` calls fail as they do against a workspace that does not
+    answer -- exit 1 and nothing said -- and each one counts it down.
     """
     script = directory / "fake-mngr"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json\n"
+        "import pathlib\n"
         "import signal\n"
         "import sys\n"
+        f"unanswered_path = {None if unanswered_exec_count_path is None else str(unanswered_exec_count_path)!r}\n"
         "if sys.argv[1] == 'exec':\n"
+        "    if unanswered_path is not None:\n"
+        "        unanswered = int(pathlib.Path(unanswered_path).read_text())\n"
+        "        if unanswered > 0:\n"
+        "            pathlib.Path(unanswered_path).write_text(str(unanswered - 1))\n"
+        "            sys.exit(1)\n"
         f"    print(json.dumps({{'results': [{{'stdout': {FAKE_WORKSPACE_HOME!r}, 'stderr': '', 'success': True}}]}}))\n"
         "    sys.exit(0)\n"
         f"open({str(argv_record_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"

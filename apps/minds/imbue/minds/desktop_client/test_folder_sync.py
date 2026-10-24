@@ -25,8 +25,12 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.testing import FAKE_WORKSPACE_HOME
+from imbue.minds.desktop_client.testing import OneMachineBackendResolver
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.errors import FolderSyncError
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 
 _AGENT_ID = "agent-000102030405060708090a0b0c0d0e0f"
 
@@ -36,6 +40,7 @@ _DEVICE_ID = "host-0f0e0d0c0b0a09080706050403020100"
 # The host id ``StaticBackendResolver`` reports for an agent it knows.
 _HOST_ID = "localhost"
 _OTHER_AGENT_ID = "agent-0f0e0d0c0b0a090807060504030201ff"
+_MACHINE_HOST_ID = "host-5e1f0a2b3c4d5e6f708192a3b4c5d6e7"
 
 
 @pytest.fixture
@@ -448,6 +453,204 @@ def test_a_pairing_that_cannot_start_settles_the_row_as_failed(
     assert status is not None
     assert status.state == FolderSyncState.FAILED
     assert "Could not find agent" in status.message
+
+
+def _manager_on_one_machine(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+    unanswered_exec_count: int,
+) -> tuple[FolderSyncManager, OneMachineBackendResolver, Path]:
+    """A manager whose workspaces share one machine the test starts and stops.
+
+    Its first ``unanswered_exec_count`` asks of the workspace go unanswered;
+    the returned path holds how many are left.
+    """
+    unanswered_exec_count_path = tmp_path / "unanswered-exec-count"
+    unanswered_exec_count_path.write_text(str(unanswered_exec_count))
+    resolver = OneMachineBackendResolver(
+        url_by_agent_and_service={_AGENT_ID: {}, _OTHER_AGENT_ID: {}}, host_id=HostId(_MACHINE_HOST_ID)
+    )
+    manager = FolderSyncManager(
+        concurrency_group=root_concurrency_group,
+        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json", unanswered_exec_count_path)),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id=_DEVICE_ID,
+        backend_resolver=resolver,
+        store=folder_sync_store,
+    )
+    return manager, resolver, unanswered_exec_count_path
+
+
+def _start_syncing(manager: FolderSyncManager, local_folder: Path) -> None:
+    local_folder.mkdir()
+    manager.start(
+        agent_id=_AGENT_ID,
+        raw_local_path=str(local_folder),
+        direction=FolderSyncDirection.BOTH,
+        conflict=FolderSyncConflict.NEWER,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_restore_waits_for_a_stopped_workspace_and_starts_when_its_machine_runs(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+) -> None:
+    """What launch looks like after quitting stopped the workspace: Imbue Studio starts it moments later."""
+    manager, resolver, unanswered_exec_count_path = _manager_on_one_machine(
+        tmp_path, root_concurrency_group, folder_sync_store, unanswered_exec_count=63_481
+    )
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    _remember(folder_sync_store, local_folder, FolderSyncActivity.ACTIVE)
+    resolver.set_host_state(HostState.STOPPED)
+
+    manager.restore_all()
+
+    assert "not running" in manager.restore_failure_for(_AGENT_ID, str(local_folder))
+    assert manager.status_for_path(_AGENT_ID, str(local_folder)) is None
+    # The workspace was not asked anything while its machine was down.
+    assert unanswered_exec_count_path.read_text() == "63481"
+
+    unanswered_exec_count_path.write_text("0")
+    resolver.set_host_state(HostState.STARTING)
+    manager.on_backend_changed()
+    assert manager.status_for_path(_AGENT_ID, str(local_folder)) is None
+    resolver.set_host_state(HostState.RUNNING)
+    manager.on_backend_changed()
+
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.state == FolderSyncState.SYNCED
+    assert manager.restore_failure_for(_AGENT_ID, str(local_folder)) == ""
+    manager.stop_all()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_restore_on_a_running_workspace_starts_at_once(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+) -> None:
+    """A workspace left running while Imbue Studio was closed needs nothing to happen first."""
+    manager, resolver, _unanswered_exec_count_path = _manager_on_one_machine(
+        tmp_path, root_concurrency_group, folder_sync_store, unanswered_exec_count=0
+    )
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    _remember(folder_sync_store, local_folder, FolderSyncActivity.ACTIVE)
+    resolver.set_host_state(HostState.RUNNING)
+
+    manager.restore_all()
+
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.state == FolderSyncState.SYNCED
+    manager.stop_all()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_sync_that_failed_while_its_machine_was_down_starts_again_when_it_comes_up(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+) -> None:
+    manager, resolver, unanswered_exec_count_path = _manager_on_one_machine(
+        tmp_path, root_concurrency_group, folder_sync_store, unanswered_exec_count=48_219
+    )
+    resolver.set_host_state(HostState.RUNNING)
+    local_folder = tmp_path / "notes"
+    _start_syncing(manager, local_folder)
+    failed = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert failed is not None and failed.state == FolderSyncState.FAILED
+    resolver.set_host_state(HostState.STOPPED)
+    manager.on_backend_changed()
+    unanswered_exec_count_path.write_text("0")
+
+    resolver.set_host_state(HostState.RUNNING)
+    manager.on_backend_changed()
+
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.state == FolderSyncState.SYNCED
+    manager.stop_all()
+
+
+def test_a_sync_that_fails_on_a_running_machine_is_not_asked_again_on_every_change(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+) -> None:
+    """Only the machine coming up starts a failed sync again; the resolver changes far more often than that."""
+    manager, resolver, unanswered_exec_count_path = _manager_on_one_machine(
+        tmp_path, root_concurrency_group, folder_sync_store, unanswered_exec_count=52_903
+    )
+    resolver.set_host_state(HostState.RUNNING)
+    local_folder = tmp_path / "notes"
+    _start_syncing(manager, local_folder)
+    manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    # The first change the manager sees finds the machine running, which is an edge.
+    manager.on_backend_changed()
+    retried = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert retried is not None and retried.state == FolderSyncState.FAILED
+    assert unanswered_exec_count_path.read_text() == "52901"
+
+    manager.on_backend_changed()
+    manager.on_backend_changed()
+
+    assert manager.wait_until_settled(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert unanswered_exec_count_path.read_text() == "52901"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_failed_sync_starts_again_when_its_own_workspace_answers_again(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    folder_sync_store: FolderSyncStore,
+) -> None:
+    """The health tracker's recovery edge, for a machine that stayed RUNNING while its shell stopped answering."""
+    manager, resolver, unanswered_exec_count_path = _manager_on_one_machine(
+        tmp_path, root_concurrency_group, folder_sync_store, unanswered_exec_count=31_337
+    )
+    resolver.set_host_state(HostState.RUNNING)
+    local_folder = tmp_path / "notes"
+    _start_syncing(manager, local_folder)
+    failed = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert failed is not None and failed.state == FolderSyncState.FAILED
+    unanswered_exec_count_path.write_text("0")
+
+    manager.on_workspace_recovered(AgentId(_OTHER_AGENT_ID))
+    still_failed = manager.status_for_path(_AGENT_ID, str(local_folder))
+    assert still_failed is not None and still_failed.state == FolderSyncState.FAILED
+
+    manager.on_workspace_recovered(AgentId(_AGENT_ID))
+
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.state == FolderSyncState.SYNCED
+    manager.stop_all()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_workspace_coming_back_leaves_a_sync_the_user_turned_off_alone(
+    tmp_path: Path,
+    folder_sync_manager: FolderSyncManager,
+) -> None:
+    local_folder = tmp_path / "notes"
+    _start_syncing(folder_sync_manager, local_folder)
+    folder_sync_manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    folder_sync_manager.stop(_AGENT_ID, str(local_folder))
+    assert folder_sync_manager.wait_until_settled(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+
+    folder_sync_manager.on_workspace_recovered(AgentId(_AGENT_ID))
+
+    assert folder_sync_manager.wait_until_settled(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert folder_sync_manager.desired_activity_for(_AGENT_ID, str(local_folder)) == FolderSyncActivity.INACTIVE
+    status = folder_sync_manager.status_for_path(_AGENT_ID, str(local_folder))
+    assert status is not None and status.state == FolderSyncState.STOPPED
 
 
 def test_a_shared_file_cannot_be_synced(

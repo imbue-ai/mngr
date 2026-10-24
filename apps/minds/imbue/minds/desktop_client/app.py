@@ -2837,6 +2837,8 @@ def create_desktop_client(
         # A cloud machine leaving RUNNING is the moment its kind starts to
         # matter; the wake lists it at once rather than a poll later.
         backend_resolver.add_on_change_callback(machine_stop_kind_tracker.request_refresh)
+        if folder_sync_manager is not None:
+            backend_resolver.add_on_change_callback(folder_sync_manager.on_backend_changed)
     if system_interface_health_tracker is not None:
         _health_tracker_for_ui = system_interface_health_tracker
 
@@ -2867,6 +2869,8 @@ def create_desktop_client(
                 concurrency_group=root_concurrency_group,
             )
             _health_tracker_for_ui.add_on_recovery_callback(workspace_view_refresher)
+            if folder_sync_manager is not None:
+                _health_tracker_for_ui.add_on_recovery_callback(folder_sync_manager.on_workspace_recovered)
             if connectivity_detector is not None:
                 connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
             if sleep_tracker is not None:

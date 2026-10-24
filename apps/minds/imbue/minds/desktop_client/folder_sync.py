@@ -27,6 +27,12 @@ outlives it: :mod:`folder_sync_store` records it, and :meth:`restore_all`
 starts them again at launch. Quitting stops every sync; starting brings back
 every one the user had not turned off.
 
+A sync can only run while its workspace's machine does, and Imbue Studio
+already follows every machine's state (discovery, plus its own starts and
+stops). So a sync never waits on a timer: one whose machine is not running at
+launch waits for it, and :meth:`FolderSyncManager.on_backend_changed` starts it,
+and any that failed, once the machine is RUNNING again.
+
 Starting a sync checks only what the next step needs -- an absolute path to a
 directory that exists -- and deliberately not what a share path goes through:
 see :func:`_build_folder_sync_spec` for why that was not the boundary it read
@@ -77,6 +83,8 @@ from imbue.minds.errors import FolderSyncError
 from imbue.minds.errors import FolderSyncStoreError
 from imbue.minds.errors import MngrCommandError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import poll_for_value
 
 # How long ``stop`` waits for ``mngr pair`` to tear its unison down before
@@ -136,6 +144,8 @@ _WORKSPACE_MKDIR_TIMEOUT_SECONDS: Final[float] = 60.0
 # its own thread and blocks nothing.
 _RESTORE_HOST_WAIT_SECONDS: Final[float] = 120.0
 _RESTORE_HOST_POLL_SECONDS: Final[float] = 1.0
+
+_WORKSPACE_NOT_RUNNING_MESSAGE: Final[str] = "This workspace is not running. Syncing starts again when it is."
 
 
 class FolderSyncState(UpperCaseStrEnum):
@@ -810,6 +820,9 @@ class FolderSyncManager(MutableModel):
     # so the checkbox is on, and with no run behind it the row would otherwise
     # report a bare STOPPED with no reason and no way to act on it.
     _restore_failures: dict[_SyncKey, str] = PrivateAttr(default_factory=dict)
+    # Whether each workspace with a sync was running when the resolver last
+    # changed, so its machine coming up again is seen as the edge it is.
+    _is_running_by_agent: dict[str, bool] = PrivateAttr(default_factory=dict)
 
     def start(
         self,
@@ -1019,6 +1032,81 @@ class FolderSyncManager(MutableModel):
         self._forget_restore_failure(key)
         self._set_desired(spec, FolderSyncActivity.ACTIVE)
         return FolderSyncStatus(spec=spec, state=FolderSyncState.STARTING, message="")
+
+    def on_backend_changed(self) -> None:
+        """Start the syncs of every workspace whose machine has just come up.
+
+        Registered on the backend resolver, which calls it on every change it
+        sees: discovery, and Imbue Studio's own starts and stops. Only the edge
+        into RUNNING acts, so a sync that fails on a running machine for a
+        reason of its own is not asked again on every unrelated change.
+        """
+        with self._lock:
+            agent_ids = {key.agent_id for key in self._desired_by_key} | {
+                key.agent_id for key in self._restore_failures
+            }
+        is_running_by_agent = {
+            agent_id: self._workspace_state(agent_id) == HostState.RUNNING for agent_id in agent_ids
+        }
+        with self._lock:
+            came_up = [
+                agent_id
+                for agent_id, is_running in is_running_by_agent.items()
+                if is_running and self._is_running_by_agent.get(agent_id) is not True
+            ]
+            self._is_running_by_agent.update(is_running_by_agent)
+        for agent_id in came_up:
+            self.on_workspace_recovered(AgentId(agent_id))
+
+    def on_workspace_recovered(self, agent_id: AgentId) -> None:
+        """Start again every sync with ``agent_id`` that is meant to run and is not running.
+
+        Called when the workspace's machine comes up (see
+        :meth:`on_backend_changed`) and when its shell answers again after it
+        did not. A sync that failed while the workspace was away failed because
+        it was away, and so did a launch-time restore that could not run; neither
+        would come back without a click otherwise. One retry per event, so a
+        sync that fails for a reason of its own stays failed.
+
+        Fast enough for the callers' callback threads: each retry only records
+        a destination and hands it to a worker.
+        """
+        with self._lock:
+            failed_paths = [
+                key.local_path
+                for key, run in self._runs_by_key.items()
+                if key.agent_id == agent_id
+                and run.sink.state == FolderSyncState.FAILED
+                and self._is_desired_active(key)
+            ]
+            unrestored_paths = [key.local_path for key in self._restore_failures if key.agent_id == agent_id]
+        for local_path in (*failed_paths, *unrestored_paths):
+            logger.info("The workspace for {} is back; starting its folder sync again", local_path)
+            try:
+                self.retry(str(agent_id), local_path)
+            except FolderSyncError as e:
+                logger.warning("Could not start the folder sync for {} again: {}", local_path, e)
+
+    def _is_desired_active(self, key: _SyncKey) -> bool:
+        """Whether ``key`` is meant to be syncing. Call with the lock held."""
+        desired = self._desired_by_key.get(key)
+        return desired is not None and desired.activity == FolderSyncActivity.ACTIVE
+
+    def _workspace_state(self, agent_id: str) -> HostState | None:
+        """The state of the machine ``agent_id`` runs on, or None while Imbue Studio cannot say."""
+        host_id = self._host_id_for(agent_id)
+        if host_id is None:
+            return None
+        try:
+            parsed = HostId(host_id)
+        except ValueError:
+            return None
+        return self.backend_resolver.get_host_state(parsed)
+
+    def _is_workspace_known_not_running(self, agent_id: str) -> bool:
+        """Whether the resolver says ``agent_id``'s machine is in a state other than RUNNING."""
+        state = self._workspace_state(agent_id)
+        return state is not None and state != HostState.RUNNING
 
     def discard_copy(self, agent_id: str, local_path: str) -> None:
         """Ask for the set-aside copy of a folder whose sync is off to be deleted.
@@ -1554,7 +1642,8 @@ class FolderSyncManager(MutableModel):
         rather than when someone next opens the panel.
 
         Every failure is per-folder and lands on that folder's row: a machine
-        that is stopped (nothing here starts one), a workspace Imbue Studio cannot
+        that is stopped (nothing here starts one; the sync starts when the
+        machine does, see :meth:`on_backend_changed`), a workspace Imbue Studio cannot
         place yet, or a folder that is no longer on this computer -- an
         unmounted disk, or one the user deleted. None of them are reasons to
         abandon the other folders, and none of them forget the intent, which is
@@ -1580,6 +1669,16 @@ class FolderSyncManager(MutableModel):
                 key = _SyncKey(agent_id=record.agent_id, local_path=record.local_path)
                 with self._lock:
                     self._restore_failures[key] = message
+                continue
+            if self._is_workspace_known_not_running(record.agent_id):
+                # Quitting often stops the machine, and Imbue Studio starts it
+                # again moments after launch; asking it before then only fails.
+                # The resolver says when it is running, and on_backend_changed
+                # starts the sync then.
+                logger.info("Waiting for the workspace of {} to run before syncing it", record.local_path)
+                key = _SyncKey(agent_id=record.agent_id, local_path=record.local_path)
+                with self._lock:
+                    self._restore_failures[key] = _WORKSPACE_NOT_RUNNING_MESSAGE
                 continue
             try:
                 self.start(
