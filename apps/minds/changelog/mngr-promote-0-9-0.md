@@ -1,0 +1,1 @@
+- Promote Imbue Studio 0.9.0 to the alpha channels: the desktop alpha channel serves ToDesktop build `261024jwpoaghtp` (mac and Linux, 100%), and browser-created alpha workspaces pin to `minds-v0.9.0`. 0.9.0 needs macOS 13, so the alpha mac manifest declares `minimumSystemVersion: 22.0.0` and a macOS 12 install stays on 0.8.7. Beta stays on 0.8.7 and stable on 0.8.5.
