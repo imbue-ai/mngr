@@ -21,6 +21,7 @@ provisioned where the container reaches it over its docker bridge).
 """
 
 import os
+import platform
 import secrets
 import tempfile
 import threading
@@ -92,6 +93,7 @@ from imbue.minds.desktop_client.forward_identity import FORWARD_HEADERS_FILENAME
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
+from imbue.minds.desktop_client.full_disk_access_probe import start_full_disk_access_probe
 from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -115,6 +117,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_d
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
+from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
@@ -427,6 +430,11 @@ def run(
     # staleness baseline) is downstream of it.
     sleep_tracker = SleepTracker()
     start_sleep_heartbeat_loop(sleep_tracker, root_concurrency_group)
+
+    # A read of a Full Disk Access protected file, whose refusal is what puts
+    # Imbue Studio on the System Settings list a user grants that permission
+    # from (see full_disk_access_probe.py). Nothing waits for it.
+    start_full_disk_access_probe(root_concurrency_group, host_platform_from_system(platform.system()))
 
     # Connectivity detector: answers whether this device can reach anything, and
     # whether the network it is on passes SSH at all. Probed only when a decision
