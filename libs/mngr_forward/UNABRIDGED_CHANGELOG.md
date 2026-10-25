@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+Added `local_ca_dir` and `local_ca_cert_path` to `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` to `imbue.mngr_forward.primitives`, so host applications can find the proxy's local CA certificate from the mngr host dir alone and pin it when they verify the proxy's TLS. The `mngr forward` CLI now derives the same paths through these helpers instead of spelling the layout out itself.
+
+The README now describes how the Imbue Studio shell trusts the proxy: it pins the local CA by the path the backend hands it.
+
+A leaf the proxy mints for a service origin too long for an X.509 CommonName (over 64 characters, e.g. `system-interface-<rand>.agent-<32hex>.localhost`) now carries a fixed non-empty subject (`O=mngr forward local service`) instead of an empty one. An empty subject is only valid with a critical SAN, and Chromium refused the minted leaf for such an origin with `ERR_CERT_INVALID` (the empty subject is the one way that leaf differs from the leaves Chromium accepts), which the Imbue Studio shell used to paper over by trusting every loopback certificate; now that the shell pins the proxy's CA and leaves every other objection to Chromium, those workspace origins failed to load. Clients verify the hostname against the SAN and ignore the subject, so nothing else changes.
+
 ## 2026-10-22
 
 - `mngr forward` no longer rewrites its on-disk service map when an agent re-announces registrations it already knows. Before, an agent replaying a long services history caused one full rewrite of the cache file per line.

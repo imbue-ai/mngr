@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bump Latchkey to 3.19.4.
+
 ### Fixed
 
 - Fixed: `GET /permissions/self` no longer fails when the user's desktop is asleep, offline, or closed; the remote workspace gateway now answers it from the permissions file it enforces.

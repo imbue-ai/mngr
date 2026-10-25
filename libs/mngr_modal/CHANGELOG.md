@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Security
+
+- Security: The wait for a new sandbox's sshd now verifies the sandbox's host key against the key mngr pinned for it in the provider's `known_hosts` file; a mismatch fails sandbox creation immediately instead of trusting whatever key is presented.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

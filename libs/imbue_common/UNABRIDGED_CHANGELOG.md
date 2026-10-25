@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+The trailing-comments ratchet no longer counts Bandit's scoped `# nosec BNNN` suppression as a trailing comment. Bandit only honors the directive on the flagged line, as `ty` does with `# ty: ignore[...]`, which the ratchet already exempted. A bare `# nosec` (suppressing every check on the line) is still counted.
+
 ## 2026-10-23
 
 - Registered a repo-wide `smoke` pytest marker in the shared markers list, so

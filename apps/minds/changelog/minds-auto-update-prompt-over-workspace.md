@@ -1,1 +1,0 @@
-The one-time "Turn on auto-updates?" offer now comes up over a workspace too, not only over Home. Studio usually reopens straight into the last workspace, and the offer used to wait until you went back to Home, so it could miss the launch right after an app update.

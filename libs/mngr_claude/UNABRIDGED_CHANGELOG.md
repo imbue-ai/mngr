@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+Claude agents no longer report RUNNING forever after a turn is interrupted directly in the terminal (Esc in the Claude TUI). Claude fires no hook on an interrupt, so the `active` marker the UserPromptSubmit hook created stayed in place: `mngr list` and every other lifecycle consumer (Imbue Studio's chat status and update checks included) kept reporting the agent as working while the terminal sat idle at its prompt.
+
+The transcript streamer (`stream_transcript.sh`) now clears the stranded marker when the current session's last record is an interrupt sentinel (`[Request interrupted by user...]`, either shape) that postdates the marker, and emits one activity event (reason `interrupt_heal`), as the idle hooks do. It leaves the marker alone when the interrupt is flushing a queued prompt into a new turn: Claude dequeues that prompt around the sentinel and fires no hook when its turn starts, so a dequeue after the interrupted turn's last reply marks the flush.
+
 ## 2026-10-23
 
 Fixed a CI flake in the `common_transcript.sh` tests (MIND-377): stopping a test's background watcher could leave one of its child processes running.

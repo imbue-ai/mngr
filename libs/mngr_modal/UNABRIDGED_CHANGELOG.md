@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+The CI safety-net sweep of old Modal test environments no longer fails when another run deletes an environment first: `modal environment delete` reports that as "No such environment", which now counts as already gone, as "not found" did.
+
+The wait for a new sandbox's sshd now checks the sandbox's host key against the key mngr pinned for it in the provider's known_hosts file. Previously the probe accepted whatever key the endpoint presented. If the sandbox presents a different key, sandbox creation now fails immediately with an error naming the mismatch.
+
 ## 2026-10-20
 
 Marked eight Modal acceptance tests `@pytest.mark.flaky`, so offload retries them instead of turning CI red on each occurrence. The 2026-10-19 flake sweep found each one recovering on a retry, on `main` or on more than one branch that does not touch the code it exercises, and none carried the marker:

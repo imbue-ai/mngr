@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+Bump Latchkey to 3.19.4.
+
+Documented and suppressed Bandit's B701 (`jinja2_autoescape_false`) finding on the remote package's template environment. The templates render shell scripts and system config files, never HTML, and HTML autoescaping would corrupt the `shquote`-quoted values in them, so autoescaping stays off; the reason is now recorded at the site and the finding is marked `# nosec B701`.
+
 ## 2026-10-23
 
 A remote workspace's gateway now answers `GET /permissions/self` itself, from the permissions file it enforces, instead of forwarding the read to the user's desktop. Reading what an agent may do no longer fails with `Desktop <device> (<hostname>) is unreachable` while the user's computer is asleep, offline, or has Imbue Studio closed, and the answer is the policy the machine applies to the agent's requests (every desktop edit reaches the machine before the desktop reports it). It leaves out the per-agent Studio API rule, which only the desktop applies, to forwarded `/minds-api-proxy` requests. A request that names a desktop with `X-Latchkey-Device`, and every other `/permissions`, `/permission-requests` and `/minds-api-proxy` request, is still forwarded.

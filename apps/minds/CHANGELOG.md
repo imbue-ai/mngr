@@ -154,6 +154,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Mint-only AI-key page (`/settings/ai-keys?workspace=<host_id>`), opened from the workspace's "Sign in with Imbue" option, mints a LiteLLM key for the workspace's account and copies a credential blob to paste back.
 - Added: Workspace apps can request microphone input (macOS still asks).
 - Added: Developer knobs `MINDS_REMOTE_DEBUGGING_PORT` (Chromium DevTools protocol on 127.0.0.1, also a `just minds-start` argument), `MINDS_WINDOW_CONTROLS=mac`, `MINDS_LATCHKEY_CURL` (dev mode only) and `start-desktop.sh --reopen`.
+- Added: Imbue Studio 0.9.1 released.
+- Added: Bumped bundled Latchkey to 3.19.4 (restores Zoom sign-in through latchkey).
 
 ### Changed
 
@@ -334,6 +336,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Bumped bundled Latchkey from 2.21.0 to 3.19.3.
 - Changed: Tier `deploy.toml` gains `[origins]` (`accounts_origin`, `chrome_origin`, `cookie_domain`, `api_origin`, `llm_origin`, `legacy_chrome_origins`), `content_domain`, `[ssh_ca]`, optional `[management_plane]` (replacing `management_plane.toml`), per-plan quota definitions (`[plans.free]`, `[plans.explorer]`, `[plans.ally]` and a zero-quota `[plans.guest]`), `[storage] stop_retention_seconds`, `[waitlist] is_enabled`, and the `sharing`, `storage`, `sentry`, `ssh-ca` and `postmark` secret services (`pool-ssh` is dropped). Production keeps two warm connector containers and staging/production a 600s scaledown window, stopping share-relay 500s.
 - Changed: A source run without `--config-file`/`MINDS_CLIENT_CONFIG_PATH` defaults to the production `client.toml`. Dev binaries are cached per user (`~/.cache/minds/binaries/`, override `MINDS_BINARY_CACHE_DIR`), and dev uses the pinned `limactl`.
+- Changed: From 0.9.0, Imbue Studio requires macOS 13 or later; an older Mac stays on its 0.8.x build until macOS is updated.
+- Changed: The one-time "Turn on auto-updates?" offer now also appears over a workspace, not only over Home.
 
 ### Deprecated
 
@@ -487,6 +491,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Backend shutdown stalling ~10s and being force-killed, and pre-warmed `mngr` processes outliving the backend; SIGTERM/SIGINT quit without the running-workspaces prompt, and closing a window no longer raises an uncaught main-process error.
 - Fixed: Imbue Studio no longer pins a CPU core when a workspace keeps re-announcing its apps (e.g. one still running the retired `app-watcher`): unchanged workspace updates no longer wake the backend's listeners, and UI updates are spaced at least 100 ms apart.
 - Fixed: The report-a-bug dialog an agent opens closes again (close X, Escape) after two quick agent requests, and Done returns to the machine the report is about.
+- Fixed: A workspace update whose apply has landed now reads "Finishing update…" until its verdict, instead of showing "Preparing an update for this workspace" again.
+- Fixed: The band over a workspace no longer flashes "Lost connection to this workspace" when its update starts landing.
 
 ### Security
 
@@ -494,6 +500,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Security: Redact secrets from persisted logs. The `mngr create` subprocess is now given a log-safe process `name` with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field or `ProcessError` messages. The `modal secret create` subprocess used by `minds env` deploy tooling is likewise named with its `KEY=VALUE` secret values masked so raw Vault secrets no longer reach the thread name or error messages. The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie — a reusable, session-lifetime bearer token — before writing backend stdout events to disk. The single-use one-time login code is left as-is (spent immediately at session start).
 - Security: The bundled lima download is SHA256-verified against a pinned hash, like every other bundled binary.
 - Security: Remote workspace VPSes load an nftables policy (via `mngr_latchkey` provisioning) that drops traffic to the gateway and owner-exec daemon ports unless it arrives on the docker bridge or loopback, and drops any other new connection from the workspace into its VPS.
+- Security: Desktop probes of the local `mngr forward` proxy verify its TLS certificate against the proxy's local CA, and the Electron shell trusts a loopback forward-proxy origin only when its leaf was signed by that CA, instead of disabling certificate verification.
+- Security: The share-URL readiness probe verifies certificate chains against the system roots instead of disabling verification altogether.
+- Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
 
 ## [v0.2.8] - 2026-05-13
 

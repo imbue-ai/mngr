@@ -1,1 +1,0 @@
-Documented and suppressed Bandit's B701 (`jinja2_autoescape_false`) finding on the remote package's template environment. The templates render shell scripts and system config files, never HTML, and HTML autoescaping would corrupt the `shquote`-quoted values in them, so autoescaping stays off; the reason is now recorded at the site and the finding is marked `# nosec B701`.

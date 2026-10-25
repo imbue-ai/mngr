@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+A workspace update no longer reads "Preparing an update for this workspace" again after it has landed. Once the workspace's run record says the apply went live, Imbue Studio reports the update as finishing ("This workspace is updated. Its update agent is finishing its checks.", and "Finishing update…" on the row) until the run records its verdict.
+
+The band over a workspace no longer flashes "Lost connection to this workspace" when its update starts landing. The apply takes the workspace's services down within a second of starting, so Studio now reads the run record at the outage's first failed probe, holding the outage back until that read answers, and opens the apply window when an apply is under way. A workspace with no apply under way is still reported stuck, once the read has answered. That read and the check made when a workspace does go stuck now fetch the run record alone, without the in-workspace agent listing or busy-chat check.
+
+Bump Latchkey to 3.19.4.
+
+The electron-updater / builder-util-runtime alignment test now accepts pnpm peer-dependency suffixes (for example `electron-updater@6.8.9(supports-color@7.2.0)`) on lockfile snapshot keys and resolved versions, instead of failing whenever a re-resolve links an optional peer somewhere below electron-updater.
+
+The desktop client's probes of the local `mngr forward` proxy (workspace readiness after a create, the system-interface health loop, recovery waits, and the provider sign-in relay) now verify the proxy's TLS certificate against the proxy's own local CA instead of disabling certificate verification. The CA certificate is read from the plugin's state under the mngr host dir the proxy was spawned with, and the preauth cookie those probes carry can no longer be handed to anything else listening on the proxy's port. This resolves Bandit's B501 (`request_with_no_cert_validation`) finding on `make_workspace_probe_client`.
+
+`probe_workspace_through_plugin` now takes the probe client, the port and the workspace id only; every caller already passed a client, so the one-shot client path was removed. `AgentCreator` gained a `mngr_forward_ca_cert_path` field, which disables readiness probing when unset, like a zero port or an empty preauth cookie.
+
+The Electron shell now trusts a forward-proxy origin only when its leaf certificate was signed by the proxy's local CA (whose path the backend reports in the `mngr_forward_started` event as `ca_cert_path`) and Chromium's only objection is not knowing that CA; a name mismatch, an expired leaf, or any other issuer is left to Chromium to refuse. It previously accepted any certificate on any loopback origin. The verdict lives in `electron/forward-proxy-trust.js` with node unit tests.
+
+The share-URL readiness probe now verifies certificate chains against the system roots instead of disabling verification altogether (Bandit B501). Only the hostname match stays off, because workspaces built before service labels became strict hostname labels still serve their shell at `system_interface-<rand>.<domain>`, which Python's ssl cannot match; the site is marked for cleanup once no supported workspace predates hyphenated labels.
+
+The frontend's pnpm workspace now sets `trustPolicy: no-downgrade`, so resolution refuses a release whose publish-trust evidence (trusted publisher, provenance) is weaker than an earlier release of the same package had, and `blockExoticSubdeps: true`, so transitive dependencies can only come from the registry, not from git repositories or tarball URLs. `prettier-plugin-tailwindcss@0.7.4`, hand-published with provenance between trusted-publisher releases, is excluded from the trust check by exact version. A notification-feed log line now uses a constant format string, so a request path can no longer act as a format specifier (Semgrep `unsafe-formatstring`).
+
+The Electron package's pnpm workspace gets the same `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`. `semver@6.3.1`, the CVE-2022-25883 backport hand-published after the 7.x line had started shipping with provenance, is excluded from the trust check by exact version. Without the exclusion, a re-resolving install -- including ToDesktop's `pnpm install --no-frozen-lockfile` -- fails with `ERR_PNPM_TRUST_DOWNGRADE`. The desktop-app docs describe both settings and how to handle a refusal.
+
+When the shell leaves a loopback origin's certificate to Chromium, it now logs a `[forward-proxy-trust]` line with the hostname, Chromium's `errorCode` and `verificationResult`, and whether the proxy's CA issued the leaf, so a workspace frame that fails TLS can be diagnosed from the Electron log instead of showing up only as a blank frame.
+
+The one-time "Turn on auto-updates?" offer now comes up over a workspace too, not only over Home. Studio usually reopens straight into the last workspace, and the offer used to wait until you went back to Home, so it could miss the launch right after an app update.
+
+- Cut the Imbue Studio 0.9.1 release: the app version is 0.9.1 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.1`, carrying everything that landed on `main` since `minds-v0.9.0`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: an agent interrupted in its terminal no longer stays "working" forever, a workspace whose update has landed reads "Finishing update…" instead of flashing "Lost connection", the auto-update offer also appears over a workspace, Zoom sign-in through latchkey works again (latchkey 3.19.4), and the app trusts its local proxy's certificates only when its own local CA signed them.
+
+- `docs/desktop-app.md` states that from 0.9.0 the app needs macOS 13 or later and that an older Mac stays on its 0.8.x build until macOS is updated; `release-channels.toml` and `docs/deploy/ops/app-release.md` (step 9) document the new `mac_minimum_system_version` entry field that keeps it there.
+
+- Promote Imbue Studio 0.9.0 to the alpha channels: the desktop alpha channel serves ToDesktop build `261024jwpoaghtp` (mac and Linux, 100%), and browser-created alpha workspaces pin to `minds-v0.9.0`. 0.9.0 needs macOS 13, so the alpha mac manifest declares `minimumSystemVersion: 22.0.0` and a macOS 12 install stays on 0.8.7. Beta stays on 0.8.7 and stable on 0.8.5.
+
+- Recorded the Imbue Studio 0.9.0 release in `docs/deploy/history/minds-v0.9.0.md` (the tag pair and build, every verification run, the staging and production deploys and bakes, the macOS 12 decision, the CA fix's operator follow-ups and the channel moves) and reset `docs/deploy/next_deploy.md` after it.
+
+- Corrected the release runbooks where 0.9.0 found them short: the release machine needs the desktop's pinned Node and pnpm to start the rehearsal app, and `services.md` now says how to reach a relay, that frps must be restarted to take a trust-store update, and that a share is probed on its per-app hostnames.
+
 ## 2026-10-23
 
 The Electron end-to-end runner's provider-chooser sign-in now ends when the chooser closes itself after the API key is accepted, and no longer clicks the success screen's Done button. The template shows that success screen only while it reloads the account list, then closes the chooser on its own, so a Done click aimed at it could land after the chooser was gone and time out (`Frame.click: Timeout 20000ms exceeded. waiting for locator("[data-e2e=done]")`). This was the most common flake of `test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` (MIND-365).

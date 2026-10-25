@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: The claude common transcript dropped messages the user sent while a turn was running, so `mngr transcript` and the ATIF trajectory showed the agent replying to a message nobody had sent; each such message is now recorded as a user step in order.
+- Fixed: Claude agents no longer report RUNNING forever after a turn is interrupted directly in the terminal (Esc); the transcript streamer now clears the stranded active marker and emits an activity event.
 
 ## [v0.3.0] - 2026-10-22
 

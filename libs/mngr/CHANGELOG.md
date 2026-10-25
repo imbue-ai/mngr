@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `run_interactive_subprocess` and `popen_interactive_subprocess` now take an argv list only (the `shell` argument is removed); the one deliberate shell invocation (the `--help` pager) moved to the new `popen_interactive_shell_command`.
+
 ### Fixed
 
 - Fixed: `mngr message` and typed key chords now preserve a trailing `;` instead of dropping it (tmux read it as a command separator).
@@ -14,6 +18,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Security
 
 - Security: The mngr Docker image drops the compromised `emSign ECC Root CA - G3` root (uv 0.13.4, Node 24.22.1, Claude Code 2.1.307, upgraded `ca-certificates`).
+- Security: `wait_for_sshd_with_retry` now verifies the SSH server's host key against a pinned `known_hosts` file (new required `known_hosts_path`) instead of trusting any key presented.
 
 ## [v0.3.0] - 2026-10-22
 

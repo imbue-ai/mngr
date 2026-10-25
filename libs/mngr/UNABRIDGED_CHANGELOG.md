@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+Progress step ids derived from Dockerfile instruction text now hash it with `hashlib.sha1(..., usedforsecurity=False)`, marking the hash as an identifier rather than a security control. This resolves Bandit's B324 (`hashlib`) finding on `text_step_id`; the ids themselves are unchanged.
+
+The interactive subprocess helpers (`run_interactive_subprocess`, `popen_interactive_subprocess`) no longer accept a `shell` argument and take an argv list only; no caller ever passed `shell=True` to `run_interactive_subprocess`. The one deliberate shell invocation, running the user's configured pager for `--help` output, now goes through a dedicated `popen_interactive_shell_command` that documents why the shell is used and marks the call `# nosec B602`. This resolves Bandit's two B602 (`subprocess_popen_with_shell_equals_true`) findings without changing behavior. The `utils` direct-subprocess ratchet count rises from 13 to 14 because the new helper is a third sanctioned `subprocess.Popen` call in the same wrapper module.
+
+The SSH session-open readiness probe (`wait_for_sshd_with_retry`) now verifies the server's host key against a pinned known_hosts file instead of trusting any key it is shown (paramiko `AutoAddPolicy`). Callers pass the file as the new required `known_hosts_path` keyword. A server whose key differs from the pin fails at once with a `MngrError` instead of being retried until the timeout. This resolves Bandit's B507 (`ssh_no_host_key_verification`) finding.
+
 ## 2026-10-23
 
 Messages sent to an agent now keep a trailing `;`. tmux reads an argument that ends in `;` as a command separator and drops the `;`, so `mngr message` with `hello;` used to type `hello`, and a `;` key chord typed nothing. The same applied to an additional window's command (`find . -exec ... \;` lost its backslash). Short messages, key chords and typed window commands now escape a trailing `;` the way tmux expects; long messages were never affected, since they go through a paste buffer.

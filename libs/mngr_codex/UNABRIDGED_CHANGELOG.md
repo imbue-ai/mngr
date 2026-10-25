@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24
+
+The `codex app-server` socket directory name now hashes the agent's codex home with `hashlib.sha1(..., usedforsecurity=False)`, marking the hash as a path shortener rather than a security control. This resolves Bandit's B324 (`hashlib`) finding on `get_codex_app_server_socket_path`; the socket path itself is unchanged.
+
 ## 2026-10-23
 
 The codex `common_transcript.sh` tests now stop their background poll daemon with `running_in_own_process_group` from `imbue.mngr.utils.testing` (MIND-377), the same stop the claude watcher tests use.

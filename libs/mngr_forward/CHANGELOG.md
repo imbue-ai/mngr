@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `local_ca_dir` and `local_ca_cert_path` in `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` in `imbue.mngr_forward.primitives`, so host applications can locate the proxy's local CA certificate from the mngr host dir alone and pin it when verifying the proxy's TLS.
+
+### Changed
+
+- Changed: Leaves minted for a service origin too long for an X.509 CommonName now carry a non-empty subject (`O=mngr forward local service`) instead of an empty one, which Chromium requires (it refused the old leaf with `ERR_CERT_INVALID`).
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added
