@@ -1,0 +1,5 @@
+`mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it. Enough of those used to fill a tunnel's 200-slot pool, after which every HTTP request to that service failed with "Proxy connection pool exhausted" until the forward was restarted.
+
+- The trigger is ordinary sleep/wake. After a wake, the first request rebuilds the tunnel while the page's other requests wait behind it, and some of those requests' clients disconnect in the meantime. When the proxy then cancels the backend request, httpcore 1.0.9 left the just-connected connection holding its slot forever (encode/httpcore#1099, still unmerged upstream). Two users' Imbue Studio chat panels went dead this way after about six days of uptime, while the chat WebSocket on the same tunnel kept working.
+
+- The proxy's HTTP clients now use `httpx2` (Pydantic's maintained fork of httpx, same API), which reclaims these connections. The plugin depends on `httpx2>=2.12.0` instead of `httpx`.
