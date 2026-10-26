@@ -52,9 +52,17 @@ elif command -v limactl >/dev/null 2>&1; then
   LIMACTL="limactl"
 fi
 if [[ -n "$LIMACTL" ]]; then
-  log "stopping and deleting Lima VM instances via $LIMACTL"
-  "$LIMACTL" stop --all >/dev/null 2>&1 || true
-  "$LIMACTL" delete --all >/dev/null 2>&1 || true
+  log "deleting minds Lima VM instances via $LIMACTL"
+  # `delete --force` stops an instance before removing it.
+  for instance in $("$LIMACTL" list -q 2>/dev/null); do
+    case "$instance" in
+      minds-host-*)
+        if ! delete_output=$("$LIMACTL" delete --force "$instance" 2>&1); then
+          log "  limactl delete --force $instance failed: $delete_output"
+        fi
+        ;;
+    esac
+  done
 fi
 
 # Belt and suspenders for the CI runner: rm the Lima state minds e2e runs
@@ -103,7 +111,7 @@ fi
 # Local Time Machine snapshots hold deleted-file blocks until purged.
 # After a sequence of CI runs that each create+destroy a Lima VM (whose
 # diffdisk is up to 100GB), those snapshots can pin ~50-100GB even after
-# limactl delete --all reclaims the user-visible files. Free them so the
+# the VM deletion above reclaims the user-visible files. Free them so the
 # next Lima diffdisk conversion ("no space left on device" -- run
 # 27060995662) has room.
 log "freeing local Time Machine snapshots (best effort)"
@@ -113,10 +121,10 @@ log "disk usage after cleanup:"
 df -h "$HOME" / 2>&1 | sed 's/^/[reset]   /' >&2
 
 log "wiping leftover /tmp diagnostic artifacts from prior runs"
-# Only /tmp/minds-electron.log persists across runs (re-written each
-# launch); the deleted first-message-* artifacts were produced by
-# scripts that no longer exist.
-rm -f /tmp/minds-electron.log 2>/dev/null || true
+# The workflow uploads these whole, so anything a previous run left in them
+# would ride along in this run's artifact.
+rm -f /tmp/minds-electron.log /tmp/minds-electron-relaunch.log 2>/dev/null || true
+rm -rf /tmp/launch-to-msg-logs /tmp/launch-to-msg-screenshots /tmp/slack-mock 2>/dev/null || true
 
 log "removing the data roots and the installed app bundle"
 rm -rf "${DATA_ROOTS[@]}"

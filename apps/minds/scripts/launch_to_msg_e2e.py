@@ -164,6 +164,8 @@ EVENTS_LOG = MINDS_LOG_HOME / "minds-events.jsonl"
 ONE_TIME_CODES = MINDS_STATE_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
+ELECTRON_LOG = Path("/tmp/minds-electron.log")
+ELECTRON_RELAUNCH_LOG = Path("/tmp/minds-electron-relaunch.log")
 # Plain HTTP; socat terminates TLS on :443.
 SLACK_MOCK_PORT = 8443
 LATCHKEY_DIR = MINDS_STATE_HOME / "latchkey"
@@ -1405,8 +1407,9 @@ def pre_run_sweep() -> None:
     # .app or the data roots, wipes the roots, and removes the .app entirely
     # BEFORE we run.
     # So orphan mngr forward / mngr event / Imbue Studio.app processes can't exist
-    # by the time we get here. The state below is what mac-runner-reset.sh
-    # does NOT cover: host-side mocking residue and a stray caffeinate.
+    # by the time we get here. The calls below undo what mac-runner-reset.sh
+    # does NOT cover: the Slack mock's /etc/hosts entry and socat, and a stray
+    # caffeinate.
     revert_etc_hosts()
     _kill_pgrep("OPENSSL-LISTEN:443", "stale socat", sudo=True)
     _kill_pgrep("caffeinate -dimsu", "stale caffeinate")
@@ -1416,7 +1419,8 @@ def pre_run_sweep() -> None:
     for stale in (
         SLACK_MOCK_STATE,
         SCREENSHOT_DIR,
-        Path("/tmp/minds-electron.log"),
+        ELECTRON_LOG,
+        ELECTRON_RELAUNCH_LOG,
     ):
         if stale.is_dir():
             shutil.rmtree(stale, ignore_errors=True)
@@ -1476,7 +1480,7 @@ def run_e2e() -> int:
     minds_proc = subprocess.Popen(
         [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port}"],
         env=env,
-        stdout=open("/tmp/minds-electron.log", "w"),
+        stdout=open(ELECTRON_LOG, "w"),
         stderr=subprocess.STDOUT,
     )
 
@@ -2217,7 +2221,7 @@ def run_e2e() -> int:
             minds_proc = subprocess.Popen(
                 [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port2}"],
                 env=env,
-                stdout=open("/tmp/minds-electron-relaunch.log", "w"),
+                stdout=open(ELECTRON_RELAUNCH_LOG, "w"),
                 stderr=subprocess.STDOUT,
             )
 
