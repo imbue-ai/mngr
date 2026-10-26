@@ -138,6 +138,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import LocalCertificateAuthority
@@ -1337,6 +1338,9 @@ def mngr_create_stub_body(agent_id: AgentId, host_id: HostId) -> str:
 
 
 FAKE_WORKSPACE_HOME: Final[str] = "/home/agent"
+_FAKE_MNGR_EXEC_HELD_NAME: Final[str] = "fake-mngr-exec-held"
+_FAKE_MNGR_EXEC_RELEASE_NAME: Final[str] = "fake-mngr-exec-release"
+_FAKE_MNGR_PAIR_ATTEMPTS_NAME: Final[str] = "fake-mngr-pair-attempts"
 
 
 class OneMachineBackendResolver(StaticBackendResolver):
@@ -1358,7 +1362,11 @@ class OneMachineBackendResolver(StaticBackendResolver):
 
 
 def write_fake_mngr_pair_script(
-    directory: Path, argv_record_path: Path, unanswered_exec_count_path: Path | None = None
+    directory: Path,
+    argv_record_path: Path,
+    unanswered_exec_count_path: Path | None = None,
+    held_exec_containing: str = "",
+    failing_pair_attempts: int = 0,
 ) -> Path:
     """A stand-in ``mngr`` for folder-sync tests: records its argv, then waits.
 
@@ -1369,18 +1377,49 @@ def write_fake_mngr_pair_script(
     once unison is watching both replicas and the ``pair_transferring`` settle
     it emits once unison's first pass has left them level, and then blocks on
     ``signal.pause`` until it is signalled -- which is how a real ``mngr pair``
-    spends the sync.
-    Because ``FolderSyncManager.start`` waits for that event, the argv file is
-    always on disk by the time ``start`` returns.
+    spends the sync. ``FolderSyncManager.wait_until_started`` returns once
+    ``pair_syncing`` arrives, so a pairing that got that far has its argv file
+    on disk by then.
+
+    An ``mngr exec`` whose script contains ``held_exec_containing`` (when it
+    is not empty) does not answer until :func:`release_held_fake_mngr_exec`,
+    which holds a converger part-way through that step; see
+    :func:`wait_for_held_fake_mngr_exec`. The first ``failing_pair_attempts``
+    runs of ``mngr pair`` exit 1 at once, the way a pairing that dies on its
+    own does.
 
     With ``unanswered_exec_count_path``, that file holds how many more
     ``mngr exec`` calls fail as they do against a workspace that does not
     answer -- exit 1 and nothing said -- and each one counts it down.
     """
+    exec_hold = ""
+    if held_exec_containing:
+        os.mkfifo(directory / _FAKE_MNGR_EXEC_RELEASE_NAME)
+        # Released by a byte, not by the writer closing: on macOS under load a
+        # read-only reader waiting for EOF can miss it and hang. Opened
+        # read-write, the open never blocks and the read ends on the byte.
+        exec_hold = (
+            f"    if {held_exec_containing!r} in sys.argv[3]:\n"
+            f"        open({str(directory / _FAKE_MNGR_EXEC_HELD_NAME)!r}, 'w').close()\n"
+            f"        os.read(os.open({str(directory / _FAKE_MNGR_EXEC_RELEASE_NAME)!r}, os.O_RDWR), 1)\n"
+        )
+    # Only when asked for: the count is a read-modify-write of a shared file,
+    # which two pairings started together from one script would race on.
+    pair_failure = ""
+    if failing_pair_attempts > 0:
+        pair_failure = (
+            f"attempts_path = {str(directory / _FAKE_MNGR_PAIR_ATTEMPTS_NAME)!r}\n"
+            "attempts = int(open(attempts_path).read()) if os.path.exists(attempts_path) else 0\n"
+            "open(attempts_path, 'w').write(str(attempts + 1))\n"
+            f"if attempts < {failing_pair_attempts}:\n"
+            "    sys.stderr.write('Error: the fake pairing failed\\n')\n"
+            "    sys.exit(1)\n"
+        )
     script = directory / "fake-mngr"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json\n"
+        "import os\n"
         "import pathlib\n"
         "import signal\n"
         "import sys\n"
@@ -1391,8 +1430,10 @@ def write_fake_mngr_pair_script(
         "        if unanswered > 0:\n"
         "            pathlib.Path(unanswered_path).write_text(str(unanswered - 1))\n"
         "            sys.exit(1)\n"
+        f"{exec_hold}"
         f"    print(json.dumps({{'results': [{{'stdout': {FAKE_WORKSPACE_HOME!r}, 'stderr': '', 'success': True}}]}}))\n"
         "    sys.exit(0)\n"
+        f"{pair_failure}"
         f"open({str(argv_record_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
         "sys.stdout.write(json.dumps({'event': 'pair_syncing'}) + '\\n')\n"
         "sys.stdout.write(json.dumps({'event': 'pair_transferring', 'is_transferring': False}) + '\\n')\n"
@@ -1401,6 +1442,17 @@ def write_fake_mngr_pair_script(
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return script
+
+
+def wait_for_held_fake_mngr_exec(directory: Path, timeout: float) -> bool:
+    """Whether the ``mngr exec`` held by :func:`write_fake_mngr_pair_script` got that far within ``timeout``."""
+    return poll_until(lambda: (directory / _FAKE_MNGR_EXEC_HELD_NAME).exists(), timeout=timeout)
+
+
+def release_held_fake_mngr_exec(directory: Path) -> None:
+    """Let the held ``mngr exec`` answer. Call only once it is known to be held."""
+    with open(directory / _FAKE_MNGR_EXEC_RELEASE_NAME, "wb") as release:
+        release.write(b"\n")
 
 
 def wait_until_synced(manager: FolderSyncManager, agent_id: str, local_path: str, timeout: float) -> FolderSyncStatus:

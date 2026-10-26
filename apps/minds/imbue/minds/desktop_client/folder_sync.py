@@ -781,6 +781,9 @@ class FolderSyncManager(MutableModel):
     # so the checkbox is on, and with no run behind it the row would otherwise
     # report a bare STOPPED with no reason and no way to act on it.
     _restore_failures: dict[_SyncKey, str] = PrivateAttr(default_factory=dict)
+    # Set by stop_all. A converger may still be mid-step when the app shuts
+    # down, and this is what stops it spawning a ``mngr pair`` nobody will stop.
+    _is_stopped: bool = PrivateAttr(default=False)
     # Whether each workspace with a sync was running when the resolver last
     # changed, so its machine coming up again is seen as the edge it is.
     _is_running_by_agent: dict[str, bool] = PrivateAttr(default_factory=dict)
@@ -1118,15 +1121,10 @@ class FolderSyncManager(MutableModel):
         )
 
     def _converge(self, key: _SyncKey) -> None:
-        """Thread body: move one sync towards its destination until it is there.
-
-        Retires only after checking, under the lock, that the destination has
-        not moved since the last step -- otherwise a click landing in that
-        window would find a worker still marked as running and nothing would
-        pick it up.
-        """
+        """Thread body: move one sync towards its destination until it is there."""
         last_desired: _DesiredSync | None = None
         steps_for_this_destination = 0
+        is_retired = False
         try:
             # Runs for as long as this sync has somewhere to be. There is no
             # step budget for the whole worker: a click is a new destination
@@ -1134,20 +1132,16 @@ class FolderSyncManager(MutableModel):
             # there have been. What is bounded is the moves against any *one*
             # destination, below.
             while (desired := self._desired_for(key)) is not None:
-                if desired != last_desired:
-                    # A new destination, so the count starts again.
+                if desired is not last_desired:
+                    # A new click, so the count starts again -- even one asking
+                    # for the same destination, like a retry.
                     last_desired = desired
                     steps_for_this_destination = 0
                 step = self._next_step(key, desired)
                 if step is None:
-                    # Retiring and the last look at the destination happen under
-                    # one lock hold. Apart, a click landing between them would
-                    # find a worker still marked as running and be picked up by
-                    # nobody.
-                    with self._lock:
-                        if self._desired_by_key.get(key) is desired:
-                            self._converging.discard(key)
-                            return
+                    if self._retire_if_still_bound_for(key, desired):
+                        is_retired = True
+                        return
                     continue
                 steps_for_this_destination += 1
                 if steps_for_this_destination > _MAX_STEPS_PER_DESTINATION:
@@ -1156,22 +1150,45 @@ class FolderSyncManager(MutableModel):
                     # of real moves does. Giving up is better than a thread
                     # spinning on the machine, and worse than either would be
                     # carrying on silently.
-                    logger.warning(
-                        "Gave up moving {} after {} moves towards one destination; it is left where it "
-                        "got to and the next click starts again",
-                        key.local_path,
-                        _MAX_STEPS_PER_DESTINATION,
-                    )
-                    return
+                    if self._retire_if_still_bound_for(key, desired):
+                        is_retired = True
+                        logger.warning(
+                            "Gave up moving {} after {} moves towards one destination; it is left where it "
+                            "got to and the next click starts again",
+                            key.local_path,
+                            _MAX_STEPS_PER_DESTINATION,
+                        )
+                        return
+                    continue
                 step(desired.spec)
         finally:
-            # Also covers a step that raised: the flag must not outlive the
-            # thread holding it, or the folder is stuck with no worker.
-            with self._lock:
-                self._converging.discard(key)
-                settled = self._settled_events.pop(key, None)
-            if settled is not None:
-                settled.set()
+            # A step that raised: the flag must not outlive the thread holding
+            # it, or the folder is stuck with no worker. Skipped after a normal
+            # retirement, when the key may already belong to the next click's
+            # worker.
+            if not is_retired:
+                with self._lock:
+                    self._retire_locked(key)
+
+    def _retire_if_still_bound_for(self, key: _SyncKey, desired: _DesiredSync) -> bool:
+        """Retire ``key``'s worker if ``desired`` is still its destination, and say whether it did.
+
+        The last look and the whole of retiring share one lock hold. Split, a
+        click between them is either picked up by nobody or starts a worker
+        whose settled event this one then pops and sets.
+        """
+        with self._lock:
+            if self._desired_by_key.get(key) is not desired:
+                return False
+            self._retire_locked(key)
+            return True
+
+    def _retire_locked(self, key: _SyncKey) -> None:
+        """Mark ``key`` as having no worker and wake anyone waiting on it. Caller holds ``self._lock``."""
+        self._converging.discard(key)
+        settled = self._settled_events.pop(key, None)
+        if settled is not None:
+            settled.set()
 
     def _desired_for(self, key: _SyncKey) -> _DesiredSync | None:
         """Where this sync should end up, or None once nothing wants it anywhere."""
@@ -1245,7 +1262,16 @@ class FolderSyncManager(MutableModel):
         Everything slow about starting a sync happens here, and anything that
         goes wrong settles the row as FAILED with the reason -- which is how the
         pane learns, since nobody is waiting on a return value.
+
+        Refuses once :meth:`stop_all` has run. That needs ``run`` registered
+        before this is called: :meth:`stop_all` then either stopped it or had
+        already set the flag.
         """
+        with self._lock:
+            is_stopped = self._is_stopped
+        if is_stopped:
+            run.sink.on_stopped()
+            return
         try:
             # Behind the same lock as setting a copy aside: turning sync off
             # and straight back on is two renames of one directory.
@@ -1655,8 +1681,13 @@ class FolderSyncManager(MutableModel):
                     self._restore_failures[key] = str(e)
 
     def stop_all(self) -> None:
-        """Stop every sync, so no unison outlives the app. Called on shutdown."""
+        """Stop every sync, so no unison outlives the app. Called on shutdown.
+
+        Final: no sync starts on this manager afterwards, including one a
+        converger was part-way to bringing up when this ran.
+        """
         with self._lock:
+            self._is_stopped = True
             runs = tuple(self._runs_by_key.values())
         for run in runs:
             run.terminate()

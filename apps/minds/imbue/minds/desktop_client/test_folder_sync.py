@@ -18,6 +18,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync import _MAX_STEPS_PER_DESTINATION
+from imbue.minds.desktop_client.folder_sync import _WORKSPACE_OUTCOME_PREFIX
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
@@ -26,6 +27,8 @@ from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.testing import FAKE_WORKSPACE_HOME
 from imbue.minds.desktop_client.testing import OneMachineBackendResolver
+from imbue.minds.desktop_client.testing import release_held_fake_mngr_exec
+from imbue.minds.desktop_client.testing import wait_for_held_fake_mngr_exec
 from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.errors import FolderSyncError
@@ -50,18 +53,33 @@ def folder_sync_store(tmp_path: Path) -> FolderSyncStore:
     return FolderSyncStore(records_dir=tmp_path / "folder_syncs")
 
 
+def _manager_rooted_at(
+    tmp_path: Path,
+    concurrency_group: ConcurrencyGroup,
+    mngr_binary: Path,
+    store: FolderSyncStore | None = None,
+) -> FolderSyncManager:
+    """A manager running ``mngr_binary`` for ``mngr``, rooted at ``tmp_path``, that knows both test agents."""
+    return FolderSyncManager(
+        concurrency_group=concurrency_group,
+        mngr_binary=str(mngr_binary),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id=_DEVICE_ID,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={_AGENT_ID: {}, _OTHER_AGENT_ID: {}}),
+        store=store,
+    )
+
+
 @pytest.fixture
 def folder_sync_manager(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, folder_sync_store: FolderSyncStore
 ) -> FolderSyncManager:
     """A manager whose ``mngr`` is the stand-in above, rooted at ``tmp_path``."""
-    return FolderSyncManager(
-        concurrency_group=root_concurrency_group,
-        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
-        mngr_host_dir=tmp_path / ".mngr",
-        home_dir=tmp_path,
-        device_id=_DEVICE_ID,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={_AGENT_ID: {}, _OTHER_AGENT_ID: {}}),
+    return _manager_rooted_at(
+        tmp_path,
+        root_concurrency_group,
+        write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json"),
         store=folder_sync_store,
     )
 
@@ -245,29 +263,87 @@ def test_a_restore_that_fails_is_reported_on_the_row_not_only_the_log(
     assert manager.status_for_path(_AGENT_ID, str(local_folder)) is None
 
 
+# Two rounds of bringing a sync up, each of which can take seconds when the
+# machine is loaded; the waits inside are bounded by _START_TIMEOUT_SECONDS.
+@pytest.mark.timeout(60)
 @pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
 def test_retrying_brings_a_settled_sync_up_again(
     tmp_path: Path,
-    folder_sync_manager: FolderSyncManager,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """A sync that has had everything asked of it carried out needs a nudge, not a flip."""
+    manager = _manager_rooted_at(
+        tmp_path,
+        root_concurrency_group,
+        write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json", failing_pair_attempts=1),
+    )
     local_folder = tmp_path / "notes"
     local_folder.mkdir()
-    folder_sync_manager.start(
+    manager.start(
         agent_id=_AGENT_ID,
         raw_local_path=str(local_folder),
         direction=FolderSyncDirection.BOTH,
         conflict=FolderSyncConflict.NEWER,
     )
-    folder_sync_manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    folder_sync_manager.stop_all()
+    failed = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert failed is not None
+    assert failed.state == FolderSyncState.FAILED
 
-    folder_sync_manager.retry(_AGENT_ID, str(local_folder))
+    manager.retry(_AGENT_ID, str(local_folder))
 
-    status = folder_sync_manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     assert status is not None
-    assert status.state in (FolderSyncState.STARTING, FolderSyncState.SYNCED, FolderSyncState.SYNCING)
-    folder_sync_manager.stop_all()
+    assert status.state in (FolderSyncState.SYNCED, FolderSyncState.SYNCING)
+    manager.stop_all()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="signal.pause and SIGTERM are POSIX-only")
+def test_a_sync_part_way_to_starting_at_shutdown_never_spawns(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """stop_all stops what runs; a converger mid-step must not start a pairing after it.
+
+    Turned off and straight back on, the converger sets the copy aside and then
+    brings the sync up again. stop_all lands while the first of those is held,
+    so the run the second would create does not exist yet for it to stop.
+    """
+    manager = _manager_rooted_at(
+        tmp_path,
+        root_concurrency_group,
+        write_fake_mngr_pair_script(
+            tmp_path, tmp_path / "argv.json", held_exec_containing=f"{_WORKSPACE_OUTCOME_PREFIX}absent"
+        ),
+    )
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    manager.start(
+        agent_id=_AGENT_ID,
+        raw_local_path=str(local_folder),
+        direction=FolderSyncDirection.BOTH,
+        conflict=FolderSyncConflict.NEWER,
+    )
+    started = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert started is not None
+    assert started.state in (FolderSyncState.SYNCED, FolderSyncState.SYNCING)
+    (tmp_path / "argv.json").unlink()
+    manager.stop(_AGENT_ID, str(local_folder))
+    assert wait_for_held_fake_mngr_exec(tmp_path, _START_TIMEOUT_SECONDS)
+    try:
+        manager.start(
+            agent_id=_AGENT_ID,
+            raw_local_path=str(local_folder),
+            direction=FolderSyncDirection.BOTH,
+            conflict=FolderSyncConflict.NEWER,
+        )
+        manager.stop_all()
+    finally:
+        release_held_fake_mngr_exec(tmp_path)
+
+    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.state == FolderSyncState.STOPPED
+    assert not (tmp_path / "argv.json").exists()
 
 
 def test_the_reason_a_folder_cannot_sync_is_the_one_starting_it_would_give(
@@ -431,14 +507,7 @@ def test_a_pairing_that_cannot_start_settles_the_row_as_failed(
         "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('Error: Could not find agent\\n')\nsys.exit(1)\n"
     )
     failing_mngr.chmod(failing_mngr.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    manager = FolderSyncManager(
-        concurrency_group=root_concurrency_group,
-        mngr_binary=str(failing_mngr),
-        mngr_host_dir=tmp_path / ".mngr",
-        home_dir=tmp_path,
-        device_id=_DEVICE_ID,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={_AGENT_ID: {}, _OTHER_AGENT_ID: {}}),
-    )
+    manager = _manager_rooted_at(tmp_path, root_concurrency_group, failing_mngr)
     local_folder = tmp_path / "notes"
     local_folder.mkdir()
 
@@ -687,13 +756,10 @@ def test_a_sync_comes_back_after_a_restart(
     # Quitting, which stops every sync without forgetting any of them.
     folder_sync_manager.stop_all()
 
-    restarted = FolderSyncManager(
-        concurrency_group=root_concurrency_group,
-        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
-        mngr_host_dir=tmp_path / ".mngr",
-        home_dir=tmp_path,
-        device_id=_DEVICE_ID,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={_AGENT_ID: {}, _OTHER_AGENT_ID: {}}),
+    restarted = _manager_rooted_at(
+        tmp_path,
+        root_concurrency_group,
+        write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json"),
         store=FolderSyncStore(records_dir=folder_sync_store.records_dir),
     )
     restarted.restore_all()
