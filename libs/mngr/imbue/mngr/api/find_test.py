@@ -37,6 +37,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import _START_AGENT_LAUNCH_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS
 from imbue.mngr.hosts.outer_host import SSH_TRANSIENT_RETRY_MAX_ATTEMPTS
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -636,11 +637,6 @@ def test_parse_host_location_address_with_empty_prefix_before_colon() -> None:
     assert parsed == HostLocationAddress(path=Path("/path/to/dir"))
 
 
-# =============================================================================
-# AgentMatch Tests
-# =============================================================================
-
-
 def test_agent_match_construction() -> None:
     """AgentMatch should be constructable with required fields."""
     agent_id = AgentId.generate()
@@ -657,11 +653,6 @@ def test_agent_match_construction() -> None:
     assert match.host_id == host_id
     assert match.host_name == HostName("my-host")
     assert match.provider_name == ProviderInstanceName("local")
-
-
-# =============================================================================
-# group_agents_by_host Tests
-# =============================================================================
 
 
 def test_group_agents_by_host_empty_list() -> None:
@@ -744,11 +735,6 @@ def test_group_agents_by_host_key_format() -> None:
     result = group_agents_by_host([match])
     expected_key = f"{host_id}:docker"
     assert expected_key in result
-
-
-# =============================================================================
-# _find_agents_by_identifiers_or_state Tests
-# =============================================================================
 
 
 def test__find_agents_by_identifiers_or_state_no_agents_returns_empty(
@@ -918,9 +904,6 @@ def test__find_agents_by_identifiers_or_state_filter_by_stopped_state(
     assert "find-stopped-test" in found_names
 
 
-# --- filter_all_hosts ---
-
-
 def test_filter_all_hosts_by_name() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("my-host"), provider_name=ProviderInstanceName("local")
@@ -982,9 +965,6 @@ def test_filter_all_hosts_host_provider_form_no_match() -> None:
         )
         == []
     )
-
-
-# --- _filter_all_agents ---
 
 
 def test__filter_all_agents_by_name() -> None:
@@ -1237,6 +1217,38 @@ def test_ensure_agent_started_starts_a_stopped_agent_under_the_host_lock(
     assert host.is_lock_held_at_start == [True]
     assert host.lock_timeouts == [_START_HOST_LOCK_TIMEOUT_SECONDS]
     assert host.is_currently_locked is False
+
+
+class _UnreadableLifecycleHost(_LockRecordingHost):
+    """Local host whose tmux panes and processes cannot be read, as on a host too loaded to answer."""
+
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        return None
+
+
+@pytest.mark.parametrize(("is_start_desired", "expected_is_lock_held_at_start"), [(True, [True]), (False, [])])
+def test_ensure_agent_started_starts_an_agent_whose_state_is_unreadable_only_when_desired(
+    is_start_desired: bool,
+    expected_is_lock_held_at_start: list[bool],
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """An unreadable state takes the start path when a start is wanted (it no-ops on a live session) and is otherwise left alone."""
+    host = make_local_host_of_class(local_provider, _UnreadableLifecycleHost)
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_StartThroughAgent,
+    )
+    agent = agent.model_copy_update(to_update(agent.field_ref().host, host))
+    assert agent.get_lifecycle_state() == AgentLifecycleState.UNKNOWN
+
+    ensure_agent_started(agent, host, is_start_desired=is_start_desired)
+
+    assert host.is_lock_held_at_start == expected_is_lock_held_at_start
 
 
 def _make_same_id_agents_on_two_hosts() -> tuple[AgentId, dict[DiscoveredHost, list[DiscoveredAgent]]]:

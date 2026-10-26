@@ -2126,11 +2126,11 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     """Dispatch the idempotent 'Update backup service' operation; return a handle to poll.
 
     Body: ``{"stop_chats"?: bool}`` -- the "Stop all chats and retry" flow sets
-    it so RUNNING chat agents, and idle ones busy with a pending background
-    task, are stopped (and those tasks ended) before the code update (they
-    resume on the user's next message). One tracked operation runs per
-    workspace at a time; a second request while one (of any kind) is running is
-    rejected rather than stacked.
+    it so RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones
+    busy with a pending background task, are stopped (and those tasks ended)
+    before the code update (they resume on the user's next message). One
+    tracked operation runs per workspace at a time; a second request while one
+    (of any kind) is running is rejected rather than stacked.
     """
     context = _resolve_backup_route_context(agent_id)
     if isinstance(context, Response):

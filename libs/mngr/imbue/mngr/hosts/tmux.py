@@ -78,6 +78,11 @@ AGENT_PANE_ID_OPTION: Final[str] = "@mngr_agent_pane"
 # session through `rename-session`.
 AGENT_ID_OPTION: Final[str] = "@mngr_agent_id"
 
+# What a tmux client prints when no server listens on its socket, so there are no sessions: "no
+# server running on <socket>" for a stale socket, "error connecting to <socket> (No such file or
+# directory)" for none.
+TMUX_NO_SERVER_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no server running on ", "(No such file or directory)")
+
 # Shell expressions for the name and id of the tmux session a command's own pane belongs to. A
 # launch command is stored once at create and replayed on every start, so one that baked in the
 # session's name would name a gone session after the agent is renamed; these read it when they run.

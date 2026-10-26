@@ -568,6 +568,9 @@ class AntigravityAgent(
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
+    # `agy` is a single-file Go binary; ps/tmux show the literal command name.
+    fixed_process_name: ClassVar[str | None] = "agy"
+
     # Regex (searched against the pane) for the input box agy draws ONLY once the
     # prompt is ready for keystrokes: a horizontal rule, the ``>`` prompt line, and a
     # second horizontal rule. Polled by ``InteractiveTuiAgent.wait_for_ready_signal``.
@@ -583,10 +586,6 @@ class AntigravityAgent(
     # spans the terminal width, which at the minimum width is just two ``─`` -- hence
     # ``{2,}`` rather than a longer run.
     TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
-
-    def get_expected_process_name(self) -> str:
-        # `agy` is a single-file Go binary; ps/tmux show the literal command name.
-        return "agy"
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy

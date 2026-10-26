@@ -749,6 +749,25 @@ def cleanup_tmux_session(session_name: str) -> None:
     _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:agent")
 
 
+def shadow_program_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+    shim_dir: Path,
+    program: str,
+    # Shell run in place of the program; "$REAL" names the real program and "$@" its arguments.
+    shim_body: str,
+) -> None:
+    """Put a shell script ahead of ``program`` on PATH, e.g. to make a loaded host's tmux or ps slow or fail.
+
+    Only processes started after this call (with the patched environment) see the shim, so set
+    up whatever the test needs from the real program first.
+    """
+    real_program = shutil.which(program)
+    assert real_program is not None, f"{program} is not installed"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    write_executable_script(shim_dir / program, f"#!/bin/sh\nREAL={shlex.quote(real_program)}\n{shim_body}\n")
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+
 @contextmanager
 def tmux_session_cleanup(session_name: str) -> Generator[None, None, None]:
     """Context manager that cleans up a tmux session and all its processes on exit."""

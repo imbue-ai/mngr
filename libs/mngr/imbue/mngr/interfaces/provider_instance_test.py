@@ -253,7 +253,9 @@ def _make_mock_online_agent(agent_id: AgentId) -> MagicMock:
     agent.get_reported_url.return_value = None
     agent.get_labels.return_value = {}
     agent.get_lifecycle_state.return_value = AgentLifecycleState.RUNNING
-    agent.probe_lifecycle.return_value = LifecycleProbeResult(state=AgentLifecycleState.RUNNING, pid=4321)
+    agent.probe_lifecycle_from_snapshot.return_value = LifecycleProbeResult(
+        state=AgentLifecycleState.RUNNING, pid=4321
+    )
     return agent
 
 
@@ -275,12 +277,12 @@ def test_build_agent_details_populates_pid_from_probe(host_id: HostId) -> None:
         agent = _make_mock_online_agent(AgentId.generate())
         host_details = HostDetails(id=host_id, name="test-host", provider_name=ProviderInstanceName(provider_name))
 
-        details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {})
+        details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {}, None)
 
         assert details.state == AgentLifecycleState.RUNNING
         assert details.pid == 4321
         assert details.host.provider_name == ProviderInstanceName(provider_name)
-        agent.probe_lifecycle.assert_called_once()
+        agent.probe_lifecycle_from_snapshot.assert_called_once()
 
 
 def test_connection_error_fallback_applies_provider_state_override(

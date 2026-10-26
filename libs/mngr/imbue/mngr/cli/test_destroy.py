@@ -13,6 +13,8 @@ from imbue.mngr.cli.create import create
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import create_test_agent_via_cli
+from imbue.mngr.utils.testing import shadow_program_on_path
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -246,6 +248,35 @@ def test_destroy_blocks_running_agent_without_force(
         assert "--force" in destroy_result.output
 
         # Agent should still be running (not destroyed)
+        assert tmux_session_exists(session_name)
+
+
+@pytest.mark.tmux
+def test_destroy_blocks_agent_whose_state_is_unreadable_without_force(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent whose state cannot be read may be running, so destroying it needs --force too."""
+    agent_name = f"test-destroy-unreadable-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, command="sleep 120005"
+        )
+
+        with monkeypatch.context() as patch:
+            shadow_program_on_path(patch, tmp_path / "shims", "tmux", 'echo "lost server" >&2\nexit 1')
+            destroy_result = cli_runner.invoke(
+                destroy, [agent_name], input="y\n", obj=plugin_manager, catch_exceptions=False
+            )
+
+        assert destroy_result.exit_code == 0
+        assert f"Could not determine whether agent {agent_name}" in destroy_result.output
         assert tmux_session_exists(session_name)
 
 

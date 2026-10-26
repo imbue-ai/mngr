@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SizeBytes
@@ -675,6 +676,15 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     @abstractmethod
     def get_agents(self) -> list[AgentInterface]:
         """Return a list of all agents running on this host."""
+        ...
+
+    @abstractmethod
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        """Read every tmux pane and then the process table.
+
+        None when the panes cannot be read (a failure or a timeout); a process table that cannot be
+        read leaves the snapshot's ``ps_output`` None.
+        """
         ...
 
     @abstractmethod

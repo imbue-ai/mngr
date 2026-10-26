@@ -1,0 +1,1 @@
+Pi agents now declare their process name (`pi`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.

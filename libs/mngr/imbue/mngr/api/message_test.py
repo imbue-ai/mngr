@@ -64,6 +64,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import shadow_program_on_path
 
 
 def test_message_result_initializes_with_empty_lists() -> None:
@@ -338,6 +339,57 @@ def test_send_message_to_agents_revives_done_agent_when_start_desired(
 
     assert "revive-done-test" in result.successful_agents
     assert error_agents == []
+
+
+@pytest.mark.tmux
+def test_send_message_fails_as_state_unknown_without_restarting_an_agent_whose_state_is_unreadable(
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send to an agent whose state cannot be read neither delivers nor (re)starts it.
+
+    On a loaded host the lifecycle probe can fail to answer while the agent runs on. Reading that
+    as DONE would tear the live agent down to revive it; delivering blind could type into a dead
+    shell. The send fails as one worth retrying, and the agent's process is left alone.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    agent = host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("unreadable-state-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847274"),
+        ),
+    )
+    host.start_agents([agent.id])
+    wait_for(
+        lambda: agent.probe_lifecycle().pid is not None,
+        error_message="Expected the agent's process to be running before the send",
+    )
+    pid_before_send = agent.probe_lifecycle().pid
+    matches = find_all_agents(addresses=(), filter_all=True, target_state=None, mngr_ctx=temp_mngr_ctx)
+
+    with monkeypatch.context() as patch:
+        shadow_program_on_path(patch, tmp_path / "shims", "tmux", 'echo "lost server" >&2\nexit 1')
+        result = send_message_to_agents(
+            mngr_ctx=temp_mngr_ctx,
+            message_content="Hello while loaded",
+            agents_to_message=matches,
+            is_start_desired=True,
+        )
+    pid_after_send = agent.probe_lifecycle().pid
+    host.destroy_agent(agent)
+
+    assert result.successful_agents == []
+    assert [(failure.agent_name, failure.kind) for failure in result.failures] == [
+        ("unreadable-state-test", SendFailureKind.STATE_UNKNOWN)
+    ]
+    assert "Could not determine whether agent unreadable-state-test is running" in result.failures[0].reason
+    assert pid_after_send == pid_before_send
 
 
 class _ReviveFailingAgent(BaseAgent[AgentTypeConfig]):

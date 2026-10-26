@@ -199,6 +199,24 @@ class CommandResult(FrozenModel):
     )
 
 
+class TmuxPaneListing(FrozenModel):
+    """One pane from a host-wide ``tmux list-panes -a`` listing."""
+
+    session_name: str = Field(description="Name of the session holding the pane")
+    session_agent_id: str = Field(description="Agent id stamped on the session, or empty for an unstamped session")
+    window_name: str = Field(description="Name of the window holding the pane")
+    pane_info: str = Field(description="The pane's lifecycle fields as 'pane_dead|pane_current_command|pane_pid'")
+
+
+class HostLifecycleSnapshot(FrozenModel):
+    """One read of a host's tmux panes and process table, from which every agent's lifecycle on it is determined."""
+
+    panes: tuple[TmuxPaneListing, ...] = Field(description="Every pane on the host's tmux server")
+    ps_output: str | None = Field(
+        description="Output of 'ps -e -o pid=,ppid=,comm=' on the host, or None when it could not be read"
+    )
+
+
 class CleanupFailureCategory(UpperCaseStrEnum):
     """The cause of a real cleanup failure (a resource that was left behind).
 

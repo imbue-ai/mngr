@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 
 import click
 from loguru import logger
@@ -548,6 +549,9 @@ class PiCodingAgent(
     ``InteractiveTuiAgent`` -- it uses none of the latter's paste/Enter pipeline.
     """
 
+    # Pi sets process.title = "pi" in cli.ts.
+    fixed_process_name: ClassVar[str | None] = "pi"
+
     @property
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
@@ -704,7 +708,7 @@ class PiCodingAgent(
         ``-e <extension>`` loads the lifecycle extension (marker, readiness
         sentinel, transcripts). No background helper is launched, so the
         foreground (and lifecycle-detected) process is plain ``pi``
-        (``get_expected_process_name`` pins ``"pi"`` regardless).
+        (``fixed_process_name`` pins ``"pi"`` regardless).
 
         When ``auto_dismiss_dialogs_at_startup`` is set, ``--approve`` is added so pi
         auto-trusts the project folder for the run (its native unattended
@@ -780,13 +784,6 @@ class PiCodingAgent(
             "(is the mngr lifecycle extension loading?)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
-
-    def get_expected_process_name(self) -> str:
-        """Return 'pi' as the expected process name.
-
-        Pi sets process.title = "pi" in cli.ts.
-        """
-        return "pi"
 
     def on_before_provisioning(
         self,

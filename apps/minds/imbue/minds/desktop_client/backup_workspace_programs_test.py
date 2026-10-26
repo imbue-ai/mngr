@@ -430,6 +430,22 @@ def test_gate_probe_reports_running_chats_excluding_main_and_worktrees(tmp_path:
     assert payload["backup_tick_in_flight"] is False
 
 
+def test_gate_probe_counts_a_chat_whose_state_is_unreadable_as_running(tmp_path: Path) -> None:
+    """A loaded workspace can fail to read a live chat's state; that chat may be mid-turn, so it holds the gate."""
+    repo = _make_workspace_repo(tmp_path)
+    agents = [
+        {"name": "chat-1", "id": "agent-1", "type": "claude", "state": "UNKNOWN", "work_dir": str(repo)},
+        {"name": "chat-2", "id": "agent-2", "type": "claude", "state": "STOPPED", "work_dir": str(repo)},
+    ]
+    stub_bin = _make_stub_bin(tmp_path, agents_json=json.dumps({"agents": agents, "errors": []}))
+
+    run = _run_program(repo, backup_gate_probe, ("--agent-id", "agent-x"), extra_path=stub_bin)
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["running_chats"] == ["chat-1"]
+
+
 def test_gate_probe_answers_in_a_machine_whose_own_mngr_config_it_cannot_parse(tmp_path: Path) -> None:
     """An unanswerable gate reads as "chats running", which declines the update that would fix it."""
     repo = _make_workspace_repo(tmp_path)

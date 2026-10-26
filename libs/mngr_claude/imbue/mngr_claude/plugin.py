@@ -1631,6 +1631,9 @@ class ClaudeCoreAgent(
     does not carry those interactive-only capabilities.
     """
 
+    # Launched through a shell chain of exports and resume fallbacks, but the process is always claude.
+    fixed_process_name: ClassVar[str | None] = "claude"
+
     @property
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
@@ -1773,14 +1776,6 @@ class ClaudeCoreAgent(
         slash-command picker such as ``/model``, or the cost threshold.
         """
         return self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
-
-    def get_expected_process_name(self) -> str:
-        """Return 'claude' as the expected process name.
-
-        This overrides the base implementation because ClaudeAgent uses a complex
-        shell command with exports and fallbacks, but the actual process is always 'claude'.
-        """
-        return "claude"
 
     def get_provision_file_transfers(
         self,

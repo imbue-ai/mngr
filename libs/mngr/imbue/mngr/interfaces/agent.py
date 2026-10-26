@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import ClassVar
 from typing import Generic
 from typing import Sequence
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from imbue.mngr.errors import AgentNoLongerIdleError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -57,6 +59,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     host_id: HostId = Field(description="ID of the host this agent runs on")
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="Mngr context")
     agent_config: AgentConfigT = Field(frozen=True, repr=False, description="Agent type config")
+
+    # The process name an agent of this class always runs as, whatever its command line, or None
+    # when it is the command's first word. A class attribute so a listing that knows only an
+    # agent's type (not a loaded agent) can read it off the registered class.
+    fixed_process_name: ClassVar[str | None] = None
 
     @property
     def session_name(self) -> str:
@@ -111,8 +118,9 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 
-        Subclasses can override this to return a hardcoded process name
-        when the command is complex (e.g., shell wrappers with exports).
+        An agent class whose process name is not its command's first word (e.g. one launched
+        through a shell wrapper with exports) sets ``fixed_process_name`` rather than overriding
+        this, so a listing that knows only the agent's type expects the same name.
         """
         ...
 
@@ -174,6 +182,15 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         is the local machine.
         """
         return LifecycleProbeResult(state=self.get_lifecycle_state())
+
+    def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
+        """Like ``probe_lifecycle``, but read from a host-wide snapshot shared with the host's other agents.
+
+        ``lifecycle_snapshot`` is None when the host's snapshot could not be read. The default
+        implementation ignores the snapshot and probes on its own; implementations that read tmux
+        and ps (e.g. BaseAgent) override this so a listing reads them once per host.
+        """
+        return self.probe_lifecycle()
 
     def is_blocked_on_dialog(self) -> bool:
         """Whether the agent is holding on a dialog only the user can answer.

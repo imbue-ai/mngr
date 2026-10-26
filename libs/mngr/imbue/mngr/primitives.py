@@ -28,8 +28,6 @@ from imbue.imbue_common.primitives import PositiveInt
 # mapping and the plugins that bind outer-host services at the bridge address.
 OUTER_HOST_HOSTNAME_IN_CONTAINER: Final[str] = "host.docker.internal"
 
-# === Enums ===
-
 
 class DockerBuilder(UpperCaseStrEnum):
     """Image builder backend used by the docker provider.
@@ -353,9 +351,6 @@ class PluginKind(UpperCaseStrEnum):
     PROVIDER = auto()
 
 
-# === ID Types ===
-
-
 class HostState(UpperCaseStrEnum):
     """The lifecycle state of a host."""
 
@@ -405,11 +400,23 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
     RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
-    # The provider that owns this agent could not be accessed during the most recent discovery attempt,
-    # so the agent's actual state is unknown. Emitted by AgentObserver for previously-tracked agents
-    # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
-    # snapshot or being explicitly destroyed.
+    # The agent's actual state could not be observed: e.g. the host's tmux panes and processes could
+    # not be read in time (a host too loaded to answer), or AgentObserver's provider failed discovery
+    # for a previously-tracked agent (which stays UNKNOWN until it reappears in a snapshot or is
+    # explicitly destroyed). Consumers treat it as no evidence either way: never as stopped, and
+    # never as running enough to act on.
     UNKNOWN = auto()
+
+
+# The states that count as running: the agent's pane is held by a live program, not a shell prompt.
+RUNNING_AGENT_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+    }
+)
 
 
 class LifecycleProbeResult(FrozenModel):
@@ -594,8 +601,6 @@ AgentNameOrId = AgentId | AgentName
 HostNameOrId = HostId | HostName
 
 
-# === Parsed address types ===
-#
 # These FrozenModel shapes are produced by the parsers in
 # ``api/addresses.py`` and consumed across the codebase, including by
 # ``config/data_types.py``. They live here in ``primitives`` because the

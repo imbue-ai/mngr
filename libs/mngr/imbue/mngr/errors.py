@@ -284,6 +284,9 @@ class SendFailureKind(StrEnum):
     NOT_READY = "not_ready"
     # There is nothing to talk to -- the pane is gone. Trying again cannot help.
     AGENT_UNREACHABLE = "agent_unreachable"
+    # Whether the agent is running could not be read (e.g. its host is too loaded to answer in time).
+    # Trying again helps once the host answers; until then nothing more is known about the agent.
+    STATE_UNKNOWN = "state_unknown"
     # The agent was not where the caller located it: that host has no such agent, or the host
     # itself could not be reached. Nothing was typed, so looking the agent up afresh and sending
     # again is safe.
@@ -383,6 +386,18 @@ class AgentStartError(AgentError):
         self.agent_name = agent_name
         self.reason = reason
         super().__init__(f"Failed to start agent {agent_name}: {reason}")
+
+
+class AgentLifecycleUnknownError(AgentError):
+    """An agent's lifecycle state could not be read, so a send to it is not attempted."""
+
+    def __init__(self, agent_name: str) -> None:
+        self.agent_name = agent_name
+        super().__init__(
+            f"Could not determine whether agent {agent_name} is running: its host's tmux panes or "
+            "processes could not be read (a host too loaded to answer in time reads this way). "
+            "Try again once the host answers."
+        )
 
 
 class VolumeListingError(MngrError, OSError):

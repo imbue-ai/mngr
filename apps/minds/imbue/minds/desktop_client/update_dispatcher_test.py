@@ -228,6 +228,21 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
             {"idle_ticks": 2, "last_reminded_at": 0.0},
             WatchdogAction.REMIND,
         ),
+        # A lead or worker whose state could not be read may be mid-turn: neither count nor remind.
+        (
+            _OPEN_RUN,
+            [_agent(_LEAD, "UNKNOWN")],
+            _NOTHING_BUSY,
+            {"idle_ticks": 2, "last_reminded_at": 0.0},
+            WatchdogAction.NOTHING,
+        ),
+        (
+            _OPEN_RUN,
+            [_agent(_LEAD, "WAITING"), _agent(_WORKER, "UNKNOWN")],
+            _NOTHING_BUSY,
+            {"idle_ticks": 2, "last_reminded_at": 0.0},
+            WatchdogAction.NOTHING,
+        ),
         # Reminded a minute ago: wait out the interval.
         (
             _OPEN_RUN,

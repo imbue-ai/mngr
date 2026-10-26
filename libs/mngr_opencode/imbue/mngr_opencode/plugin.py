@@ -330,18 +330,16 @@ class OpenCodeAgent(
 ):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
+    # Both `opencode serve` and `opencode attach` report `opencode`; the attach client is the pane's
+    # foreground process (lifecycle detection also matches it among pane descendants).
+    fixed_process_name: ClassVar[str | None] = "opencode"
+
     # How long send_message waits for the launch script to have written the
     # server port / root-session files (written at launch, before readiness, so
     # this only ever waits on the first send racing a just-started agent).
     # ClassVars so a test subclass can shrink them.
     _SEND_FILE_WAIT_SECONDS: ClassVar[float] = 30.0
     _SEND_FILE_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.5
-
-    def get_expected_process_name(self) -> str:
-        # Both `opencode serve` and `opencode attach` report `opencode`; the
-        # attach client is the pane's foreground process (lifecycle detection
-        # also matches it among pane descendants).
-        return "opencode"
 
     def is_blocked_on_dialog(self) -> bool:
         """Whether opencode is holding on a tool-approval prompt.

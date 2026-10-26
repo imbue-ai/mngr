@@ -1916,27 +1916,36 @@ def _is_reap_step(command: str) -> bool:
     return "tmux list-windows" in command or "/proc/[0-9]*/environ" in command or "kill -TERM" in command
 
 
-def test_start_agents_raises_and_reaps_nothing_when_the_session_probe_times_out(
+# What tmux prints for a session that does not exist on a running server.
+_NO_SESSION_PROBE_RESULT: Final[CommandResult] = CommandResult(
+    stdout="", stderr="can't find session: mngr-agent\n", success=False
+)
+
+
+@pytest.mark.parametrize("is_probe_timed_out", [True, False], ids=["timeout", "tmux-failure"])
+def test_start_agents_raises_and_reaps_nothing_when_the_session_probe_cannot_answer(
+    is_probe_timed_out: bool,
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """A timed-out session probe aborts the start; it must never be read as "no session".
+    """A session probe that times out or fails without saying the session is absent aborts the start.
 
-    Regression guard: the probe used to report a timeout as ``success=False``, which is
-    indistinguishable from "no session", and start_agents then reaped the LIVE agent's
-    whole process tree (for a minds services agent: supervisord and every service under it).
+    It must never be read as "no session": start_agents would then reap the LIVE agent's whole
+    process tree (for a minds services agent: supervisord and every service under it).
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
+            if is_probe_timed_out:
+                raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
+            return CommandResult(stdout="", stderr="lost server\n", success=False)
         return CommandResult(stdout="", stderr="", success=True)
 
     host, recorded = _make_local_command_intercepting_host(local_provider, agent, handle)
 
-    with pytest.raises(CommandTimeoutError):
+    with pytest.raises(HostError):
         host.start_agents([agent.id])
 
     commands = [command for command, _ in recorded]
@@ -1955,7 +1964,7 @@ def test_start_agents_reaps_then_launches_on_a_definitive_no_session_answer(
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            return CommandResult(stdout="", stderr="", success=False)
+            return _NO_SESSION_PROBE_RESULT
         return CommandResult(stdout="", stderr="", success=True)
 
     host, recorded = _make_local_command_intercepting_host(local_provider, agent, handle)
@@ -1982,7 +1991,7 @@ def test_start_agents_bounds_the_launch_batch_and_fails_loudly_when_it_times_out
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            return CommandResult(stdout="", stderr="", success=False)
+            return _NO_SESSION_PROBE_RESULT
         if "tmux new-session" in command:
             raise CommandTimeoutError(f"Command timed out after {_START_AGENT_LAUNCH_TIMEOUT_SECONDS}s: {command}")
         return CommandResult(stdout="", stderr="", success=True)

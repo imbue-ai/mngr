@@ -1171,6 +1171,9 @@ def decide_watchdog_action(
     worker = _find_agent(agents, worker_name) if worker_name else None
     if _is_agent_busy(lead, busy) or _is_agent_busy(worker, busy):
         return WatchdogAction.RESET
+    if any(agent is not None and agent.get("state") == "UNKNOWN" for agent in (lead, worker)):
+        # An unreadable state (a loaded host) is no evidence the run is idle, and mngr refuses to message it.
+        return WatchdogAction.NOTHING
     idle_ticks = _count_or_zero(watchdog_state.get("idle_ticks")) + 1
     last_reminded_at = _epoch_or_none(watchdog_state.get("last_reminded_at")) or 0.0
     if idle_ticks >= _IDLE_TICKS_BEFORE_REMINDER and now - last_reminded_at >= _REMINDER_INTERVAL_SECONDS:

@@ -6,6 +6,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
+from typing import ClassVar
 from typing import cast
 
 import pytest
@@ -15,6 +16,8 @@ from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
+from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
@@ -22,17 +25,23 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
+from imbue.mngr.hosts.common import find_agent_session_name
 from imbue.mngr.hosts.common import get_descendant_pids
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.common import timestamp_to_datetime
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import WaitingReason
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def test_timestamp_to_datetime_returns_none_for_none() -> None:
@@ -518,29 +527,50 @@ def test_descendant_pids_visits_each_process_once_when_the_parent_links_form_a_c
     assert get_descendant_pids("100", "100 300 init\n200 100 bash\n300 200 sleep\n") == ["200", "300"]
 
 
-def test_resolve_expected_process_name_for_claude() -> None:
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("/usr/bin/my-agent --flag", "my-agent"),
+        ("sleep", "sleep"),
+        ("( /usr/bin/script.sh session ) &", "script.sh"),
+    ],
+    ids=["path-with-args", "bare-command", "subshell-wrapped"],
+)
+def test_resolve_expected_process_name_falls_back_to_the_command_basename(command: str, expected: str) -> None:
+    """Without a fixed name on the class, the listing expects what a loaded agent of the type expects."""
     config = MngrConfig.model_construct(agent_types={})
-    result = resolve_expected_process_name("claude", CommandString("complex wrapper command"), config)
-    assert result == "claude"
+    assert resolve_expected_process_name("custom", CommandString(command), config) == expected
 
 
-def test_resolve_expected_process_name_for_simple_command() -> None:
-    config = MngrConfig.model_construct(agent_types={})
-    result = resolve_expected_process_name("custom", CommandString("/usr/bin/my-agent --flag"), config)
-    assert result == "my-agent"
+class _FixedProcessNameAgent(AgentInterface):
+    """An agent class that always runs as one process, whatever its launch command."""
+
+    fixed_process_name: ClassVar[str | None] = "codex"
 
 
-def test_resolve_expected_process_name_for_custom_type_with_claude_parent() -> None:
-    custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("claude"))
-    config = MngrConfig.model_construct(agent_types={AgentTypeName("my-claude"): custom_config})
-    result = resolve_expected_process_name("my-claude", CommandString("complex wrapper"), config)
-    assert result == "claude"
+@pytest.mark.parametrize(
+    ("agent_type", "agent_types"),
+    [
+        ("codex", {}),
+        ("my-codex", {AgentTypeName("my-codex"): AgentTypeConfig.model_construct(parent_type=AgentTypeName("codex"))}),
+    ],
+    ids=["registered-type", "custom-type-with-that-parent"],
+)
+def test_resolve_expected_process_name_reads_the_registered_class_fixed_name(
+    agent_type: str, agent_types: dict[AgentTypeName, AgentTypeConfig]
+) -> None:
+    """A listing that knows only the type gets the name a loaded agent of the class reports, not the
+    launch command's first word (a codex agent's command starts with a backgrounded subshell)."""
+    try:
+        register_agent_class("codex", _FixedProcessNameAgent)
+        config = MngrConfig.model_construct(agent_types=agent_types)
+        result = resolve_expected_process_name(
+            agent_type, CommandString("( bash codex_background_tasks.sh ) & codex --remote"), config
+        )
+    finally:
+        reset_agent_class_registry()
 
-
-def test_resolve_expected_process_name_for_bare_command() -> None:
-    config = MngrConfig.model_construct(agent_types={})
-    result = resolve_expected_process_name("unknown", CommandString("sleep"), config)
-    assert result == "sleep"
+    assert result == "codex"
 
 
 def test_check_agent_type_known_for_registered_type() -> None:
@@ -799,3 +829,104 @@ def test_blocked_on_dialog_has_no_default() -> None:
             expected_process_name="claude",
             ps_output="",
         )
+
+
+@pytest.mark.parametrize(
+    ("tmux_info", "expected"),
+    [
+        # No session, and a pane whose process has exited, need no process table to settle.
+        (None, LifecycleProbeResult(state=AgentLifecycleState.STOPPED)),
+        ("1|bash|4242", LifecycleProbeResult(state=AgentLifecycleState.DONE)),
+        # tmux's own report of the foreground settles a live pane, though without a PID.
+        ("0|claude|4242", LifecycleProbeResult(state=AgentLifecycleState.WAITING)),
+        # A shell foreground may hide the agent below it, which only the process table could show.
+        ("0|bash|4242", LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)),
+    ],
+)
+def test_lifecycle_without_a_process_table_settles_only_what_tmux_shows(
+    tmux_info: str | None, expected: LifecycleProbeResult
+) -> None:
+    probe = determine_lifecycle_probe_result(
+        tmux_info,
+        is_active=False,
+        is_blocked_on_dialog=False,
+        expected_process_name="claude",
+        ps_output=None,
+    )
+    assert probe == expected
+
+
+def test_lifecycle_snapshot_finds_an_agents_session_by_its_id_stamp_before_its_name() -> None:
+    """A renamed agent's session carries its id under the new name, while a stale session may hold the old name."""
+    agent_id = AgentId.generate()
+    panes = parse_tmux_pane_listings(
+        f"mngr-renamed::MNGR::{agent_id}::MNGR::agent::MNGR::0|claude|4242\n"
+        "mngr-original::MNGR::::MNGR::agent::MNGR::0|bash|4343\n"
+    )
+
+    assert find_agent_session_name(panes, agent_id, "mngr-original") == "mngr-renamed"
+    assert find_agent_session_name(panes, AgentId.generate(), "mngr-original") == "mngr-original"
+    assert find_agent_session_name(panes, AgentId.generate(), "mngr-gone") is None
+
+
+def _write_fake_program(bin_dir: Path, name: str, body: str) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    write_executable_script(bin_dir / name, f"#!/bin/sh\n{body}\n")
+
+
+def _run_snapshot_command(command: str, path_dir: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        env={"PATH": str(path_dir)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_process_table_snapshot_reads_a_host_without_ps_but_not_one_whose_ps_fails(tmp_path: Path) -> None:
+    """Minimal images ship no ps, so they list no processes; a ps that is there but fails says nothing."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    without_ps = _run_snapshot_command(PROCESS_TABLE_SNAPSHOT_COMMAND, bin_dir)
+
+    assert without_ps.returncode == 0, without_ps.stderr
+    assert without_ps.stdout == ""
+
+    _write_fake_program(bin_dir, "ps", "exit 1")
+
+    assert _run_snapshot_command(PROCESS_TABLE_SNAPSHOT_COMMAND, bin_dir).returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("tmux_stderr", "is_readable"),
+    [
+        ("no server running on /tmp/tmux-501/default", True),
+        ("error connecting to /tmp/tmux-501/default (No such file or directory)", True),
+        ("lost server", False),
+    ],
+)
+def test_tmux_panes_snapshot_reads_a_host_without_a_tmux_server_but_not_one_whose_tmux_fails(
+    tmux_stderr: str, is_readable: bool, tmp_path: Path
+) -> None:
+    """No tmux server means no sessions, so its agents read STOPPED; any other tmux failure says nothing."""
+    bin_dir = tmp_path / "bin"
+    _write_fake_program(bin_dir, "tmux", f"echo {shlex.quote(tmux_stderr)} >&2\nexit 1")
+
+    run = _run_snapshot_command(TMUX_PANES_SNAPSHOT_COMMAND, bin_dir)
+
+    assert (run.returncode == 0) == is_readable, run.stderr
+    if is_readable:
+        assert parse_tmux_pane_listings(run.stdout) == ()
+
+
+def test_tmux_panes_snapshot_reads_a_host_without_tmux_as_having_no_panes(tmp_path: Path) -> None:
+    """A host with no tmux binary has no tmux sessions, so its agents read STOPPED rather than unreadable."""
+    empty_bin_dir = tmp_path / "bin"
+    empty_bin_dir.mkdir()
+
+    run = _run_snapshot_command(TMUX_PANES_SNAPSHOT_COMMAND, empty_bin_dir)
+
+    assert run.returncode == 0, run.stderr
+    assert parse_tmux_pane_listings(run.stdout) == ()

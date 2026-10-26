@@ -59,11 +59,14 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
+from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_descendant_pids
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
@@ -74,6 +77,7 @@ from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
+from imbue.mngr.hosts.tmux import TMUX_NO_SERVER_STDERR_SUBSTRINGS
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import quote_tmux_text_argument
@@ -87,6 +91,7 @@ from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostBootInfo
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
@@ -488,6 +493,10 @@ _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 # before declaring a command wedged.
 _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
+# Per read (panes, then processes). Generous next to a healthy host's few milliseconds; the per-host
+# read budget can clamp it lower.
+_LIFECYCLE_SNAPSHOT_TIMEOUT_SECONDS: Final[float] = 5.0
+
 # Per-attempt bound on the single shell batch that launches one agent (tmux session
 # creation, the launch-script write and send-keys, activity recording, and the
 # backgrounded monitor). Every step is a tmux client call or a small file write, so a
@@ -532,6 +541,9 @@ _TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     # either way, so this is benign (it surfaced as a spurious LOCAL_STATE_REMAINS before).
     "no current target",
 )
+# tmux's own answers that a session does not exist: no such session on a running server, or no
+# server at all. Any other tmux failure says nothing about the session.
+_TMUX_NO_SESSION_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("can't find session", *TMUX_NO_SERVER_STDERR_SUBSTRINGS)
 # kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
 # pids routinely die between collection and the kill loop.
 _KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
@@ -1641,6 +1653,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         ]
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
+
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        # Two reads, each with its own timeout, so a slow or failing ps leaves the panes readable.
+        panes_stdout = self._read_lifecycle_snapshot_part(TMUX_PANES_SNAPSHOT_COMMAND, "tmux panes")
+        if panes_stdout is None:
+            return None
+        return HostLifecycleSnapshot(
+            panes=parse_tmux_pane_listings(panes_stdout),
+            ps_output=self._read_lifecycle_snapshot_part(PROCESS_TABLE_SNAPSHOT_COMMAND, "process table"),
+        )
+
+    def _read_lifecycle_snapshot_part(self, command: str, description: str) -> str | None:
+        try:
+            result = self.execute_idempotent_command(command, timeout_seconds=_LIFECYCLE_SNAPSHOT_TIMEOUT_SECONDS)
+        except HostConnectionError as e:
+            logger.debug("Failed to read the {} on host {}: {}", description, self.id, e)
+            return None
+        if not result.success:
+            logger.debug("Failed to read the {} on host {}: {}", description, self.id, result.stderr)
+            return None
+        return result.stdout
 
     def load_agents_from_refs(self, agent_refs: Sequence[DiscoveredAgent]) -> list[AgentInterface]:
         for agent_ref in agent_refs:
@@ -3840,19 +3873,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Return True iff the agent's tmux session already exists (it is likely running).
 
         Raises ``CommandTimeoutError`` when the probe times out (a tmux server wedged or
-        slow under load) rather than answering: callers gate destructive actions (the
-        pre-launch process-tree reap) on a "no" answer, so an unknown must never be
-        reported as absence -- otherwise one slow probe would make an idempotent start
-        kill a live agent's entire tree.
+        slow under load), and ``HostError`` when tmux fails without saying the session is
+        absent (e.g. a lost server), rather than answering: callers gate destructive actions
+        (the pre-launch process-tree reap) on a "no" answer, so an unknown must never be
+        reported as absence -- otherwise one slow or failing probe would make an idempotent
+        start kill a live agent's entire tree.
         """
         session_name = self.mngr_ctx.config.agent_session_name(agent.name)
         target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
         result = self.execute_idempotent_command(
-            f"tmux has-session -t {target} 2>/dev/null",
+            f"tmux has-session -t {target}",
             timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
             raise_on_timeout=True,
         )
-        return result.success
+        if result.success:
+            return True
+        if any(substring in result.stderr for substring in _TMUX_NO_SESSION_STDERR_SUBSTRINGS):
+            return False
+        raise HostError(
+            f"Could not tell whether agent {agent.name}'s tmux session exists on host {self.id}: "
+            f"{result.stderr.strip() or 'tmux has-session failed without output'}"
+        )
 
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
@@ -4194,7 +4235,7 @@ def build_host_tmux_config(is_local: bool, host_dir: Path, additional_config_pat
         # else (a session started before the id was stamped on it) the session name.
         signals_dir = host_dir / "signals"
         # CLEANUP: drop the session-name fallback once no running session predates the
-        # AGENT_ID_OPTION stamp (the same condition as BaseAgent._build_lifecycle_probe_command's).
+        # AGENT_ID_OPTION stamp (the same condition as hosts.common.find_agent_session_name's).
         signal_key = f'$(tmux display-message -p "#{{?{AGENT_ID_OPTION},#{{{AGENT_ID_OPTION}}},#{{session_name}}}}")'
         lines.extend(
             [

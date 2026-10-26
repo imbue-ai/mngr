@@ -198,8 +198,8 @@ class BackupServiceUpdateRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
-            "tasks (the 'Stop all chats and retry' flow)"
+            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
+            "background task, first, ending those tasks (the 'Stop all chats and retry' flow)"
         ),
     )
 
@@ -210,8 +210,8 @@ class BackupRestoreRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
-            "tasks (the 'Stop chats and try again' flow)"
+            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
+            "background task, first, ending those tasks (the 'Stop chats and try again' flow)"
         ),
     )
     update_after: bool = Field(

@@ -1462,7 +1462,10 @@ def _running_process_exit_watch(observer: AgentObserver) -> Iterator[None]:
 
 
 def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """The watch opens on first sighting, follows a PID change, and closes when the PID is gone."""
+    """The watch opens on first sighting, follows a PID change, and closes once the agent has exited.
+
+    A live reading without a PID (the host's process table could not be read) keeps the watch.
+    """
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     proc_a = _spawn_sleeper()
     proc_b = _spawn_sleeper()
@@ -1480,8 +1483,15 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
             observer._reconcile_watcher_for_agent(agent_b)
             assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc_b.pid
 
-            # No live process (pid None): the watch is closed.
             observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().pid, None)))
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc_b.pid
+
+            observer._reconcile_watcher_for_agent(
+                agent_a.model_copy_update(
+                    to_update(agent_a.field_ref().state, AgentLifecycleState.DONE),
+                    to_update(agent_a.field_ref().pid, None),
+                )
+            )
             assert observer._get_process_exit_watch().watched_pid(instance_key_str) is None
     finally:
         for proc in (proc_a, proc_b):
@@ -1515,6 +1525,37 @@ def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_
             assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc.pid
             observer._reconcile_watcher_for_agent(remote_agent)
             assert observer._get_process_exit_watch().watched_pid(instance_key_str) is None
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def test_unknown_reading_is_emitted_and_keeps_watching_the_live_process(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """An UNKNOWN reading is reported as such, but is no evidence the watched process exited."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc = _spawn_sleeper()
+    try:
+        with _running_process_exit_watch(observer):
+            waiting_agent = make_test_agent_details(name="loaded", state=AgentLifecycleState.WAITING, pid=proc.pid)
+            unknown_agent = waiting_agent.model_copy_update(
+                to_update(waiting_agent.field_ref().state, AgentLifecycleState.UNKNOWN),
+                to_update(waiting_agent.field_ref().pid, None),
+            )
+            instance_key_str = _details_instance_key(waiting_agent)
+
+            observer._emit_agent_state(waiting_agent)
+            observer._emit_agent_state(unknown_agent)
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc.pid
+            observer._emit_agent_state(waiting_agent)
+
+            states_path = get_agent_states_events_path(observer.events_base_dir)
+            transitions = [
+                (event["old_state"], event["new_state"])
+                for event in (json.loads(line) for line in states_path.read_text().splitlines())
+            ]
+            assert transitions == [(None, "WAITING"), ("WAITING", "UNKNOWN"), ("UNKNOWN", "WAITING")]
     finally:
         proc.terminate()
         proc.wait()

@@ -511,24 +511,6 @@ def test_base_agent_get_host(
     assert host.id is not None
 
 
-def test_base_agent_get_command_basename(
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Test _get_command_basename extracts basename correctly."""
-    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-basename", temp_work_dir)
-
-    # Test simple command
-    assert agent._get_command_basename(CommandString("sleep 1000")) == "sleep"
-
-    # Test with path
-    assert agent._get_command_basename(CommandString("/usr/bin/sleep 1000")) == "sleep"
-
-    # Test command with arguments
-    assert agent._get_command_basename(CommandString("python script.py --flag")) == "python"
-
-
 def test_base_agent_lifecycle_hooks_are_noop(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,

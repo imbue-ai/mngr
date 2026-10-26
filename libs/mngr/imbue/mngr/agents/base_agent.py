@@ -11,6 +11,7 @@ from typing import Final
 from typing import Generator
 from typing import Mapping
 from typing import Sequence
+from typing import final
 from uuid import uuid4
 
 from loguru import logger
@@ -30,8 +31,10 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
+from imbue.mngr.hosts.common import find_agent_session_name
+from imbue.mngr.hosts.common import find_first_pane_info
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
+from imbue.mngr.hosts.common import get_command_basename
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -44,12 +47,14 @@ from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.agent import SupportsKeyChordMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import RUNNING_AGENT_LIFECYCLE_STATES
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.polling import poll_until
@@ -278,12 +283,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def is_running(self) -> bool:
         """Check if the agent is currently running by checking lifecycle state."""
         state = self.get_lifecycle_state()
-        is_running = state in (
-            AgentLifecycleState.RUNNING,
-            AgentLifecycleState.WAITING,
-            AgentLifecycleState.REPLACED,
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        )
+        is_running = state in RUNNING_AGENT_LIFECYCLE_STATES
         logger.trace("Determined agent {} is_running={} (lifecycle_state={})", self.name, is_running, state)
         return is_running
 
@@ -295,42 +295,31 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return self.probe_lifecycle().state
 
+    @final
     def probe_lifecycle(self) -> LifecycleProbeResult:
         """Get the lifecycle state and the agent's main process PID in one probe.
 
-        Collects tmux state and ps output via SSH (a single probe, shared with
-        get_lifecycle_state), then delegates to the shared pure function. The PID
+        Reads the host's tmux panes and process table, then delegates to
+        ``probe_lifecycle_from_snapshot``, the method subclasses override (a listing
+        calls it directly with a snapshot shared across the host's agents). The PID
         is that of the running agent process (e.g. ``claude``) when the agent is
         RUNNING/WAITING, else None. It is a PID in the agent host's namespace, so
-        callers watching the process for spontaneous death must only do so when
-        that host is the local machine.
+        callers watching the process for spontaneous death must only do so when that
+        host is the local machine.
+        """
+        return self.probe_lifecycle_from_snapshot(self.host.read_lifecycle_snapshot())
+
+    def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
+        """Determine the lifecycle state and PID from a host snapshot.
+
+        A snapshot that could not be read is UNKNOWN, never STOPPED or DONE: a host too loaded
+        to answer in time says nothing about whether this agent is still running.
         """
         try:
-            # Get pane state and pid in one command.
-            result = self.host.execute_idempotent_command(
-                self._build_lifecycle_probe_command(),
-                timeout_seconds=5.0,
-            )
-            tmux_info = result.stdout.strip() if result.success else None
-
-            # Migrate pre-upgrade agents whose primary window predates named-window
-            # targeting: if the by-name probe missed but the session exists, rename
-            # its primary window to the configured name and probe once more.
-            if not tmux_info:
-                is_migrated = self._migrate_unnamed_primary_window()
-                if is_migrated:
-                    reprobe_result = self.host.execute_idempotent_command(
-                        self._build_lifecycle_probe_command(),
-                        timeout_seconds=5.0,
-                    )
-                    tmux_info = reprobe_result.stdout.strip() if reprobe_result.success else None
-
-            # Get ps output for descendant process detection
-            ps_result = self.host.execute_idempotent_command(
-                "ps -e -o pid=,ppid=,comm= 2>/dev/null",
-                timeout_seconds=5.0,
-            )
-            ps_output = ps_result.stdout if ps_result.success else ""
+            readable_snapshot = self._read_snapshot_after_migrating_unnamed_primary_window(lifecycle_snapshot)
+            if readable_snapshot is None:
+                logger.trace("Determined agent {} lifecycle state: UNKNOWN (tmux panes unreadable)", self.name)
+                return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
             # Check if the active file exists
             is_active = self._check_file_exists(self._get_agent_dir() / "active")
@@ -339,36 +328,44 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
             probe = determine_lifecycle_probe_result(
-                tmux_info=tmux_info if tmux_info else None,
+                tmux_info=self._find_primary_pane_info(readable_snapshot),
                 is_active=is_active,
                 is_blocked_on_dialog=self.is_blocked_on_dialog() if is_active else False,
                 expected_process_name=expected_process_name,
-                ps_output=ps_output,
+                ps_output=readable_snapshot.ps_output,
                 is_agent_type_known=is_type_known,
             )
             logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)
             return probe
         except HostConnectionError:
-            logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
-            return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
+            logger.trace("Determined agent {} lifecycle state: UNKNOWN (host connection error)", self.name)
+            return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
-    def _build_lifecycle_probe_command(self) -> str:
-        """Build the command that probes the agent's primary window for lifecycle state.
+    def _read_snapshot_after_migrating_unnamed_primary_window(
+        self, lifecycle_snapshot: HostLifecycleSnapshot | None
+    ) -> HostLifecycleSnapshot | None:
+        """The snapshot to read this agent from, re-read once if its pre-upgrade primary window was just renamed.
 
-        The session is found by the agent id it carries, falling back to the session named after
-        this agent: a rename moves the session before it rewrites data.json, so the name this
-        agent was loaded with can already be gone while the agent runs on.
+        A session that exists but has no window by the configured name predates named-window
+        targeting; renaming its primary window lets name-based targeting resolve again.
         """
-        # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION
-        # stamp, i.e. once every host has restarted its agents on an mngr that sets it.
-        id_filter = shlex.quote(f"id={self.id}")
-        return (
-            f"session=$(tmux list-sessions -F '#{{{AGENT_ID_OPTION}}}|#{{session_name}}' 2>/dev/null"
-            f" | awk -F'|' -v {id_filter} '$1 == id {{print $2; exit}}'); "
-            f'[ -n "$session" ] || session={shlex.quote(self.session_name)}; '
-            f'tmux list-panes -t "=$session:"{shlex.quote(str(self.tmux_target.window))} '
-            f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1"
-        )
+        if lifecycle_snapshot is None or self._find_session_name(lifecycle_snapshot) is None:
+            return lifecycle_snapshot
+        if self._find_primary_pane_info(lifecycle_snapshot) is not None:
+            return lifecycle_snapshot
+        if not self._migrate_unnamed_primary_window():
+            return lifecycle_snapshot
+        return self.host.read_lifecycle_snapshot()
+
+    def _find_session_name(self, lifecycle_snapshot: HostLifecycleSnapshot) -> str | None:
+        return find_agent_session_name(lifecycle_snapshot.panes, self.id, self.session_name)
+
+    def _find_primary_pane_info(self, lifecycle_snapshot: HostLifecycleSnapshot) -> str | None:
+        """The agent's primary window's ``dead|command|pid``, or None when it has no such window."""
+        session_name = self._find_session_name(lifecycle_snapshot)
+        if session_name is None:
+            return None
+        return find_first_pane_info(lifecycle_snapshot.panes, session_name, str(self.tmux_target.window))
 
     def _migrate_unnamed_primary_window(self) -> bool:
         """One-time migration for in-flight agents created before named-window targeting.
@@ -400,22 +397,15 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         result = self.host.execute_idempotent_command(rename_command, timeout_seconds=5.0)
         return result.success
 
-    def _get_command_basename(self, command: CommandString) -> str:
-        """Extract the basename from a command string.
-
-        Strips leading shell subshell syntax (e.g. '( script.sh ... ) &')
-        to find the actual command name.
-        """
-        stripped = str(command).lstrip("( ")
-        return stripped.split()[0].split("/")[-1] if stripped else ""
-
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 
-        Subclasses can override this to return a hardcoded process name
-        when the command is complex (e.g., shell wrappers with exports).
+        The class's ``fixed_process_name`` when it sets one (for agents launched through a complex
+        shell command, e.g. with exports and fallbacks), else the command's first word.
         """
-        return self._get_command_basename(self.get_command())
+        if self.fixed_process_name is not None:
+            return self.fixed_process_name
+        return get_command_basename(self.get_command())
 
     def _check_file_exists(self, path: Path) -> bool:
         """Check if a file exists on the host."""

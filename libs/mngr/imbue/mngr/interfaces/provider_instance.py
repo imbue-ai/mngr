@@ -37,6 +37,7 @@ from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -222,6 +223,7 @@ def _build_agent_details_from_online_agent(
     host: OnlineHostInterface,
     ssh_activity: datetime | None,
     field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
+    lifecycle_snapshot: HostLifecycleSnapshot | None,
 ) -> AgentDetails:
     """Build AgentDetails from a live agent on an online host."""
     # Get activity config from host
@@ -245,7 +247,7 @@ def _build_agent_details_from_online_agent(
     # Compute plugin-specific fields from field generators
     plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
-    lifecycle = agent.probe_lifecycle()
+    lifecycle = agent.probe_lifecycle_from_snapshot(lifecycle_snapshot)
 
     return AgentDetails(
         id=agent.id,
@@ -1122,10 +1124,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
 
-            # Get all agents on this host
+            # Get all agents on this host, and the tmux panes and processes their states are read from
             agents: list[AgentInterface] | None = None
+            lifecycle_snapshot: HostLifecycleSnapshot | None = None
             if isinstance(host, OnlineHostInterface):
                 agents = host.get_agents()
+                lifecycle_snapshot = host.read_lifecycle_snapshot() if agents else None
 
             # Build AgentDetails for each agent on this host
             resolved_field_generators = field_generators or {}
@@ -1138,7 +1142,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                         agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
                         if agent is not None:
                             agent_details = _build_agent_details_from_online_agent(
-                                agent, host_details, host, ssh_activity, resolved_field_generators
+                                agent, host_details, host, ssh_activity, resolved_field_generators, lifecycle_snapshot
                             )
                         else:
                             # Agent was discovered but is no longer on the host

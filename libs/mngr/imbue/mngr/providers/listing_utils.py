@@ -34,7 +34,11 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
+from imbue.mngr.hosts.common import TMUX_PANE_LISTING_FORMAT
+from imbue.mngr.hosts.common import find_agent_session_name
+from imbue.mngr.hosts.common import find_first_pane_info
+from imbue.mngr.hosts.common import parse_tmux_pane_listings
+from imbue.mngr.interfaces.data_types import TmuxPaneListing
 
 # Unique delimiters for parsing the single-command output
 SEP_DATA_JSON_START: Final[str] = "---MNGR_DATA_JSON_START---"
@@ -49,9 +53,6 @@ SEP_AGENT_MTIMES_START: Final[str] = "---MNGR_AGENT_MTIMES_START---"
 SEP_AGENT_MTIMES_END: Final[str] = "---MNGR_AGENT_MTIMES_END---"
 SEP_TMUX_PANES_START: Final[str] = "---MNGR_TMUX_PANES_START---"
 SEP_TMUX_PANES_END: Final[str] = "---MNGR_TMUX_PANES_END---"
-
-# Separates a tmux pane line's session name, session agent id, and window name from its lifecycle fields.
-_TMUX_PANE_FIELD_SEPARATOR: Final[str] = "::MNGR::"
 
 # The activity files whose mtimes the listing reports, by the agent-dict key each fills.
 _AGENT_ACTIVITY_MTIME_KEY_BY_FILE_NAME: Final[dict[str, str]] = {
@@ -160,14 +161,6 @@ def build_listing_collection_script(
     ``LISTING_FINGERPRINT=``, and ends early with ``LISTING_UNCHANGED=true`` when
     it equals the ``MNGR_UNCHANGED_FINGERPRINT`` environment variable.
     """
-    tmux_pane_format = _TMUX_PANE_FIELD_SEPARATOR.join(
-        (
-            "#{session_name}",
-            f"#{{{AGENT_ID_OPTION}}}",
-            "#{window_name}",
-            "#{pane_dead}|#{pane_current_command}|#{pane_pid}",
-        )
-    )
     fingerprint_script = _build_listing_change_fingerprint_script() if is_change_fingerprint_included else ""
     return f"""
 {_build_host_dir_resolution_script(host_dir, fallback_host_dirs)}
@@ -204,7 +197,7 @@ echo '{SEP_PS_END}'
 # Every pane on the server, joined to its agent by session (agent id, else name) and window name on the parsing side
 echo '{SEP_TMUX_PANES_START}'
 if [ -d "$HOST_DIR/agents" ]; then
-    tmux list-panes -a -F {shlex.quote(tmux_pane_format)} 2>/dev/null
+    tmux list-panes -a -F {shlex.quote(TMUX_PANE_LISTING_FORMAT)} 2>/dev/null
 fi
 echo '{SEP_TMUX_PANES_END}'
 {_build_agents_section_script(is_host_running=True)}
@@ -496,46 +489,11 @@ def _parse_agent_activity_mtimes(block: str) -> dict[tuple[str, str], int]:
 
 
 @pure
-def _split_tmux_pane_lines(block: str) -> list[tuple[str, str, str, str]]:
-    """Each well-formed line of the ``tmux list-panes -a`` block as ``(session, agent id, window, pane info)``."""
-    pane_lines: list[tuple[str, str, str, str]] = []
-    for line in block.splitlines():
-        fields = line.split(_TMUX_PANE_FIELD_SEPARATOR)
-        if len(fields) == 4:
-            session_name, agent_id, window_name, pane_info = fields
-            pane_lines.append((session_name, agent_id, window_name, pane_info))
-    return pane_lines
-
-
-@pure
-def _parse_first_tmux_pane_by_window(block: str) -> dict[tuple[str, str], str]:
-    """Each ``(session, window)``'s first pane's ``dead|command|pid`` from the ``tmux list-panes -a`` block.
-
-    The first pane listed is the one targeting that window alone would have reported first.
-    """
-    pane_info_by_window: dict[tuple[str, str], str] = {}
-    for session_name, _agent_id, window_name, pane_info in _split_tmux_pane_lines(block):
-        pane_info_by_window.setdefault((session_name, window_name), pane_info.strip())
-    return pane_info_by_window
-
-
-@pure
-def _parse_tmux_session_by_agent_id(block: str) -> dict[str, str]:
-    """Each agent id's session name from the ``tmux list-panes -a`` block, for sessions stamped with one."""
-    session_by_agent_id: dict[str, str] = {}
-    for session_name, agent_id, _window_name, _pane_info in _split_tmux_pane_lines(block):
-        if agent_id:
-            session_by_agent_id.setdefault(agent_id, session_name)
-    return session_by_agent_id
-
-
-@pure
 def _join_batched_agent_fields(
     agent_raw: Mapping[str, Any],
     agent_dir_name: str,
     mtime_by_agent_activity: Mapping[tuple[str, str], int],
-    pane_info_by_window: Mapping[tuple[str, str], str],
-    session_by_agent_id: Mapping[str, str],
+    tmux_panes: Sequence[TmuxPaneListing],
     tmux_session_prefix: str | None,
     tmux_window_name: str | None,
 ) -> dict[str, Any]:
@@ -552,15 +510,12 @@ def _join_batched_agent_fields(
     agent_data = agent_raw["data"]
     agent_name = agent_data.get("name") if isinstance(agent_data, dict) else None
     is_tmux_listed = tmux_session_prefix is not None and tmux_window_name is not None
-    # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION stamp
-    # (the same condition as BaseAgent._build_lifecycle_probe_command's).
-    session_name = session_by_agent_id.get(agent_dir_name) or (
-        f"{tmux_session_prefix}{agent_name}" if agent_name else None
+    session_name_for_agent_name = f"{tmux_session_prefix}{agent_name}" if agent_name else None
+    session_name = (
+        find_agent_session_name(tmux_panes, agent_dir_name, session_name_for_agent_name) if is_tmux_listed else None
     )
     tmux_info = (
-        pane_info_by_window.get((session_name, str(tmux_window_name))) or None
-        if is_tmux_listed and session_name
-        else None
+        (find_first_pane_info(tmux_panes, session_name, str(tmux_window_name)) or None) if session_name else None
     )
     return {**agent_raw, **activity_mtimes, "tmux_info": tmux_info}
 
@@ -570,8 +525,7 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     agent_raw_by_dir_name: dict[str, dict[str, Any]] = {}
     mtime_by_agent_activity: dict[tuple[str, str], int] = {}
-    pane_info_by_window: dict[tuple[str, str], str] = {}
-    session_by_agent_id: dict[str, str] = {}
+    tmux_panes: tuple[TmuxPaneListing, ...] = ()
     tmux_session_prefix: str | None = None
     tmux_window_name: str | None = None
     lines = stdout.split("\n")
@@ -631,8 +585,7 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
         elif line.strip() == SEP_TMUX_PANES_START:
             idx += 1
             tmux_block, idx = _extract_delimited_block(lines, idx, SEP_TMUX_PANES_END)
-            pane_info_by_window = _parse_first_tmux_pane_by_window(tmux_block)
-            session_by_agent_id = _parse_tmux_session_by_agent_id(tmux_block)
+            tmux_panes = parse_tmux_pane_listings(tmux_block)
         elif line.strip() == SEP_AGENT_MTIMES_START:
             idx += 1
             mtimes_block, idx = _extract_delimited_block(lines, idx, SEP_AGENT_MTIMES_END)
@@ -652,8 +605,7 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             agent_raw,
             agent_dir_name,
             mtime_by_agent_activity,
-            pane_info_by_window,
-            session_by_agent_id,
+            tmux_panes,
             tmux_session_prefix,
             tmux_window_name,
         )

@@ -19,6 +19,7 @@ from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import revive_done_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentLifecycleUnknownError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
@@ -376,6 +377,17 @@ def _send_message_to_agent(
             raise MngrError(error_msg) from e
         return
 
+    # An unreadable state is neither: delivering could type into a dead shell, and reviving could
+    # kill a live agent.
+    if lifecycle_state == AgentLifecycleState.UNKNOWN:
+        unknown_error = AgentLifecycleUnknownError(agent_name)
+        _record_agent_failure(
+            result, result_lock, agent_name, str(unknown_error), on_error, SendFailureKind.STATE_UNKNOWN
+        )
+        if error_behavior == ErrorBehavior.ABORT:
+            raise unknown_error
+        return
+
     if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
             try:
@@ -460,6 +472,7 @@ def send_message_with_resend_guidance(agent: AgentInterface, message: str, situa
                 SendFailureKind.INPUT_BLOCKED
                 | SendFailureKind.NOT_READY
                 | SendFailureKind.AGENT_UNREACHABLE
+                | SendFailureKind.STATE_UNKNOWN
                 | SendFailureKind.AGENT_NOT_FOUND
                 | SendFailureKind.UNKNOWN
             ):

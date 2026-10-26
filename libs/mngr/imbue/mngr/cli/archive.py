@@ -30,8 +30,10 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import RUNNING_AGENT_LIFECYCLE_STATES
 
 
 class ArchiveCliOptions(CommonCliOptions):
@@ -165,8 +167,16 @@ def _partition_running_agents(
 
         match host:
             case OnlineHostInterface() as online_host:
-                host_agents = online_host.get_agents()
-                running_agent_ids = {agent.id for agent in host_agents if agent.is_running()}
+                targeted_agent_ids = {agent_match.agent_id for agent_match in agent_list}
+                lifecycle_snapshot = online_host.read_lifecycle_snapshot()
+                # An agent whose state could not be read may be running, so it counts as running here.
+                running_agent_ids = {
+                    agent.id
+                    for agent in online_host.get_agents()
+                    if agent.id in targeted_agent_ids
+                    and agent.probe_lifecycle_from_snapshot(lifecycle_snapshot).state
+                    in RUNNING_AGENT_LIFECYCLE_STATES | {AgentLifecycleState.UNKNOWN}
+                }
                 for agent_match in agent_list:
                     if agent_match.agent_id in running_agent_ids:
                         running.append(agent_match)
@@ -218,7 +228,8 @@ CommandHelpMetadata(
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to archive.",
     description="""Sets an 'archived_at' label with the current UTC timestamp on each
 targeted agent. By default, only non-running agents are archived; running
-agents are skipped with a warning.
+agents are skipped with a warning. An agent whose state could not be read
+(e.g. on a host too loaded to answer in time) counts as running.
 
 Use --force to stop running agents before archiving them.
 

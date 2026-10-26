@@ -35,11 +35,14 @@ from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import resolve_expected_process_name
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -56,6 +59,7 @@ from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr_codex.app_server_client import AppServerTransport
 from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
@@ -281,13 +285,18 @@ def _make_codex_agent(
     *,
     is_interactive: bool = False,
     is_auto_approve: bool = False,
+    host_class: type[Host] = Host,
 ) -> CodexAgent:
     # These setup tests run against a real local host where codex is not installed; the
     # install check is irrelevant to provision setup (files/trust/config) and is covered
     # separately, so skip it unless a caller opted in explicitly.
     if "check_installation" not in agent_config.model_fields_set:
         agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    host = (
+        local_provider.create_host(HostName(LOCAL_HOST_NAME))
+        if host_class is Host
+        else make_local_host_of_class(local_provider, host_class)
+    )
     work_dir = tmp_path / "work"
     work_dir.mkdir(exist_ok=True)
     ctx = local_provider.mngr_ctx.model_copy_update(
@@ -305,6 +314,13 @@ def _make_codex_agent(
         agent_config=agent_config,
         host=host,
     )
+
+
+class _UnlistedTmuxHost(Host):
+    """A local host that lists no tmux panes, for tests that fix the process-presence probe themselves."""
+
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        return HostLifecycleSnapshot(panes=(), ps_output="")
 
 
 class _ConfirmingCodexAgent(CodexAgent):
@@ -701,10 +717,17 @@ def _live_codex_agent(
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-        def _base_probe_lifecycle(self) -> LifecycleProbeResult:
+        def _base_probe_lifecycle(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
             return LifecycleProbeResult(state=base_state, pid=base_pid)
 
-    agent = _make_codex_agent(_LiveCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent = _make_codex_agent(
+        _LiveCodexAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(),
+        is_auto_approve=True,
+        host_class=_UnlistedTmuxHost,
+    )
     agent.host.write_text_file(agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME, "thread-1")
     return agent
 
@@ -764,17 +787,18 @@ def test_get_lifecycle_state_stays_running_through_the_flush_tail_until_complete
     assert idle_agent.get_lifecycle_state() == AgentLifecycleState.WAITING
 
 
-def test_get_lifecycle_state_keeps_stopped_without_querying_the_daemon(
-    local_provider: LocalProviderInstance, tmp_path: Path
+@pytest.mark.parametrize("base_state", [AgentLifecycleState.STOPPED, AgentLifecycleState.UNKNOWN])
+def test_get_lifecycle_state_keeps_an_absent_or_unreadable_process_without_querying_the_daemon(
+    base_state: AgentLifecycleState, local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """A dead/absent window (base STOPPED) is reported verbatim and never queries the daemon.
+    """A dead/absent window (base STOPPED) or an unreadable host (base UNKNOWN) is reported verbatim.
 
-    Process presence is authoritative for STOPPED/DONE/REPLACED, so no WebSocket connection is
-    opened for a stopped agent (no per-``mngr ls`` churn against a daemon that is gone anyway).
+    Process presence is authoritative for STOPPED/DONE/REPLACED/UNKNOWN, so no WebSocket connection
+    is opened for such an agent (no per-``mngr ls`` churn against a daemon that may be gone).
     """
     transport = _status_transport({"type": "idle"}, [])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.STOPPED)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+    agent = _live_codex_agent(local_provider, tmp_path, transport, base_state)
+    assert agent.get_lifecycle_state() == base_state
     assert transport.sent == []
 
 
@@ -867,8 +891,14 @@ def test_get_lifecycle_state_degrades_to_waiting_when_daemon_unreachable(
 # Simple accessors
 
 
-def test_get_expected_process_name(codex_agent: CodexAgent) -> None:
-    assert codex_agent.get_expected_process_name() == "codex"
+def test_type_only_listing_expects_the_same_process_name_as_a_loaded_agent(codex_agent: CodexAgent) -> None:
+    """The remote providers' batched listing knows only the agent's type and launch command; it must
+    look for the process a loaded codex agent reports, not the command's first word (`(`)."""
+    command = codex_agent.assemble_command(codex_agent.host, (), None)
+
+    listed_name = resolve_expected_process_name("codex", command, codex_agent.mngr_ctx.config)
+
+    assert listed_name == codex_agent.get_expected_process_name() == "codex"
 
 
 def test_is_common_transcript_enabled_follows_config(local_provider: LocalProviderInstance, tmp_path: Path) -> None:

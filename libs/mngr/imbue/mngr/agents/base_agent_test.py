@@ -31,11 +31,15 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
+from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -44,6 +48,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -1289,6 +1294,16 @@ class _StubHost:
     def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
         return self._execute_command(command, **kwargs)
 
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        panes_result = self._execute_command(TMUX_PANES_SNAPSHOT_COMMAND)
+        if not panes_result.success:
+            return None
+        ps_result = self._execute_command(PROCESS_TABLE_SNAPSHOT_COMMAND)
+        return HostLifecycleSnapshot(
+            panes=parse_tmux_pane_listings(panes_result.stdout),
+            ps_output=ps_result.stdout if ps_result.success else None,
+        )
+
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))
 
@@ -1445,47 +1460,64 @@ def test_migrate_unnamed_primary_window_renames_lowest_index_window(
     assert temp_mngr_ctx.config.tmux.primary_window_name in command
 
 
-def test_get_lifecycle_state_migrates_on_name_miss_then_reprobes(
+def _lifecycle_snapshot_results(session_name: str, window_name: str) -> list[CommandResult]:
+    """The host's pane and process reads for one session whose window runs the stub agent's ``bash`` as pid 12345."""
+    return [
+        CommandResult(
+            success=True, stdout=f"{session_name}::MNGR::::MNGR::{window_name}::MNGR::0|bash|12345\n", stderr=""
+        ),
+        CommandResult(success=True, stdout="12345 1 bash\n", stderr=""),
+    ]
+
+
+def test_probe_lifecycle_migrates_an_unnamed_primary_window_then_rereads(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A by-name probe miss on an existing session triggers a rename and a successful re-probe."""
+    """A session whose primary window lacks the configured name gets it renamed, then is read again."""
+    primary_window_name = temp_mngr_ctx.config.tmux.primary_window_name
+    agent_session_name = temp_mngr_ctx.config.agent_session_name(AgentName("stub-agent"))
     stub = _StubHost(
         command_results=[
-            # Initial by-name probe misses (unnamed pre-upgrade primary window).
-            CommandResult(success=True, stdout="", stderr=""),
+            # The pre-upgrade primary window was auto-named after its command.
+            *_lifecycle_snapshot_results(agent_session_name, "bash"),
             # The one-shot migration rename succeeds.
             CommandResult(success=True, stdout="", stderr=""),
-            # The re-probe now resolves the renamed primary window.
-            CommandResult(success=True, stdout="0|node|12345", stderr=""),
-            # ps output for descendant detection.
-            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+            *_lifecycle_snapshot_results(agent_session_name, primary_window_name),
         ]
     )
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    agent.get_lifecycle_state()
+    probe = agent.probe_lifecycle()
 
-    # First probe, then rename, then re-probe (a correctly-named session would skip the latter two).
-    assert "list-panes" in stub.sent_commands[0]
-    assert "rename-window" in stub.sent_commands[1]
-    assert "list-panes" in stub.sent_commands[2]
+    assert probe == LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=12345)
+    assert "list-panes -a" in stub.sent_commands[0]
+    assert "rename-window" in stub.sent_commands[2]
+    assert "list-panes -a" in stub.sent_commands[3]
 
 
-def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
+def test_probe_lifecycle_skips_migration_when_the_primary_window_is_named(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A correctly-named session resolves on the first probe and never issues a rename."""
-    stub = _StubHost(
-        command_results=[
-            CommandResult(success=True, stdout="0|node|12345", stderr=""),
-            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
-        ]
-    )
+    """A correctly-named session resolves from the first read and never issues a rename."""
+    primary_window_name = temp_mngr_ctx.config.tmux.primary_window_name
+    agent_session_name = temp_mngr_ctx.config.agent_session_name(AgentName("stub-agent"))
+    stub = _StubHost(command_results=_lifecycle_snapshot_results(agent_session_name, primary_window_name))
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    agent.get_lifecycle_state()
+    probe = agent.probe_lifecycle()
 
+    assert probe == LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=12345)
     assert not any("rename-window" in command for command in stub.sent_commands)
+
+
+def test_probe_lifecycle_is_unknown_when_the_lifecycle_snapshot_cannot_be_read(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A host whose tmux panes could not be listed says nothing about the agent, so it is neither STOPPED nor DONE."""
+    stub = _StubHost(command_results=[CommandResult(success=False, stdout="", stderr="")])
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent.probe_lifecycle() == LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
 
 def test_agent_name_rejects_slash() -> None:
@@ -1612,49 +1644,6 @@ def test_press_key_chord_holds_message_lock(
     assert lock_path.exists()
     assert len(stub.sent_commands) == 1
     assert "send-keys" in stub.sent_commands[0]
-
-
-# _get_command_basename tests
-
-
-def test_get_command_basename_full_path(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_get_command_basename should extract basename from a full path."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    assert agent._get_command_basename(CommandString("/usr/bin/python3 script.py")) == "python3"
-
-
-def test_get_command_basename_simple_command(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_get_command_basename should handle a simple command name."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    assert agent._get_command_basename(CommandString("sleep 1000")) == "sleep"
-
-
-def test_get_command_basename_single_word(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_get_command_basename should return the command itself for a single word."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    assert agent._get_command_basename(CommandString("python3")) == "python3"
-
-
-def test_get_command_basename_strips_leading_subshell_syntax(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_get_command_basename should strip leading '(' from subshell-wrapped commands."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
 
 
 # get_reported_activity_record tests

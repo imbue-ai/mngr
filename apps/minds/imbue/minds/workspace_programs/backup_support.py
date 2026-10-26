@@ -269,8 +269,9 @@ def list_running_chats() -> tuple[RunningChatsGate | None, str]:
     """``(gate, error)``; the gate is None when the chats could not be listed.
 
     The gate's ``chats`` are the agents in this work_dir, excluding type=main, that are RUNNING,
-    or WAITING with their chat busy (they will resume on their own). ``runner_pids_by_chat``
-    holds each chat's runners, the background commands that would wake it again after a stop.
+    UNKNOWN (their state could not be read, so they may be mid-turn), or WAITING with their chat
+    busy (they will resume on their own). ``runner_pids_by_chat`` holds each chat's runners, the
+    background commands that would wake it again after a stop.
     """
     listed = run_mngr(["list", "--format", "json", "--provider", "local"], MNGR_COMMAND_TIMEOUT_SECONDS)
     if listed.returncode != 0:
@@ -290,7 +291,8 @@ def list_running_chats() -> tuple[RunningChatsGate | None, str]:
             continue
         own_background_chats = _background_chats_of(agent, background_chats)
         is_busy = any(chat.get("is_busy") is True for chat in own_background_chats)
-        if agent.get("state") != "RUNNING" and not (agent.get("state") == "WAITING" and is_busy):
+        state = agent.get("state")
+        if state not in ("RUNNING", "UNKNOWN") and not (state == "WAITING" and is_busy):
             continue
         chat_name = str(agent.get("name") or agent.get("id") or "unknown")
         chats.append(chat_name)
