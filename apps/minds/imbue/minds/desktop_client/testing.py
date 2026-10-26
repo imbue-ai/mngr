@@ -56,6 +56,9 @@ from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import NetworkProber
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogin
@@ -132,6 +135,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import LocalCertificateAuthority
@@ -1353,8 +1357,10 @@ def write_fake_mngr_pair_script(
     the workspace side exist and reports the agent's home directory) prints the
     success envelope carrying :data:`FAKE_WORKSPACE_HOME` and exits. ``mngr pair`` writes the arguments it was handed to
     ``argv_record_path``, emits the ``pair_syncing`` event a real pairing emits
-    once unison is watching both replicas, and then blocks on ``signal.pause``
-    until it is signalled -- which is how a real ``mngr pair`` spends the sync.
+    once unison is watching both replicas and the ``pair_transferring`` settle
+    it emits once unison's first pass has left them level, and then blocks on
+    ``signal.pause`` until it is signalled -- which is how a real ``mngr pair``
+    spends the sync.
     Because ``FolderSyncManager.start`` waits for that event, the argv file is
     always on disk by the time ``start`` returns.
 
@@ -1380,11 +1386,30 @@ def write_fake_mngr_pair_script(
         "    sys.exit(0)\n"
         f"open({str(argv_record_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
         "sys.stdout.write(json.dumps({'event': 'pair_syncing'}) + '\\n')\n"
+        "sys.stdout.write(json.dumps({'event': 'pair_transferring', 'is_transferring': False}) + '\\n')\n"
         "sys.stdout.flush()\n"
         "signal.pause()\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return script
+
+
+def wait_until_synced(manager: FolderSyncManager, agent_id: str, local_path: str, timeout: float) -> FolderSyncStatus:
+    """Block until a sync's first pass has left the two sides level, and return its status.
+
+    ``wait_until_started`` returns once unison is up, a step before that: the
+    fake reports the settle on the next line, which the sink may not have read.
+    """
+    status, _polls, _elapsed = poll_for_value(
+        lambda: _synced_status_or_none(manager, agent_id, local_path), timeout=timeout, poll_interval=0.05
+    )
+    assert status is not None, f"The sync of {local_path} never reached SYNCED"
+    return status
+
+
+def _synced_status_or_none(manager: FolderSyncManager, agent_id: str, local_path: str) -> FolderSyncStatus | None:
+    status = manager.status_for_path(agent_id, local_path)
+    return status if status is not None and status.state == FolderSyncState.SYNCED else None
 
 
 def _streamed_request(

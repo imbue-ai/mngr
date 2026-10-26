@@ -10,7 +10,11 @@
 import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
-import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
+import {
+  armProviderRelay,
+  stopProviderRelay,
+} from "../../models/providerRelay";
+import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
 import type {
   ChromeAnchor,
   DetachedWindowEntry,
@@ -55,6 +59,7 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
+  OPEN_LOCAL_FILES: string;
   HIGHLIGHT_CHROME: string;
   CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
@@ -154,7 +159,12 @@ export interface EmbedHandlerDeps {
     beginDrag: (request: WorkspaceWindowDragRequest) => void;
     /** The shell's own drag gesture ended, having detached the window or not, and cancelled or released
      * (null from a shell that does not say). */
-    endDrag: (workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null) => void;
+    endDrag: (
+      workspaceId: string,
+      windowId: string,
+      isDetached: boolean,
+      isCancelled: boolean | null,
+    ) => void;
     detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
   } | null;
 }
@@ -228,6 +238,13 @@ export function buildEmbedHandlers(
         : { tab: "share", target: serviceName },
     );
   };
+  handlers[contract.OPEN_LOCAL_FILES] = () => {
+    // Float the options panel's Permissions pane over this machine, at Local files.
+    navigate(`/workspace/${workspaceAgentId()}/options`, {
+      tab: "permissions",
+      section: LOCAL_FILES_SECTION,
+    });
+  };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
     onWorkspaceReady({
@@ -237,36 +254,48 @@ export function buildEmbedHandlers(
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
+    // Every chrome that runs these handlers has the options panel, so each
+    // takes OPEN_LOCAL_FILES.
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
+      opensLocalFiles: true,
     });
   };
   const openExternalLink = deps.openExternalLink;
   if (openExternalLink !== null) {
-    handlers[contract.OPEN_EXTERNAL] = (message) => openExternalLink(String(message.url));
+    handlers[contract.OPEN_EXTERNAL] = (message) =>
+      openExternalLink(String(message.url));
   }
   handlers[contract.HIGHLIGHT_CHROME] = (message) => {
     // The contract's list is the one source of anchor names; anything else clears the ring.
     const anchor = message.anchor;
-    const isKnown = typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
+    const isKnown =
+      typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
     deps.highlightChrome(isKnown ? (anchor as ChromeAnchor) : null);
   };
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
     // here so nothing else of a message rides into main.
-    const openRequestOf = (message: Record<string, unknown>): PopoutOpenRequest => ({
+    const openRequestOf = (
+      message: Record<string, unknown>,
+    ): PopoutOpenRequest => ({
       workspaceId: workspaceAgentId(),
       windowId: String(message.windowId),
       title: String(message.title),
       width: Number(message.width),
       height: Number(message.height),
     });
-    handlers[contract.POP_OUT_WINDOW] = (message) => popout.open(openRequestOf(message));
+    handlers[contract.POP_OUT_WINDOW] = (message) =>
+      popout.open(openRequestOf(message));
     handlers[contract.WINDOW_DRAG_STARTED] = (message) =>
-      popout.beginDrag({ ...openRequestOf(message), grabX: Number(message.grabX), grabY: Number(message.grabY) });
+      popout.beginDrag({
+        ...openRequestOf(message),
+        grabX: Number(message.grabX),
+        grabY: Number(message.grabY),
+      });
     handlers[contract.WINDOW_DRAG_ENDED] = (message) =>
       popout.endDrag(
         workspaceAgentId(),
@@ -281,7 +310,10 @@ export function buildEmbedHandlers(
         if (typeof raw !== "object" || raw === null) continue;
         const entry = raw as Record<string, unknown>;
         if (typeof entry.windowId !== "string") continue;
-        entries.push({ windowId: entry.windowId, title: typeof entry.title === "string" ? entry.title : "" });
+        entries.push({
+          windowId: entry.windowId,
+          title: typeof entry.title === "string" ? entry.title : "",
+        });
       }
       popout.detachedWindows(entries);
     };
@@ -329,7 +361,10 @@ export async function pushResolutionSnapshot(
   if (entries !== null && entries.length > 0) send(entries);
 }
 
-const NO_LINK_PROMISES: WorkspaceLinkPromises = { opensLinks: false, opensCustomSchemeLinks: false };
+const NO_LINK_PROMISES: WorkspaceLinkPromises = {
+  opensLinks: false,
+  opensCustomSchemeLinks: false,
+};
 
 /** What main is told about the mounted frame's link handling, and the gate on
  * handing its page a link main caught. Only the page's own announcement sets
@@ -339,7 +374,8 @@ const NO_LINK_PROMISES: WorkspaceLinkPromises = { opensLinks: false, opensCustom
 export class FrameLinkHandling {
   private workspaceId: string | null = null;
   private promises: WorkspaceLinkPromises = NO_LINK_PROMISES;
-  private lastReport: WorkspaceLinkHandlingReport | null | undefined = undefined;
+  private lastReport: WorkspaceLinkHandlingReport | null | undefined =
+    undefined;
   private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
   private readonly sendOpenLink: (url: string) => void;
 
@@ -376,8 +412,13 @@ export class FrameLinkHandling {
    * to a page that announced it opens links, and nowhere otherwise. */
   openLink(url: string): void {
     if (this.workspaceId === null || !this.promises.opensLinks) {
-      const why = this.workspaceId === null ? "no workspace is mounted" : "its page has not announced opensLinks";
-      console.warn(`[link-routing] dropped a link main handed back, since ${why}: ${url}`);
+      const why =
+        this.workspaceId === null
+          ? "no workspace is mounted"
+          : "its page has not announced opensLinks";
+      console.warn(
+        `[link-routing] dropped a link main handed back, since ${why}: ${url}`,
+      );
       return;
     }
     this.sendOpenLink(url);
@@ -385,7 +426,9 @@ export class FrameLinkHandling {
 
   private publish(): void {
     const next =
-      this.workspaceId === null ? null : { workspaceId: this.workspaceId, ...this.promises };
+      this.workspaceId === null
+        ? null
+        : { workspaceId: this.workspaceId, ...this.promises };
     const last = this.lastReport;
     const isUnchanged =
       last !== undefined &&
@@ -466,14 +509,21 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
     armedIsSoloReopened = isSoloReopened;
-    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId, isSoloReopened);
+    const expected = shell.stores.workspaces.workspaceFrameUrl(
+      workspaceAnyId,
+      soloWindowId,
+      isSoloReopened,
+    );
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
       shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
-    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
+    linkHandling.frameArmed(
+      shell.stores.workspaces.toAgentScopedId(workspaceAnyId),
+      isNavigating,
+    );
   }
 
   // Re-navigate the frame even though the URL is unchanged: assigning src
@@ -485,14 +535,21 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
     shell.highlightedChromeAnchor = null;
-    frameElement.src =
-      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
-    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
+    frameElement.src = shell.stores.workspaces.workspaceFrameUrl(
+      armedWorkspaceAnyId,
+      armedSoloWindowId,
+      armedIsSoloReopened,
+    );
+    linkHandling.frameArmed(
+      shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId),
+      true,
+    );
   }
 
   return {
     oncreate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
+        vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
@@ -511,7 +568,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
         if (armedWorkspaceAnyId !== null) {
-          armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
+          armFrame(
+            shell,
+            armedWorkspaceAnyId,
+            armedSoloWindowId,
+            armedIsSoloReopened,
+          );
         }
       });
 
@@ -562,9 +624,15 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
-                beginDrag: (request) => electronBridge.beginWorkspaceWindowDrag(request),
+                beginDrag: (request) =>
+                  electronBridge.beginWorkspaceWindowDrag(request),
                 endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached, isCancelled),
+                  electronBridge.endWorkspaceWindowDrag(
+                    workspaceId,
+                    windowId,
+                    isDetached,
+                    isCancelled,
+                  ),
                 detachedWindows: (windows) =>
                   shell.handleDetachedWindows(
                     windows,
@@ -614,7 +682,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           if (!isMountedPageReady) return false;
           switch (message.kind) {
             case "focus-chat":
-              endpoint?.send(loaded.FOCUS_CHAT, { chatId: message.chatAgentId });
+              endpoint?.send(loaded.FOCUS_CHAT, {
+                chatId: message.chatAgentId,
+              });
               return true;
             case "app-message":
               // The workspace shell routes the type to the app whose
@@ -625,12 +695,22 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         };
         shell.registerWorkspaceMessageSender(workspaceMessageSender);
         reattachWindowSender = (windowId, frame) => {
-          endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
+          endpoint?.send(
+            loaded.REATTACH_WINDOW,
+            frame === null ? { windowId } : { windowId, frame },
+          );
         };
         shell.registerReattachWindowSender(reattachWindowSender);
         tearOutSender = (report: TearOutReport) => {
-          if (report.workspaceId !== shell.stores.workspaces.toAgentScopedId(mountedAnyId())) return;
-          endpoint?.send(loaded.TEAR_OUT, { windowId: report.windowId, phase: report.phase });
+          if (
+            report.workspaceId !==
+            shell.stores.workspaces.toAgentScopedId(mountedAnyId())
+          )
+            return;
+          endpoint?.send(loaded.TEAR_OUT, {
+            windowId: report.windowId,
+            phase: report.phase,
+          });
         };
         shell.registerTearOutSender(tearOutSender);
         openLinkSender = (url) => linkHandling.openLink(url);
@@ -667,7 +747,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       });
     },
     onupdate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
+        vnode.attrs;
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
     },
     onremove(vnode) {
@@ -682,7 +763,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         permissionResolvedSender = null;
       }
       if (workspaceMessageSender !== null) {
-        vnode.attrs.shell.unregisterWorkspaceMessageSender(workspaceMessageSender);
+        vnode.attrs.shell.unregisterWorkspaceMessageSender(
+          workspaceMessageSender,
+        );
         workspaceMessageSender = null;
       }
       if (reattachWindowSender !== null) {

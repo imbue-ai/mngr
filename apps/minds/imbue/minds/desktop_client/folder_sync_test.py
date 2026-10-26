@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.folder_sync import FolderSyncSpec
-from imbue.minds.desktop_client.folder_sync import FolderSyncState
 from imbue.minds.desktop_client.folder_sync import WORKSPACE_SYNC_DIRECTORY
 from imbue.minds.desktop_client.folder_sync import _PairEventSink
 from imbue.minds.desktop_client.folder_sync import _WorkspaceTarget
@@ -18,6 +17,7 @@ from imbue.minds.desktop_client.folder_sync import _build_workspace_prepare_argv
 from imbue.minds.desktop_client.folder_sync import _overlaps
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.errors import FolderSyncError
 
 _AGENT_ID = "agent-000102030405060708090a0b0c0d0e0f"
@@ -250,25 +250,40 @@ def test_spec_refuses_a_path_that_is_not_there(tmp_path: Path) -> None:
         )
 
 
-def test_sink_settles_at_synced_once_unison_is_up() -> None:
-    """Up and watching is "synced", not "syncing" -- nothing is moving yet."""
+_FIRST_PASS_SETTLED = json.dumps({"event": "pair_transferring", "is_transferring": False})
+
+
+def test_sink_is_syncing_while_unisons_first_pass_compares_the_two_sides() -> None:
+    """Up and watching is not yet "synced": nothing has said the two sides agree."""
     sink = _PairEventSink()
     sink.on_output(json.dumps({"event": "pair_started", "source_path": "/a", "target_path": "/b"}), True)
     assert sink.state == FolderSyncState.STARTING
     sink.on_output(json.dumps({"event": "pair_syncing"}), True)
+    assert sink.state == FolderSyncState.SYNCING
+
+
+def test_sink_is_synced_once_the_first_pass_settles() -> None:
+    sink = _PairEventSink()
+    sink.on_output(json.dumps({"event": "pair_syncing"}), True)
+
+    sink.on_output(_FIRST_PASS_SETTLED, True)
+
     assert sink.state == FolderSyncState.SYNCED
 
 
 def test_sink_settles_a_restart_the_same_way_it_settles_a_first_start() -> None:
-    """A restart waits on the same event; only what the row says while it waits differs."""
+    """A restart waits on the same events; only what the row says while it waits differs."""
     sink = _PairEventSink(state=FolderSyncState.RESTARTING)
     sink.on_output(json.dumps({"event": "pair_syncing"}), True)
+    assert sink.state == FolderSyncState.SYNCING
+    sink.on_output(_FIRST_PASS_SETTLED, True)
     assert sink.state == FolderSyncState.SYNCED
 
 
 def test_sink_shows_syncing_only_while_bytes_are_moving() -> None:
     sink = _PairEventSink()
     sink.on_output(json.dumps({"event": "pair_syncing"}), True)
+    sink.on_output(_FIRST_PASS_SETTLED, True)
 
     sink.on_output(json.dumps({"event": "pair_transferring", "is_transferring": True}), True)
     assert sink.state == FolderSyncState.SYNCING

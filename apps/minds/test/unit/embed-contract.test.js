@@ -292,7 +292,7 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   contract.createWorkspaceEndpoint({
     handlers: {
       [contract.EMBEDDER_CAPABILITIES]: (msg) =>
-        seen.push(['caps', msg.canPopOut, msg.opensExternalLinks, msg.opensCustomSchemeLinks]),
+        seen.push(['caps', msg.canPopOut, msg.opensExternalLinks, msg.opensCustomSchemeLinks, msg.opensLocalFiles]),
       [contract.REATTACH_WINDOW]: (msg) => seen.push(['reattach', msg.windowId, msg.frame === undefined]),
       [contract.TEAR_OUT]: (msg) => seen.push(['tear', msg.windowId, msg.phase]),
     },
@@ -307,6 +307,8 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: true, opensCustomSchemeLinks: true });
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: true, opensCustomSchemeLinks: 1 });
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: 'yes' });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, opensExternalLinks: true, opensLocalFiles: true });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, opensLocalFiles: 1 });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc' });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5 } });
@@ -314,9 +316,10 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'agent-abc' });
   assert.deepStrictEqual(seen, [
     ['tear', 'win-abc', 'out'],
-    ['caps', true, undefined, undefined],
-    ['caps', true, true, undefined],
-    ['caps', true, true, true],
+    ['caps', true, undefined, undefined, undefined],
+    ['caps', true, true, undefined, undefined],
+    ['caps', true, true, true, undefined],
+    ['caps', false, true, undefined, true],
     ['reattach', 'win-abc', true],
     ['reattach', 'win-abc', false],
   ]);
@@ -499,6 +502,27 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
     handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
   });
   win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LINK, url: 'http://localhost/' } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes an open-local-files ask, which carries nothing', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_LOCAL_FILES]: (msg) => seen.push(msg.type) },
+  });
+  win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LOCAL_FILES } });
+  assert.deepStrictEqual(seen, [contract.OPEN_LOCAL_FILES]);
+});
+
+test('workspace endpoint never honours an open-local-files, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.OPEN_LOCAL_FILES]: () => seen.push('workspace') },
+  });
+  win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_LOCAL_FILES } });
   assert.deepStrictEqual(seen, []);
 });
 

@@ -773,8 +773,11 @@ export class PermissionsModel {
    *
    * The same write as changing a row's access, under a different busy key: an
    * access change has a row to show it on, and this one does not until the
-   * write comes back with it. */
+   * write comes back with it. A path already on the list is left as it is:
+   * the same write would re-grade it to read-only, taking its write access
+   * away and turning a two-way sync one-way. */
   async addSharedPath(path: string): Promise<void> {
+    if ((this.data?.shared_paths ?? []).some((row) => row.path === path)) return;
     const body: UiSharedPathRequest = { path, access: "READ" };
     await this.writeFlip(
       ADD_SHARED_PATH_ROW_KEY,

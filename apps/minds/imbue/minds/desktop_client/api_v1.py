@@ -89,6 +89,8 @@ from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
 from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentFolderSync
+from imbue.minds.desktop_client.api_models import AgentFolderSyncsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AppVersionResponse
@@ -243,8 +245,11 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.ui_api_folder_syncs import folder_sync_rows
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
+from imbue.minds.desktop_client.ui_api_inbox import workspace_agent_id_for_agent
+from imbue.minds.desktop_client.ui_models import UiFolderSyncRow
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.visiting_agents import VisitingAgent
@@ -2837,6 +2842,59 @@ def _handle_workspace_refresh(agent_id: str) -> OkResponse:
     return OkResponse(ok=True)
 
 
+# Folder-sync state route
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AgentFolderSyncsResponse))
+def _handle_agent_folder_syncs(agent_id: str) -> AgentFolderSyncsResponse | Response:
+    """This desktop's folder syncs with a workspace, on behalf of an agent in it.
+
+    ``agent_id`` may be any agent of the workspace -- a chat, a service's
+    ``MNGR_AGENT_ID`` -- and is resolved to the workspace's primary agent, which
+    is what every sync is filed under. Answered from this process alone, like
+    the Permissions pane's poll it shares its rows with: a running sync reports
+    itself through its ``mngr pair`` subprocess, and a stopped one is
+    remembered on disk.
+    """
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    resolved_id = backend_resolver.resolve_agent_id(AgentId(agent_id))
+    if resolved_id not in backend_resolver.list_known_agent_ids():
+        return _json_error(f"Unknown agent {agent_id}", 404)
+    manager = state.folder_sync_manager
+    if manager is None:
+        return AgentFolderSyncsResponse(device_id=state.device_id, syncs=())
+    workspace_agent_id = workspace_agent_id_for_agent(str(resolved_id), backend_resolver)
+    return AgentFolderSyncsResponse(
+        device_id=manager.device_id,
+        syncs=tuple(
+            sync
+            for sync in (_agent_folder_sync(row) for row in folder_sync_rows(manager, workspace_agent_id))
+            if sync is not None
+        ),
+    )
+
+
+def _agent_folder_sync(row: UiFolderSyncRow) -> AgentFolderSync | None:
+    """One row of the pane's poll as an agent reads it, or None for a folder never synced."""
+    sync = row.sync
+    if sync is None:
+        return None
+    is_counted = sync.bytes_total > 0
+    return AgentFolderSync(
+        local_path=row.path,
+        workspace_path=sync.workspace_path or None,
+        activity=sync.activity,
+        state=sync.state,
+        message=sync.message or None,
+        bytes_done=sync.bytes_done if is_counted else None,
+        bytes_total=sync.bytes_total if is_counted else None,
+        direction=sync.direction,
+        conflict=sync.conflict,
+    )
+
+
 # Workspace metadata update route (color + account association)
 
 
@@ -5278,5 +5336,9 @@ def create_api_v1_blueprint() -> Blueprint:
     # Workspace view refresh (per-agent for the same gateway-permission reason; the
     # agent_id identifies which workspace's view to rebuild).
     blueprint.add_url_rule("/agents/<agent_id>/refresh", view_func=_handle_workspace_refresh, methods=["POST"])
+
+    # Folder-sync state (per-agent for the same gateway-permission reason; the
+    # agent_id names the workspace whose syncs to report).
+    blueprint.add_url_rule("/agents/<agent_id>/folder-syncs", view_func=_handle_agent_folder_syncs, methods=["GET"])
 
     return blueprint

@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "10";
+export const CONTRACT_VERSION = "11";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -106,6 +106,11 @@ export const DETACHED_WINDOWS = "minds:detached-windows";
 // (and, for a custom-scheme link, `opensCustomSchemeLinks`) or for an external
 // link that embedder handed over with OPEN_LINK.
 export const OPEN_EXTERNAL = "minds:open-external";
+// workspace -> embedder: open the shell's workspace-options panel on its
+// Permissions tab at the Local files section, where the user shares files and
+// folders from this computer and turns syncing on. Payload: {}. Sent only to
+// an embedder that said `opensLocalFiles` with EMBEDDER_CAPABILITIES.
+export const OPEN_LOCAL_FILES = "minds:open-local-files";
 // workspace -> embedder: pulse a ring around one of the chrome's own controls
 // while the workspace's tour talks about it, or clear the ring. Payload:
 // { anchor }, one of CHROME_ANCHORS or null to clear. Fire-and-forget; a
@@ -140,11 +145,12 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks? }: `opensExternalLinks: true` says it takes
-// OPEN_EXTERNAL, and `opensCustomSchemeLinks: true` that it takes custom-scheme
-// links there too. A workspace that never receives it (an older chrome, a
-// plain browser) keeps its pull-out gesture off and opens external links
-// itself.
+// opensCustomSchemeLinks?, opensLocalFiles? }: `opensExternalLinks: true` says
+// it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
+// custom-scheme links there too, and `opensLocalFiles: true` that it takes
+// OPEN_LOCAL_FILES. A workspace that never receives it (an older chrome, a
+// plain browser) keeps its pull-out gesture off, opens external links itself,
+// and offers no way to reach the Local files settings.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -343,6 +349,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [OPEN_EXTERNAL]: function (data) {
     return isLinkUrlValid(data.url);
   },
+  [OPEN_LOCAL_FILES]: function () {
+    return true;
+  },
   [HIGHLIGHT_CHROME]: function (data) {
     return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
@@ -375,7 +384,11 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   },
   [EMBEDDER_CAPABILITIES]: function (data) {
     if (typeof data.canPopOut !== 'boolean') return false;
-    return isOptionalBoolean(data.opensExternalLinks) && isOptionalBoolean(data.opensCustomSchemeLinks);
+    return (
+      isOptionalBoolean(data.opensExternalLinks) &&
+      isOptionalBoolean(data.opensCustomSchemeLinks) &&
+      isOptionalBoolean(data.opensLocalFiles)
+    );
   },
   [REATTACH_WINDOW]: function (data) {
     return isWindowIdValid(data.windowId) && isFrameValid(data.frame);

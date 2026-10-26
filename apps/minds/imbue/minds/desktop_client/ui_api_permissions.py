@@ -69,13 +69,13 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync import FolderSyncSpec
-from imbue.minds.desktop_client.folder_sync import FolderSyncState
 from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
 from imbue.minds.desktop_client.folder_sync import WORKSPACE_INACTIVE_SYNC_DIRECTORY
 from imbue.minds.desktop_client.folder_sync import WORKSPACE_SYNC_DIRECTORY
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
@@ -344,7 +344,7 @@ def _build_shared_paths(
         # however quietly it happened -- so the row says so rather than
         # reporting a bare STOPPED with no reason and no way to act on it.
         if sync is not None and manager is not None and sync.activity == FolderSyncActivity.ACTIVE:
-            sync = _with_restore_failure(sync, manager.restore_failure_for(agent_id, path))
+            sync = with_restore_failure(sync, manager.restore_failure_for(agent_id, path))
         # A folder part-way to where the user just sent it shows how far it has
         # got, over whatever its last settled state was.
         in_flight = None if manager is None else manager.in_flight_state_for(agent_id, path)
@@ -1020,7 +1020,7 @@ def ui_remembered_sync(record: FolderSyncRecord, device_id: str) -> UiPathSync:
     )
 
 
-def _with_restore_failure(sync: UiPathSync, failure: str) -> UiPathSync:
+def with_restore_failure(sync: UiPathSync, failure: str) -> UiPathSync:
     """Report a sync that could not be brought back at launch as the failure it is."""
     if not failure or sync.state != FolderSyncState.STOPPED:
         return sync

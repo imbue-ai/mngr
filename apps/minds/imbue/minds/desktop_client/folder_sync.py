@@ -20,7 +20,8 @@ One ``mngr pair`` subprocess per sync, supervised here:
   conflict. Those map onto ``--sync-direction`` and ``--conflict``;
 * its ``--format jsonl`` stream is read line by line to drive the state one
   sync is shown in: STARTING until ``pair_syncing`` says unison is watching
-  both replicas, then SYNCING until the process exits.
+  both replicas, then SYNCING until ``pair_transferring`` says its first pass
+  has left the two level, and from there SYNCED or SYNCING as bytes move.
 
 A sync runs only while Imbue Studio does, but the *choice* to keep a folder synced
 outlives it: :mod:`folder_sync_store` records it, and :meth:`restore_all`
@@ -52,7 +53,6 @@ import shlex
 import threading
 import time
 from collections.abc import Callable
-from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
@@ -64,7 +64,6 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -74,6 +73,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
@@ -146,48 +146,6 @@ _RESTORE_HOST_WAIT_SECONDS: Final[float] = 120.0
 _RESTORE_HOST_POLL_SECONDS: Final[float] = 1.0
 
 _WORKSPACE_NOT_RUNNING_MESSAGE: Final[str] = "This workspace is not running. Syncing starts again when it is."
-
-
-class FolderSyncState(UpperCaseStrEnum):
-    """Where one folder actually is right now, as opposed to where the user asked it to be.
-
-    The user sets the destination -- see :class:`FolderSyncActivity`, which is
-    what a click writes -- and this is the app's progress towards it. Every
-    move between destinations crosses the network, so each has a state for
-    being under way, and a click never waits for one.
-
-    STARTING covers everything between spawning ``mngr pair`` and unison
-    reporting for duty: resolving the workspace, moving a set-aside copy back,
-    installing a usable unison on a remote host, the SSH handshake. RESTARTING
-    is the same work for a sync whose settings changed under it -- told apart
-    because the files are already on the machine, so the wait is a handshake
-    rather than a first copy, and a user who has just changed a dropdown is
-    owed the difference. After that a sync alternates between SYNCING (moving
-    bytes right now) and SYNCED (up and watching, with nothing to carry across)
-    -- which is where it spends nearly all its time. DEACTIVATING and
-    DISCARDING are the same idea in the other direction: the sync has stopped
-    and the machine is being told what to do with its copy.
-
-    Three states are terminal, and they are worth keeping apart because the
-    user is owed a different thing by each. STOPPED means it ended because it
-    was asked to -- the user unticked the box, or Imbue Studio quit -- and is where a
-    settled inactive folder rests, so the unticked checkbox says everything and
-    the row needs no badge. FAILED means it ended on its own, and carries the
-    reason. UNKNOWN is neither: the folder is one the user still wants synced,
-    nothing is running, and Imbue Studio cannot say why. That is not a resting place,
-    it is a disagreement between what the app says and what it is doing -- and
-    it used to be spelled STOPPED, which made it invisible.
-    """
-
-    STARTING = auto()
-    RESTARTING = auto()
-    SYNCING = auto()
-    SYNCED = auto()
-    DEACTIVATING = auto()
-    DISCARDING = auto()
-    STOPPED = auto()
-    UNKNOWN = auto()
-    FAILED = auto()
 
 
 class FolderSyncSpec(FrozenModel):
@@ -552,12 +510,16 @@ class _PairEventSink(MutableModel):
     def on_output(self, line: str, is_stdout: bool) -> None:
         """Fold one line of the subprocess's output into the sync's state.
 
-        ``pair_syncing`` says unison is up, which settles the sync at SYNCED;
-        ``pair_transferring`` then moves it between SYNCED and SYNCING as bytes
-        actually move. mngr's ``error`` event is kept as the verdict a failure
-        is reported with. Every line joins the tail regardless -- mngr's own
-        logging, on stderr, is what a death neither of those events explains is
-        diagnosed from.
+        ``pair_syncing`` says unison is up, which is not yet that the two sides
+        agree: its first pass is still comparing them, and may have a whole
+        folder to carry across, so the sync reads SYNCING until
+        ``pair_transferring`` reports that pass settled (which ``mngr pair``
+        always does for the first one, even when it moved nothing). From then
+        on that event moves it between SYNCED and SYNCING as bytes actually
+        move. mngr's ``error`` event is kept as the verdict a failure is
+        reported with.
+        Every line joins the tail regardless -- mngr's own logging, on stderr,
+        is what a death neither of those events explains is diagnosed from.
         """
         stripped = line.strip()
         logger.debug("mngr pair: {}", stripped)
@@ -570,8 +532,7 @@ class _PairEventSink(MutableModel):
             FolderSyncState.STARTING,
             FolderSyncState.RESTARTING,
         ):
-            # Up and watching, with nothing to carry across until told otherwise.
-            self.state = FolderSyncState.SYNCED
+            self.state = FolderSyncState.SYNCING
             self._left_starting.set()
         if event.get("event") == _PAIR_TRANSFERRING_EVENT and self.state in (
             FolderSyncState.SYNCED,

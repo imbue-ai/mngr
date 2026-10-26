@@ -91,7 +91,10 @@ about to begin), `pair_syncing` (unison is up and both replicas are being
 watched), and `pair_stopped` (the sync has ended). A fourth,
 `pair_transferring`, carries `is_transferring` and fires when unison starts
 moving bytes and again when it settles -- a sync spends nearly all its life up
-but idle.
+but idle. The first pass always ends with one carrying `is_transferring: false`,
+even when it found nothing to move, so that event is the word that the two
+replicas have been compared and are level; `pair_syncing` alone only says
+unison is up.
 
 ## Limitations
 

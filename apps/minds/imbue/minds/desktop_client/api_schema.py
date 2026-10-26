@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
 from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentFolderSyncsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
@@ -170,6 +171,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         request_model=BugReportRequest, response_model=OkResponse
     ),
     ("POST", "/api/v1/agents/{agent_id}/refresh"): _RouteModels(response_model=OkResponse),
+    ("GET", "/api/v1/agents/{agent_id}/folder-syncs"): _RouteModels(response_model=AgentFolderSyncsResponse),
     ("GET", "/api/v1/app/version"): _RouteModels(response_model=AppVersionResponse),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),

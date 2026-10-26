@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.testing import create_file_sharing_permission_re
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -1725,7 +1726,7 @@ def test_the_folder_sync_poll_reports_a_running_sync(
         f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
         json={"path": str(shared), "enabled": True},
     )
-    manager.wait_until_started(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+    wait_until_synced(manager, str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
 
     payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/folder-syncs").data)
 

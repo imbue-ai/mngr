@@ -680,8 +680,9 @@ changes rather than dropped. A new `/api/v1/agents/<id>/*` route
 therefore needs no permissions work: the agent notifications route
 (`POST .../agents/<id>/notifications`) and its read route
 (`POST .../agents/<id>/notifications/read`, which a workspace's chat app
-calls as the chat's agent when the chat becomes watched) are both covered
-by the same rule.
+calls as the chat's agent when the chat becomes watched) and the
+folder-sync state read (`GET .../agents/<id>/folder-syncs`, which any agent
+of a workspace may call under its own id) are all covered by the same rule.
 
 The bug-report route (`POST .../agents/<...>/report`) is the one
 exception: it sits in a rule *ahead* of the unauthorized gate, so it

@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 10 (tracks `CONTRACT_VERSION` in
+Version: 11 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v10)
+## Message inventory (v11)
 
 ### workspace -> embedder
 
@@ -64,6 +64,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Imbue Studio window's edge on some platforms. |
 | `minds:window-drag-ended` | `{ windowId, isDetached, isCancelled? }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out); `isCancelled` is true for a cancel (Escape), which drops any popout being dragged, and false for a release, after which a popout that is out stays and the embedder sends `minds:tear-out` `released`. The shell takes the embedder's last `minds:tear-out` word on the drag even when it lands after its own release. A shell that omits `isCancelled` is taken at its `isDetached`. |
 | `minds:open-external` | `{ url }` | Open this external link outside the workspace: a web link in the user's default browser, a `mailto:`, `tel:` or custom-scheme link in the app the system has for it once the user confirms it in a dialog (or has chosen to always allow that kind of link from the workspace). `url` is an absolute `http:`, `https:`, `mailto:`, `tel:` or custom-scheme URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters; a custom scheme is any the browser does not load itself (not `file:`, `data:`, `blob:`, `about:`, `javascript:`, `ws:` and the like). The workspace sends it for an external link no app of its own is registered for, and only to an embedder that said `opensExternalLinks: true` (and, for a custom-scheme link, `opensCustomSchemeLinks: true`) or for an external link that embedder handed over with `minds:open-link`. |
+| `minds:open-local-files` | `{}` | Open the shell's workspace-options panel on its Permissions tab at the Local files section, where the user shares files and folders from this computer with the workspace and turns syncing on. Sent only to an embedder whose `embedder-capabilities` carries `opensLocalFiles: true`. |
 | `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
 | `minds:highlight-chrome` | `{ anchor }` | Pulse a ring around one of the chrome's own controls while the workspace's tour talks about it: `anchor` is one of `workspace-switcher`, `permissions`, `settings`, `share`, `help`, or `null` to clear the ring. Fire-and-forget (no ack); the tour's words never depend on the ring, so a chrome that ignores it reads the same. |
 
@@ -76,7 +77,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:provider-sign-in-ack` | `{ relay }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
-| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off and opens external links itself. |
+| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, and offers no way to reach the Local files settings. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when a re-dock drag dropped it there, else at its kept frame. |
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:`, `tel:` or custom-scheme URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`; a custom-scheme link, only to one that announced `opensCustomSchemeLinks: true` too. |
@@ -264,3 +265,10 @@ payloads -- to the console.
   workspace, and a workspace facing an older chrome launches one no app of
   it takes itself, without a popup, since such a chrome shows a
   custom-scheme popup as an empty window.
+- **11** -- added `open-local-files` (workspace -> embedder) and the
+  optional `opensLocalFiles` field on `embedder-capabilities`. A workspace
+  app (the Files app) offers "Manage connected files" only where the chrome
+  said it takes `open-local-files`; the chrome opens the Permissions pane at
+  its Local files section (`?tab=permissions&section=local-files`). A v11
+  workspace facing an older chrome never hears `opensLocalFiles` and offers
+  nothing; a v11 chrome facing an older workspace is never asked.

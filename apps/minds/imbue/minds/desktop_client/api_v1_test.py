@@ -89,6 +89,10 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
@@ -113,6 +117,8 @@ from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.testing import wait_until_synced
+from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.workspace_create import CreateOnCreatedCallback
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
@@ -6531,6 +6537,114 @@ def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_im
     assert json.loads(response.data)["error"] == "not_published"
     (call,) = cli.mobile_access_link_calls
     assert call["link"] is None
+
+
+_FOLDER_SYNC_DEVICE_ID: Final[str] = "host-0f0e0d0c0b0a09080706050403020100"
+_FOLDER_SYNC_START_TIMEOUT_SECONDS: Final[float] = 20.0
+
+
+def _client_with_folder_syncs(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    workspace_agent_id: AgentId,
+    chat_agent_id: AgentId,
+) -> tuple[FlaskClient, FolderSyncManager]:
+    """A client whose folder syncs run against the stand-in ``mngr`` and a workspace with a chat in it."""
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={}, workspace_agent_id=workspace_agent_id, chat_agent_id=chat_agent_id
+    )
+    manager = FolderSyncManager(
+        concurrency_group=root_concurrency_group,
+        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id=_FOLDER_SYNC_DEVICE_ID,
+        backend_resolver=resolver,
+        store=FolderSyncStore(records_dir=tmp_path / "folder_syncs"),
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+        folder_sync_manager=manager,
+        device_id=_FOLDER_SYNC_DEVICE_ID,
+    )
+    return app.test_client(), manager
+
+
+def test_folder_syncs_answers_any_agent_of_the_workspace_with_the_workspaces_syncs(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A chat asks under its own id, and is answered with what is filed under the primary's."""
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
+    try:
+        manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+        wait_until_synced(manager, str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+
+        response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
+    finally:
+        manager.stop_all()
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["device_id"] == _FOLDER_SYNC_DEVICE_ID
+    (sync,) = body["syncs"]
+    assert sync["local_path"] == str(local_folder)
+    assert sync["workspace_path"] == f"~/synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
+    assert sync["activity"] == "ACTIVE"
+    assert sync["state"] == "SYNCED"
+    assert sync["message"] is None
+    assert sync["bytes_done"] is None and sync["bytes_total"] is None
+    assert sync["direction"] == "BOTH"
+    assert sync["conflict"] == "NEWER"
+
+
+def test_folder_syncs_reports_where_a_turned_off_syncs_copy_was_set_aside(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
+    manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+    manager.stop(str(workspace_agent_id), str(local_folder))
+    assert manager.wait_until_settled(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+    manager.forget(str(workspace_agent_id), str(local_folder))
+
+    response = client.get(f"/api/v1/agents/{workspace_agent_id}/folder-syncs", headers=_auth_header())
+
+    (sync,) = json.loads(response.data)["syncs"]
+    assert sync["activity"] == "INACTIVE"
+    assert sync["state"] == "STOPPED"
+    assert sync["workspace_path"] == f"~/inactive_synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
+
+
+def test_folder_syncs_refuses_an_agent_this_desktop_does_not_know(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    client, _manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, AgentId(), AgentId())
+
+    response = client.get(f"/api/v1/agents/{AgentId()}/folder-syncs", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_folder_syncs_answers_with_none_in_a_build_that_cannot_sync(tmp_path: Path) -> None:
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, _app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["syncs"] == []
 
 
 # Visiting agents: the Share panel's routes onto the workspace's agent-access CLI.

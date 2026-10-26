@@ -17,15 +17,16 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
-from imbue.minds.desktop_client.folder_sync import FolderSyncState
 from imbue.minds.desktop_client.folder_sync import _MAX_STEPS_PER_DESTINATION
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.testing import FAKE_WORKSPACE_HOME
 from imbue.minds.desktop_client.testing import OneMachineBackendResolver
+from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
@@ -81,9 +82,8 @@ def test_starting_a_sync_runs_mngr_pair_with_the_settings_the_user_chose(
     )
     # The row exists at once, in STARTING; bringing the sync up is asynchronous.
     assert started.state == FolderSyncState.STARTING
-    status = folder_sync_manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    folder_sync_manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    wait_until_synced(folder_sync_manager, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     argv = json.loads((tmp_path / "argv.json").read_text())
     assert argv[0] == "pair"
     assert argv[argv.index("--source-host") + 1] == _HOST_ID
@@ -701,9 +701,8 @@ def test_a_sync_comes_back_after_a_restart(
         store=FolderSyncStore(records_dir=folder_sync_store.records_dir),
     )
     restarted.restore_all()
-    status = restarted.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    restarted.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    status = wait_until_synced(restarted, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     # The settings came back with it, not just the fact that something was synced.
     assert status.spec.direction == FolderSyncDirection.TO_WORKSPACE
     assert status.spec.conflict == FolderSyncConflict.WORKSPACE
