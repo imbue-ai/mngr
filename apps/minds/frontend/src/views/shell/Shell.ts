@@ -26,7 +26,6 @@ import {
   popoutFromPath,
 } from "./classify";
 import { PopoutChrome } from "./PopoutChrome";
-import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import { noticeBandFor } from "./notice-band";
 import {
   isUpdateOffered,
@@ -492,11 +491,6 @@ export function Shell(): m.Component<ShellAttrs> {
           : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
         popout === null ? m(SidebarMenu, { shell }) : null,
         popout === null ? m(AccountSwitcherMenu, { shell }) : null,
-        // A popout dragged over this window offers to return its window to the
-        // desktop here; the overlay names the drop.
-        shell.isPopoutDropTarget && surfaceWorkspaceId !== null && popout === null
-          ? m(PopoutDropOverlay)
-          : null,
         band !== null
           ? m(NoticeBand, {
               shell,

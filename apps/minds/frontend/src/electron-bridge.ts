@@ -177,11 +177,10 @@ interface MindsNativeSurface {
   setPopoutTitle?(title: string): void;
   onPopoutReattachRequest?(callback: () => void): void;
   // A main window is asked to return a popout's window to the desktop it
-  // shows: the popout was dropped onto it, or is closing.
+  // shows: the popout is closing.
   onReattachPopoutWindow?(callback: (ask: PopoutReattachAsk) => void): void;
   // This main window's desktop has the asked-for window back; main closes its popout.
   popoutWindowReturned?(workspaceId: string, windowId: string): void;
-  onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
   // Link routing (electron/link-routing.js). Optional: a preload from before
   // it lacks them, and the browser build opens popups itself.
   reportWorkspaceLinkHandling?(report: WorkspaceLinkHandlingReport | null): void;
@@ -237,22 +236,11 @@ export interface PopoutGrab {
   grabY: number;
 }
 
-/** A frame in fractions of the workspace backdrop, as a drop back onto the
- * desktop names it. */
-export interface PopoutFrame {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 /** Main's ask of a main window to return a pulled-out window of the workspace
- * it shows to the desktop: at `frame` when the popout was dropped there, else
- * at the window's kept frame (the popout is closing). */
+ * it shows to the desktop, at the window's kept frame (the popout is closing). */
 export interface PopoutReattachAsk {
   workspaceId: string;
   windowId: string;
-  frame: PopoutFrame | null;
 }
 
 /** What a workspace's page promised when it announced readiness: that it
@@ -469,9 +457,6 @@ export const electronBridge = {
   },
   popoutWindowReturned(workspaceId: string, windowId: string): void {
     native()?.popoutWindowReturned?.(workspaceId, windowId);
-  },
-  onPopoutDropTarget(callback: (isOver: boolean) => void): void {
-    native()?.onPopoutDropTarget?.(callback);
   },
 
   /** Tell main which workspace this window's frame shows and whether it opens

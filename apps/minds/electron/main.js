@@ -48,8 +48,6 @@ const {
   popoutOpenBounds,
   surfaceBounds,
   isTornOut,
-  dropTargetFor,
-  redockFrame,
   isReattachHandshakeNeeded,
   isNavigationTarget,
   TITLEBAR_HEIGHT,
@@ -227,9 +225,8 @@ const windowControls = resolveWindowControls(process.platform, process.env);
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
 // to a new native window): once per frame is smooth enough and cheap.
 const POPOUT_FOLLOW_INTERVAL_MS = 16;
-// How long a popout whose window is returning to the desktop (an OS close, a
-// drop onto a main window) waits for the desktop to take the window back
-// before it goes anyway.
+// How long a popout whose window is returning to the desktop (an OS close)
+// waits for the desktop to take the window back before it goes anyway.
 const POPOUT_REATTACH_TIMEOUT_MS = 2000;
 // Window ids as the workspace shell mints them; mirrors the embed contract's
 // WINDOW_ID_PATTERN (never trust the renderer).
@@ -691,8 +688,8 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     kind,
     // For a popout: the workspace and window it shows, the follow loop while
     // the cursor drags it, whether its page has settled the window (so an OS
-    // close needs no reattach handshake), the main window a re-dock drag is
-    // over, and the window's title for the OS title.
+    // close needs no reattach handshake), and the window's title for the OS
+    // title.
     popout:
       popout === null
         ? null
@@ -702,8 +699,6 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
             title: (popout.title || '').slice(0, POPOUT_TITLE_MAX_LENGTH),
             followTimer: null,
             followGrab: null,
-            isRedockDrag: false,
-            dropTarget: null,
             isReattachSettled: false,
             reattachTimer: null,
           },
@@ -3169,20 +3164,18 @@ function closePopoutWindow(bundle, reason) {
 }
 
 // Ask a main window showing the popout's workspace to return the popout's
-// window to the desktop, at ``frame`` (fractions of that window's surface)
-// when a drop named one. That window's shell is the desktop's one writer of
+// window to the desktop at its kept frame. That window's shell is the desktop's one writer of
 // the layout, so the return goes through it rather than the popout's own
 // page whenever one is open. The popout closes once the window is reported
 // back or after the wait, not only when its own page sees it back: that page
 // may not have loaded yet.
-function sendReattachAsk(target, bundle, frame) {
+function sendReattachAsk(target, bundle) {
   try {
     // Agent-scoped like the SPA's own ids: a restored popout carries the
     // host-scoped coordinate its persisted route was written with.
     target.window.webContents.send('reattach-popout-window', {
       workspaceId: toAgentScopedWorkspaceId(bundle.popout.workspaceId),
       windowId: bundle.popout.windowId,
-      frame,
     });
   } catch (err) {
     console.warn('[popout] could not ask the desktop window to take the window back:', err && err.message);
@@ -3205,7 +3198,7 @@ function requestPopoutReattach(bundle) {
   }
   const target = mostRecentBundleForWorkspace(bundle.popout.workspaceId);
   if (target) {
-    sendReattachAsk(target, bundle, null);
+    sendReattachAsk(target, bundle);
   } else {
     try {
       wc.send('popout-reattach-request');
@@ -3227,35 +3220,12 @@ function armReattachTimeout(bundle) {
   }, POPOUT_REATTACH_TIMEOUT_MS);
 }
 
-// The main windows a re-dock drag could drop onto, most recently focused
-// first, as the drop-target rule reads them.
-function redockCandidatesFor(bundle) {
-  const candidates = [];
-  for (const b of mruWindows) {
-    if (b.window.isDestroyed() || isPopoutBundle(b)) continue;
-    candidates.push({
-      id: b,
-      contentBounds: b.window.getContentBounds(),
-      isSameWorkspace: sameWorkspaceId(b.currentWorkspaceId, bundle.popout.workspaceId),
-    });
-  }
-  return candidates;
-}
-
-function sendDropTarget(target, isOver) {
-  if (!target || target.window.isDestroyed() || target.window.webContents.isDestroyed()) return;
-  try {
-    target.window.webContents.send('popout-drop-target', isOver);
-  } catch { /* noop */ }
-}
-
 // Follow the cursor with the popout until told to stop: the tear-out drag
 // (the workspace shell still holds the pointer) and the popout's own bar
-// drag (which may end over a main window as a re-dock).
-function startFollowingCursor(bundle, grab, { isRedockDrag }) {
+// drag.
+function startFollowingCursor(bundle, grab) {
   stopFollowingCursor(bundle);
   bundle.popout.followGrab = grab;
-  bundle.popout.isRedockDrag = isRedockDrag;
   bundle.popout.followTimer = setInterval(() => {
     if (bundle.window.isDestroyed()) {
       stopFollowingCursor(bundle);
@@ -3264,12 +3234,6 @@ function startFollowingCursor(bundle, grab, { isRedockDrag }) {
     const cursor = screen.getCursorScreenPoint();
     const position = followPosition(cursor, bundle.popout.followGrab);
     bundle.window.setPosition(position.x, position.y);
-    if (!bundle.popout.isRedockDrag) return;
-    const target = dropTargetFor(cursor, redockCandidatesFor(bundle));
-    if (target === bundle.popout.dropTarget) return;
-    sendDropTarget(bundle.popout.dropTarget, false);
-    sendDropTarget(target, true);
-    bundle.popout.dropTarget = target;
   }, POPOUT_FOLLOW_INTERVAL_MS);
 }
 
@@ -3279,11 +3243,6 @@ function stopFollowingCursor(bundle) {
     bundle.popout.followTimer = null;
   }
   bundle.popout.followGrab = null;
-  const target = bundle.popout.dropTarget;
-  bundle.popout.dropTarget = null;
-  bundle.popout.isRedockDrag = false;
-  sendDropTarget(target, false);
-  return target;
 }
 
 // The renderer's popout asks all come from the SPA page of a window main
@@ -3332,7 +3291,7 @@ function openPopout(source, request, mode) {
     // surfacing the popout inactive keeps it that way, and the release ends
     // the follow and focuses the popout.
     bundle.showInactiveOnFirstShow = true;
-    startFollowingCursor(bundle, { grabX: request.grabX, grabY: request.grabY }, { isRedockDrag: false });
+    startFollowingCursor(bundle, { grabX: request.grabX, grabY: request.grabY });
     // Shown at once rather than at ready-to-show: the window is under the
     // cursor now, and a blank card that follows the hand beats one that
     // appears a beat later wherever the hand has got to.
@@ -3495,21 +3454,14 @@ ipcMain.on('begin-popout-drag', (event, grab) => {
   const grabX = Number(grab.grabX);
   const grabY = Number(grab.grabY);
   if (!Number.isFinite(grabX) || !Number.isFinite(grabY)) return;
-  startFollowingCursor(bundle, { grabX, grabY }, { isRedockDrag: true });
+  startFollowingCursor(bundle, { grabX, grabY });
 });
 
 ipcMain.on('end-popout-bar-drag', (event) => {
   const bundle = popoutSenderBundle(event);
   if (!bundle || !isPopoutBundle(bundle)) return;
-  const target = stopFollowingCursor(bundle);
+  stopFollowingCursor(bundle);
   scheduleSessionSave();
-  if (!target || target.window.isDestroyed()) return;
-  // Released over a main window showing this workspace: that window's shell
-  // returns the window to the desktop where it was dropped.
-  const frame = redockFrame(bundle.window.getContentBounds(), target.window.getContentBounds());
-  sendReattachAsk(target, bundle, frame);
-  armReattachTimeout(bundle);
-  focusBundle(target);
 });
 
 ipcMain.on('close-popout', (event) => {
@@ -3520,8 +3472,8 @@ ipcMain.on('close-popout', (event) => {
   closePopoutWindow(bundle, 'its page no longer shows the window as out');
 });
 
-// A main window's shell took back the window main asked it to (a drop onto
-// it, a popout's close): the popout waiting on that return goes now.
+// A main window's shell took back the window main asked it to (a popout's
+// close): the popout waiting on that return goes now.
 ipcMain.on('popout-window-returned', (event, payload) => {
   const source = popoutSenderBundle(event);
   if (!source || isPopoutBundle(source) || !isValidWorkspaceWindowIds(payload)) return;

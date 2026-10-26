@@ -9,7 +9,6 @@ import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
-import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UiNotificationEntry } from "../../channel/messages";
@@ -1274,10 +1273,7 @@ describe("Shell on the popout route", () => {
   }
 
   it("mounts the workspace surface in solo mode under the popout bar, with no titlebar or sidebar", () => {
-    const { state } = makeShell({
-      currentRouteSearch: () => "",
-      isPopoutDropTarget: false,
-    } as unknown as Partial<ShellState>);
+    const { state } = makeShell({ currentRouteSearch: () => "" } as unknown as Partial<ShellState>);
     const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
     const names = componentNames(root);
     expect(names).toContain("PopoutChrome");
@@ -1293,31 +1289,20 @@ describe("Shell on the popout route", () => {
   });
 
   it("tells the workspace shell a popout the app reopened was reopened", () => {
-    const { state } = makeShell({
-      currentRouteSearch: () => "reopened=1",
-      isPopoutDropTarget: false,
-    } as unknown as Partial<ShellState>);
+    const { state } = makeShell({ currentRouteSearch: () => "reopened=1" } as unknown as Partial<ShellState>);
     const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
     expect(attrsOf(frame as AnyVnode).isSoloReopened).toBe(true);
   });
 
-  it("mounts the ordinary surface with no solo window, and offers a drop only there", () => {
-    const { state } = makeShell({ isPopoutDropTarget: true } as unknown as Partial<ShellState>);
+  it("mounts the ordinary surface with no solo window", () => {
+    const { state } = makeShell();
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#surface"));
     const names = componentNames(root);
     expect(names).toContain("Titlebar");
-    expect(collectVnodes(root).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(true);
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBeNull();
-    // A popout dragged over a popout is not a drop target.
-    const popout = makeShell({
-      currentRouteSearch: () => "",
-      isPopoutDropTarget: true,
-    } as unknown as Partial<ShellState>);
-    const popoutRoot = renderShell(popout.state, POPOUT_PATH, m("div#popout-page"));
-    expect(collectVnodes(popoutRoot).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(false);
   });
 });
 

@@ -36,11 +36,7 @@ import type {
   UiSwitchAccountRequest,
   UiSwitchAccountResponse,
 } from "../../channel/messages";
-import type {
-  PopoutFrame,
-  PopoutReattachAsk,
-  TearOutReport,
-} from "../../electron-bridge";
+import type { PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
 import {
@@ -78,11 +74,8 @@ export type WorkspaceMessageSender = (
 ) => boolean;
 
 /** Sends a reattach ask into the mounted frame: return the pulled-out window
- * to the desktop, at `frame` when one is given. Registered by WorkspaceFrame. */
-export type ReattachWindowSender = (
-  windowId: string,
-  frame: PopoutFrame | null,
-) => void;
+ * to the desktop. Registered by WorkspaceFrame. */
+export type ReattachWindowSender = (windowId: string) => void;
 
 /** Forwards a step of a watched title-bar drag into the mounted frame, when
  * the report names the frame's workspace. Registered by WorkspaceFrame. */
@@ -275,9 +268,6 @@ export class ShellState {
   /** Callers waiting for a window to leave the detached set (a reattach on
    * its way): resolved by the next report without it, or by their timer. */
   private reattachWaiters: ReattachWaiter[] = [];
-  /** Whether a popout is being dragged over this window's surface, offering
-   * to return its window to the desktop here. */
-  isPopoutDropTarget = false;
   /** The mounted Permissions pane's live list, registered while one is up. The
    * popup answers a request; the pane behind it is what shows the list that
    * request was in. */
@@ -822,8 +812,7 @@ export class ShellState {
   }
 
   /** Main asks this window to return a pulled-out window of the workspace it
-   * shows to the desktop (the popout was dropped onto this window's surface,
-   * or is closing): the mounted shell takes the window back. Resolves true
+   * shows to the desktop (the popout is closing): the mounted shell takes the window back. Resolves true
    * once the shell reports it back, which is main's word to close the popout
    * (its own page may not have loaded to see it), and false when this window
    * did not take it (it shows some other workspace, or is a popout itself,
@@ -840,20 +829,19 @@ export class ShellState {
       return Promise.resolve(false);
     }
     const reportedBack = this.whenReportedBack(ask.windowId);
-    sender(ask.windowId, ask.frame);
+    sender(ask.windowId);
     return reportedBack;
   }
 
-  /** Ask this popout's own shell to return its window to the desktop, at
-   * `frame` when a drop named one: the way back when no desktop window can
-   * take it. Resolves when the shell reports the window back (which it does
+  /** Ask this popout's own shell to return its window to the desktop: the
+   * way back when no desktop window can take it. Resolves when the shell reports the window back (which it does
    * only once its save has landed), or after a short wait when it never does. */
-  async returnPopoutToDesktop(frame: PopoutFrame | null): Promise<void> {
+  async returnPopoutToDesktop(): Promise<void> {
     const popout = this.popoutRoute();
     const sender = this.reattachWindowSender;
     if (popout === null || sender === null) return;
     const reportedBack = this.whenReportedBack(popout.windowId);
-    sender(popout.windowId, frame);
+    sender(popout.windowId);
     await reportedBack;
   }
 
@@ -874,10 +862,6 @@ export class ShellState {
       };
       this.reattachWaiters.push(waiter);
     });
-  }
-
-  setPopoutDropTarget(isOver: boolean): void {
-    this.isPopoutDropTarget = isOver;
   }
 
   registerWorkspaceMessageSender(sender: WorkspaceMessageSender): void {

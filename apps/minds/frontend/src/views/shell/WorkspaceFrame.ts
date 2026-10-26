@@ -701,11 +701,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           }
         };
         shell.registerWorkspaceMessageSender(workspaceMessageSender);
-        reattachWindowSender = (windowId, frame) => {
-          endpoint?.send(
-            loaded.REATTACH_WINDOW,
-            frame === null ? { windowId } : { windowId, frame },
-          );
+        reattachWindowSender = (windowId) => {
+          endpoint?.send(loaded.REATTACH_WINDOW, { windowId });
         };
         shell.registerReattachWindowSender(reattachWindowSender);
         tearOutSender = (report: TearOutReport) => {

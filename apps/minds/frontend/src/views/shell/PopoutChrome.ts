@@ -7,8 +7,8 @@
 //
 // Dragging the bar moves the OS window: a pointer-capture handler tells main
 // where the bar was grabbed and main follows the cursor until the release
-// (Electron cannot hand a native drag to a renderer-driven move), which is
-// also how a drop back onto a main window is detected.
+// (Electron cannot hand a native drag to a renderer-driven move). Releasing
+// it anywhere, over a Mind window included, only moves the popout.
 
 import m from "mithril";
 import { Icon12 } from "../components/Icon";
