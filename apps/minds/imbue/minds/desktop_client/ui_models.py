@@ -58,7 +58,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 27
+UI_SCHEMA_VERSION: int = 28
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -116,6 +116,13 @@ class UiWorkspaceEntry(FrozenModel):
         ),
     )
     account: str = Field(default="", description="Owning account email, when known")
+    account_user_id: str = Field(
+        default="",
+        description=(
+            "Owning account's user id (the record's association, whether or not that account is signed in "
+            "here); empty for a workspace associated with no account, which belongs to the device's 'local' id"
+        ),
+    )
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"
     )
@@ -169,9 +176,21 @@ class RemoteTileState(FrozenModel):
 
 
 class UiWorkspacesMessage(FrozenModel):
-    """Full workspace-list state (always the complete list, never a delta)."""
+    """Full workspace-list state (always the complete list, never a delta).
+
+    Scoped per window: ``workspaces`` holds the receiving window's account's rows,
+    and ``account_id`` names that account, so the Electron main process, which
+    hears every window's frame, can keep one list per account.
+    """
 
     type: Literal["workspaces"] = "workspaces"
+    account_id: str = Field(
+        default="",
+        description=(
+            "The receiving window's account id ('local' for the device); empty on the install-wide "
+            "list before the publisher projects it for a window"
+        ),
+    )
     workspaces: tuple[UiWorkspaceEntry, ...] = Field(
         description="Every visible workspace/create/remote row, in display order"
     )
@@ -192,22 +211,30 @@ class UiWorkspacesMessage(FrozenModel):
 
 
 class UiAccountEntry(FrozenModel):
-    """One signed-in account, as Manage Accounts lists it."""
+    """One account the titlebar's account switcher lists (signed in, or signed out with workspaces still here)."""
 
     user_id: str = Field(description="The account's user id")
     email: str = Field(description="The account's email")
+    display_name: str = Field(default="", description="The account's display name; empty when it has none")
     workspace_count: int = Field(description="Number of machines owned by this account")
-    is_default: bool = Field(description="Whether this account is the default for new machines")
 
 
 class UiAccountsMessage(FrozenModel):
-    """The signed-in accounts: the bottom-left launcher's label and Manage Accounts' list."""
+    """The window's account and the switcher's list: every signed-in account, and the signed-out ones with workspaces.
+
+    Scoped per window: ``account_id`` is the account the receiving window shows
+    (a SuperTokens user id, or ``local`` for the device). The two lists are the
+    same for every window of the install.
+    """
 
     type: Literal["accounts"] = "accounts"
+    account_id: str = Field(description="The receiving window's account id, or 'local' for the device")
     has_accounts: bool = Field(description="Whether any account is signed in")
-    account_email: str = Field(description="Label email for the launcher, empty when signed out")
-    extra_account_count: int = Field(description="How many additional signed-in accounts beyond the label one")
     accounts: tuple[UiAccountEntry, ...] = Field(description="Every signed-in account, session-store order")
+    signed_out_accounts: tuple[UiAccountEntry, ...] = Field(
+        default=(),
+        description="Accounts with no session here whose workspaces are still on this install, user-id order",
+    )
 
 
 class ProviderPanelStatus(UpperCaseStrEnum):
@@ -318,6 +345,13 @@ class UiRequestsMessage(FrozenModel):
         default=(),
         description="Workspace primary agent ids with pending requests, independent of notification dismissal",
     )
+    workspace_agent_id_by_request_id: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "request event id -> the primary agent id of the workspace that filed it; a request whose "
+            "workspace could not be named is absent, and every window keeps it"
+        ),
+    )
 
 
 class NotificationOutcome(LowerCaseStrEnum):
@@ -386,6 +420,10 @@ class UiNotificationEntry(FrozenModel):
     )
     workspace_agent_id: str = Field(
         description="Origin workspace's agent id; '' when unresolvable or for an account-level system event"
+    )
+    account_id: str = Field(
+        default="",
+        description="For an account-level system event, the account's user id, so the entry reaches that account's windows",
     )
     workspace_name: str = Field(
         description="Origin workspace's display name (the account for an account-level event), snapshotted at creation"
@@ -693,6 +731,13 @@ class UiClientStateMessage(FrozenModel):
         default=False,
         description="Whether the OS reports the screen locked (desktop app on macOS and Windows only)",
     )
+    account_id: str = Field(
+        default="",
+        description=(
+            "The account this window shows (a user id, or 'local' for the device); the server scopes the "
+            "frames it sends this connection to it. Empty until the window has reported one."
+        ),
+    )
 
 
 # Everything the server may send. The discriminator makes both pydantic
@@ -746,6 +791,38 @@ class UiBootstrapSeed(FrozenModel):
     is_onboarding_complete: bool = Field(
         description="Whether this install is past the first-run start flow (drives the home page's /start redirect)"
     )
+    account_id: str = Field(
+        description=(
+            "The account the served URL resolves to (its hub segment, its workspace's association, its "
+            "?account= parameter, else the install's most recently used account): the window's account at first paint"
+        )
+    )
+
+
+class UiSwitchAccountRequest(FrozenModel):
+    """Body of POST /ui/api/windows/switch-account: move the asking window to another account."""
+
+    account_id: str = Field(description="The account to switch to (a user id, or 'local' for the device)")
+    client_id: str = Field(description="The asking window's channel client id, so its own workspace is not counted")
+    is_desktop: bool = Field(
+        default=True,
+        description=(
+            "Whether the asker is a desktop window. Browser tabs are not deduplicated, so a workspace another "
+            "tab shows is still a landing for one of them"
+        ),
+    )
+
+
+class UiSwitchAccountResponse(FrozenModel):
+    """The route the asking window navigates to: the account's most recent free workspace, else its hub."""
+
+    route: str = Field(description="The SPA route to navigate the window to")
+
+
+class UiRouteAccountResponse(FrozenModel):
+    """Answer of GET /ui/api/windows/route-account: the account a SPA route belongs to (see ``resolve_window_account_id``)."""
+
+    account_id: str = Field(description="The account the route's window shows (a user id, or 'local' for the device)")
 
 
 class UiBootstrap(FrozenModel):
@@ -1162,3 +1239,6 @@ class UiWireSchema(FrozenModel):
     )
     folder_syncs: UiFolderSyncs = Field(description="folder-syncs poll payload")
     permission_grant_group: UiPermissionGrantGroup = Field(description="one grant-dialog permission group")
+    switch_account: UiSwitchAccountRequest = Field(description="windows/switch-account request body")
+    switch_account_response: UiSwitchAccountResponse = Field(description="windows/switch-account response")
+    route_account_response: UiRouteAccountResponse = Field(description="windows/route-account response")

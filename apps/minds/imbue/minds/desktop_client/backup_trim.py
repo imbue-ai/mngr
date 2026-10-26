@@ -321,6 +321,7 @@ class BackupTrimManager(MutableModel):
                     else "Backup cleanup failed",
                     body=outcome.detail,
                     workspace_agent_id="",
+                    account_id=user_id,
                     workspace_name=account_email,
                     workspace_accent=DEFAULT_WORKSPACE_COLOR,
                 )

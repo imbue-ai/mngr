@@ -8,6 +8,7 @@ import {
   FINISHING_LINE,
   PATH_ASK,
   SETUP_LINE,
+  SHOWCASE_APP,
   SHOWCASE_READ_MS,
   readyTurnMarkdown,
 } from "../../models/creationTranscript";
@@ -15,7 +16,7 @@ import { FLOW_THINK_MS, MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } fr
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import type { AnyVnode } from "../../testing";
-import { allText, byId, classTokensOf, classesOf, collectText, attrsOf, collectVnodes, jsonResponse } from "../../testing";
+import { allText, byId, classTokensOf, classesOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
 import { Button } from "../components/Button";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
@@ -516,6 +517,41 @@ describe("CreatingPage across a route change", () => {
     expect(entered).toEqual([]);
     await vi.advanceTimersByTimeAsync(3000);
     expect(entered).toEqual(["agent-0123abcd"]);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("opens the recording enlarged on a click and closes it again", async () => {
+    const { page } = mountDoneAttempt("create-attempt-q", "DONE", true);
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-q"));
+    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-build-answers"));
+    pressAnswer(page, "create-attempt-q", "no");
+    pressAnswer(page, "create-attempt-q", "examples");
+
+    // The recording is a control; nothing is enlarged until it is pressed.
+    const settled = renderDeep(render());
+    expect(collectVnodes(settled).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
+    const opener = collectVnodes(settled).find(
+      (node) => attrsOf(node)["aria-label"] === `View the ${SHOWCASE_APP.title} recording larger`,
+    ) as AnyVnode;
+    expect(opener.tag).toBe("button");
+    (attrsOf(opener).onclick as () => void)();
+
+    // Enlarged: the same recording in a dialog, over the page.
+    const enlarged = renderDeep(render());
+    const dialog = collectVnodes(enlarged).find((node) => attrsOf(node).role === "dialog") as AnyVnode;
+    expect(dialog).toBeDefined();
+    expect(attrsOf(dialog)["aria-label"]).toBe(SHOWCASE_APP.title);
+    const enlargedImage = collectVnodes(dialog).find(
+      (node) => node.tag === "img" && attrsOf(node).src === SHOWCASE_APP.gifUrl,
+    );
+    expect(enlargedImage).toBeDefined();
+
+    // Its close control takes it down again.
+    const close = collectVnodes(enlarged).find(
+      (node) => attrsOf(node)["aria-label"] === "Close image viewer",
+    ) as AnyVnode;
+    (attrsOf(close).onclick as () => void)();
+    expect(collectVnodes(renderDeep(render())).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
     (page.onremove as () => void).call(page);
   });
 

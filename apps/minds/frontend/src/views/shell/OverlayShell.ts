@@ -27,6 +27,7 @@ import {
   openTitlebarPopup,
   titlebarAnchors,
 } from "./RaisedTitlebarIcons";
+import { accountSwitcherLabel } from "./AccountSwitcher";
 import { OverlayBackdrop } from "./OverlayBackdrop";
 import { DialogCloseButton } from "../components/Modal";
 import type { CardBox } from "./card-resize";
@@ -260,6 +261,7 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
                 shell.displayedWorkspaceAgentId(),
               ),
             agentId: shell.displayedWorkspaceAgentId(),
+            accountLabel: accountSwitcherLabel(shell),
           }),
     ];
   }

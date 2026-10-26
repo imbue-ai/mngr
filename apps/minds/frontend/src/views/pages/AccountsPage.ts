@@ -1,4 +1,4 @@
-// Manage Accounts: signed-in account cards with default/log-out controls and
+// Manage Accounts: signed-in account cards with log-out controls and
 // per-account plan + usage (loaded asynchronously, never blocking first
 // paint). Port of templates/pages/Accounts.jinja + accounts.js; the legacy
 // accounts modal collapses into this page (modals are plain routes now).

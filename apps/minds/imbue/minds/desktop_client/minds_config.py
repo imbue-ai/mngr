@@ -1,8 +1,8 @@
 """Imbue Studio application configuration stored in ``~/.minds/config.toml``.
 
 Provides a thread-safe interface for reading and writing user preferences
-that persist across sessions, such as the default account for new workspaces
-and the error-reporting preferences.
+that persist across sessions, such as the error-reporting preferences and the
+order in which accounts and workspaces were last shown.
 
 The env-selection URL (``connector_url``, ``litellm_proxy_url``) lives in
 the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is
@@ -27,6 +27,12 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
+
+# How many accounts, and how many workspaces per account, the ``[recent]``
+# lists keep. Both are consulted for a switch target and a new window's account,
+# so a bound well above what one install holds loses nothing.
+MAX_RECENT_ACCOUNTS: Final[int] = 32
+MAX_RECENT_WORKSPACES_PER_ACCOUNT: Final[int] = 64
 
 # Local-clock hours [start, end) scheduled updates run in by default.
 DEFAULT_UPDATE_WINDOW: Final[tuple[int, int]] = (2, 5)
@@ -105,23 +111,38 @@ def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
     return {str(key): item for key, item in value.items()}
 
 
+def _str_list(value: object) -> list[str]:
+    """A TOML array read as a list of strings; anything else reads as empty."""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _recent_account_ids(data: dict[str, object]) -> list[str]:
+    recent = _as_str_keyed_dict(data.get("recent"))
+    return _str_list(recent.get("accounts")) if recent is not None else []
+
+
+def _recent_workspace_ids(data: dict[str, object], account_id: str) -> list[str]:
+    recent = _as_str_keyed_dict(data.get("recent"))
+    if recent is None:
+        return []
+    by_account = _as_str_keyed_dict(recent.get("workspaces_by_account"))
+    return _str_list(by_account.get(account_id)) if by_account is not None else []
+
+
 @pure
-def resolve_default_account_id(
-    stored_default_account_id: str | None,
-    signed_in_user_ids: Sequence[str],
-) -> str | None:
-    """Return the account new workspaces default to: the stored default while it is signed in, else the first signed-in account.
-
-    None only when no account is signed in, so a signed-in account always has a default beside it.
-    """
-    if stored_default_account_id is not None and stored_default_account_id in signed_in_user_ids:
-        return stored_default_account_id
-    return signed_in_user_ids[0] if signed_in_user_ids else None
+def _moved_to_front(items: Sequence[str], item: str, max_count: int) -> list[str]:
+    """``items`` with ``item`` first (added when absent), bounded to ``max_count``."""
+    return [item] + [other for other in items if other != item][: max_count - 1]
 
 
-def _stored_default_account_id(data: dict[str, object]) -> str | None:
-    value = data.get("default_account_id")
-    return str(value) if value is not None else None
+def _write_text_atomically(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a sibling temp file, creating the parent directory as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(text)
+    tmp_path.rename(path)
 
 
 class MindsConfig(MutableModel):
@@ -155,44 +176,53 @@ class MindsConfig(MutableModel):
             raise MindsConfigError(f"Failed to parse {path}: {e}") from e
 
     def _write_raw(self, data: dict[str, object]) -> None:
-        """Write the config data to TOML file atomically."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        """Write the config data to TOML file atomically.
+
+        Raises MindsConfigError when the file cannot be written, so a caller
+        handles a failed write the way it handles a failed read.
+        """
         path = self._config_path
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(tomlkit.dumps(data))
-        tmp_path.rename(path)
+        try:
+            _write_text_atomically(path, tomlkit.dumps(data))
+        except OSError as e:
+            raise MindsConfigError(f"Cannot write {path}: {e}") from e
 
-    def get_default_account_id(self) -> str | None:
-        """Return the default account user ID for new workspaces, or None."""
+    def get_recent_account_ids(self) -> list[str]:
+        """The accounts windows of this install last showed, most recent first (``[recent].accounts``)."""
         with self._lock:
-            return _stored_default_account_id(self._read_raw())
+            return _recent_account_ids(self._read_raw())
 
-    def settle_default_account_id(self, signed_in_user_ids: Sequence[str]) -> str | None:
-        """Resolve the default account (see :func:`resolve_default_account_id`) and store it when it changed.
+    def get_recent_workspace_ids(self, account_id: str) -> list[str]:
+        """The workspaces windows on ``account_id`` last opened, most recent first."""
+        with self._lock:
+            return _recent_workspace_ids(self._read_raw(), account_id)
 
-        Storing the fallback keeps it put when the account listing's order changes. An empty
-        listing stores nothing, since a failed listing reads the same and proves nothing.
+    def note_window_shows(self, account_id: str, workspace_id: str | None) -> bool:
+        """Move ``account_id`` (and ``workspace_id`` within it) to the front of the recent lists.
+
+        Fed by every window's ``client_state`` report, so it runs often: the file is
+        rewritten only when the order it records changes. Returns whether it did.
         """
         with self._lock:
             data = self._read_raw()
-            stored_default_account_id = _stored_default_account_id(data)
-            default_account_id = resolve_default_account_id(stored_default_account_id, signed_in_user_ids)
-            if default_account_id is not None and default_account_id != stored_default_account_id:
-                data["default_account_id"] = default_account_id
-                self._write_raw(data)
-        return default_account_id
-
-    def set_default_account_id(self, user_id: str | None) -> None:
-        """Set or clear the default account for new workspaces."""
-        with self._lock:
-            data = self._read_raw()
-            if user_id is not None:
-                data["default_account_id"] = user_id
-            elif "default_account_id" in data:
-                del data["default_account_id"]
-            else:
-                pass
+            recent_accounts = _recent_account_ids(data)
+            moved_accounts = _moved_to_front(recent_accounts, account_id, MAX_RECENT_ACCOUNTS)
+            recent_workspaces = _recent_workspace_ids(data, account_id)
+            moved_workspaces = (
+                recent_workspaces
+                if workspace_id is None
+                else _moved_to_front(recent_workspaces, workspace_id, MAX_RECENT_WORKSPACES_PER_ACCOUNT)
+            )
+            if moved_accounts == recent_accounts and moved_workspaces == recent_workspaces:
+                return False
+            recent = _as_str_keyed_dict(data.get("recent")) or {}
+            workspaces_by_account = _as_str_keyed_dict(recent.get("workspaces_by_account")) or {}
+            workspaces_by_account[account_id] = moved_workspaces
+            recent["accounts"] = moved_accounts
+            recent["workspaces_by_account"] = workspaces_by_account
+            data["recent"] = recent
             self._write_raw(data)
+            return True
 
     def get_sign_in_browser_id(self) -> str | None:
         """Return the browser provider sign-ins open in (see ``sign_in_browser``), or None for the default."""
@@ -487,10 +517,3 @@ class MindsConfig(MutableModel):
             _write_notification_prefs_into_raw(data, is_enabled, style)
             self._write_raw(data)
             return compute_version(is_enabled, style, True)
-
-
-def settle_default_account_id(minds_config: MindsConfig | None, signed_in_user_ids: Sequence[str]) -> str | None:
-    """The default account every reader of it shows: settled into ``minds_config``, or resolved alone without one."""
-    if minds_config is None:
-        return resolve_default_account_id(None, signed_in_user_ids)
-    return minds_config.settle_default_account_id(signed_in_user_ids)

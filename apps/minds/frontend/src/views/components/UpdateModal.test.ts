@@ -368,7 +368,11 @@ describe("the update modal over a machine too old to update in place", () => {
     press(draw(), "Create a new workspace");
 
     expect(onClose).toHaveBeenCalled();
-    expect(routeSet).toHaveBeenCalledWith("/create");
+    expect(routeSet).toHaveBeenCalledWith(
+      "/account/local/create",
+      undefined,
+      undefined,
+    );
   });
 });
 

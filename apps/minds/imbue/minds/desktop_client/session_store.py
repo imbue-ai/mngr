@@ -318,6 +318,30 @@ class MultiAccountSessionStore(MutableModel):
                 return _build_session(account, workspace_ids)
         return None
 
+    def get_owner_user_id_for_workspace(self, workspace_any_id: str) -> str | None:
+        """The account a workspace (by either coordinate) is associated with, signed in here or not.
+
+        None for a workspace with no record. The association is record existence,
+        so it names an account whose session is gone from this device as readily
+        as a signed-in one: the window scoping lists such a workspace under its
+        account, not under the device. A ``host-`` coordinate (a restored window's
+        URL) is mapped through the records too, so a workspace discovery does not
+        report resolves all the same.
+        """
+        if self.record_store is None:
+            return None
+        agent_id = (
+            self.record_store.active_agent_id_for_host(workspace_any_id)
+            if workspace_any_id.startswith("host-")
+            else workspace_any_id
+        )
+        if agent_id is None:
+            return None
+        for user_id, workspace_ids in self._associations_view().items():
+            if agent_id in workspace_ids:
+                return user_id
+        return None
+
     def is_any_signed_in(self) -> bool:
         """Whether at least one account is currently signed in (per the plugin)."""
         return bool(self._identity_by_user_id())

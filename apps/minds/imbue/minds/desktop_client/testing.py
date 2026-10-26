@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -91,6 +92,7 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
+from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -498,14 +500,16 @@ def build_ui_state_publisher_for_test(
     derive_workspaces: Callable[[], UiWorkspacesMessage] = _empty_workspaces_message,
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = tuple,
     min_seconds_between_passes: float = DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
+    resolve_workspace_account_id: Callable[[str], str] = lambda _agent_id: LOCAL_PROFILE_USER_ID,
 ) -> tuple[UiStatePublisher, "queue.Queue[str | None]"]:
     """A publisher over a fresh broadcaster, plus the queue one registered window reads.
 
     Every derive answers an empty frame, because the tests that build one of
     these are about what the publisher *does* with the frames rather than what is
-    in them. The two exceptions are the two a test can want to say something
-    about: the workspace list a caller mutates between passes, and the health
-    states a snapshot replays.
+    in them. The exceptions are the ones a test can want to say something about:
+    the workspace list a caller mutates between passes, the health states a
+    snapshot replays, and which account a health edge is routed to (the device's
+    by default).
 
     Shared rather than rebuilt per file: the derive list is the publisher's
     constructor signature, so every frame added to the wire would otherwise have
@@ -516,9 +520,7 @@ def build_ui_state_publisher_for_test(
     publisher = UiStatePublisher(
         broadcaster=broadcaster,
         derive_workspaces=derive_workspaces,
-        derive_accounts=lambda: UiAccountsMessage(
-            has_accounts=False, account_email="", extra_account_count=0, accounts=()
-        ),
+        derive_accounts=lambda: UiAccountsMessage(account_id=LOCAL_PROFILE_USER_ID, has_accounts=False, accounts=()),
         derive_providers=lambda: UiProvidersMessage(
             accounts=(), device_providers=(), last_event_at=None, last_full_snapshot_at=None
         ),
@@ -530,9 +532,16 @@ def build_ui_state_publisher_for_test(
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
         derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
+        resolve_workspace_account_id=resolve_workspace_account_id,
         min_seconds_between_passes=min_seconds_between_passes,
     )
-    return publisher, broadcaster.register()
+    client_queue = broadcaster.register()
+    # The window shows the device account, as a fresh install's first window does,
+    # so the account-scoped frames reach it.
+    broadcaster.set_client_state(
+        client_queue, UiClientStateMessage(client_id="test-window", route="/", account_id=LOCAL_PROFILE_USER_ID)
+    )
+    return publisher, client_queue
 
 
 _DEFAULT_WORKSPACE_AGENT_NAME: Final[AgentName] = AgentName("my-claude-agent")

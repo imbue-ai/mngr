@@ -53,6 +53,7 @@ class CreateAttemptRow(FrozenModel):
     provider_instance_name: str = Field(default="", description="Provider instance the create attempt targets")
     launch_mode: LaunchMode = Field(description="Compute launch mode of the create attempt")
     account_email: str = Field(default="", description="Owning account's email, empty for a private workspace")
+    account_id: str = Field(default="", description="Owning account's user id, empty for a private workspace")
     color: str | None = Field(default=None, description="Workspace accent color, when the request chose one")
     error: str | None = Field(default=None, description="Error message, set for FAILED rows")
     error_kind: str | None = Field(default=None, description="Machine-readable failure classification, if any")
@@ -82,6 +83,7 @@ def _row_from_live_info(
         provider_instance_name=info.provider_instance_name,
         launch_mode=info.launch_mode,
         account_email=record.request.account_email if record is not None else "",
+        account_id=record.request.account_id if record is not None else "",
         color=record.request.color if record is not None else None,
         error=info.error,
         error_kind=str(info.error_kind) if info.error_kind is not None else None,
@@ -107,6 +109,7 @@ def _row_from_record(record: PendingCreateAttemptRecord) -> CreateAttemptRow | N
         provider_instance_name=record.provider_instance_name,
         launch_mode=record.request.launch_mode,
         account_email=record.request.account_email,
+        account_id=record.request.account_id,
         color=record.request.color,
         error=record.error,
         error_kind=record.error_kind,

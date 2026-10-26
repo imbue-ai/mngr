@@ -19,6 +19,7 @@
 import m from "mithril";
 import type { ShellState } from "./shell-state";
 import {
+  hubPagePath,
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
@@ -39,6 +40,7 @@ import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
 import { ANCHORED_CARD_CLASS, OverlayShell } from "./OverlayShell";
 import { SidebarMenu } from "./SidebarMenu";
+import { AccountSwitcherMenu } from "./AccountSwitcher";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
 import { NotificationChoiceCard } from "./NotificationChoiceCard";
@@ -222,7 +224,7 @@ export function Shell(): m.Component<ShellAttrs> {
       // The New workspace template stepper floats as a modal only when it is
       // over a machine (?workspace=); opened with none it redirects to the full
       // create form, so it is not an overlay then.
-      const isTemplateRoute = routePath === "/create/template";
+      const isTemplateRoute = hubPagePath(routePath) === "/create/template";
       // The workspace surface kept mounted underneath: the agent surface itself,
       // or the workspace a Get help / request popup / template modal was
       // opened over. Rendering it at a stable vtree position keeps its iframe
@@ -467,7 +469,7 @@ export function Shell(): m.Component<ShellAttrs> {
       // any of the Shell's own modals rather than stacking on one.
       const isAutoUpdatePromptPlaceable =
         popout === null &&
-        (routePath === "/" ||
+        (hubPagePath(routePath) === "/" ||
           (workspaceParam !== null && !isWorkspaceOverlayPath(routePath))) &&
         overlay === null &&
         !isRecoveryOpen &&
@@ -489,6 +491,7 @@ export function Shell(): m.Component<ShellAttrs> {
           ? m(Titlebar, { shell, routePath })
           : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
         popout === null ? m(SidebarMenu, { shell }) : null,
+        popout === null ? m(AccountSwitcherMenu, { shell }) : null,
         // A popout dragged over this window offers to return its window to the
         // desktop here; the overlay names the drop.
         shell.isPopoutDropTarget && surfaceWorkspaceId !== null && popout === null

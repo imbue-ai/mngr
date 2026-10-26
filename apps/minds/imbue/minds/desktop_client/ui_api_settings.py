@@ -4,7 +4,7 @@ JSON twins of the data that used to be server-rendered into the Settings,
 Accounts, and AI-keys pages, plus the settings writes the SPA performs
 directly (the error-reporting opt-out and the notification preferences).
 Mutating flows the legacy POST routes already implement (permission revokes,
-connector add/disconnect, plan switch, trim, set-default, logout, key mint,
+connector add/disconnect, plan switch, trim, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
 The error-reporting and notification-prefs writes are records Imbue Studio owns,

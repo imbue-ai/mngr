@@ -1,14 +1,26 @@
 Feature: Home page routing
-  "/" is the home page.
-  For an authenticated user, what it shows depends on the one-time consent gate, whether initial workspace discovery has finished, which workspaces are known, and -- when none are -- whether the installation has ever been taken past the first-run start flow ("onboarding complete": a workspace create was started, or the user signed in from the start flow's "I have an account (log in)" answer).
+  "/account/<account_id>/" is an account's home page, and "/" redirects to the most recently shown account's.
+  For an authenticated user, what it shows depends on the one-time consent gate, whether initial workspace discovery has finished, which of the account's workspaces are known, and -- when none are -- whether the installation has ever been taken past the first-run start flow ("onboarding complete": a workspace create was started, or the user signed in from the start flow's "I have an account (log in)" answer to an account that already has workspaces).
+
+  @bare-root-redirects
+  Scenario Outline: "/" is the home page of the account most recently shown in a window
+    Given an authenticated user who has answered the consent question
+    And <history>
+    When they visit "/"
+    Then they land on <destination>
+
+    Examples:
+      | history                                                       | destination                                        |
+      | no account has been shown in a window on this installation    | the device's home page, "/account/local/"          |
+      | the account "alice@example.com" was the last shown in a window | that account's home page, "/account/<alice's id>/" |
 
   @consent-gate
   Scenario: The consent question is asked once, right after a session is authenticated
     Given an authenticated user who has never answered the error-reporting consent question
-    When they visit "/"
+    When they visit a home page
     Then they see the "Help improve Imbue Studio" consent screen instead of the home page's normal content
     When they answer the consent question
-    Then no later visit to "/" ever shows the consent screen again
+    Then no later visit to a home page ever shows the consent screen again
 
   @consent-reporting-choice
   Scenario: The consent question is a checkbox that starts checked, and its answer is the reporting setting
@@ -22,38 +34,48 @@ Feature: Home page routing
   @discovering
   Scenario: While the first workspace discovery is still running, show progress
     Given an authenticated user who has answered the consent question
-    And no workspaces are known yet
+    And none of the account's workspaces are known yet
     And the initial workspace discovery has not finished
-    When they visit "/"
+    When they visit the account's home page
     Then they see a "Discovering workspaces" progress page that refreshes itself
 
   @empty-shows-create-form
   Scenario: With no workspaces and onboarding complete, the home page is the new-workspace form
     Given an authenticated user who has answered the consent question
     And the installation's onboarding is complete
-    And the initial workspace discovery finished without finding any workspace
-    When they visit "/"
-    Then they see the new-workspace form
+    And the initial workspace discovery finished without finding any workspace of the account
+    When they visit the account's home page
+    Then they see the new-workspace form, which creates under that account
+
+  @signed-out-account-offers-login
+  Scenario: The home page of a signed-out account offers to log in instead of creating
+    Given an authenticated user who has answered the consent question
+    And the account "alice@example.com" is signed out but has workspaces on this installation
+    When they visit that account's home page
+    Then its workspaces are listed
+    And where the page would offer to create a workspace it offers to log in
 
   @empty-starts-onboarding
   Scenario: With no workspaces and onboarding incomplete, the home page hands over to the start flow
     Given an authenticated user whose installation has never been taken past the start flow
     And the initial workspace discovery finished without finding any workspace
-    When they visit "/"
+    When they visit a home page
     Then they are taken to the start flow, the chat that creates their first workspace
-    And once a create is started, or they sign in from the start flow's "I have an account (log in)" answer, no later visit to "/" ever hands over to the start flow again
+    And once a create is started, or they sign in from the start flow's "I have an account (log in)" answer to an account that already has workspaces, no later visit to a home page ever hands over to the start flow again
 
   @deep-link-prefill
   Scenario: A deep link pre-fills the new-workspace form
     Given an authenticated user who has answered the consent question
-    And the initial workspace discovery finished without finding any workspace
-    When they visit "/" with a git URL and/or branch in the query string
+    And the initial workspace discovery finished without finding any workspace of the account
+    When they visit the account's home page with a git URL and/or branch in the query string
     Then the new-workspace form is pre-filled with those values
     And the form opens with its advanced fields visible
 
   @lists-workspaces
-  Scenario: With workspaces, the home page lists every one of them
+  Scenario: With workspaces, the home page lists every one of the account's
     Given an authenticated user who has answered the consent question
-    And they have one or more workspaces (discovered locally or synced from their other devices)
-    When they visit "/"
-    Then every one of those workspaces is listed
+    And the account has one or more workspaces (discovered locally or synced from their other devices)
+    And another account has workspaces on this installation
+    When they visit the account's home page
+    Then every one of the account's workspaces is listed
+    And none of the other account's workspaces is

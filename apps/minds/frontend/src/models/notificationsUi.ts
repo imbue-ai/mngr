@@ -85,6 +85,9 @@ export interface NotificationGestureContext {
   createAttemptStateOf(agentScopedId: string): string | null;
   /** Agent-scoped id of the displayed workspace, or null on hub pages. */
   displayedWorkspaceAgentId(): string | null;
+  /** `params` plus what an overlay route carries so a reload keeps the
+   * window's account (`ShellState.overlayQuery`). */
+  overlayQuery(params: Record<string, string>): Record<string, string>;
   /** Open the review popup over the CURRENT surface (the shell forwards the
    * displayed workspace so it stays mounted behind the popup). */
   openInPlace(requestId: string): void;
@@ -256,14 +259,15 @@ export class NotificationGestures {
 
   /** The system-event gesture: the route the event names, else the workspace's
    * backups page, or the accounts page (where the backup quota lives) for an
-   * account-level event. */
+   * account-level event, opened as this window's overlay: an entry that names
+   * an account only reaches that account's windows. */
   openSystemEvent(workspaceAgentId: string, linkPath = ""): void {
     if (linkPath !== "") {
       m.route.set(linkPath);
       return;
     }
     if (workspaceAgentId === "") {
-      m.route.set("/accounts");
+      m.route.set("/accounts", this.context?.overlayQuery({}));
       return;
     }
     m.route.set(`/workspace/${this.agentScopedIdOf(workspaceAgentId)}/backups`);

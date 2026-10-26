@@ -92,6 +92,7 @@ export class UiChannelClient {
   private isStopped = false;
   private currentRoute = "/";
   private currentWorkspaceAgentId: string | null = null;
+  private currentAccountId = "";
 
   constructor(options: ChannelOptions) {
     this.options = options;
@@ -127,17 +128,23 @@ export class UiChannelClient {
     );
   }
 
-  setClientState(route: string, workspaceAgentId: string | null): void {
+  setClientState(
+    route: string,
+    workspaceAgentId: string | null,
+    accountId: string,
+  ): void {
     // Called from the route resolver's render, i.e. on EVERY redraw; only an
     // actual change warrants a frame. Reconnect registration is unaffected:
     // the onopen path calls sendClientState directly.
     if (
       route === this.currentRoute &&
-      workspaceAgentId === this.currentWorkspaceAgentId
+      workspaceAgentId === this.currentWorkspaceAgentId &&
+      accountId === this.currentAccountId
     )
       return;
     this.currentRoute = route;
     this.currentWorkspaceAgentId = workspaceAgentId;
+    this.currentAccountId = accountId;
     this.sendClientState();
   }
 
@@ -196,6 +203,9 @@ export class UiChannelClient {
         // for a banner.
         window_kind: popoutFromPath(this.currentRoute) === null ? "main" : "popout",
         is_screen_locked: (this.options.isScreenLocked ?? isScreenLocked)(),
+        // The account this window shows: the server answers a change of it with
+        // that account's snapshot, and scopes every later frame to it.
+        account_id: this.currentAccountId,
       }),
     );
   }

@@ -185,7 +185,7 @@ describe("AccountsDetailModel", () => {
     const model = new AccountsDetailModel(
       async (input, init) => {
         const url = String(input);
-        if (url === "/accounts/set-default") {
+        if (url === "/accounts/user-1/logout") {
           observedBody = String(init?.body);
           observedContentType = new Headers(init?.headers).get("Content-Type");
           return new Response("", { status: 200 });
@@ -196,9 +196,9 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    await model.setDefault("user-1");
+    await model.logOut("user-1");
 
-    expect(observedBody).toBe("user_id=user-1");
+    expect(observedBody).toBe("");
     expect(observedContentType).toBe("application/x-www-form-urlencoded");
   });
 });

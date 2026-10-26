@@ -15,9 +15,9 @@ function defaultFetcher(url: string, init?: RequestInit): Promise<Response> {
 /**
  * Whether this install is past the first-run start flow, as this window knows
  * it. Seeded from the bootstrap document and flipped locally the moment the
- * SPA completes onboarding itself (a sign-in from the start flow, or a create
- * submission), so the home page's redirect never fires against a seed that the
- * server has since moved past.
+ * SPA completes onboarding itself (a start-flow sign-in landing on an account
+ * that has workspaces, or a create submission), so the home page's redirect
+ * never fires against a seed that the server has since moved past.
  */
 export class OnboardingProgress {
   isComplete = true;
@@ -52,6 +52,35 @@ export async function recordErrorReportingConsent(
   } catch {
     return false;
   }
+}
+
+/**
+ * Where the start flow's existing-login sign-in should land, as the backend
+ * knows it: "done" with the account's synced-workspace count once the first
+ * record fetch has finished (or the records were already local), "pending"
+ * while it is still in flight, "failed" when the last fetch could not reach
+ * the sync service.
+ */
+export interface SigninLanding {
+  state: "pending" | "done" | "failed";
+  workspace_count: number;
+}
+
+/** GET the landing answer for the account the existing-login sign-in reported. */
+export async function fetchSigninLanding(
+  accountId: string,
+  fetcher: FetchLike = defaultFetcher,
+): Promise<SigninLanding> {
+  const response = await fetcher(
+    `/ui/api/onboarding/signin-landing?account=${encodeURIComponent(accountId)}`,
+  );
+  if (!response.ok) throw new Error(`The signin-landing route answered ${response.status}`);
+  const body = (await response.json()) as Partial<SigninLanding>;
+  const state = body.state === "pending" || body.state === "failed" ? body.state : "done";
+  return {
+    state,
+    workspace_count: typeof body.workspace_count === "number" ? body.workspace_count : 0,
+  };
 }
 
 /**

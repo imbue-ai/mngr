@@ -1,14 +1,30 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import { createEmptyStores } from "../../models/boot";
+import { ShellState } from "../shell/shell-state";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, collectVnodes, createFormDefaults, jsonResponse, settle } from "../../testing";
-import type { CloudAccountOption, CreateFormDefaults } from "../../models/create";
+import {
+  accountsMessage,
+  allText,
+  attrsOf,
+  collectVnodes,
+  createFormDefaults,
+  jsonResponse,
+  secondAccountEntry,
+  settle,
+} from "../../testing";
+import type {
+  CloudAccountOption,
+  CreateFormDefaults,
+} from "../../models/create";
 import { CreateTemplatePage } from "./CreateTemplatePage";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 
 afterEach(() => {
+  clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -26,7 +42,14 @@ const TEAM_AWS_CONNECTION: CloudAccountOption = {
 };
 
 /** The full page, already on "Where should it run?", rendered afresh as vnodes on each call. */
-async function pageOnWhereToRun(defaults: CreateFormDefaults): Promise<() => AnyVnode[]> {
+async function pageOnWhereToRun(
+  defaults: CreateFormDefaults,
+): Promise<() => AnyVnode[]> {
+  // The page reads the window's account off the shell for the defaults it fetches.
+  const stores = createEmptyStores();
+  const shell = new ShellState(stores);
+  shell.accountId = defaults.account?.user_id ?? "local";
+  registerAppContext({ stores, shell });
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(((key?: string) =>
     key === undefined ? undefined : ROUTE[key]) as typeof m.route.param);
@@ -62,17 +85,18 @@ describe("CreateTemplatePage", () => {
     expect(allText(nodes)).toContain("Your own cloud");
   });
 
-  it("drops an account's connection from the compute select when the account changes", async () => {
-    const defaults = createFormDefaults({ cloud_accounts: [TEAM_AWS_CONNECTION] });
-    const render = await pageOnWhereToRun(defaults);
+  it("offers only the device's compute when the window has no account", async () => {
+    const render = await pageOnWhereToRun(
+      createFormDefaults({
+        account: null,
+        cloud_accounts: [TEAM_AWS_CONNECTION],
+      }),
+    );
     pick(render(), "own-cloud");
-    expect(attrsOf(computeSelect(render()) as AnyVnode).value).toBe("CONNECTION:aws_acct");
-
-    const accountSelect = render().find((node) => attrsOf(node).id === "account_id") as AnyVnode;
-    (attrsOf(accountSelect).onchange as (event: Event) => void)({ target: { value: "" } } as unknown as Event);
 
     const select = computeSelect(render()) as AnyVnode;
-    expect(attrsOf(select).value).toBe(defaults.local_launch_mode);
+    // An account's connection is not on offer on the device: the own-cloud preset falls to Vultr.
+    expect(attrsOf(select).value).toBe("VULTR");
     expect(allText(select)).not.toContain("team aws");
   });
 
@@ -96,5 +120,76 @@ describe("CreateTemplatePage", () => {
     const notice = local().find((node) => attrsOf(node).id === "insp-slow-start-notice");
     expect(notice).toBeDefined();
     expect(allText(notice)).toBe(SLOW_START_WARNING);
+  });
+});
+
+describe("CreateTemplatePage's sign-in for Imbue Cloud", () => {
+  const BOB = secondAccountEntry();
+  const BOB_OPTION = {
+    user_id: BOB.user_id,
+    email: BOB.email,
+    state: "SIGNED_IN" as const,
+    is_connection_owner_eligible: true,
+  };
+
+  it("takes up the account signed in here when a device window creates on Imbue Cloud, then posts the create under it", async () => {
+    // The window is the device's, with Bob signed in on the install: the
+    // stepper's Create must not send the user to the accounts page they are
+    // already listed on, but take Bob up into the window and create.
+    const stores = createEmptyStores();
+    const shell = new ShellState(stores);
+    shell.accountId = "local";
+    stores.accounts.applyAccountsMessage(accountsMessage([BOB]));
+    registerAppContext({ stores, shell });
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    vi.spyOn(m.route, "param").mockImplementation(((key?: string) =>
+      key === undefined ? undefined : ROUTE[key]) as typeof m.route.param);
+    vi.spyOn(m.route, "get").mockReturnValue("/account/local/create/template");
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("document", { getElementById: () => null });
+    vi.stubGlobal("window", { history: { replaceState: () => undefined } });
+    const requests: [string, RequestInit | undefined][] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      requests.push([url, init]);
+      if (url === "/api/v1/workspaces")
+        return Promise.resolve(jsonResponse({ operation_id: "op-1" }, 202));
+      const account = url.endsWith(`account=${BOB.user_id}`)
+        ? BOB_OPTION
+        : null;
+      return Promise.resolve(jsonResponse(createFormDefaults({ account })));
+    });
+    const vnode = m(CreateTemplatePage) as m.Vnode;
+    const page = CreateTemplatePage(vnode);
+    page.oninit?.call(page, vnode);
+    await settle();
+    const render = (): AnyVnode[] => collectVnodes(page.view.call(page, vnode));
+
+    pick(render(), "remote");
+    const trust = render().find(
+      (node) => attrsOf(node).type === "checkbox",
+    ) as AnyVnode;
+    (attrsOf(trust).onchange as (event: unknown) => void)({
+      target: { checked: true },
+    });
+    const form = render().find((node) => node.tag === "form") as AnyVnode;
+    (attrsOf(form).onsubmit as (event: unknown) => void)({
+      preventDefault: () => undefined,
+    });
+    await settle();
+
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(requests.map(([url]) => url)).toEqual([
+      "/ui/api/create/form-defaults?account=local",
+      `/ui/api/create/form-defaults?account=${BOB.user_id}`,
+      "/api/v1/workspaces",
+    ]);
+    const createInit = requests[2]?.[1] as RequestInit;
+    expect(JSON.parse(String(createInit.body))).toMatchObject({
+      account_id: BOB.user_id,
+      launch_mode: "IMBUE_CLOUD",
+    });
+    expect(routeSet).toHaveBeenCalledWith("/creating/op-1");
   });
 });

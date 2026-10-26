@@ -8,12 +8,16 @@ import m from "mithril";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { Shell } from "./views/shell/Shell";
 import {
+  HUB_PAGES,
+  accountHubRoute,
+  isHubPage,
   isWorkspaceOverlayPath,
   popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./views/shell/classify";
+import type { HubPage } from "./views/shell/classify";
 import type { ShellState } from "./views/shell/shell-state";
 import { DevStyleguide } from "./views/pages/DevStyleguide";
 import { AccountsPage } from "./views/pages/AccountsPage";
@@ -42,16 +46,24 @@ interface RouteEntry {
   component: m.ComponentTypes;
 }
 
+// The hub pages, each under an account: /account/<id>/ is that account's home.
+const HUB_PAGE_COMPONENTS: Record<HubPage, m.ComponentTypes> = {
+  "/": LandingPage,
+  "/create": CreatePage,
+  "/create/template": CreateTemplatePage,
+  "/workspaces/destroyed": DestroyedWorkspacesPage,
+  "/workspaces/shared": SharedWorkspacesPage,
+};
+
 const ROUTE_ENTRIES: RouteEntry[] = [
-  { path: "/", component: LandingPage },
-  { path: "/create", component: CreatePage },
-  { path: "/create/template", component: CreateTemplatePage },
+  ...HUB_PAGES.map((page) => ({
+    path: `/account/:accountId${page === "/" ? "" : page}`,
+    component: HUB_PAGE_COMPONENTS[page],
+  })),
   { path: "/creating/:agentId", component: CreatingPage },
   { path: "/settings", component: SettingsPage },
   { path: "/settings/ai-keys", component: AiKeysPage },
   { path: "/accounts", component: AccountsPage },
-  { path: "/workspaces/destroyed", component: DestroyedWorkspacesPage },
-  { path: "/workspaces/shared", component: SharedWorkspacesPage },
   // The workspace content surface (SPA twin of the deleted /_chrome wrapper).
   // Accepts agent- OR host-scoped ids: cold-start restore navigates with a
   // host-scoped id before the snapshot provides the alias mapping.
@@ -83,6 +95,24 @@ const ROUTE_ENTRIES: RouteEntry[] = [
 
 export function mountRouter(root: Element, shell: ShellState): void {
   const resolvers: m.RouteDefs = {};
+
+  // The bare hub spellings (/, /create, ...) land on the window's account's
+  // hub, query intact: existing deep links, Electron's home loads, and
+  // sessions saved before the account segment all keep working. The window's
+  // account is the bootstrap's answer for the served URL (the most recently
+  // used account for a bare one).
+  for (const page of HUB_PAGES) {
+    resolvers[page] = {
+      onmatch(_args, requestedPath) {
+        const query = requestedPath.split("?")[1];
+        m.route.set(
+          accountHubRoute(shell.accountId, page) + (query ? `?${query}` : ""),
+          undefined,
+          { replace: true },
+        );
+      },
+    };
+  }
 
   const wrap = (component: m.ComponentTypes): m.RouteResolver => ({
     onmatch: () => component,
@@ -133,7 +163,7 @@ export function mountRouter(root: Element, shell: ShellState): void {
   resolvers["/:notFound..."] = wrap(RouteError);
 
   m.route.prefix = "";
-  m.route(root as HTMLElement, "/", resolvers);
+  m.route(root as HTMLElement, accountHubRoute(shell.accountId), resolvers);
 }
 
 /** Port of chrome.js's navigateContent for URLs arriving from outside the
@@ -180,12 +210,17 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
       };
       const branch = parsed.searchParams.get("branch");
       if (branch) query.branch = branch;
-      m.route.set("/create/template", query);
+      m.route.set(shell.hubRoute("/create/template"), query);
       return;
     }
-    shell.routeTo(parsed.pathname + parsed.search);
+    // A bare hub spelling from outside (Electron's home load, a deeplink's
+    // /create) is this window's account's page.
+    const target = isHubPage(parsed.pathname)
+      ? shell.hubRoute(parsed.pathname)
+      : parsed.pathname;
+    shell.routeTo(target + parsed.search);
   } catch {
-    m.route.set("/");
+    shell.routeToHub();
   }
 }
 

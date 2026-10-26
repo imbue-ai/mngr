@@ -256,6 +256,38 @@ describe("WebLoginModel", () => {
   });
 });
 
+describe("WebLoginModel's landed account", () => {
+  it("keeps the user id and email the poll reports, and clears them for the next flow", async () => {
+    vi.useFakeTimers();
+    try {
+      const bodies = [
+        { state: "waiting" },
+        { state: "done", user_id: "user-9", email: "nine@example.com" },
+        { state: "waiting" },
+      ];
+      const model = new WebLoginModel(
+        (input) =>
+          Promise.resolve(
+            String(input).includes("/web-login/start") ? jsonResponse({ flow_id: "flow-1" }) : jsonResponse(bodies.shift()),
+          ),
+        () => {},
+        () => {},
+      );
+      await model.start();
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      expect([model.state, model.userId, model.email]).toEqual(["waiting", "", ""]);
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      expect([model.state, model.userId, model.email]).toEqual(["done", "user-9", "nine@example.com"]);
+
+      model.dismiss();
+      await model.start();
+      expect([model.userId, model.email]).toEqual(["", ""]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("WebLoginModel.start joining a waiting sign-in", () => {
   function makeModel(startBody: object): { model: WebLoginModel; openedUrls: string[] } {
     const openedUrls: string[] = [];

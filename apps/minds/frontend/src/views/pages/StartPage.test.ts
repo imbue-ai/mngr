@@ -18,7 +18,7 @@ const SIGNED_OUT = { signedInAccount: null, knownAccountIds: [] };
 const SIGNED_IN = { signedInAccount: { userId: "user-1", email: "a@b.com" }, knownAccountIds: ["user-1"] };
 
 describe("cloudCreateBody", () => {
-  it("is the create form's remote preset with the default account and its region", () => {
+  it("is the create form's remote preset under the flow's account, with its region", () => {
     const body = cloudCreateBody(createFormDefaults(), "user-1");
     expect(body).toMatchObject({
       launch_mode: "IMBUE_CLOUD",
@@ -34,14 +34,18 @@ describe("cloudCreateBody", () => {
     });
   });
 
-  it("runs under the flow's account rather than the default", () => {
+  it("runs under the flow's account", () => {
     const withBob = createFormDefaults({
-      accounts: [
-        { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-        { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-      ],
+      account: {
+        user_id: "user-2",
+        email: "bob@example.com",
+        state: "SIGNED_IN",
+        is_connection_owner_eligible: true,
+      },
     });
-    expect(cloudCreateBody(withBob, "user-2")).toMatchObject({ account_id: "user-2" });
+    expect(cloudCreateBody(withBob, "user-2")).toMatchObject({
+      account_id: "user-2",
+    });
   });
 });
 
@@ -50,7 +54,9 @@ describe("areDefaultsStale", () => {
     // The route reads the defaults when it mounts, which on a first run is
     // before the account step; a create built from those could not name the
     // account that signed in since.
-    expect(areDefaultsStale(createFormDefaults({ accounts: [], default_account_id: "" }), "user-1")).toBe(true);
+    expect(
+      areDefaultsStale(createFormDefaults({ account: null }), "user-1"),
+    ).toBe(true);
     expect(areDefaultsStale(createFormDefaults(), "user-2")).toBe(true);
   });
 

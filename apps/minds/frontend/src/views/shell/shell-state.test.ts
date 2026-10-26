@@ -4,7 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { takePendingHelpLaunch } from "../../models/help";
 import { WebLoginModel } from "../../models/webLogin";
-import { workspacesMessage } from "../../testing";
+import type { UiChannelClient } from "../../channel/client";
+import {
+  accountEntry,
+  accountsMessage,
+  jsonResponse,
+  secondAccountEntry,
+  settle,
+  workspacesMessage,
+} from "../../testing";
 import type { WaitingRequestList } from "./shell-state";
 import { ShellState } from "./shell-state";
 
@@ -103,7 +111,7 @@ describe("ShellState.openInbox", () => {
 
     expect(routeSet).toHaveBeenCalledWith(
       "/inbox",
-      { selected: "evt-a", workspace: WORKSPACE_ID },
+      { selected: "evt-a", workspace: WORKSPACE_ID, account: "local" },
       undefined,
     );
   });
@@ -307,6 +315,20 @@ describe("ShellState.closeAppOverlay", () => {
       undefined,
       { replace: true },
     );
+  });
+
+  it("closes the template stepper floating over a machine on its account's hub route", () => {
+    // The stepper is opened on /account/<id>/create/template?workspace=: the
+    // hub prefix must not hide the modal from the dismissal.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/account/local/create/template?workspace=${WORKSPACE_ID}`);
+    expect(shell.displayedWorkspaceAnyId).toBe(WORKSPACE_ID);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(1);
   });
 
   it("still prefers history.back() for an app overlay with no workspace to name (e.g. Get help)", () => {
@@ -547,7 +569,7 @@ describe("ShellState review deep link", () => {
     expect(routeSet).toHaveBeenNthCalledWith(
       2,
       "/inbox",
-      { selected: "evt-1", workspace: WORKSPACE_ID },
+      { selected: "evt-1", workspace: WORKSPACE_ID, account: "local" },
       undefined,
     );
 
@@ -832,6 +854,66 @@ describe("ShellState.switchToNotifications", () => {
   });
 });
 
+describe("ShellState.switchToAccountSwitcher", () => {
+  it("puts Get help away and keeps the switcher up across that navigation's landing", () => {
+    // The account button on the raised strip over Get help is a switch between
+    // two titlebar popups: the arrival at the machine Get help is dismissed to
+    // must not close the switcher it opened.
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 5, back: vi.fn() } });
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.switchToAccountSwitcher();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    // An ORDINARY navigation after that still closes it.
+    land(shell, "/create");
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+
+  it("closes the docked options panel on its way to the switcher, replacing its entry", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.switchToAccountSwitcher();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+  });
+
+  it("just opens the switcher when there is no popup to put away, and the next navigation closes it", () => {
+    const shell = makeShell();
+    land(shell, "/create");
+    shell.openNotifications();
+
+    shell.switchToAccountSwitcher();
+
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+});
+
 describe("ShellState.openHelp", () => {
   it("floats over the displayed machine as an ordinary push", () => {
     // No titlebar popup is up (the titlebar's own bug button), so dismissing
@@ -846,13 +928,13 @@ describe("ShellState.openHelp", () => {
 
     expect(routeSet).toHaveBeenCalledWith(
       "/help",
-      { workspace: WORKSPACE_ID, assist: "1" },
+      { workspace: WORKSPACE_ID, assist: "1", account: "local" },
       undefined,
     );
   });
 
   it("replaces another titlebar popup's entry when switched to from its strip", () => {
-    // Options panel -> bug icon is a switch between two of the five surfaces:
+    // Options panel -> bug icon is a switch between two of the strip's surfaces:
     // pushed, the panel would be left one Back away under Get help, and
     // dismissing the form would re-raise the panel that was just left.
     const shell = makeShell();
@@ -865,7 +947,7 @@ describe("ShellState.openHelp", () => {
 
     expect(routeSet).toHaveBeenCalledWith(
       "/help",
-      { workspace: WORKSPACE_ID, assist: "1" },
+      { workspace: WORKSPACE_ID, assist: "1", account: "local" },
       { replace: true },
     );
   });
@@ -873,7 +955,7 @@ describe("ShellState.openHelp", () => {
   it("lets go of the panel the request popup was remembering", () => {
     // Switching the popup for Get help leaves the panel like it leaves the
     // popup. Kept, the panel stayed painted under Get help with its own
-    // backdrop and its own raised strip -- two of the five surfaces at once.
+    // backdrop and its own raised strip -- two of the strip's surfaces at once.
     const shell = makeShell();
     const optionsRoute = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
     land(shell, optionsRoute);
@@ -888,7 +970,7 @@ describe("ShellState.openHelp", () => {
 
     expect(routeSet).toHaveBeenLastCalledWith(
       "/help",
-      { workspace: WORKSPACE_ID, assist: "1" },
+      { workspace: WORKSPACE_ID, assist: "1", account: "local" },
       { replace: true },
     );
     // The panel lives exactly as long as /inbox is the route: it is let go
@@ -914,7 +996,7 @@ describe("ShellState.openHelpForAgentAsk", () => {
 
     expect(routeSet).toHaveBeenCalledWith(
       "/help",
-      { workspace: WORKSPACE_ID },
+      { workspace: WORKSPACE_ID, account: "local" },
       undefined,
     );
     // The route names the machine, so the Shell reads it as displayed.
@@ -949,7 +1031,7 @@ describe("ShellState.openHelpForAgentAsk", () => {
 
     expect(routeSet).toHaveBeenCalledWith(
       "/help",
-      { workspace: WORKSPACE_ID },
+      { workspace: WORKSPACE_ID, account: "local" },
       { replace: true },
     );
   });
@@ -971,13 +1053,13 @@ describe("ShellState.openHelpForAgentAsk arriving twice", () => {
     expect(routeSet).toHaveBeenNthCalledWith(
       1,
       "/help",
-      { workspace: WORKSPACE_ID },
+      { workspace: WORKSPACE_ID, account: "local" },
       undefined,
     );
     expect(routeSet).toHaveBeenNthCalledWith(
       2,
       "/help",
-      { workspace: WORKSPACE_ID },
+      { workspace: WORKSPACE_ID, account: "local" },
       { replace: true },
     );
     expect(takePendingHelpLaunch()).toMatchObject({
@@ -1740,7 +1822,10 @@ describe("pulled-out windows (the popout route)", () => {
 
   /** A shell on the popout route, its frame's reattach sender recording what
    * it is asked to send. */
-  function popoutShell(): { shell: ShellState; sends: { windowId: string; frame: unknown }[] } {
+  function popoutShell(): {
+    shell: ShellState;
+    sends: { windowId: string; frame: unknown }[];
+  } {
     stubAccentPainting();
     const shell = new ShellState(createEmptyStores());
     const sends: { windowId: string; frame: unknown }[] = [];
@@ -1987,5 +2072,297 @@ describe("pulled-out windows (the popout route)", () => {
       "[link-routing] dropped a link main handed back, since no workspace frame is mounted: http://localhost:3000/after",
     ]);
     warn.mockRestore();
+  });
+});
+
+describe("ShellState's account", () => {
+  const ALICE = accountEntry();
+  const BOB = secondAccountEntry();
+  const BOBS_WORKSPACE = "agent-bb01";
+
+  /** A shell on Alice's hub, whose list holds her workspace and the device's, with a channel listening. */
+  function shellOnAlice(): {
+    shell: ShellState;
+    clientStates: [string, string | null, string][];
+  } {
+    const shell = makeShell();
+    shell.stores.accounts.applyAccountsMessage(
+      accountsMessage([ALICE, BOB], ALICE.user_id),
+    );
+    shell.stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({
+        workspaces: [
+          { ...workspacesMessage().workspaces[0], account_user_id: ALICE.user_id },
+          { ...workspacesMessage().workspaces[0], id: "agent-dd01", host_id: "host-dd02", name: "device" },
+        ],
+      }),
+    );
+    const clientStates: [string, string | null, string][] = [];
+    shell.channel = {
+      clientId: "win-asking",
+      setClientState: (route: string, workspaceAgentId: string | null, accountId: string) => {
+        clientStates.push([route, workspaceAgentId, accountId]);
+      },
+    } as unknown as UiChannelClient;
+    land(shell, `/account/${ALICE.user_id}/`);
+    clientStates.length = 0;
+    return { shell, clientStates };
+  }
+
+  /** A fetch that answers the switch-account route with `route`, or a refusal / failure. */
+  function stubSwitchAnswer(answer: { route: string } | number | Error): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      if (answer instanceof Error) throw answer;
+      if (typeof answer === "number") return jsonResponse({ error: "no" }, answer);
+      return jsonResponse(answer);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    return fetchMock;
+  }
+
+  it("reads the account off the route: the hub segment, a listed workspace's association, ?account=, the start flow", () => {
+    const { shell } = shellOnAlice();
+    expect(shell.accountIdForRoute(`/account/${BOB.user_id}/create`, "")).toBe(BOB.user_id);
+    expect(shell.accountIdForRoute("/account/local/", "")).toBe("local");
+    expect(shell.accountIdForRoute("/workspace/agent-aa11", "")).toBe(ALICE.user_id);
+    // By either coordinate, and a workspace associated with no account is the device's.
+    expect(shell.accountIdForRoute("/workspace/host-bb22/options", "")).toBe(ALICE.user_id);
+    // The sub-pages that replace the surface are the workspace's pages too.
+    expect(shell.accountIdForRoute("/workspace/agent-aa11/backups", "")).toBe(ALICE.user_id);
+    expect(shell.accountIdForRoute("/workspace/agent-aa11/settings", "")).toBe(ALICE.user_id);
+    expect(shell.accountIdForRoute("/workspace/agent-dd01", "")).toBe("local");
+    // A workspace the list does not know says nothing: the window keeps its account.
+    expect(shell.accountIdForRoute(`/workspace/${BOBS_WORKSPACE}`, "")).toBeNull();
+    expect(shell.accountIdForRoute("/settings", `account=${BOB.user_id}`)).toBe(BOB.user_id);
+    // A value that is not an account id names none, as the backend reads the same parameter.
+    expect(shell.accountIdForRoute("/settings", "account=..%2Fetc")).toBeNull();
+    expect(shell.accountIdForRoute("/settings", "account=")).toBeNull();
+    expect(shell.accountIdForRoute("/start", "")).toBe("local");
+    expect(shell.accountIdForRoute("/accounts", "")).toBeNull();
+  });
+
+  it("follows the route's account on a route change and builds its hub routes and overlay query from it", () => {
+    const { shell } = shellOnAlice();
+    expect(shell.accountId).toBe(ALICE.user_id);
+    expect(shell.hubRoute("/create")).toBe(`/account/${ALICE.user_id}/create`);
+    expect(shell.overlayQuery({ selected: "evt-a" })).toEqual({ selected: "evt-a", account: ALICE.user_id });
+
+    land(shell, "/workspace/agent-dd01");
+    expect(shell.accountId).toBe("local");
+    expect(shell.hubRoute()).toBe("/account/local/");
+  });
+
+  it("lands a switch on the answered workspace as that account's window, so the channel brings its rows", async () => {
+    const { shell, clientStates } = shellOnAlice();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const fetchMock = stubSwitchAnswer({ route: `/workspace/${BOBS_WORKSPACE}` });
+
+    await shell.switchAccount(BOB.user_id);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      account_id: BOB.user_id,
+      client_id: "win-asking",
+      is_desktop: false,
+    });
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(clientStates).toEqual([[`/account/${ALICE.user_id}/`, null, BOB.user_id]]);
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${BOBS_WORKSPACE}`);
+    // The landing commits before Bob's list arrives: the still-unknown workspace does not undo the switch,
+    // and whose it is was settled by the switch, so the backend is not asked.
+    land(shell, `/workspace/${BOBS_WORKSPACE}`);
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(shell.isAccountSwitchPending).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["refuses", 503],
+    ["cannot be asked", new Error("offline")],
+  ] as const)("lands a switch on the account's hub when the backend %s", async (_name, answer) => {
+    const { shell } = shellOnAlice();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    stubSwitchAnswer(answer);
+
+    await shell.switchAccount(BOB.user_id);
+
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([`/account/${BOB.user_id}/`]);
+  });
+
+  it("does not switch to the account the window already shows, nor twice while one switch is out", async () => {
+    const { shell } = shellOnAlice();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const fetchMock = stubSwitchAnswer({ route: `/account/${BOB.user_id}/` });
+
+    await shell.switchAccount(ALICE.user_id);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const first = shell.switchAccount(BOB.user_id);
+    const second = shell.switchAccount("local");
+    await Promise.all([first, second]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(routeSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("lands on the hub when another desktop window claims the workspace the switch answered", async () => {
+    const { shell } = shellOnAlice();
+    vi.stubGlobal("window", {
+      mindsNative: {
+        claimWorkspaceWindow: () => Promise.resolve({ opened_elsewhere: true }),
+      },
+    });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    stubSwitchAnswer({ route: `/workspace/${BOBS_WORKSPACE}` });
+
+    await shell.switchAccount(BOB.user_id);
+    await settle();
+
+    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([`/account/${BOB.user_id}/`]);
+    expect(shell.accountId).toBe(BOB.user_id);
+  });
+
+  it("adopts a landed account without navigating: the hub URL is rewritten in place and the channel told", () => {
+    const { shell, clientStates } = shellOnAlice();
+    const replaceState = vi.fn();
+    vi.stubGlobal("window", { history: { replaceState } });
+    vi.spyOn(m.route, "get").mockReturnValue(`/account/${ALICE.user_id}/create?git_url=x`);
+
+    shell.adoptAccount(ALICE.user_id);
+    expect(clientStates).toEqual([]);
+
+    shell.adoptAccount(BOB.user_id);
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(replaceState).toHaveBeenCalledWith(null, "", `/account/${BOB.user_id}/create?git_url=x`);
+    expect(clientStates).toEqual([[`/account/${ALICE.user_id}/create`, null, BOB.user_id]]);
+  });
+
+  it("keeps an adopted account across a redraw of the unchanged route, and the start flow's too", () => {
+    // The router runs handleRouteChanged on every draw; mithril still reports
+    // the pre-rewrite hub path, and /start reads as the device's.
+    const { shell, clientStates } = shellOnAlice();
+    vi.stubGlobal("window", { history: { replaceState: vi.fn() } });
+    const hubPath = `/account/${ALICE.user_id}/create`;
+    land(shell, hubPath);
+    clientStates.length = 0;
+
+    shell.adoptAccount(BOB.user_id);
+    shell.handleRouteChanged(hubPath, "");
+    expect(shell.accountId).toBe(BOB.user_id);
+    // The channel heard Bob (once from the adoption, once more from the draw,
+    // which the real client dedupes) and never Alice again.
+    const reported = clientStates.map(([, , accountId]) => accountId);
+    expect(reported).toContain(BOB.user_id);
+    expect(reported).not.toContain(ALICE.user_id);
+
+    land(shell, "/start");
+    expect(shell.accountId).toBe("local");
+    shell.adoptAccount(ALICE.user_id);
+    shell.handleRouteChanged("/start", "");
+    expect(shell.accountId).toBe(ALICE.user_id);
+    // The next navigation reads its own account as ever.
+    land(shell, "/account/local/");
+    expect(shell.accountId).toBe("local");
+  });
+
+  it("asks the backend whose a workspace route is when the list cannot say, and becomes that account's window", async () => {
+    const { shell, clientStates } = shellOnAlice();
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ account_id: BOB.user_id }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    land(shell, `/workspace/${BOBS_WORKSPACE}`);
+
+    expect(shell.accountId).toBe(ALICE.user_id);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `/ui/api/windows/route-account?path=%2Fworkspace%2F${BOBS_WORKSPACE}&query=`,
+    ]);
+    await settle();
+    expect(shell.accountId).toBe(BOB.user_id);
+    // The channel is told (after the landing's own report), so Bob's rows (the workspace's among them) follow.
+    expect(clientStates.map(([route, , accountId]) => [route, accountId])).toEqual([
+      [`/workspace/${BOBS_WORKSPACE}`, ALICE.user_id],
+      [`/workspace/${BOBS_WORKSPACE}`, BOB.user_id],
+    ]);
+    // A redraw on the same route asks the list, not the backend again.
+    shell.handleRouteChanged(`/workspace/${BOBS_WORKSPACE}`, "");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the backend's answer once the window has moved on, and asks nothing for a route naming no workspace", async () => {
+    const { shell } = shellOnAlice();
+    let answer: (response: Response) => void = () => undefined;
+    const fetchMock = vi.fn(
+      (_url: string, _init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    land(shell, `/workspace/${BOBS_WORKSPACE}`);
+    land(shell, "/account/local/");
+    answer(jsonResponse({ account_id: BOB.user_id }));
+    await settle();
+
+    expect(shell.accountId).toBe("local");
+    // An overlay's ?workspace= and a bare overlay say nothing the backend should be asked about.
+    land(shell, `/help?workspace=${BOBS_WORKSPACE}`);
+    land(shell, "/accounts");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a switch made while the backend's answer for the route it left was still out", async () => {
+    const { shell } = shellOnAlice();
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    let answer: (response: Response) => void = () => undefined;
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) =>
+      url.startsWith("/ui/api/windows/route-account")
+        ? new Promise<Response>((resolve) => {
+            answer = resolve;
+          })
+        : Promise.resolve(jsonResponse({ route: `/account/${BOB.user_id}/` })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    land(shell, `/workspace/${BOBS_WORKSPACE}`);
+    await shell.switchAccount(BOB.user_id);
+    // The landing has not committed yet when the ask answers for the old route.
+    answer(jsonResponse({ account_id: ALICE.user_id }));
+    await settle();
+
+    expect(shell.accountId).toBe(BOB.user_id);
+  });
+
+  it("asks a workspace route again on a redraw until its row has arrived", () => {
+    const { shell } = shellOnAlice();
+    const path = `/workspace/${BOBS_WORKSPACE}`;
+    land(shell, path);
+    expect(shell.accountId).toBe(ALICE.user_id);
+
+    shell.stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({
+        workspaces: [
+          {
+            ...workspacesMessage().workspaces[0],
+            id: BOBS_WORKSPACE,
+            host_id: "host-bb02",
+            account_user_id: BOB.user_id,
+          },
+        ],
+      }),
+    );
+    shell.handleRouteChanged(path, "");
+    expect(shell.accountId).toBe(BOB.user_id);
+  });
+
+  it("knows a signed-out account's window from the device's and a signed-in one's", () => {
+    const { shell } = shellOnAlice();
+    expect(shell.isAccountSignedOut()).toBe(false);
+    land(shell, "/account/user-gone/");
+    expect(shell.isAccountSignedOut()).toBe(true);
+    land(shell, "/account/local/");
+    expect(shell.isAccountSignedOut()).toBe(false);
   });
 });

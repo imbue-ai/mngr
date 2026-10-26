@@ -107,7 +107,6 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -137,7 +136,6 @@ from imbue.minds.desktop_client.static_pages import build_error_page_html
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
-from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -787,36 +785,57 @@ def _handle_help_assist() -> Response:
 
 
 def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:
-    """The `/ui/ws` ``accounts`` frame: every signed-in account, plus the launcher's label.
+    """The `/ui/ws` ``accounts`` frame: the switcher's lists, before the publisher stamps each window's account.
 
-    The home screen's bottom-left launcher and Manage Accounts both render from
-    this one frame, so a sign-in, sign-out, or default switch updates them
-    together, without a reload. The launcher names the default account and
-    counts the rest. Resolving the default also stores it (see
-    :func:`settle_default_account_id`), so the create form preselects the same
-    one. ``has_accounts`` is derived from the account list rather than the
-    email so it keeps its exact "any account at all" meaning.
+    The titlebar's account switcher and Manage Accounts both render from this
+    one frame, so a sign-in or sign-out updates them together, without a
+    reload. Beside the signed-in accounts it lists the accounts signed out on
+    this install whose workspaces are still here, so a window can switch to
+    one of those and see them. ``has_accounts`` is derived from the signed-in
+    list so it keeps its exact "any account at all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
-    default_account_id = settle_default_account_id(
-        get_state().minds_config, [str(account.user_id) for account in accounts]
-    )
     entries = tuple(
         UiAccountEntry(
             user_id=str(account.user_id),
             email=str(account.email),
+            display_name=account.display_name or "",
             workspace_count=len(account.workspace_ids),
-            is_default=str(account.user_id) == default_account_id,
         )
         for account in accounts
     )
-    launcher_entry = next((entry for entry in entries if entry.is_default), None)
-    return UiAccountsMessage(
-        has_accounts=bool(entries),
-        account_email=launcher_entry.email if launcher_entry is not None else "",
-        extra_account_count=max(len(entries) - 1, 0),
-        accounts=entries,
+    record_store = session_store.record_store if session_store is not None else None
+    signed_in_user_ids = {str(account.user_id) for account in accounts}
+    signed_out_entries = tuple(
+        UiAccountEntry(
+            user_id=user_id,
+            email=(record_store.account_email_for(user_id) if record_store is not None else None) or "",
+            workspace_count=workspace_count,
+        )
+        for user_id, workspace_count in _signed_out_account_workspace_counts(record_store, signed_in_user_ids)
     )
+    return UiAccountsMessage(
+        account_id=LOCAL_PROFILE_USER_ID,
+        has_accounts=bool(entries),
+        accounts=entries,
+        signed_out_accounts=signed_out_entries,
+    )
+
+
+def _signed_out_account_workspace_counts(
+    record_store: WorkspaceRecordStore | None, signed_in_user_ids: AbstractSet[str]
+) -> list[tuple[str, int]]:
+    """``(user id, active record count)`` for every signed-out account whose replica still holds active rows."""
+    if record_store is None:
+        return []
+    counts: list[tuple[str, int]] = []
+    for user_id, records in sorted(record_store.list_all_records().items()):
+        if user_id in signed_in_user_ids or user_id == LOCAL_PROFILE_USER_ID:
+            continue
+        active_count = sum(1 for record in records if record.state == RECORD_STATE_ACTIVE)
+        if active_count > 0:
+            counts.append((user_id, active_count))
+    return counts
 
 
 def _compute_cloud_tile_state(
@@ -1460,6 +1479,8 @@ def _create_attempt_row_entry(row: CreateAttemptRow) -> dict[str, str]:
     }
     if row.account_email:
         entry["account"] = row.account_email
+    if row.account_id:
+        entry["account_user_id"] = row.account_id
     return entry
 
 
@@ -1560,6 +1581,11 @@ def _build_workspace_list(
             if stop_kind is not None:
                 entry["stop_kind"] = stop_kind
         if session_store is not None:
+            # The association names the owning account whether or not it is
+            # signed in here; the email (and the key state) need the identity.
+            owner_user_id = session_store.get_owner_user_id_for_workspace(str(aid))
+            if owner_user_id is not None:
+                entry["account_user_id"] = owner_user_id
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
                 entry["account"] = account.email
@@ -1568,6 +1594,11 @@ def _build_workspace_list(
                 key_state = _cloud_row_key_state(session_store.record_store, account, str(aid), info)
                 if key_state is not None:
                     entry["key_state"] = key_state.value
+            elif owner_user_id is not None and session_store.record_store is not None:
+                entry["account"] = session_store.record_store.account_email_for(owner_user_id) or ""
+            else:
+                # Associated with no account: the row is the device's and names none.
+                pass
         # A host that refused this device's key reads "Status unknown" on its
         # own; the chip says why, and that no restart will change it.
         if "key_state" not in entry and host_state_by_agent_id.get(aid) is HostState.UNAUTHENTICATED:
@@ -1598,6 +1629,7 @@ def _build_workspace_list(
         owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
         if owner is not None:
             remote_entry["account"] = owner.email
+            remote_entry["account_user_id"] = str(owner.user_id)
         workspaces.append(remote_entry)
     return workspaces
 
@@ -1650,12 +1682,17 @@ def _build_requests_payload(
     """
     request_ids = [req.request_id for req in displayable_requests]
     primary_ids = primary_agent_ids_by_workspace_name(backend_resolver)
-    workspace_ids = {
-        primary_id
+    workspace_id_by_request_id = {
+        req.request_id: primary_id
         for req in displayable_requests
         if (primary_id := primary_ids.get(workspace_name_for_request(req, backend_resolver))) is not None
     }
-    return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
+    return {
+        "count": len(request_ids),
+        "request_ids": request_ids,
+        "workspace_agent_ids": sorted(set(workspace_id_by_request_id.values())),
+        "workspace_agent_id_by_request_id": workspace_id_by_request_id,
+    }
 
 
 # The probe loop's own timeout is all that lives here. The recovery page's route
@@ -1882,21 +1919,6 @@ def _handle_mint_ai_key() -> Response:
     )
 
 
-def _handle_set_default_account() -> Response:
-    """Set the default account for new workspaces."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    form = request.form
-    user_id = str(form.get("user_id", ""))
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config and user_id:
-        minds_config.set_default_account_id(user_id)
-        # The home screen's account launcher shows the default account, so the
-        # open windows behind this modal need to re-read it.
-        wake_ui_state_publisher()
-    return make_response(status_code=303, headers={"Location": "/accounts"})
-
-
 def _handle_account_logout(
     user_id: str,
 ) -> Response:
@@ -2038,6 +2060,7 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         liveness=entry.get("liveness", ""),
         stop_kind=entry.get("stop_kind", ""),
         account=entry.get("account", ""),
+        account_user_id=entry.get("account_user_id", ""),
         create_attempt_state=entry.get("create_attempt_state", ""),
         is_remote=entry.get("is_remote") == "true",
         remote_kind=entry.get("remote_kind", ""),
@@ -2115,6 +2138,7 @@ def _derive_ui_requests_and_notifications_messages(
             count=payload["count"],
             request_ids=tuple(payload["request_ids"]),
             workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
+            workspace_agent_id_by_request_id=payload["workspace_agent_id_by_request_id"],
         )
         return requests_message, _reconcile_notification_feed(state, displayable_requests, backend_resolver)
 
@@ -2263,6 +2287,12 @@ class _LegacyUiStateDeriver(MutableModel):
         if self.workspace_update_service is None:
             return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
         return build_workspace_updates_message(self.workspace_update_service, window, self.minds_config)
+
+    def resolve_workspace_account_id(self, agent_id: str) -> str:
+        """The account a workspace's frames go to: its association, else the device."""
+        if self.session_store is None:
+            return LOCAL_PROFILE_USER_ID
+        return self.session_store.get_owner_user_id_for_workspace(agent_id) or LOCAL_PROFILE_USER_ID
 
 
 def _read_default_update_window() -> tuple[int, int]:
@@ -2529,6 +2559,7 @@ def _create_ui_state_publisher(
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
         derive_workspace_updates=deriver.derive_workspace_updates,
+        resolve_workspace_account_id=deriver.resolve_workspace_account_id,
     )
 
 
@@ -2937,6 +2968,17 @@ def create_desktop_client(
     # ignored) by serve_spa_index so parameterized pages route here too.
     for spa_route in (
         "/",
+        # The hub pages, one set per account (a user id, or 'local' for the
+        # device); the bare spellings below them redirect in the SPA. The home
+        # page is spelled with its trailing slash by the SPA, Electron, and the
+        # switch-account route, and a rule without one is a leaf to Werkzeug,
+        # so both spellings are registered.
+        "/account/<account_id>",
+        "/account/<account_id>/",
+        "/account/<account_id>/create",
+        "/account/<account_id>/create/template",
+        "/account/<account_id>/workspaces/destroyed",
+        "/account/<account_id>/workspaces/shared",
         "/create",
         "/create/template",
         "/creating/<agent_id>",
@@ -2981,7 +3023,6 @@ def create_desktop_client(
 
     # Account management action routes
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
-    app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule(
         "/accounts/<user_id>/resend-verification",

@@ -3,9 +3,10 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
+from imbue.minds.desktop_client.minds_config import MAX_RECENT_ACCOUNTS
+from imbue.minds.desktop_client.minds_config import MAX_RECENT_WORKSPACES_PER_ACCOUNT
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
-from imbue.minds.desktop_client.minds_config import resolve_default_account_id
 from imbue.minds.desktop_client.testing import ReadCountingMindsConfig
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.errors import MindsConfigError
@@ -18,7 +19,7 @@ def _make_config(tmp_path: Path) -> MindsConfig:
 def test_default_values_when_no_file(tmp_path: Path) -> None:
     """Default values are returned when config.toml does not exist."""
     config = _make_config(tmp_path)
-    assert config.get_default_account_id() is None
+    assert config.get_recent_account_ids() == []
     assert config.get_report_unexpected_errors() is True
 
 
@@ -39,30 +40,6 @@ def test_browser_import_offered_defaults_false_and_round_trips(tmp_path: Path) -
     assert _make_config(tmp_path).get_is_browser_import_offered() is True
 
 
-@pytest.mark.parametrize(
-    ("stored_default_account_id", "signed_in_user_ids", "expected"),
-    [
-        ("user-kept", ["user-other", "user-kept"], "user-kept"),
-        ("user-departed", ["user-only"], "user-only"),
-        (None, ["user-only"], "user-only"),
-        ("user-departed", ["user-first", "user-second"], "user-first"),
-        (None, ["user-first", "user-second"], "user-first"),
-        ("user-departed", [], None),
-    ],
-)
-def test_resolve_default_account_id(
-    stored_default_account_id: str | None,
-    signed_in_user_ids: list[str],
-    expected: str | None,
-) -> None:
-    """A signed-in stored default wins; otherwise the first signed-in account is the default."""
-    resolved = resolve_default_account_id(
-        stored_default_account_id=stored_default_account_id,
-        signed_in_user_ids=signed_in_user_ids,
-    )
-    assert resolved == expected
-
-
 def test_sign_in_browser_id_round_trips_and_clears(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     assert config.get_sign_in_browser_id() is None
@@ -74,46 +51,44 @@ def test_sign_in_browser_id_round_trips_and_clears(tmp_path: Path) -> None:
     assert _make_config(tmp_path).get_sign_in_browser_id() is None
 
 
-def test_settle_default_account_id_stores_the_fallback_so_it_stays_put(tmp_path: Path) -> None:
+def test_note_window_shows_moves_the_account_and_its_workspace_to_the_front(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    config.set_default_account_id("user-departed")
+    assert config.note_window_shows("user-a", "agent-1") is True
+    assert config.note_window_shows("user-b", None) is True
+    assert config.note_window_shows("user-a", "agent-2") is True
 
-    assert config.settle_default_account_id(["user-first", "user-second"]) == "user-first"
-    # Stored, so a listing that later comes back in another order keeps the same default.
-    assert config.get_default_account_id() == "user-first"
-    assert config.settle_default_account_id(["user-second", "user-first"]) == "user-first"
+    assert config.get_recent_account_ids() == ["user-a", "user-b"]
+    assert config.get_recent_workspace_ids("user-a") == ["agent-2", "agent-1"]
+    assert config.get_recent_workspace_ids("user-b") == []
+    # Persisted to the file, not held in memory: a second store reads it back.
+    assert _make_config(tmp_path).get_recent_workspace_ids("user-a") == ["agent-2", "agent-1"]
 
 
-def test_settle_default_account_id_keeps_a_signed_in_default(tmp_path: Path) -> None:
+def test_note_window_shows_writes_nothing_when_the_order_is_unchanged(tmp_path: Path) -> None:
+    config = WriteCountingMindsConfig(data_dir=tmp_path)
+    config.note_window_shows("user-a", "agent-1")
+    assert config.write_count == 1
+
+    assert config.note_window_shows("user-a", "agent-1") is False
+    assert config.note_window_shows("user-a", None) is False
+    assert config.write_count == 1
+    assert config.get_recent_workspace_ids("user-a") == ["agent-1"]
+
+
+def test_recent_lists_are_bounded(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    config.set_default_account_id("user-second")
+    for index in range(MAX_RECENT_ACCOUNTS + 5):
+        config.note_window_shows(f"user-{index}", None)
+    for index in range(MAX_RECENT_WORKSPACES_PER_ACCOUNT + 5):
+        config.note_window_shows("user-0", f"agent-{index}")
 
-    assert config.settle_default_account_id(["user-first", "user-second"]) == "user-second"
-    assert config.get_default_account_id() == "user-second"
-
-
-def test_settle_default_account_id_never_clears_the_default_on_an_empty_listing(tmp_path: Path) -> None:
-    # A failed account listing is empty too, so it cannot be taken as "everyone signed out".
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-kept")
-
-    assert config.settle_default_account_id([]) is None
-    assert config.get_default_account_id() == "user-kept"
-
-
-def test_set_and_get_default_account_id(tmp_path: Path) -> None:
-    """Setting and getting default_account_id works correctly."""
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-123")
-    assert config.get_default_account_id() == "user-123"
-
-
-def test_clear_default_account_id(tmp_path: Path) -> None:
-    """Clearing the default account sets it to None."""
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-123")
-    config.set_default_account_id(None)
-    assert config.get_default_account_id() is None
+    # Trimming drops the oldest entries: the workspace reports put user-0 back at
+    # the front, and the newest accounts follow it down to the trimmed tail.
+    newest_accounts = [f"user-{index}" for index in range(MAX_RECENT_ACCOUNTS + 4, 0, -1)]
+    assert config.get_recent_account_ids() == ["user-0"] + newest_accounts[: MAX_RECENT_ACCOUNTS - 1]
+    assert config.get_recent_workspace_ids("user-0") == [
+        f"agent-{index}" for index in range(MAX_RECENT_WORKSPACES_PER_ACCOUNT + 4, 4, -1)
+    ]
 
 
 def test_default_region_is_none(tmp_path: Path) -> None:
@@ -160,12 +135,21 @@ def test_error_reporting_settings_round_trip(tmp_path: Path) -> None:
 def test_persistence_across_instances(tmp_path: Path) -> None:
     """Config written by one instance is readable by a new instance."""
     config1 = _make_config(tmp_path)
-    config1.set_default_account_id("user-abc")
+    config1.set_sign_in_browser_id("/Applications/Firefox.app")
     config1.set_report_unexpected_errors(False)
 
     config2 = _make_config(tmp_path)
-    assert config2.get_default_account_id() == "user-abc"
+    assert config2.get_sign_in_browser_id() == "/Applications/Firefox.app"
     assert config2.get_report_unexpected_errors() is False
+
+
+def test_a_failed_write_raises_a_config_error(tmp_path: Path) -> None:
+    """A write that the filesystem refuses is reported as the config's own error, like a failed read."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    config = MindsConfig(data_dir=blocker)
+    with pytest.raises(MindsConfigError):
+        config.note_window_shows("user-a", None)
 
 
 def test_corrupt_toml_raises(tmp_path: Path) -> None:
@@ -178,7 +162,7 @@ def test_corrupt_toml_raises(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     (tmp_path / "config.toml").write_text("not valid toml {{{")
     with pytest.raises(MindsConfigError):
-        config.get_default_account_id()
+        config.get_recent_account_ids()
     with pytest.raises(MindsConfigError):
         config.get_report_unexpected_errors()
 
@@ -186,13 +170,13 @@ def test_corrupt_toml_raises(tmp_path: Path) -> None:
 def test_multiple_settings_coexist(tmp_path: Path) -> None:
     """Setting one value does not clobber other values."""
     config = _make_config(tmp_path)
-    config.set_default_account_id("user-xyz")
+    config.note_window_shows("user-xyz", None)
     config.set_report_unexpected_errors(False)
 
-    assert config.get_default_account_id() == "user-xyz"
+    assert config.get_recent_account_ids() == ["user-xyz"]
     assert config.get_report_unexpected_errors() is False
 
-    config.set_default_account_id("user-new")
+    config.note_window_shows("user-new", None)
     assert config.get_report_unexpected_errors() is False
 
 
@@ -414,7 +398,7 @@ def test_an_unusable_stored_update_window_falls_back_rather_than_raising(
     tmp_path: Path, stored: dict[str, object]
 ) -> None:
     config = _make_config(tmp_path)
-    config.set_default_account_id("someone")
+    config.set_sign_in_browser_id("someone")
     raw = (tmp_path / "config.toml").read_text()
     lines = [f"{key} = {_toml_literal(value)}" for key, value in stored.items()]
     (tmp_path / "config.toml").write_text(raw + "\n[updates]\n" + "\n".join(lines) + "\n")

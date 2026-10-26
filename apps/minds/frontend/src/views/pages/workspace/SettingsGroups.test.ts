@@ -592,6 +592,62 @@ describe("the Account settings group on a workspace on an account-owned provider
   });
 });
 
+describe("the Account settings group's link to an account", () => {
+  const OFFERED = {
+    user_id: "user-1",
+    email: "me@example.com",
+    display_name: null,
+  };
+
+  /** A pane whose PATCH of the association answers `patchStatus`, and whose options reload answers the drawn data. */
+  function linkingHarness(patchStatus: number): Harness {
+    let drawn: Harness | null = null;
+    const pane = harness((url, init) => {
+      if (init?.method === "PATCH")
+        return Promise.resolve(
+          jsonResponse(
+            patchStatus === 200 ? {} : { error: "refused" },
+            patchStatus,
+          ),
+        );
+      const model = drawn?.models.get(UNBACKED);
+      return Promise.resolve(jsonResponse(model?.data ?? {}));
+    });
+    drawn = pane;
+    return pane;
+  }
+
+  it("leaves for the window's account's hub once the workspace belongs to the account", async () => {
+    const { draw, requests } = linkingHarness(200);
+    const routeSet = vi.spyOn(m.route, "set");
+    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+
+    press(root as AnyVnode, `Link to ${OFFERED.email}`);
+    await settleDispatch();
+
+    // The association is patched, then the options reloaded (which fetches the panes' own data too).
+    expect(requests.slice(0, 2)).toEqual([
+      `/api/v1/workspaces/${UNBACKED}`,
+      `/ui/api/workspaces/${UNBACKED}/options`,
+    ]);
+    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([
+      "/account/local/",
+    ]);
+  });
+
+  it("stays put and shows the refusal when the association is refused", async () => {
+    const { draw, models } = linkingHarness(400);
+    const routeSet = vi.spyOn(m.route, "set");
+    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+
+    press(root as AnyVnode, `Link to ${OFFERED.email}`);
+    await settleDispatch();
+
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(models.get(UNBACKED)?.accountErrorMessage).toBe("refused");
+  });
+});
+
 describe("the General settings group's color picker", () => {
   function swatch(root: m.Children, hex: string): AnyVnode {
     const found = collectVnodes(root).find(

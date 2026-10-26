@@ -6,10 +6,14 @@ from collections.abc import Callable
 from typing import Any
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.testing import build_ui_state_publisher_for_test
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
+from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
+from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
@@ -122,6 +126,75 @@ def test_publish_health_broadcasts_immediately_without_diffing() -> None:
     assert [frame["type"] for frame in frames] == ["health", "health"]
 
 
+_ALICE = "user-alice"
+
+
+def _window_on(broadcaster: UiChannelBroadcaster, client_id: str, account_id: str) -> "queue.Queue[str | None]":
+    """Register one more window with the broadcaster, reporting ``account_id`` as the account it shows."""
+    client_queue = broadcaster.register()
+    broadcaster.set_client_state(
+        client_queue, UiClientStateMessage(client_id=client_id, route="/", account_id=account_id)
+    )
+    return client_queue
+
+
+def _workspace_rows(frames: list[dict[str, Any]]) -> list[tuple[str, list[str]]]:
+    """``(account_id, [row names])`` of every workspaces frame among ``frames``, in order."""
+    return [
+        (frame["account_id"], [entry["name"] for entry in frame["workspaces"]])
+        for frame in frames
+        if frame["type"] == "workspaces"
+    ]
+
+
+def test_publish_now_sends_each_window_its_own_accounts_projection_and_diffs_per_account() -> None:
+    """Two windows on different accounts hear different lists from one pass, and a change in one account's rows reaches only its windows."""
+    source = _MutableWorkspaceSource()
+    alice_row = UiWorkspaceEntry(id="agent-a1", name="alices", accent="#112233", account_user_id=_ALICE)
+    source.entries = (alice_row, _workspace_entry_named("devices"))
+    publisher, device_queue = build_ui_state_publisher_for_test(
+        source.derive, resolve_workspace_account_id=lambda agent_id: _ALICE if agent_id == "agent-a1" else "local"
+    )
+    alice_queue = _window_on(publisher.broadcaster, "win-alice", _ALICE)
+
+    publisher.publish_now()
+
+    assert _workspace_rows(drain_ui_channel_frames(device_queue)) == [("local", ["devices"])]
+    assert _workspace_rows(drain_ui_channel_frames(alice_queue)) == [(_ALICE, ["alices"])]
+
+    # Only Alice's row changes: the device's list is unchanged and is not resent.
+    source.entries = (
+        alice_row.model_copy_update(to_update(alice_row.field_ref().name, "renamed")),
+        _workspace_entry_named("devices"),
+    )
+    publisher.publish_now()
+
+    assert drain_ui_channel_frames(device_queue) == []
+    assert _workspace_rows(drain_ui_channel_frames(alice_queue)) == [(_ALICE, ["renamed"])]
+
+    # A health edge goes to the owning account's windows alone.
+    publisher.publish_health(UiHealthMessage(agent_id="agent-a1", status=AgentHealth.STUCK, error=None))
+    assert drain_ui_channel_frames(device_queue) == []
+    assert [frame["agent_id"] for frame in drain_ui_channel_frames(alice_queue)] == ["agent-a1"]
+
+
+def test_publish_now_forgets_the_diff_of_an_account_no_window_shows() -> None:
+    """Once every window on an account is gone, its next window is published to again, unchanged derivation or not."""
+    source = _MutableWorkspaceSource()
+    source.entries = (UiWorkspaceEntry(id="agent-a1", name="alices", accent="#112233", account_user_id=_ALICE),)
+    publisher, _device_queue = build_ui_state_publisher_for_test(source.derive)
+    first_alice_queue = _window_on(publisher.broadcaster, "win-alice-1", _ALICE)
+    publisher.publish_now()
+    assert _workspace_rows(drain_ui_channel_frames(first_alice_queue)) == [(_ALICE, ["alices"])]
+
+    publisher.broadcaster.unregister(first_alice_queue)
+    publisher.publish_now()
+    second_alice_queue = _window_on(publisher.broadcaster, "win-alice-2", _ALICE)
+    publisher.publish_now()
+
+    assert _workspace_rows(drain_ui_channel_frames(second_alice_queue)) == [(_ALICE, ["alices"])]
+
+
 def _wait_for_frame(client_queue: "queue.Queue[str | None]", is_wanted: Callable[[dict[str, Any]], bool]) -> bool:
     """Block on the client queue (no polling) until a frame satisfying ``is_wanted`` arrives, or 5s pass."""
     deadline = time.monotonic() + 5.0
@@ -228,12 +301,15 @@ def test_replayed_health_frames_say_they_are_a_replay() -> None:
     after any reordering, silently.
     """
     failed = UiHealthMessage(agent_id="agent-ab12", status=AgentHealth.RECOVERY_FAILED, error="no answer")
-    publisher, client_queue = build_ui_state_publisher_for_test(
-        _MutableWorkspaceSource().derive, derive_health_states=lambda: (failed,)
-    )
+    # Health follows the account's rows, so the workspace has to be listed for its frame to be replayed.
+    source = _MutableWorkspaceSource()
+    source.entries = (_workspace_entry_named("ab12"),)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive, derive_health_states=lambda: (failed,))
 
     snapshot_health = [
-        frame for frame in (json.loads(raw) for raw in publisher.build_snapshot_frames()) if frame["type"] == "health"
+        frame
+        for frame in (json.loads(raw) for raw in publisher.build_snapshot_frames(LOCAL_PROFILE_USER_ID))
+        if frame["type"] == "health"
     ]
     publisher.publish_health(failed)
 
@@ -245,7 +321,7 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
     source = _MutableWorkspaceSource()
     publisher, _client_queue = build_ui_state_publisher_for_test(source.derive)
 
-    frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
+    frames = [json.loads(frame) for frame in publisher.build_snapshot_frames(LOCAL_PROFILE_USER_ID)]
 
     assert frames[0]["type"] == "hello"
     assert frames[0]["schema_version"] == UI_SCHEMA_VERSION
@@ -266,7 +342,7 @@ def test_snapshot_notifications_frame_says_it_is_a_replay() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
-    snapshot_frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
+    snapshot_frames = [json.loads(frame) for frame in publisher.build_snapshot_frames(LOCAL_PROFILE_USER_ID)]
     publisher.publish_now()
 
     snapshot_notifications = [frame for frame in snapshot_frames if frame["type"] == "notifications"]

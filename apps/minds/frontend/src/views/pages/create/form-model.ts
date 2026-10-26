@@ -185,12 +185,11 @@ export class CreateFormModel {
   isSubmitting = false;
   submitError = "";
   submitErrorField = "";
-  isAccountErrorShown = false;
 
   applyDefaults(defaults: CreateFormDefaults): void {
     this.defaults = defaults;
     this.color = defaults.color;
-    this.accountId = defaults.default_account_id;
+    this.accountId = defaults.account?.user_id ?? "";
     this.backupProvider = defaults.selected_backup_provider;
     this.runtime = defaults.selected_docker_runtime;
     // Seed the repository/branch defaults (the shipped template, or the
@@ -219,7 +218,6 @@ export class CreateFormModel {
       this.backupProvider = prefill.backup_provider;
       this.isBackupProviderTouched = true;
       this.backupApiKeyEnv = prefill.backup_api_key_env;
-      this.accountId = prefill.account_id || defaults.default_account_id;
       this.runtime = prefill.docker_runtime;
       this.isOnboardingDrivenByAgent = prefill.is_onboarding_driven_by_agent;
       this.launchValue =
@@ -264,7 +262,7 @@ export class CreateFormModel {
   }
 
   /**
-   * Sharing and Imbue backups follow the selected account: both are on by
+   * Sharing and Imbue backups follow the window's account: both are on by
    * default once there is an account to own them, and both fall off when
    * there is none (the server refuses either without an account). A choice
    * the user made by hand holds across account changes.
@@ -378,7 +376,7 @@ export class CreateFormModel {
       this.launchValue = defaults.local_launch_mode;
   }
 
-  /** The owner whose providers are on offer: the selected account, or the local profile. */
+  /** The owner whose providers are on offer: the window's account, or the local profile. */
   selectedOwnerUserId(): string {
     return this.accountId || LOCAL_PROFILE_USER_ID;
   }
@@ -411,7 +409,7 @@ export class CreateFormModel {
   launchOptions(): LaunchOption[] {
     const options: LaunchOption[] = [];
     for (const mode of this.defaults?.launch_modes ?? []) {
-      // Imbue Cloud is the selected account's own provider: without one it stays visible but unusable.
+      // Imbue Cloud is the window's account's own provider: without one it stays visible but unusable.
       // Every other mode the backend offers belongs to no account (the connection-only modes are never sent).
       const isDisabled = mode === "IMBUE_CLOUD" && this.accountId === "";
       options.push({ value: mode, label: launchModeLabel(mode), isDisabled });
@@ -503,39 +501,24 @@ export class CreateFormModel {
   applyPreset(name: PresetName): void {
     this.selectedPreset = name;
     this.launchValue = this.presetLaunchValue(name);
-    if (
-      name === "remote" &&
-      this.accountId === "" &&
-      (this.defaults?.accounts.length ?? 0) > 0
-    ) {
-      this.accountId = this.defaults?.accounts[0]?.user_id ?? "";
-    }
     this.syncAccountDefaults();
-    if (!this.imbueCloudNeedsAccount()) this.isAccountErrorShown = false;
   }
 
   /**
-   * Take up the accounts a sign-in added while the form was open, and the
-   * connections now on offer (the new account's synced ones). Every edit in
-   * the form stays; only an account pick that is empty or no longer signed in
-   * moves, to the new default, and a compute selection the new owner cannot
-   * use follows it (as the account select does). Returns whether the compute
-   * selection survived, so a caller about to submit knows the form still says
-   * what the user picked.
+   * Take up the account the window now shows (a sign-in it asked for landed),
+   * and the connections on offer under it (the account's synced ones). Every
+   * edit in the form stays; a compute selection the new owner cannot use
+   * falls back. Returns whether the compute selection survived, so a caller
+   * about to submit knows the form still says what the user picked.
    */
-  adoptAccounts(defaults: CreateFormDefaults): boolean {
+  adoptAccount(defaults: CreateFormDefaults): boolean {
     if (this.defaults === null) return true;
     this.defaults = {
       ...this.defaults,
-      accounts: defaults.accounts,
-      default_account_id: defaults.default_account_id,
+      account: defaults.account,
       cloud_accounts: defaults.cloud_accounts,
     };
-    if (
-      !defaults.accounts.some((account) => account.user_id === this.accountId)
-    ) {
-      this.accountId = defaults.default_account_id;
-    }
+    this.accountId = defaults.account?.user_id ?? "";
     const launchValueBefore = this.launchValue;
     this.syncLaunchValueToSelectedAccount();
     return this.launchValue === launchValueBefore;
@@ -543,9 +526,9 @@ export class CreateFormModel {
 
   /**
    * Offer a connection the add-connection modal just registered, and select it
-   * when the selected account can use it. The account pick is the user's and
-   * stays: a connection added under another owner is offered once that owner is
-   * picked, rather than moving the workspace's association as a side effect.
+   * when the window's account can use it. The account stays the window's: a
+   * connection added under another owner is offered once the window is on that
+   * owner, rather than moving the workspace's association as a side effect.
    */
   adoptConnection(account: CloudAccountOption): void {
     if (this.defaults === null) return;
@@ -556,19 +539,17 @@ export class CreateFormModel {
     if (!this.isConnectionOfferedUnderSelectedOwner(account)) return;
     this.launchValue = `${CONNECTION_LAUNCH_PREFIX}${account.name}`;
     this.selectedPreset = null;
-    if (!this.imbueCloudNeedsAccount()) this.isAccountErrorShown = false;
   }
 
-  /** The picked account, or null when none (or an unknown one) is picked. */
+  /** The window's account the form creates under, or null on the device or a signed-out account. */
   selectedAccount(): CreateAccountOption | null {
-    return (
-      this.defaults?.accounts.find(
-        (account) => account.user_id === this.accountId,
-      ) ?? null
-    );
+    const account = this.defaults?.account ?? null;
+    return account !== null && account.user_id === this.accountId
+      ? account
+      : null;
   }
 
-  /** The email of the picked account, or "" when none (or an unknown one) is picked. */
+  /** The email of the account the form creates under, or "" when there is none. */
   selectedAccountEmail(): string {
     return this.selectedAccount()?.email ?? "";
   }
@@ -657,7 +638,11 @@ export class CreateFormModel {
 
   /** The numeric size the selected mode takes (its defaults, as offered), or null for a mode sized another way. */
   machineSizeDefaults(): MachineSizeNumbers | null {
-    return this.defaults?.machine_size_defaults_by_launch_mode[this.launchSelection().mode] ?? null;
+    return (
+      this.defaults?.machine_size_defaults_by_launch_mode[
+        this.launchSelection().mode
+      ] ?? null
+    );
   }
 
   /** The size fields as currently shown for the selected mode; null when the mode has none. */

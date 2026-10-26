@@ -15,8 +15,12 @@ function buildDefaults(
   overrides: Partial<CreateFormDefaults> = {},
 ): CreateFormDefaults {
   return {
-    accounts: [{ user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
-    default_account_id: "user-1",
+    account: {
+      user_id: "user-1",
+      email: "alice@example.com",
+      state: "SIGNED_IN",
+      is_connection_owner_eligible: true,
+    },
     // The backend never sends the connection-only modes (AWS, GCP, AZURE, MODAL).
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER", "VULTR"],
     selected_launch_mode: "IMBUE_CLOUD",
@@ -160,15 +164,14 @@ const LINUX_WITH_NOTHING: Partial<CreateFormDefaults> = {
 describe("CreateFormModel", () => {
   it("applies presets by filling the advanced selects (the submit source of truth)", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(buildDefaults({ default_account_id: "" }));
-    model.accountId = "";
+    model.applyDefaults(buildDefaults({ account: null }));
     model.applyPreset("local");
     expect(model.launchValue).toBe("LIMA");
     expect(model.backupProvider).toBe("CONFIGURE_LATER");
-    // Picking remote with signed-in accounts auto-picks the first one.
+    // Picking remote on the device picks Imbue Cloud; the account comes from the window, never from the pick.
     model.applyPreset("remote");
     expect(model.launchValue).toBe("IMBUE_CLOUD");
-    expect(model.accountId).toBe("user-1");
+    expect(model.accountId).toBe("");
   });
 
   it("points the own-cloud preset at the first connection on offer under the selected owner, else Vultr", () => {
@@ -288,8 +291,7 @@ describe("CreateFormModel", () => {
 
   it("requires an account only for imbue_cloud compute or backups", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(buildDefaults({ default_account_id: "" }));
-    model.accountId = "";
+    model.applyDefaults(buildDefaults({ account: null }));
     model.launchValue = "IMBUE_CLOUD";
     expect(model.imbueCloudNeedsAccount()).toBe(true);
     model.launchValue = "LIMA";
@@ -299,17 +301,19 @@ describe("CreateFormModel", () => {
 
   it("takes up a mid-form sign-in's account without disturbing the rest of the form", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(
-      buildDefaults({ accounts: [], default_account_id: "" }),
-    );
+    model.applyDefaults(buildDefaults({ account: null }));
     model.hostName = "my-machine";
     expect(model.imbueCloudNeedsAccount()).toBe(true);
     expect(model.selectedAccountEmail()).toBe("");
 
-    model.adoptAccounts(
+    model.adoptAccount(
       buildDefaults({
-        accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
-        default_account_id: "user-new",
+        account: {
+          user_id: "user-new",
+          email: "new@example.com",
+          state: "SIGNED_IN",
+          is_connection_owner_eligible: true,
+        },
       }),
     );
 
@@ -325,38 +329,39 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults());
     model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
     const signedIn = buildDefaults({
-      accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
-      default_account_id: "user-new",
+      account: {
+        user_id: "user-new",
+        email: "new@example.com",
+        state: "SIGNED_IN",
+        is_connection_owner_eligible: true,
+      },
     });
 
-    // The first account signed out and another signed in: its connection is not offered under the new one.
-    expect(model.adoptAccounts(signedIn)).toBe(false);
+    // The window moved to another account: the first one's connection is not offered under the new one.
+    expect(model.adoptAccount(signedIn)).toBe(false);
     expect(model.accountId).toBe("user-new");
     expect(model.launchValue).toBe("IMBUE_CLOUD");
 
     // A this-device-only connection is offered under every account, so it survives the account change.
     model.launchValue = `${CONNECTION_LAUNCH_PREFIX}modal_acct`;
-    expect(model.adoptAccounts(signedIn)).toBe(true);
+    expect(model.adoptAccount(signedIn)).toBe(true);
     expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}modal_acct`);
 
-    model.accountId = "";
     model.launchValue = "LIMA";
-    expect(model.adoptAccounts(signedIn)).toBe(true);
+    expect(model.adoptAccount(signedIn)).toBe(true);
     expect(model.launchValue).toBe("LIMA");
   });
 
   it("offers the connections a sign-in's account owns", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(
-      buildDefaults({
-        accounts: [],
-        default_account_id: "",
-        cloud_accounts: [],
-      }),
-    );
+    model.applyDefaults(buildDefaults({ account: null, cloud_accounts: [] }));
     const signedIn = buildDefaults({
-      accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
-      default_account_id: "user-new",
+      account: {
+        user_id: "user-new",
+        email: "new@example.com",
+        state: "SIGNED_IN",
+        is_connection_owner_eligible: true,
+      },
       cloud_accounts: [
         {
           name: "aws_synced",
@@ -369,7 +374,7 @@ describe("CreateFormModel", () => {
       ],
     });
 
-    model.adoptAccounts(signedIn);
+    model.adoptAccount(signedIn);
 
     expect(model.accountId).toBe("user-new");
     expect(
@@ -381,32 +386,25 @@ describe("CreateFormModel", () => {
     ).toBe(true);
   });
 
-  it("keeps an explicit account pick when a sign-in adds another account", () => {
+  it("follows the window's account, including off it, when the defaults are re-read", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
-    model.adoptAccounts(
+    model.adoptAccount(
       buildDefaults({
-        accounts: [
-          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-          { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-        ],
-        default_account_id: "user-2",
-      }),
-    );
-    expect(model.accountId).toBe("user-1");
-  });
-
-  it("moves an account pick that has signed out to the re-listed default", () => {
-    const model = new CreateFormModel();
-    model.applyDefaults(buildDefaults());
-    model.adoptAccounts(
-      buildDefaults({
-        accounts: [{ user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
-        default_account_id: "user-2",
+        account: {
+          user_id: "user-2",
+          email: "bob@example.com",
+          state: "SIGNED_IN",
+          is_connection_owner_eligible: true,
+        },
       }),
     );
     expect(model.accountId).toBe("user-2");
     expect(model.selectedAccountEmail()).toBe("bob@example.com");
+
+    model.adoptAccount(buildDefaults({ account: null }));
+    expect(model.accountId).toBe("");
+    expect(model.selectedAccountEmail()).toBe("");
   });
 
   it("offers a just-added this-device-only connection under the selected account and selects it, leaving the account alone", () => {
@@ -437,10 +435,7 @@ describe("CreateFormModel", () => {
 
   it("never moves the account pick to a just-added connection's owner", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(
-      buildDefaults({ accounts: [], default_account_id: "" }),
-    );
-    model.accountId = "";
+    model.applyDefaults(buildDefaults({ account: null }));
     model.launchValue = "LIMA";
 
     model.adoptConnection({
@@ -461,49 +456,22 @@ describe("CreateFormModel", () => {
     ).toBe(true);
   });
 
-  it("clears the account error once an added connection replaces the compute that needed one", () => {
+  it("says whether the window's account is locked here", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(
-      buildDefaults({ accounts: [], default_account_id: "" }),
-    );
-    model.accountId = "";
-    model.launchValue = "IMBUE_CLOUD";
-    model.isAccountErrorShown = true;
-    const connection = {
-      name: "gcp_new",
-      alias: "new gcp",
-      backend: "gcp",
-      region: "us-central1-a",
-      owner_user_id: "local",
-      is_region_pinned: true,
-    };
-
-    // The backup still needs an account, so the error stands.
-    model.backupProvider = "IMBUE_CLOUD";
-    model.adoptConnection(connection);
-    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}gcp_new`);
-    expect(model.isAccountErrorShown).toBe(true);
-
-    model.backupProvider = "CONFIGURE_LATER";
-    model.launchValue = "IMBUE_CLOUD";
-    model.adoptConnection({ ...connection, name: "gcp_other" });
-    expect(model.isAccountErrorShown).toBe(false);
-  });
-
-  it("says whether the picked account is locked here", () => {
-    const model = new CreateFormModel();
-    model.applyDefaults(
+    model.applyDefaults(buildDefaults());
+    expect(model.isSelectedAccountLocked()).toBe(false);
+    model.adoptAccount(
       buildDefaults({
-        accounts: [
-          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-          { user_id: "user-2", email: "bob@example.com", state: "LOCKED", is_connection_owner_eligible: false },
-        ],
+        account: {
+          user_id: "user-2",
+          email: "bob@example.com",
+          state: "LOCKED",
+          is_connection_owner_eligible: false,
+        },
       }),
     );
-    expect(model.isSelectedAccountLocked()).toBe(false);
-    model.accountId = "user-2";
     expect(model.isSelectedAccountLocked()).toBe(true);
-    model.accountId = "";
+    model.adoptAccount(buildDefaults({ account: null }));
     expect(model.isSelectedAccountLocked()).toBe(false);
   });
 
@@ -687,7 +655,7 @@ describe("CreateFormModel", () => {
 
     // A fresh form with no account at all starts with both off.
     const alone = new CreateFormModel();
-    alone.applyDefaults(buildDefaults({ accounts: [], default_account_id: "" }));
+    alone.applyDefaults(buildDefaults({ account: null }));
     expect(alone.submitBody().enable_web_access).toBe(false);
     expect(alone.backupProvider).toBe("CONFIGURE_LATER");
   });
@@ -752,7 +720,6 @@ describe("CreateFormModel", () => {
       docker_runtime: "RUNSC",
       backup_provider: "API_KEY",
       backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
-      account_id: "",
       region: "",
       cloud_account: "",
       instance_type: "",
@@ -779,7 +746,6 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "RESTIC_REPOSITORY=s3:...",
-          account_id: "",
           region: "us-east-1",
           cloud_account: "aws_acct",
           instance_type: "t3.xlarge",
@@ -810,7 +776,6 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
-          account_id: "user-1",
           region: "",
           cloud_account: "",
           instance_type: "",
@@ -835,7 +800,7 @@ describe("CreateFormModel", () => {
     expect(model.backupProvider).toBe("API_KEY");
   });
 
-  it("keeps a retry prefill's this-device-only connection under the re-listed default account", () => {
+  it("keeps a retry prefill's this-device-only connection under the window's account", () => {
     const model = new CreateFormModel();
     model.applyDefaults(
       buildDefaults({
@@ -847,8 +812,7 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "",
-          // The attempt's account signed out, so the default account is selected; modal_acct belongs to the local profile.
-          account_id: "",
+          // modal_acct is the local profile's connection, offered under every account.
           region: "",
           cloud_account: "modal_acct",
           instance_type: "",
@@ -879,7 +843,6 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
-          account_id: "user-1",
           region: "us-central1-a",
           cloud_account: "gcp_gone",
           instance_type: "e2-standard-4",
@@ -910,15 +873,16 @@ describe("CreateFormModel", () => {
     expect(model.retryUnavailableReason).toBe("");
   });
 
-  it("falls back from a retry prefill's account-owned connection once another account is the one picked", () => {
+  it("falls back from a retry prefill's account-owned connection when the window is another account's", () => {
     const model = new CreateFormModel();
     model.applyDefaults(
       buildDefaults({
-        accounts: [
-          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-          { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
-        ],
-        default_account_id: "user-2",
+        account: {
+          user_id: "user-2",
+          email: "bob@example.com",
+          state: "SIGNED_IN",
+          is_connection_owner_eligible: true,
+        },
         prefill: {
           git_url: "https://example.com/repo.git",
           branch: "main",
@@ -927,8 +891,7 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "",
-          // The attempt's account signed out, so the default (another account) is selected; aws_acct is user-1's.
-          account_id: "",
+          // The attempt's account signed out; the window is another account's, and aws_acct is user-1's.
           region: "",
           cloud_account: "aws_acct",
           instance_type: "",
@@ -958,7 +921,6 @@ describe("CreateFormModel", () => {
           docker_runtime: "RUNC",
           backup_provider: "API_KEY",
           backup_api_key_env: "",
-          account_id: "user-1",
           region: "",
           // The backend blanks a connection that no longer exists, keeping the mode.
           cloud_account: "",
@@ -1038,7 +1000,6 @@ describe("CreateFormModel machine size", () => {
           docker_runtime: "RUNC",
           backup_provider: "CONFIGURE_LATER",
           backup_api_key_env: "",
-          account_id: "",
           region: "",
           cloud_account: "",
           instance_type: "",
@@ -1069,7 +1030,6 @@ describe("CreateFormModel machine size", () => {
           docker_runtime: "RUNC",
           backup_provider: "CONFIGURE_LATER",
           backup_api_key_env: "",
-          account_id: "user-1",
           region: "",
           // The attempt's connection no longer exists, so the mode falls back to Imbue Cloud.
           cloud_account: "",

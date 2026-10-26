@@ -12,7 +12,7 @@ export const ONBOARDING_MEDIA_BASE_URL =
 /** The published name of the showcase recording (its SHA-256 and extension). */
 export const SHOWCASE_RECORDING_NAMES = {
   todoList:
-    "aff0d7c67d01df7d22d45bbe47296190e20a5f58413cbf87c64adf41ee505718.gif",
+    "ac28361af1792b4167a8fcd3dcf155e859fa14a31c57cb66906902ea0bd74cbe.gif",
 } as const;
 
 export function onboardingMediaUrl(name: string): string {

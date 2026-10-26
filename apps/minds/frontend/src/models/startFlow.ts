@@ -130,7 +130,7 @@ export type StepId = "run" | "auth" | "account" | "retry" | "again" | "verify" |
 const FORM_CHOICE_IDS = ["local", "own-cloud"] as const;
 /** The answers that open the create form instead of creating on Imbue Cloud. */
 export type FormChoiceId = (typeof FORM_CHOICE_IDS)[number];
-export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified";
+export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified" | "existing-login";
 
 export function isFormChoice(value: string | null): value is FormChoiceId {
   return FORM_CHOICE_IDS.some((id) => id === value);
@@ -527,6 +527,37 @@ export function landedAccount(
 /** The user pressed the quieter "I have an account (log in)" under the first question. */
 export function chooseExistingLogin(state: StartFlowState): StartFlowState {
   return { ...state, pending: "existing-login" };
+}
+
+/** What the agent says when the existing-login sign-in lands on an account with no workspaces. */
+export const NO_WORKSPACES_ACK = "You don't have any workspaces yet, so let's create your first one.";
+
+/**
+ * The existing-login sign-in landed on an account with no workspaces: the
+ * sign-in receipt becomes the open where-to-run question's answer, and the
+ * question is asked again -- the first workspace still needs to be made, now
+ * under the signed-in account (the view adopts it into the window). An
+ * account that has workspaces leaves the flow for its home page instead,
+ * which is the view's doing, like the routing itself.
+ */
+export function continueExistingLoginWithoutWorkspaces(
+  state: StartFlowState,
+  account: FlowAccount,
+): StartFlowState {
+  if (state.pending !== "existing-login") return state;
+  const at = openStepIndex(state);
+  const entry = at === null ? undefined : state.entries[at];
+  if (at === null || entry === undefined || entry.kind !== "step" || entry.id !== "run") {
+    return { ...state, pending: null };
+  }
+  return {
+    ...state,
+    pending: null,
+    entries: [
+      ...withAnswer(state.entries, at, "existing-login", signedInSaid(account.email)),
+      stepEntry("again", NO_WORKSPACES_ACK),
+    ],
+  };
 }
 
 /** A modal the flow was waiting on closed without finishing. */

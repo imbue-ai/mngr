@@ -431,6 +431,12 @@ body:has(#notice-band) .workspace-surface {
   -webkit-app-region: no-drag;
 }
 
+/* The image lightbox paints over the titlebar the same way a modal does, so
+   its backdrop subtracts the drag region for the same reason. */
+.image-lightbox-overlay {
+  -webkit-app-region: no-drag;
+}
+
 .accent-spine::before {
   content: "";
   position: absolute;

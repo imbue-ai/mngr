@@ -25,8 +25,11 @@ from flask import Response
 from flask import request
 from loguru import logger
 
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.onboarding_progress import resolve_is_onboarding_complete
+from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
 from imbue.minds.desktop_client.ui_api_create import register_create_routes
 from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
 from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
@@ -39,13 +42,18 @@ from imbue.minds.desktop_client.ui_api_provider_relay import register_provider_r
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
 from imbue.minds.desktop_client.ui_api_updates import register_update_routes
 from imbue.minds.desktop_client.ui_api_users import register_user_routes
+from imbue.minds.desktop_client.ui_api_windows import register_window_routes
+from imbue.minds.desktop_client.ui_api_windows import resolve_request_account_id
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_channel import run_ui_websocket_connection
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
+from imbue.minds.desktop_client.ui_models import UiClientStateMessage
+from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import MindError
+from imbue.minds.errors import MindsConfigError
 from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 
@@ -130,14 +138,16 @@ def _build_bootstrap_json() -> str:
         # the app was constructed some other way, which is a bug.
         raise UiPublisherMissingError("The UI publisher was never wired into the app state")
     user_agent = request.headers.get("user-agent", "")
+    account_id = resolve_request_account_id(state, request.path, request.query_string.decode())
     seed = UiBootstrapSeed(
         accent=_sanitize_accent(request.args.get("accent")),
         is_mac="Macintosh" in user_agent or "Mac OS" in user_agent,
         # Imbue Studio always runs the forward proxy with TLS, so the scheme is https.
         mngr_forward_origin=f"https://localhost:{state.mngr_forward_port or 8421}",
         is_onboarding_complete=resolve_is_onboarding_complete(state.minds_config, state.backend_resolver),
+        account_id=account_id,
     )
-    bootstrap = UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=publisher.build_snapshot())
+    bootstrap = UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=publisher.build_snapshot(account_id))
     # "</" must not appear verbatim inside an inline <script> body: a name or
     # log line containing "</script>" would otherwise terminate the tag early.
     return bootstrap.model_dump_json().replace("</", "<\\/")
@@ -238,6 +248,38 @@ def _handle_app_status() -> Response:
     return Response(json.dumps(payload), mimetype="application/json")
 
 
+def _record_recent_window_state(state: DesktopClientState, client_state: UiClientStateMessage) -> None:
+    """Move the reporting main window's account, and the workspace it shows, to the front of the recent lists.
+
+    A pulled-out window is a view of one window, not a place the reader went,
+    so only main windows' reports count. The workspace counts only when it is
+    the account's own (its association's, or the device's for one with no
+    record): a window moving to another account reports the workspace it is
+    leaving under the account it is going to, and that must not put one
+    account's workspace among another's recents.
+    """
+    minds_config = state.minds_config
+    if minds_config is None or client_state.account_id == "" or client_state.window_kind != UiWindowKind.MAIN:
+        return
+    if not is_valid_account_id(client_state.account_id):
+        # The SPA only reports ids it validated, so this is a bug or a stray client, not a user's doing.
+        logger.warning("Ignoring a window's report of an account id that is not one: {!r}", client_state.account_id)
+        return
+    workspace_id = client_state.workspace_agent_id or None
+    if workspace_id is not None:
+        owner_user_id = (
+            state.session_store.get_owner_user_id_for_workspace(workspace_id)
+            if state.session_store is not None
+            else None
+        )
+        if (owner_user_id or LOCAL_PROFILE_USER_ID) != client_state.account_id:
+            workspace_id = None
+    try:
+        minds_config.note_window_shows(client_state.account_id, workspace_id)
+    except MindsConfigError as e:
+        logger.warning("Could not record the window's account in config.toml: {}", e)
+
+
 def _handle_ui_websocket() -> Response:
     # Auth runs BEFORE the WebSocket handshake: rejection is a plain HTTP 401
     # on an intact connection (no socket hijack, no gateway suppression).
@@ -252,6 +294,7 @@ def _handle_ui_websocket() -> Response:
         # Passed as a callable: the connection derives the snapshot only after
         # registering with the broadcaster, so no concurrent publish is lost.
         build_snapshot_frames=publisher.build_snapshot_frames,
+        on_client_state=lambda client_state: _record_recent_window_state(state, client_state),
     )
 
 
@@ -275,4 +318,5 @@ def create_ui_blueprint() -> Blueprint:
     register_update_routes(blueprint)
     register_user_routes(blueprint)
     register_provider_relay_routes(blueprint)
+    register_window_routes(blueprint)
     return blueprint

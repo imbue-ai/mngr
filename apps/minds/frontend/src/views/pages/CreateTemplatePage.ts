@@ -18,8 +18,13 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
+import {
+  fetchCreateFormDefaults,
+  recoveryRoute,
+  submitCreateRequest,
+} from "../../models/create";
 import type { LocalBackendPrerequisite } from "../../models/create";
+import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
@@ -32,7 +37,13 @@ import { slowStartNotice } from "./create/ComputeNotices";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced, regionChoiceLabel } from "./create/form-model";
+import { ImbueCloudSignInGate } from "./create/sign-in-gate";
+import {
+  CreateFormModel,
+  normalizeCreateApiError,
+  presetOpensAdvanced,
+  regionChoiceLabel,
+} from "./create/form-model";
 
 // The chat command the add flow tells the user to paste.
 //
@@ -113,8 +124,19 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   let isAdvanced = false;
   let isMessageCopied = false;
   let isTrusted = false;
-  let isAccountErrorShown = false;
   let submitError = "";
+  // Set once the page is gone, so a create a sign-in enabled does not go out from it.
+  let isRemoved = false;
+  // Imbue Cloud asked for in a window with no signed-in account: the gate
+  // supplies one, reloads the form under it, and the create goes out on its own.
+  const signInGate = new ImbueCloudSignInGate({
+    model,
+    isRemoved: () => isRemoved,
+    create: postCreate,
+    setSubmitError: (message) => {
+      submitError = message;
+    },
+  });
   const copyTimers: ReturnType<typeof setTimeout>[] = [];
   // Which step circles have already played their completion pop, so a redraw
   // does not replay it (cleared if the step reopens).
@@ -124,7 +146,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   // prerequisite facts move, every edit in the form stays. A failed re-probe
   // leaves the notice as it was, which is still what the machine last said.
   function checkPrerequisitesAgain(): void {
-    fetchCreateFormDefaults(null)
+    fetchCreateFormDefaults(null, getAppContext().shell.accountId)
       .then((defaults) => {
         model.refreshPrerequisites(defaults);
         m.redraw();
@@ -146,7 +168,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     isAdvanced = false;
     isMessageCopied = false;
     isTrusted = false;
-    isAccountErrorShown = false;
     submitError = "";
     model.selectedPreset = null;
   }
@@ -194,7 +215,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   // TemplateCreate.jinja; the modal card scrolls itself, so it is exempt.)
   let isColumnPinned = false;
   function pageColumn(): HTMLElement | null {
-    return document.getElementById("template-content-top")?.parentElement ?? null;
+    return (
+      document.getElementById("template-content-top")?.parentElement ?? null
+    );
   }
   function pinPageColumn(): void {
     if (isModal() || isColumnPinned) return;
@@ -233,7 +256,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     if (isModal()) {
       const params: Record<string, string> = { git_url: gitUrl, start: "create" };
       if (branchName) params.branch = branchName;
-      m.route.set("/create/template", params);
+      m.route.set(getAppContext().shell.hubRoute("/create/template"), params);
       return;
     }
     chooseBranch("create");
@@ -267,39 +290,30 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     model.branch = branchName;
     if (model.unmetPrerequisiteForSubmit() !== null) return;
     if (model.imbueCloudNeedsAccount()) {
-      if ((model.defaults?.accounts.length ?? 0) > 0) {
-        isAccountErrorShown = true;
-      } else {
-        m.route.set("/accounts");
-      }
+      signInGate.start();
       return;
     }
+    postCreate();
+  }
+
+  function postCreate(): void {
     model.isSubmitting = true;
     submitError = "";
-    fetch("/api/v1/workspaces", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(model.submitBody()),
-    })
-      .then(async (response) => ({
-        status: response.status,
-        data: (await response.json().catch(() => ({}))) as Record<string, unknown>,
-      }))
-      .then((result) => {
-        if (result.status === 202 && typeof result.data.operation_id === "string") {
-          m.route.set(`/creating/${result.data.operation_id}`);
-          return;
-        }
-        model.isSubmitting = false;
-        submitError = normalizeCreateApiError(result.data).message;
-        m.redraw();
-      })
-      .catch(() => {
-        model.isSubmitting = false;
-        submitError = "Could not reach the server. Please try again.";
-        m.redraw();
-      });
+    void submitCreateRequest({ ...model.submitBody() }).then((result) => {
+      if (
+        result.status === 202 &&
+        typeof result.data.operation_id === "string"
+      ) {
+        m.route.set(`/creating/${result.data.operation_id}`);
+        return;
+      }
+      model.isSubmitting = false;
+      submitError =
+        result.status === 0
+          ? "Could not reach the server. Please try again."
+          : normalizeCreateApiError(result.data).message;
+      m.redraw();
+    });
   }
 
   function machineRow(entry: UiWorkspaceEntry): m.Children {
@@ -356,10 +370,18 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function step1Body(): m.Children {
     return m("div", { class: "flex flex-col gap-3" }, [
-      m(Button, { variant: "secondary", block: true, onclick: () => chooseCreate() }, "Create a new workspace"),
       m(
         Button,
-        { variant: "secondary", block: true, onclick: () => chooseBranch("add") },
+        { variant: "secondary", block: true, onclick: () => chooseCreate() },
+        "Create a new workspace",
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          block: true,
+          onclick: () => chooseBranch("add"),
+        },
         isModal() ? `Add to ${machineName()}` : "Add to an existing workspace",
       ),
     ]);
@@ -374,6 +396,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         { role: "radiogroup", "aria-label": "Where to run your workspace" },
         m(PresetCards, {
           selectedPreset: model.selectedPreset,
+          isRemoteOffered:
+            getAppContext().shell.accountId !== LOCAL_PROFILE_USER_ID,
           onSelect: (name: PresetName) => {
             model.applyPreset(name);
             const opensAdvanced = presetOpensAdvanced(name);
@@ -410,13 +434,19 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               model.launchValue = (event.target as HTMLSelectElement).value;
             },
           },
-          model.launchOptions().map((option) =>
-            m(
-              "option",
-              { value: option.value, selected: model.launchValue === option.value, disabled: option.isDisabled },
-              option.label,
+          model
+            .launchOptions()
+            .map((option) =>
+              m(
+                "option",
+                {
+                  value: option.value,
+                  selected: model.launchValue === option.value,
+                  disabled: option.isDisabled,
+                },
+                option.label,
+              ),
             ),
-          ),
         ),
       ]),
       m("div", { class: "flex items-center justify-between gap-4" }, [
@@ -474,65 +504,39 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       ]),
       m("div", { class: "mb-4" }, [
         m("p", { class: "type-label" }, "Account"),
+        // The workspace belongs to the window's account; the titlebar's switcher is where that changes.
         m(
-          "div",
-          { class: "mt-1" },
-          m(
-            Select,
-            {
-              id: "account_id",
-              name: "account_id",
-              width: "w-72",
-              value: model.accountId,
-              onchange: (event: Event) => {
-                model.accountId = (event.target as HTMLSelectElement).value;
-                // The account picks the connections on offer; a selection it does not own falls back.
-                model.syncLaunchValueToSelectedAccount();
-                if (!model.imbueCloudNeedsAccount()) isAccountErrorShown = false;
-              },
-            },
-            [
-              ...defaults.accounts.map((account) =>
-                m("option", { value: account.user_id, selected: model.accountId === account.user_id }, account.email),
-              ),
-              m("option", { value: "", selected: model.accountId === "" }, "No account (private workspace)"),
-            ],
-          ),
+          "p",
+          { id: "create-account", class: "type-body text-primary mt-1" },
+          model.selectedAccountEmail() || "No account (this device only)",
         ),
       ]),
-      isAccountErrorShown
-        ? m(
-            "p",
-            { class: "mb-4 type-helper text-important" },
-            `Pick an account to use Imbue Cloud, or choose "${PRESET_TITLES.local}" or "${PRESET_TITLES["own-cloud"]}".`,
-          )
-        : null,
-      m(
-        "label",
-        { class: "mt-6 flex items-center gap-3 cursor-pointer" },
-        [
-          m("input", {
-            type: "checkbox",
-            class: "shrink-0",
-            checked: isTrusted,
-            onchange: (event: Event) => {
-              isTrusted = (event.target as HTMLInputElement).checked;
+      m("label", { class: "mt-6 flex items-center gap-3 cursor-pointer" }, [
+        m("input", {
+          type: "checkbox",
+          class: "shrink-0",
+          checked: isTrusted,
+          onchange: (event: Event) => {
+            isTrusted = (event.target as HTMLInputElement).checked;
+          },
+        }),
+        m("span", [
+          m(
+            "span",
+            {
+              class:
+                "type-body font-semibold " +
+                (isTrusted ? "text-primary" : "text-important"),
             },
-          }),
-          m("span", [
-            m(
-              "span",
-              { class: "type-body font-semibold " + (isTrusted ? "text-primary" : "text-important") },
-              "I trust this Template",
-            ),
-            m(
-              "span",
-              { class: "block type-helper text-primary" },
-              "Templates are community content. This one has not been approved or verified by Imbue.",
-            ),
-          ]),
-        ],
-      ),
+            "I trust this Template",
+          ),
+          m(
+            "span",
+            { class: "block type-helper text-primary" },
+            "Templates are community content. This one has not been approved or verified by Imbue.",
+          ),
+        ]),
+      ]),
       m("div", { class: "mt-8" }, [
         m(
           "button",
@@ -843,7 +847,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     oninit() {
       // Defaults do not depend on the route, so load them once here; the flow
       // reads route params each render via syncRoute.
-      fetchCreateFormDefaults(null)
+      fetchCreateFormDefaults(null, getAppContext().shell.accountId)
         .then((defaults) => {
           model.applyDefaults(defaults);
           model.selectedPreset = null; // the stepper offers no default preset
@@ -851,13 +855,17 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         })
         .catch(() => m.redraw());
     },
+    onupdate() {
+      signInGate.sync();
+    },
     onremove() {
+      isRemoved = true;
       for (const timer of copyTimers) clearTimeout(timer);
     },
     view() {
       if (!syncRoute()) {
         // No repo to inspire from -> the plain create form is the right surface.
-        m.route.set("/create");
+        getAppContext().shell.routeToHub("/create");
         return null;
       }
       const steps = buildSteps();

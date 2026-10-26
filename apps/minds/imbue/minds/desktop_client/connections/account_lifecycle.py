@@ -12,7 +12,6 @@ from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -100,32 +99,12 @@ def sign_out_account_locally(
         provider_materializer.materialize()
 
 
-def hand_off_default_account(
-    signed_out_user_id: str, session_store: MultiAccountSessionStore, minds_config: MindsConfig | None
-) -> None:
-    """Make the first account still signed in the default when the default account signs out.
-
-    With none left the default is cleared, so the next sign-in takes it. The
-    default is left as it was when the account listing fails (it cannot name
-    a successor) or still lists the account (its signout did not go through).
-    """
-    if minds_config is None or minds_config.get_default_account_id() != signed_out_user_id:
-        return
-    remaining = session_store.list_accounts()
-    if session_store.is_last_identity_read_failed:
-        return
-    if any(str(account.user_id) == signed_out_user_id for account in remaining):
-        return
-    minds_config.set_default_account_id(str(remaining[0].user_id) if remaining else None)
-
-
 def sign_out_account_via_plugin(
     user_id: str,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore,
     connection_store: ConnectionStore | None,
     provider_materializer: ProviderSettingsMaterializer | None,
-    minds_config: MindsConfig | None,
 ) -> None:
     """Sign ``user_id`` out via the mngr_imbue_cloud plugin and clear local state.
 
@@ -135,7 +114,7 @@ def sign_out_account_via_plugin(
     the SuperTokens session; only this device's session is revoked, and the
     plugin drops the local tokens even when the revoke cannot land, so this
     works offline), then applies the local half through
-    :func:`sign_out_account_locally` and hands the default account on.
+    :func:`sign_out_account_locally`.
 
     No-ops the plugin half gracefully when the user isn't currently visible
     to the plugin -- the cache is still invalidated so a stale entry can't
@@ -167,7 +146,6 @@ def sign_out_account_via_plugin(
         connection_store=connection_store,
         provider_materializer=provider_materializer,
     )
-    hand_off_default_account(user_id, session_store, minds_config)
 
 
 def sign_out_dead_account(
@@ -176,7 +154,6 @@ def sign_out_dead_account(
     session_store: MultiAccountSessionStore,
     connection_store: ConnectionStore,
     provider_materializer: ProviderSettingsMaterializer,
-    minds_config: MindsConfig,
     wake_ui_publisher: Callable[[], None],
 ) -> None:
     """Sign out an account whose session the connector refused to refresh (the sync pass's callback).
@@ -192,6 +169,5 @@ def sign_out_dead_account(
         session_store=session_store,
         connection_store=connection_store,
         provider_materializer=provider_materializer,
-        minds_config=minds_config,
     )
     wake_ui_publisher()

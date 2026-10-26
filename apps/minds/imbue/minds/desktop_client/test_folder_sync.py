@@ -522,9 +522,8 @@ def test_a_restore_waits_for_a_stopped_workspace_and_starts_when_its_machine_run
     resolver.set_host_state(HostState.RUNNING)
     manager.on_backend_changed()
 
-    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    wait_until_synced(manager, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     assert manager.restore_failure_for(_AGENT_ID, str(local_folder)) == ""
     manager.stop_all()
 
@@ -546,9 +545,8 @@ def test_a_restore_on_a_running_workspace_starts_at_once(
 
     manager.restore_all()
 
-    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    wait_until_synced(manager, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     manager.stop_all()
 
 
@@ -573,9 +571,8 @@ def test_a_sync_that_failed_while_its_machine_was_down_starts_again_when_it_come
     resolver.set_host_state(HostState.RUNNING)
     manager.on_backend_changed()
 
-    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    wait_until_synced(manager, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     manager.stop_all()
 
 
@@ -628,9 +625,8 @@ def test_a_failed_sync_starts_again_when_its_own_workspace_answers_again(
 
     manager.on_workspace_recovered(AgentId(_AGENT_ID))
 
-    status = manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
-    assert status is not None
-    assert status.state == FolderSyncState.SYNCED
+    manager.wait_until_started(_AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
+    wait_until_synced(manager, _AGENT_ID, str(local_folder), _START_TIMEOUT_SECONDS)
     manager.stop_all()
 
 

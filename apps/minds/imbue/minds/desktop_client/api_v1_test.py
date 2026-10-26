@@ -5408,29 +5408,25 @@ def test_create_synced_connection_rolls_back_when_the_push_fails(
     )
 
 
-def test_create_connection_without_an_owner_lands_on_the_settled_default_account(
+def test_create_connection_without_an_owner_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A stored default the scheduler retired as dead must not refuse every ownerless registration."""
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    minds_config.set_default_account_id(str(uuid4()))
+    """There is no install-wide default account: the window adding a connection names the owner itself."""
     parts = _connection_client(
         tmp_path,
         monkeypatch,
         root_concurrency_group,
         StaticBackendResolver(url_by_agent_and_service={}),
         0,
-        minds_config=minds_config,
     )
     unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
     body = {key: value for key, value in _modal_connection_body("").items() if key != "owner"}
 
     response = _post_connection(parts, body)
 
-    assert response.status_code == 200, response.data
-    (view,) = parts.connection_store.list_all_views()
-    assert view.owner_user_id == _CONNECTION_OWNER_ID
-    assert minds_config.get_default_account_id() == _CONNECTION_OWNER_ID
+    assert response.status_code == 400, response.data
+    assert json.loads(response.data)["field"] == "owner"
+    assert parts.connection_store.list_all_views() == []
 
 
 def test_create_connection_rejects_an_unknown_owner_a_missing_token_a_blank_alias_and_a_blank_region(

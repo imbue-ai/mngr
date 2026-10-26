@@ -9,6 +9,7 @@ import { electronBridge } from "./electron-bridge";
 import { installCursorHidingWhileTyping } from "./hide-cursor-while-typing";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { onboardingProgress } from "./models/onboarding";
+import { LOCAL_PROFILE_USER_ID } from "./models/providers";
 import {
   NotificationGestures,
   NotificationsUiController,
@@ -33,6 +34,8 @@ function main(): void {
           // No bootstrap means no server verdict; treat the install as past
           // onboarding so a bare page never bounces to the start flow.
           isOnboardingComplete: true,
+          // And no account named: the device's.
+          accountId: LOCAL_PROFILE_USER_ID,
         },
         // No inline bootstrap means no version to compare; null disables the
         // mismatch reload instead of guaranteeing one on the first hello.
@@ -43,6 +46,7 @@ function main(): void {
   shell.isMac = bootContext.seed.isMac;
   shell.isTrafficLightsDrawn = electronBridge.isTrafficLightsDrawn;
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
+  shell.accountId = bootContext.seed.accountId;
   onboardingProgress.seed(bootContext.seed.isOnboardingComplete);
 
   // Arrival behavior for the notification feed (toasts, dock badge); the
@@ -65,6 +69,7 @@ function main(): void {
         : bootContext.stores.workspaces.toAgentScopedId(displayed);
     },
     openInPlace: (requestId) => shell.openInbox({ selected: requestId }),
+    overlayQuery: (params) => shell.overlayQuery(params),
     currentRoutePath: () => shell.currentRoutePath(),
     sendWorkspaceMessage: (workspaceAgentId, message) =>
       shell.requestWorkspaceMessage(workspaceAgentId, message),
@@ -117,7 +122,7 @@ function main(): void {
         displayed !== null &&
         shell.stores.workspaces.toAgentScopedId(displayed) === message.agent_id
       ) {
-        m.route.set("/");
+        shell.routeToHub();
       }
     },
     onHealthChanged: (message) => {

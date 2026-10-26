@@ -8,7 +8,7 @@ import {
   titlebarAnchors,
 } from "./RaisedTitlebarIcons";
 import type { AnyVnode } from "../../testing";
-import { attrsOf, collectVnodes } from "../../testing";
+import { allText, attrsOf, collectVnodes } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
 
@@ -41,6 +41,7 @@ function renderStrip(
   onSelect: (id: TitlebarPopupId) => void = () => undefined,
   onDismiss: () => void = () => undefined,
   hasWorkspaceRequestDot = false,
+  accountLabel = "",
 ): AnyVnode {
   stubTitlebar(ids);
   const instance = RaisedTitlebarIcons() as unknown as m.Component;
@@ -53,6 +54,7 @@ function renderStrip(
       unresolvedCount: 0,
       hasWorkspaceRequestDot,
       agentId: WORKSPACE_ID,
+      accountLabel,
     },
   });
 }
@@ -87,6 +89,7 @@ function makeShell(options: {
     currentRoutePath: () => options.routePath ?? `/workspace/${WORKSPACE_ID}`,
     panelRouteBehindOverlay: options.panelRouteBehindOverlay ?? null,
     switchToNotifications: () => calls.push("switchToNotifications"),
+    switchToAccountSwitcher: () => calls.push("switchToAccountSwitcher"),
     closeNotifications: () => calls.push("closeNotifications"),
     openHelp: () => calls.push("openHelp"),
   } as unknown as ShellState;
@@ -183,6 +186,24 @@ describe("the raised titlebar icon strip", () => {
       "Notifications",
     );
   });
+
+  it("draws the account switcher's copy with the account's name, so it is as wide as the titlebar's", () => {
+    const strip = renderStrip(
+      ["account-switcher-btn", "notifications-toggle"],
+      "notifications",
+      undefined,
+      undefined,
+      false,
+      "Alice Nguyen",
+    );
+    const switcher = icon(strip, "account");
+
+    expect(attrsOf(switcher).id).toBe("account-switcher-btn-raised");
+    expect(attrsOf(switcher)["aria-label"]).toBe("Switch account");
+    expect(allText(switcher)).toContain("Alice Nguyen");
+    // The name is the switcher's alone: the other icons stay bare.
+    expect(allText(icon(strip, "notifications"))).not.toContain("Alice Nguyen");
+  });
 });
 
 describe("openTitlebarPopup", () => {
@@ -192,6 +213,14 @@ describe("openTitlebarPopup", () => {
     openTitlebarPopup(shell, "notifications");
 
     expect(calls()).toEqual(["switchToNotifications"]);
+  });
+
+  it("hands the account switcher its own switch, like the bell", () => {
+    const { shell, calls } = makeShell();
+
+    openTitlebarPopup(shell, "account");
+
+    expect(calls()).toEqual(["switchToAccountSwitcher"]);
   });
 
   it("leaves the feed to the arrival, so the overlay slot is never empty mid-switch", () => {
@@ -225,7 +254,7 @@ describe("openTitlebarPopup", () => {
   });
 
   it("replaces another popup's entry on the way to a machine tab", () => {
-    // Get help -> the key icon is a switch between two of the five surfaces:
+    // Get help -> the key icon is a switch between two of the strip's surfaces:
     // pushed, Get help would be left one Back away under the panel.
     const { shell } = makeShell({ routePath: "/help" });
     const routeSet = vi

@@ -44,7 +44,9 @@ export function connectionBackendLabelFor(
   backends: readonly ConnectionBackendOption[],
   backendName: string,
 ): string {
-  return connectionBackendOptionFor(backends, backendName)?.label ?? backendName;
+  return (
+    connectionBackendOptionFor(backends, backendName)?.label ?? backendName
+  );
 }
 
 export interface CloudAccountOption {
@@ -64,7 +66,6 @@ export interface CreateRetryPrefill {
   docker_runtime: string;
   backup_provider: string;
   backup_api_key_env: string;
-  account_id: string;
   region: string;
   cloud_account: string;
   instance_type: string;
@@ -89,8 +90,8 @@ export interface LocalBackendPrerequisite {
 }
 
 export interface CreateFormDefaults {
-  accounts: CreateAccountOption[];
-  default_account_id: string;
+  /** The window's account, when it is signed in here; null on the device or a signed-out account. */
+  account: CreateAccountOption | null;
   launch_modes: string[];
   selected_launch_mode: string;
   docker_runtimes: string[];
@@ -178,15 +179,23 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** The create form's options under `accountId` (the window's account), with a retry's prefill when one is named. */
 export function fetchCreateFormDefaults(
   retryId: string | null,
+  accountId: string,
 ): Promise<CreateFormDefaults> {
-  const suffix = retryId ? `?retry=${encodeURIComponent(retryId)}` : "";
-  return fetchJson<CreateFormDefaults>(`/ui/api/create/form-defaults${suffix}`);
+  const params = new URLSearchParams({ account: accountId });
+  if (retryId) params.set("retry", retryId);
+  return fetchJson<CreateFormDefaults>(
+    `/ui/api/create/form-defaults?${params.toString()}`,
+  );
 }
 
-export function fetchLandingExtras(): Promise<LandingExtras> {
-  return fetchJson<LandingExtras>("/ui/api/create/landing-extras");
+export function fetchLandingExtras(accountId: string): Promise<LandingExtras> {
+  const params = new URLSearchParams({ account: accountId });
+  return fetchJson<LandingExtras>(
+    `/ui/api/create/landing-extras?${params.toString()}`,
+  );
 }
 
 export function fetchCreateAttemptDetail(

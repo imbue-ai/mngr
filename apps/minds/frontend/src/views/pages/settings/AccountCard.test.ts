@@ -5,8 +5,14 @@
 
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  clearAppContextForTests,
+  registerAppContext,
+} from "../../../app-context";
 import type { UiAccountEntry } from "../../../channel/messages";
 import { AccountsDetailModel } from "../../../models/accountsDetail";
+import { createEmptyStores } from "../../../models/boot";
+import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
 import {
   accountEntry,
@@ -54,6 +60,7 @@ function mountCard(
 }
 
 afterEach(() => {
+  clearAppContextForTests();
   vi.restoreAllMocks();
 });
 
@@ -318,6 +325,9 @@ describe("the email notifications switch", () => {
 
 describe("the shared-workspaces link", () => {
   it("is offered only while the account holds a share", () => {
+    // The link is the window's account's hub page, read off the registered shell.
+    const stores = createEmptyStores();
+    registerAppContext({ stores, shell: new ShellState(stores) });
     const model = modelOnPlan("free");
     const state = model.planStateFor(ACCOUNT.user_id);
     expect(
@@ -331,6 +341,8 @@ describe("the shared-workspaces link", () => {
       (node) => attrsOf(node).id === "account-shared-workspaces-link",
     );
     expect(link).toBeDefined();
-    expect(attrsOf(link as AnyVnode).href).toBe("/workspaces/shared");
+    expect(attrsOf(link as AnyVnode).href).toBe(
+      "/account/local/workspaces/shared",
+    );
   });
 });

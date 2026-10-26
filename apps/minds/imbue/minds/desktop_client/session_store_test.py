@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -364,6 +365,29 @@ def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:
     """get_user_info returns None for nonexistent user."""
     store, _cli = _make_store_with_users(tmp_path, [])
     assert store.get_user_info("nonexistent") is None
+
+
+def test_get_owner_user_id_for_workspace_resolves_either_coordinate_signed_in_or_not(tmp_path: Path) -> None:
+    """The owner is the record's account, by agent id or by host id, whether or not that account is signed in."""
+    store, _cli = _make_store_with_users(tmp_path, [("user-here", "here@example.com", None)])
+    record_store = store.record_store
+    assert record_store is not None
+    host_here = str(HostId.generate())
+    host_gone = str(HostId.generate())
+    store.associate_created_workspace(
+        user_id="user-here", agent_id=_AGENT_A, host_id=host_here, display_name="ws", color=None, is_cloud_row=False
+    )
+    record_store.upsert_local_record(
+        "user-gone", "gone@example.com", ReplicaRecord(host_id=host_gone, agent_id=_AGENT_B, display_name="left")
+    )
+
+    assert store.get_owner_user_id_for_workspace(_AGENT_A) == "user-here"
+    assert store.get_owner_user_id_for_workspace(host_here) == "user-here"
+    assert store.get_owner_user_id_for_workspace(_AGENT_B) == "user-gone"
+    assert store.get_owner_user_id_for_workspace(host_gone) == "user-gone"
+    # A workspace no record claims belongs to no account, by either coordinate.
+    assert store.get_owner_user_id_for_workspace(str(AgentId.generate())) is None
+    assert store.get_owner_user_id_for_workspace(str(HostId.generate())) is None
 
 
 def test_persistence_across_store_instances(tmp_path: Path) -> None:

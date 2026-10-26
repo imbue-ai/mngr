@@ -67,13 +67,14 @@ _WEB_LOGIN_URL: Final[str] = "#web-login-url"
 _WEB_LOGIN_RETRY: Final[str] = "#web-login-retry-btn"
 # A user presses Try again when the flow fails to start; the smoke run does too.
 _WEB_LOGIN_START_ATTEMPTS: Final[int] = 3
-# The create form, plus the compute preset cards.
-_CREATE_PATH: Final[str] = "/create"
+# The create form, plus the compute preset cards. The form creates under the
+# window's account, which is the hub route's segment.
+_ACCOUNTS_API_PATH: Final[str] = "/api/v1/accounts"
 _CREATE_FORM: Final[str] = "#create-form"
 _REMOTE_PRESET: Final[str] = '[data-preset="remote"]'
 _ADVANCED_TOGGLE: Final[str] = "#toggle-advanced"
 _HOST_NAME_FIELD: Final[str] = "#host_name"
-_ACCOUNT_SELECT: Final[str] = "#account_id"
+_CREATE_ACCOUNT_LABEL: Final[str] = "#create-account"
 _LAUNCH_MODE_SELECT: Final[str] = "#launch_mode"
 _REGION_SELECT: Final[str] = "#region"
 _CREATE_SUBMIT: Final[str] = "#create-submit"
@@ -140,8 +141,10 @@ _REPLY_TEXT_PRESENT_JS: Final[str] = f"""(text) => {{
     return false;
 }}"""
 _SELECT_VALUE_JS: Final[str] = "(select) => select.value"
-_ACCOUNT_OPTION_PRESENT_JS: Final[str] = f"""(email) => [...document.querySelectorAll('{_ACCOUNT_SELECT} option')]
-    .some((option) => option.textContent.trim() === email)"""
+_ACCOUNT_LABEL_SHOWN_JS: Final[str] = f"""(email) => {{
+    const label = document.querySelector('{_CREATE_ACCOUNT_LABEL}');
+    return label !== null && label.textContent.trim() === email;
+}}"""
 _FETCH_JS: Final[str] = """([origin, method, path, body]) => fetch(origin + path, {
         method,
         credentials: 'same-origin',
@@ -272,26 +275,53 @@ def _wait_for_web_login_url(page: Page) -> str:
     raise SmokeAppError(f"The app could not start its web-login flow in {_WEB_LOGIN_START_ATTEMPTS} attempts.")
 
 
-def wait_for_account_in_create_form(session: StudioAppSession, email: str, timeout_seconds: float) -> None:
-    """Wait for the create form to list ``email`` among the accounts a workspace can run on."""
+def _signed_in_account_id(session: StudioAppSession, email: str) -> str | None:
+    """The user id the app lists for ``email``, or None while it is not signed in."""
+    for account in fetch_json_from_app(session, _ACCOUNTS_API_PATH).get("accounts", []):
+        if account.get("email") == email:
+            return str(account["account_id"])
+    return None
+
+
+def _account_create_path(account_id: str) -> str:
+    return f"/account/{account_id}/create"
+
+
+def wait_for_account_in_create_form(session: StudioAppSession, email: str, timeout_seconds: float) -> str:
+    """Wait for ``email`` to be signed in and for its hub's create form to create under it; return its user id.
+
+    A window creates under the account its hub route names, so the sign-in that
+    just landed is checked on that account's create page.
+    """
     page = session.page
-    page.goto(f"{session.backend_origin}{_CREATE_PATH}", wait_until="domcontentloaded")
+    deadline = time.monotonic() + timeout_seconds
+    account_id = _signed_in_account_id(session, email)
+    while account_id is None:
+        if time.monotonic() >= deadline:
+            raise SmokeAppError(f"The app does not list {email} as a signed-in account after {timeout_seconds}s.")
+        threading.Event().wait(timeout=_POLL_SECONDS)
+        account_id = _signed_in_account_id(session, email)
+    page.goto(f"{session.backend_origin}{_account_create_path(account_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    page.wait_for_function(_ACCOUNT_OPTION_PRESENT_JS, arg=email, timeout=timeout_seconds * 1000)
-    logger.info("The create form lists {} as an account", email)
+    page.wait_for_function(_ACCOUNT_LABEL_SHOWN_JS, arg=email, timeout=max(deadline - time.monotonic(), 1.0) * 1000)
+    logger.info("The create form on {}'s hub creates under that account", email)
+    return account_id
 
 
 def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str, account_email: str) -> Frame:
-    """Drive the create form to an Imbue Cloud workspace on the account; return its rendered desktop's frame."""
+    """Drive the account's create form to an Imbue Cloud workspace; return its rendered desktop's frame."""
     page = session.page
-    page.goto(f"{session.backend_origin}{_CREATE_PATH}", wait_until="domcontentloaded")
+    account_id = _signed_in_account_id(session, account_email)
+    if account_id is None:
+        raise SmokeAppError(f"The app does not list {account_email} as a signed-in account.")
+    page.goto(f"{session.backend_origin}{_account_create_path(account_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
+    page.wait_for_function(_ACCOUNT_LABEL_SHOWN_JS, arg=account_email, timeout=_PAGE_TIMEOUT_MS)
     page.click(_REMOTE_PRESET)
     page.wait_for_selector(f"{_ADVANCED_TOGGLE}:visible", timeout=_PAGE_TIMEOUT_MS)
     page.click(_ADVANCED_TOGGLE)
     page.wait_for_selector(f"{_HOST_NAME_FIELD}:visible", timeout=_PAGE_TIMEOUT_MS)
     page.fill(_HOST_NAME_FIELD, workspace_name)
-    page.select_option(_ACCOUNT_SELECT, label=account_email)
     page.select_option(_LAUNCH_MODE_SELECT, IMBUE_CLOUD_LAUNCH_MODE)
     page.wait_for_selector(f"{_REGION_SELECT}:visible", timeout=_PAGE_TIMEOUT_MS)
     # The region the form already points at, which is the one the app picks for

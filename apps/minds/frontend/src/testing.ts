@@ -116,41 +116,39 @@ export function workspacesMessage(
   };
 }
 
-/** The accounts frame listing `accounts`, labelled with the default one as
- * the server labels it. */
+/** The accounts frame listing the signed-in `accounts` (and `signedOutAccounts`), as a window on `accountId` receives it. */
 export function accountsMessage(
   accounts: UiAccountEntry[] = [accountEntry()],
+  accountId = "local",
+  signedOutAccounts: UiAccountEntry[] = [],
 ): UiAccountsMessage {
-  const labelled =
-    accounts.find((account) => account.is_default) ?? accounts[0];
   return {
     type: "accounts",
+    account_id: accountId,
     has_accounts: accounts.length > 0,
-    account_email: labelled?.email ?? "",
-    extra_account_count: Math.max(accounts.length - 1, 0),
     accounts,
+    signed_out_accounts: signedOutAccounts,
   };
 }
 
-/** One signed-in account entry: alice, the default account. */
+/** One signed-in account entry: alice. */
 export function accountEntry(
   overrides: Partial<UiAccountEntry> = {},
 ): UiAccountEntry {
   return {
     user_id: "user-1",
     email: "alice@example.com",
+    display_name: "",
     workspace_count: 0,
-    is_default: true,
     ...overrides,
   };
 }
 
-/** A second, non-default account signed in beside accountEntry's. */
+/** A second account signed in beside accountEntry's. */
 export function secondAccountEntry(): UiAccountEntry {
   return accountEntry({
     user_id: "user-2",
     email: "bob@example.com",
-    is_default: false,
   });
 }
 
@@ -203,20 +201,17 @@ export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
   },
 ];
 
-/** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
+/** A create-form defaults payload for a window on accountEntry's account, with Imbue Cloud selected. */
 export function createFormDefaults(
   overrides: Partial<CreateFormDefaults> = {},
 ): CreateFormDefaults {
   return {
-    accounts: [
-      {
-        user_id: "user-1",
-        email: "alice@example.com",
-        state: "SIGNED_IN",
-        is_connection_owner_eligible: true,
-      },
-    ],
-    default_account_id: "user-1",
+    account: {
+      user_id: "user-1",
+      email: "alice@example.com",
+      state: "SIGNED_IN",
+      is_connection_owner_eligible: true,
+    },
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
     selected_launch_mode: "IMBUE_CLOUD",
     docker_runtimes: ["RUNC", "RUNSC"],

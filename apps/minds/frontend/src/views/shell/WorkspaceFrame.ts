@@ -26,6 +26,7 @@ import type {
   WorkspaceFrameHandle,
   WorkspaceMessageSender,
 } from "./shell-state";
+import { isAppOverlayPath } from "./classify";
 import type {
   PopoutOpenRequest,
   TearOutReport,
@@ -587,7 +588,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           armedWorkspaceAnyId ?? workspaceAnyId;
         const handlers = buildEmbedHandlers({
           contract: loaded,
-          navigate: (path, params) => m.route.set(path, params),
+          // An overlay floated over the frame carries the window's account,
+          // so a reload keeps it; a workspace sub-page names the workspace.
+          navigate: (path, params) =>
+            m.route.set(
+              path,
+              isAppOverlayPath(path) ? shell.overlayQuery(params ?? {}) : params,
+            ),
           sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
           armProviderRelay: (flowId, url) =>

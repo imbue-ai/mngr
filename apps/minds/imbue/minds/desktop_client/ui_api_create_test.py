@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
+from imbue.minds.desktop_client.conftest import lock_account_for_test
 from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
@@ -24,7 +25,6 @@ from imbue.minds.desktop_client.connections.connection_store import ConnectionSt
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
-from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.local_prerequisites import CommandProbeResult
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
@@ -108,7 +108,7 @@ def test_form_defaults_exclude_connection_only_launch_modes_and_carry_region_con
     assert payload["machine_size_defaults_by_launch_mode"]["LIMA"]["disk_gb"] == 100
     assert payload["color"].startswith("#")
     assert payload["prefill"] is None
-    assert payload["accounts"] == []
+    assert payload["account"] is None
 
 
 def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can_give(tmp_path: Path) -> None:
@@ -153,29 +153,26 @@ def test_form_defaults_keep_the_docker_cpu_default_when_the_daemon_is_not_answer
     assert "docker info --format {{.NCPU}}" not in bare_host.commands_run
 
 
-@pytest.mark.parametrize(
-    ("user_ids", "configured_default", "expected_default"),
-    [
-        pytest.param(("user-a", "user-b"), "user-b", "user-b", id="signed-in-configured-default"),
-        pytest.param(("user-current",), "user-departed", "user-current", id="sole-account-over-departed-default"),
-        pytest.param(("user-a", "user-b"), "user-gone", "user-a", id="first-account-over-departed-default"),
-        pytest.param((), "user-gone", "", id="every-account-signed-out"),
-    ],
-)
-def test_form_defaults_preselect_the_resolved_default_account(
-    tmp_path: Path, user_ids: tuple[str, ...], configured_default: str, expected_default: str
-) -> None:
-    """A stored default that has signed out is never preselected; the first signed-in account is instead."""
-    client, _minds_config = build_desktop_client_with_accounts(
-        tmp_path, user_ids, stored_default_account_id=configured_default
-    )
+def test_form_defaults_name_the_windows_account_when_it_is_signed_in(tmp_path: Path) -> None:
+    """The form creates under the window's account alone, which the route takes as ``?account=``."""
+    client, _minds_config = build_desktop_client_with_accounts(tmp_path, ("user-a", "user-b"))
 
-    response = client.get("/ui/api/create/form-defaults")
+    response = client.get("/ui/api/create/form-defaults?account=user-b")
 
     assert response.status_code == 200
     payload = json.loads(response.get_data(as_text=True))
-    assert [account["user_id"] for account in payload["accounts"]] == list(user_ids)
-    assert payload["default_account_id"] == expected_default
+    assert payload["account"]["user_id"] == "user-b"
+    assert payload["account"]["email"] == "user-b@example.com"
+
+
+@pytest.mark.parametrize("account_id", ["local", "user-signed-out"])
+def test_form_defaults_name_no_account_for_the_device_or_a_signed_out_account(tmp_path: Path, account_id: str) -> None:
+    client, _minds_config = build_desktop_client_with_accounts(tmp_path, ("user-a",))
+
+    response = client.get(f"/ui/api/create/form-defaults?account={account_id}")
+
+    assert response.status_code == 200
+    assert json.loads(response.get_data(as_text=True))["account"] is None
 
 
 def test_form_defaults_report_what_each_local_backend_needs_from_this_machine(tmp_path: Path) -> None:
@@ -282,18 +279,18 @@ def test_form_defaults_report_each_accounts_state_and_whether_it_can_own_a_conne
     connection_store = make_connection_store_for_test(data_dir, cli)
     session_store = make_session_store_for_test(data_dir, cli, connection_store=connection_store)
     unlock_account_with_master_password_for_test(connection_store.paths, eligible_user_id)
-    # A locked account: a synced connection proves a master password elsewhere, and no DEK is here.
-    unlock_account_with_master_password_for_test(connection_store.paths, locked_user_id)
-    add_modal_connection_for_test(connection_store, locked_user_id, "elsewhere modal")
-    delete_dek(connection_store.paths, locked_user_id)
+    lock_account_for_test(connection_store, locked_user_id)
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path, is_authenticated=True, session_store=session_store, connection_store=connection_store
     )
 
-    response = client.get("/ui/api/create/form-defaults")
+    by_user_id = {
+        user_id: json.loads(client.get(f"/ui/api/create/form-defaults?account={user_id}").get_data(as_text=True))[
+            "account"
+        ]
+        for user_id in (eligible_user_id, locked_user_id, bare_user_id)
+    }
 
-    assert response.status_code == 200
-    by_user_id = {account["user_id"]: account for account in json.loads(response.get_data(as_text=True))["accounts"]}
     assert by_user_id[eligible_user_id]["state"] == "SIGNED_IN"
     assert by_user_id[eligible_user_id]["is_connection_owner_eligible"] is True
     assert by_user_id[locked_user_id]["state"] == "LOCKED"
@@ -322,6 +319,39 @@ def test_landing_extras_render_empty_state_for_a_minimal_app(tmp_path: Path) -> 
     assert payload["locked_account_emails"] == []
     assert isinstance(payload["is_discovery_complete"], bool)
     assert isinstance(payload["has_restorable_workspaces"], bool)
+
+
+def test_landing_extras_report_only_the_asked_accounts_locked_state(tmp_path: Path) -> None:
+    """The sync-unlock banner is the window's: another account's locked state and the device answer nothing."""
+    cli = make_fake_imbue_cloud_cli()
+    locked_user_id, other_user_id = (str(uuid4()) for _ in range(2))
+    for user_id in (locked_user_id, other_user_id):
+        cli.add_account(user_id=user_id, email=f"{user_id[:8]}@example.com")
+    data_dir = tmp_path / "minds"
+    connection_store = make_connection_store_for_test(data_dir, cli)
+    session_store = make_session_store_for_test(data_dir, cli, connection_store=connection_store)
+    lock_account_for_test(connection_store, locked_user_id)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        session_store=session_store,
+        connection_store=connection_store,
+        paths=connection_store.paths,
+    )
+
+    locked_emails_by_asked_account = {
+        asked: json.loads(client.get(f"/ui/api/create/landing-extras?account={asked}").get_data(as_text=True))[
+            "locked_account_emails"
+        ]
+        for asked in (locked_user_id, other_user_id, LOCAL_PROFILE_USER_ID)
+    }
+    no_param_payload = json.loads(client.get("/ui/api/create/landing-extras").get_data(as_text=True))
+
+    assert locked_emails_by_asked_account[locked_user_id] == [f"{locked_user_id[:8]}@example.com"]
+    assert locked_emails_by_asked_account[other_user_id] == []
+    assert locked_emails_by_asked_account[LOCAL_PROFILE_USER_ID] == []
+    # No account parameter reads as the device, which has nothing to unlock.
+    assert no_param_payload["locked_account_emails"] == []
 
 
 def _landing_extras_with_failed_destroy(tmp_path: Path, is_workspace_still_active: bool) -> tuple[str, dict]:
@@ -507,8 +537,6 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
     # A retry keeps asking the onboarding questions when the attempt did.
     assert prefill["is_onboarding_driven_by_agent"] is True
-    # The ghost account is not offered, so it must not be pre-selected either.
-    assert prefill["account_id"] == ""
     assert prefill["cloud_account"].startswith("gcp_")
     assert prefill["unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
 
@@ -538,24 +566,6 @@ def test_form_defaults_prefill_is_retryable_while_its_connection_is_still_usable
     prefill = json.loads(response.get_data(as_text=True))["prefill"]
     assert prefill["cloud_account"] == instance_name and prefill["launch_mode"] == "MODAL"
     assert prefill["unavailable_reason"] == ""
-
-
-def test_form_defaults_prefill_keeps_a_retried_account_that_is_still_signed_in(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-) -> None:
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-kept", email="kept@example.com")
-    client, store, _creator = _make_client_with_store(
-        tmp_path, root_concurrency_group, session_store=make_session_store_for_test(tmp_path / "session-store", cli)
-    )
-    create_attempt_id = str(CreateAttemptId.generate())
-    store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED, account_id="user-kept"))
-
-    response = client.get(f"/ui/api/create/form-defaults?retry={create_attempt_id}")
-
-    assert response.status_code == 200
-    assert json.loads(response.get_data(as_text=True))["prefill"]["account_id"] == "user-kept"
 
 
 def test_create_attempt_detail_carries_error_and_log_tail_for_a_failed_record(

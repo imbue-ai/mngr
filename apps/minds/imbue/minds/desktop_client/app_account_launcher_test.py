@@ -1,9 +1,9 @@
 """Unit tests for the `/ui/ws` ``accounts`` frame.
 
-The home screen's bottom-left account launcher and Manage Accounts both render
-from this frame, and both stay put while accounts change underneath them. The
-frame is what updates them, so these tests drive the account list directly and
-assert what the windows would be told.
+The titlebar's account switcher and Manage Accounts both render from this
+frame, and both stay put while accounts change underneath them. The frame is
+what updates them, so these tests drive the account list directly and assert
+what the windows would be told.
 """
 
 from pathlib import Path
@@ -17,10 +17,12 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_models import UiAccountEntry
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 
 
 def _make_app(tmp_path: Path, cli: FakeImbueCloudCli) -> Flask:
@@ -42,76 +44,58 @@ def _session_store(app: Flask) -> MultiAccountSessionStore:
 
 
 def test_accounts_frame_is_empty_when_signed_out(tmp_path: Path) -> None:
-    """No accounts: the launcher reads "Log in" and its click opens the sign-in modal."""
+    """No accounts: the switcher lists only the device, and the launcher reads "Log in"."""
     app = _make_app(tmp_path, make_fake_imbue_cloud_cli())
     with app.app_context():
         message = _build_ui_accounts_message(_session_store(app))
 
-    assert (message.has_accounts, message.account_email, message.extra_account_count) == (False, "", 0)
-    assert message.accounts == ()
+    assert (message.has_accounts, message.accounts, message.signed_out_accounts) == (False, (), ())
 
 
-def test_accounts_frame_marks_the_only_signed_in_account_default_over_a_departed_default(tmp_path: Path) -> None:
+def test_accounts_frame_lists_every_signed_in_account_with_its_display_name(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-current", email="current@example.com")
-    app = _make_app(tmp_path, cli)
-    minds_config = get_state(app).minds_config
-    assert minds_config is not None
-    minds_config.set_default_account_id("user-departed")
-
-    with app.app_context():
-        message = _build_ui_accounts_message(_session_store(app))
-
-    assert message.account_email == "current@example.com"
-    assert [(entry.user_id, entry.is_default) for entry in message.accounts] == [("user-current", True)]
-
-
-def test_accounts_frame_always_marks_a_default_while_accounts_are_signed_in(tmp_path: Path) -> None:
-    """Several accounts signed in and the stored default gone: the first one becomes the default, and is stored."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-first", email="first@example.com")
+    cli.add_account(user_id="user-first", email="first@example.com", display_name="First Person")
     cli.add_account(user_id="user-second", email="second@example.com")
     app = _make_app(tmp_path, cli)
-    minds_config = get_state(app).minds_config
-    assert minds_config is not None
-    minds_config.set_default_account_id("user-departed")
 
     with app.app_context():
         message = _build_ui_accounts_message(_session_store(app))
 
-    assert message.account_email == "first@example.com"
-    assert [(entry.user_id, entry.is_default) for entry in message.accounts] == [
-        ("user-first", True),
-        ("user-second", False),
-    ]
-    assert minds_config.get_default_account_id() == "user-first"
-
-
-def test_accounts_frame_names_the_default_account_and_lists_them_all(tmp_path: Path) -> None:
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-first", email="first@example.com")
-    cli.add_account(user_id="user-second", email="second@example.com")
-    app = _make_app(tmp_path, cli)
-    minds_config = get_state(app).minds_config
-    assert minds_config is not None
-    minds_config.set_default_account_id("user-second")
-
-    with app.app_context():
-        message = _build_ui_accounts_message(_session_store(app))
-
-    assert (message.has_accounts, message.account_email, message.extra_account_count) == (
-        True,
-        "second@example.com",
-        1,
-    )
+    assert message.has_accounts is True
+    # The window's account is stamped per connection by the publisher; the derive carries the device.
+    assert message.account_id == LOCAL_PROFILE_USER_ID
     assert message.accounts == (
-        UiAccountEntry(user_id="user-first", email="first@example.com", workspace_count=0, is_default=False),
-        UiAccountEntry(user_id="user-second", email="second@example.com", workspace_count=0, is_default=True),
+        UiAccountEntry(
+            user_id="user-first", email="first@example.com", display_name="First Person", workspace_count=0
+        ),
+        UiAccountEntry(user_id="user-second", email="second@example.com", workspace_count=0),
+    )
+
+
+def test_accounts_frame_lists_a_signed_out_account_whose_workspaces_are_still_here(tmp_path: Path) -> None:
+    """A signed-out account with active records on this install is offered to switch to, with its workspace count."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-here", email="here@example.com")
+    app = _make_app(tmp_path, cli)
+    with app.app_context():
+        session_store = _session_store(app)
+        record_store = session_store.record_store
+        assert record_store is not None
+        record_store.upsert_local_record(
+            "user-gone",
+            "gone@example.com",
+            ReplicaRecord(host_id="host-1", agent_id="agent-1", display_name="left behind"),
+        )
+        message = _build_ui_accounts_message(session_store)
+
+    assert [entry.user_id for entry in message.accounts] == ["user-here"]
+    assert message.signed_out_accounts == (
+        UiAccountEntry(user_id="user-gone", email="gone@example.com", workspace_count=1),
     )
 
 
 def test_accounts_frame_follows_a_sign_out(tmp_path: Path) -> None:
-    """After signing the last account out, neither the launcher nor Manage Accounts may still show it.
+    """After signing the last account out, neither the switcher nor Manage Accounts may still show it.
 
     Sign-out drops the plugin's session and invalidates the identity cache; the
     frame is re-derived from that, so it flips to the signed-out shape.
@@ -127,32 +111,8 @@ def test_accounts_frame_follows_a_sign_out(tmp_path: Path) -> None:
         session_store.invalidate_identity_cache()
         after = _build_ui_accounts_message(session_store)
 
-    assert (before.account_email, [entry.email for entry in before.accounts]) == (
-        "only@example.com",
-        ["only@example.com"],
-    )
-    assert (after.has_accounts, after.account_email, after.accounts) == (False, "", ())
-
-
-def test_accounts_frame_follows_a_switch_of_the_default_account(tmp_path: Path) -> None:
-    """Switching the default account re-labels the launcher and moves the default mark."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-first", email="first@example.com")
-    cli.add_account(user_id="user-second", email="second@example.com")
-    app = _make_app(tmp_path, cli)
-    minds_config = get_state(app).minds_config
-    assert minds_config is not None
-    minds_config.set_default_account_id("user-first")
-
-    with app.app_context():
-        session_store = _session_store(app)
-        before = _build_ui_accounts_message(session_store)
-        minds_config.set_default_account_id("user-second")
-        after = _build_ui_accounts_message(session_store)
-
-    assert before.account_email == "first@example.com"
-    assert after.account_email == "second@example.com"
-    assert [entry.is_default for entry in after.accounts] == [False, True]
+    assert [entry.email for entry in before.accounts] == ["only@example.com"]
+    assert (after.has_accounts, after.accounts) == (False, ())
 
 
 def test_accounts_frame_is_empty_without_a_session_store(tmp_path: Path) -> None:

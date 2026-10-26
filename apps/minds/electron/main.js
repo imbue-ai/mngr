@@ -35,6 +35,12 @@ const {
   parsePopoutRoute,
   popoutRoutePath,
 } = require('./surface-routing');
+const {
+  DEVICE_ACCOUNT_ID,
+  accountHomePath,
+  accountIdAfterNavigation,
+} = require('./account-routing');
+const { findWorkspaceRow, withAccountRows, workspaceRowFromFrameEntry } = require('./workspace-lists');
 // Pulled-out workspace windows (the pull-out-window spec): the pure decisions
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
@@ -247,7 +253,11 @@ let appMenuInstalled = false;
 
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
-let workspaceList = []; // [{id, name, account}]
+// Each account's rows, as the last ``workspaces`` shell event about that
+// account said: account id -> [{id, name, account, accountUserId}]. Every
+// window's frame is scoped to its own account, so one frame replaces one
+// account's rows, never the install's (see ./workspace-lists).
+let workspaceRowsByAccount = new Map();
 // Agent ids ever seen in a relayed ``workspaces`` shell event's
 // ``destroying_agent_ids`` payload: a workspace disappearing from the list is
 // only treated as destroyed (windows detached) when it was seen destroying
@@ -317,6 +327,19 @@ function updateWorkspaceAliasMaps(workspaces) {
       workspaceAgentIdByHostId.set(String(w.host_id), String(w.id));
     }
   }
+}
+
+// The account a workspace belongs to, as the relayed ``workspaces`` shell event
+// last said; null for one associated with none, or one the list does not know.
+function workspaceAccountIdOf(workspaceId) {
+  const entry = findWorkspaceRow(workspaceRowsByAccount, workspaceId, sameWorkspaceId);
+  return entry && entry.accountUserId ? entry.accountUserId : null;
+}
+
+// The home page a new window opens on: the focused window's account's home.
+function newWindowHomePath() {
+  const focused = getMostRecentWindow();
+  return accountHomePath(focused ? focused.accountId : null);
 }
 
 // The SPA URL that opens a window displaying ``workspaceId``. The host-scoped
@@ -497,7 +520,7 @@ function focusBundleFromNotificationClick(bundle) {
 function computeTitleFor(bundle) {
   const agentId = bundle.currentWorkspaceId;
   if (agentId) {
-    const ws = workspaceList.find((w) => sameWorkspaceId(w.id, agentId));
+    const ws = findWorkspaceRow(workspaceRowsByAccount, agentId, sameWorkspaceId);
     const name = ws ? (ws.name || ws.id) : null;
     if (isPopoutBundle(bundle)) {
       const windowTitle = bundle.popout.title;
@@ -692,6 +715,10 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     currentContentUrl: null,
     currentWorkspaceId: null,
     overlayOverWorkspaceId: null,
+    // The account this window shows (a user id, or 'local' for the device),
+    // read off each committed URL: a hub window is saved under it, and a new
+    // window opens on the focused window's. Null until the first navigation.
+    accountId: null,
     // The window's place in its history at its last committed navigation,
     // which tells a step back from a step forward.
     historyIndex: null,
@@ -891,6 +918,12 @@ function wireBundleNavigationEvents(bundle) {
       bundle.currentWorkspaceId = null;
       bundle.currentContentUrl = parsed.pathname + parsed.search;
     }
+    bundle.accountId = accountIdAfterNavigation({
+      url,
+      workspaceAccountId: workspaceAccountIdOf(bundle.currentWorkspaceId),
+      isWorkspaceUrl: bundle.currentWorkspaceId !== null,
+      previousAccountId: bundle.accountId,
+    });
     bundle.preErrorUrl = bundle.currentContentUrl;
     scheduleSessionSave();
     updateOsTitle(bundle);
@@ -1267,7 +1300,7 @@ function openOrFocusWindow({ isReopen = false } = {}) {
     focusBundle(existing);
     return existing;
   }
-  if (target === 'home') return openNewWindow(backendBaseUrl + '/');
+  if (target === 'home') return openNewWindow(backendBaseUrl + newWindowHomePath());
   if (target === 'startup-route') return openStartupRoutedWindow();
   return openTakeoverWindow();
 }
@@ -1392,7 +1425,9 @@ function readLastLogLines(lineCount) {
 // On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId },
 // ...] }``. A workspace window persists as the port-independent
 // ``/goto/<host-id>/`` path and is restored through the SPA's
-// /workspace/<id> route; every other screen persists as home ("/").
+// /workspace/<id> route; every other screen persists as its account's hub
+// (``/account/<account-id>/``), or as home ("/") when the window's account was
+// never learned, which the SPA sends to the most recently used account.
 
 function loadSessionState() {
   try {
@@ -1439,7 +1474,7 @@ function parseRecoveryPageAgentId(url) {
   }
 }
 
-function toPersistedContentUrl(url) {
+function toPersistedContentUrl(url, accountId = null) {
   if (!url) return null;
   const absolute = toAbsoluteUrl(url);
   const popoutRoute = parsePopoutRoute(absolute);
@@ -1449,7 +1484,7 @@ function toPersistedContentUrl(url) {
   }
   const workspaceId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (workspaceId) return `/goto/${encodeURIComponent(toHostScopedWorkspaceId(workspaceId))}/`;
-  return toRelativeBackendUrl(absolute) ? '/' : null;
+  return toRelativeBackendUrl(absolute) ? accountHomePath(accountId) : null;
 }
 
 // The workspace a persisted entry belongs to, whichever shape it took: a
@@ -1503,7 +1538,7 @@ function saveSessionState() {
     for (const b of mruWindows) {
       if (b.window.isDestroyed() || isLeavingSession(b)) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
-      const persisted = toPersistedContentUrl(url);
+      const persisted = toPersistedContentUrl(url, b.accountId);
       if (!persisted) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
@@ -1625,8 +1660,9 @@ function restoreWindowBounds(bundle, entry) {
 }
 
 // Each window's SPA owns its own /ui/ws channel and relays the events main
-// still acts on. Every window relays the same broadcasts, so handlers must be
-// idempotent; genuinely once-only reactions dedupe via recentShellEventKeys.
+// still acts on. Every window on an account relays that account's frames and
+// every window relays the install-wide ones, so handlers must be idempotent;
+// genuinely once-only reactions dedupe via recentShellEventKeys.
 
 function isDuplicateShellEvent(key) {
   const now = Date.now();
@@ -1641,14 +1677,18 @@ function isDuplicateShellEvent(key) {
 function handleShellEvent(evt, senderBundle) {
   if (!evt || typeof evt.type !== 'string') return;
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
-    const oldIds = new Set(workspaceList.map((w) => w.id));
-    workspaceList = evt.workspaces.map((w) => ({
-      id: String(w.id),
-      name: w.name ? String(w.name) : '',
-      account: w.account ? String(w.account) : '',
-    }));
+    const accountId = evt.account_id ? String(evt.account_id) : DEVICE_ACCOUNT_ID;
+    const { rowsByAccount, vanishedIds } = withAccountRows(
+      workspaceRowsByAccount,
+      accountId,
+      evt.workspaces.map(workspaceRowFromFrameEntry),
+    );
+    workspaceRowsByAccount = rowsByAccount;
+    // The frame is the projection for the sender's own account, so it names
+    // the account outright where the committed URL could not (a workspace
+    // window restored before any list had arrived).
+    senderBundle.accountId = accountId;
     updateWorkspaceAliasMaps(evt.workspaces);
-    const newIds = new Set(workspaceList.map((w) => w.id));
     if (Array.isArray(evt.destroying_agent_ids)) {
       for (const aid of evt.destroying_agent_ids) {
         everSeenDestroying.add(String(aid));
@@ -1657,8 +1697,7 @@ function handleShellEvent(evt, senderBundle) {
     // Detach windows whose workspace was genuinely destroyed (seen destroying
     // at a prior tick); transient discovery hiccups are left to the page's
     // recovery flow.
-    for (const oldId of oldIds) {
-      if (newIds.has(oldId)) continue;
+    for (const oldId of vanishedIds) {
       if (!everSeenDestroying.has(oldId)) continue;
       detachWindowsForWorkspace(oldId);
     }

@@ -209,7 +209,6 @@ from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_pr
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
 from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -4105,28 +4104,23 @@ def _running_connection_operation_message(registry: ConnectionOperationRegistry,
 
 
 def _resolve_connection_owner(raw_owner: object) -> tuple[str, str | None] | Response:
-    """``(owner user id, account email)`` for a registration body's ``owner``; the local profile has no email."""
-    requested_owner = str(raw_owner).strip() if raw_owner is not None else ""
-    if requested_owner == LOCAL_PROFILE_USER_ID:
+    """``(owner user id, account email)`` for a registration body's ``owner``; the local profile has no email.
+
+    The owner is always named: the window adding the connection passes its own
+    account, and there is no install-wide default to fall back on.
+    """
+    owner_user_id = str(raw_owner).strip() if raw_owner is not None else ""
+    if owner_user_id == LOCAL_PROFILE_USER_ID:
         return LOCAL_PROFILE_USER_ID, None
-    state = get_state()
-    signed_in_user_ids = (
-        [str(account.user_id) for account in state.session_store.list_accounts()]
-        if state.session_store is not None
-        else []
-    )
-    if state.session_store is not None and state.session_store.is_last_identity_read_failed:
-        # A failed listing reads like no accounts; answering "signed out" would blame the user.
-        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
-    # Settled, not read raw: a default the scheduler retired as dead would
-    # otherwise answer every ownerless registration with "signed-out account".
-    default_account_id = settle_default_account_id(state.minds_config, signed_in_user_ids)
-    owner_user_id = requested_owner or default_account_id or ""
     if not owner_user_id:
         return _json_field_error(
-            "Sign in to an account to own this connection, or add it to this device only (owner 'local').", "owner"
+            "Name the account that owns this connection, or add it to this device only (owner 'local').", "owner"
         )
+    state = get_state()
     session = state.session_store.get_session(owner_user_id) if state.session_store is not None else None
+    if session is None and state.session_store is not None and state.session_store.is_last_identity_read_failed:
+        # A failed listing reads like no accounts; answering "signed out" would blame the user.
+        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
     if session is None:
         return _json_field_error(f"Unknown or signed-out account {owner_user_id!r}.", "owner")
     return owner_user_id, str(session.email)

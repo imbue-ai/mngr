@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
@@ -852,7 +853,7 @@ def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_pa
     publisher = state.ui_publisher
     assert publisher is not None
 
-    snapshot = publisher.build_snapshot()
+    snapshot = publisher.build_snapshot(LOCAL_PROFILE_USER_ID)
 
     assert snapshot.notifications.unresolved_count == 1
     (entry,) = snapshot.notifications.entries
@@ -873,7 +874,7 @@ def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_pa
     )
     inbox.record_response(response_event)
 
-    resolved_snapshot = publisher.build_snapshot()
+    resolved_snapshot = publisher.build_snapshot(LOCAL_PROFILE_USER_ID)
 
     assert resolved_snapshot.notifications.unresolved_count == 0
     (resolved_entry,) = resolved_snapshot.notifications.entries

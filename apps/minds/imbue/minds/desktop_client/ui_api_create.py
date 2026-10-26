@@ -6,14 +6,14 @@ agents and the browser, returning the operation id the Creating page polls).
 This module serves the page DATA that used to arrive embedded in server-side
 renders:
 
-- ``GET /ui/api/create/form-defaults`` -- everything the create form needs
-  (accounts, providers, regions, machine sizes, cloud connections, suggested
-  color), plus the ``?retry=<create_attempt_id>`` pre-fill from a pending
-  record.
-- ``GET /ui/api/create/landing-extras`` -- landing-page facts that do not ride
-  the ``workspaces`` channel message (destroy run/failed statuses,
-  locked-account emails for the sync-unlock banner, and the
-  discovery-completeness flag driving the empty-state choice).
+- ``GET /ui/api/create/form-defaults?account=<id>`` -- everything the create
+  form needs under the window's account (the account itself when it is signed
+  in, providers, regions, machine sizes, cloud connections, suggested color),
+  plus the ``?retry=<create_attempt_id>`` pre-fill from a pending record.
+- ``GET /ui/api/create/landing-extras?account=<id>`` -- landing-page facts
+  that do not ride the ``workspaces`` channel message (destroy run/failed
+  statuses, the window's account's locked state for the sync-unlock banner,
+  and the discovery-completeness flag driving the empty-state choice).
 - ``GET /ui/api/create/attempts/<create_attempt_id>`` -- the creation page's
   detail: the live in-flight attempt or the record-backed interrupted/failed
   view (both carrying the attempt's persisted request so the page can restate
@@ -48,7 +48,9 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
 from imbue.minds.desktop_client.connections.account_lifecycle import is_connection_owner_eligible
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
@@ -66,7 +68,6 @@ from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
 from imbue.minds.desktop_client.machine_size import DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE
 from imbue.minds.desktop_client.machine_size import clamp_machine_size_to_cpu_count
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -80,6 +81,7 @@ from imbue.minds.desktop_client.region_preference import modal_region_choices
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_account_scope import ACCOUNT_QUERY_PARAMETER
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
@@ -137,7 +139,6 @@ class CreateRetryPrefill(FrozenModel):
     docker_runtime: str = Field(description="Container runtime value")
     backup_provider: str = Field(description="Backup provider value")
     backup_api_key_env: str = Field(description="restic env block for the manual backup provider")
-    account_id: str = Field(description="Associated account id while it is signed in, empty otherwise")
     region: str = Field(description="Chosen region, empty when not applicable")
     cloud_account: str = Field(description="Connection instance name the attempt targeted, empty for a plain mode")
     instance_type: str = Field(description="Chosen machine size, empty when not applicable")
@@ -182,10 +183,11 @@ def connection_backend_options() -> tuple[ConnectionBackendOption, ...]:
 
 
 class CreateFormDefaultsResponse(FrozenModel):
-    """Everything the create form needs to render (the SSR context, as JSON)."""
+    """Everything the create form needs to render under one account (the SSR context, as JSON)."""
 
-    accounts: tuple[CreateAccountOption, ...] = Field(description="Signed-in accounts")
-    default_account_id: str = Field(description="Pre-selected account id, empty for none")
+    account: CreateAccountOption | None = Field(
+        description="The window's account, when it is signed in here; None on the device or a signed-out account"
+    )
     launch_modes: tuple[str, ...] = Field(description="Selectable compute modes (connection-only modes excluded)")
     selected_launch_mode: str = Field(description="Pre-selected compute mode")
     docker_runtimes: tuple[str, ...] = Field(description="Container runtime options for the local Docker provider")
@@ -238,7 +240,9 @@ class LandingExtrasResponse(FrozenModel):
     orphaned_failed_destroys: tuple[OrphanedFailedDestroy, ...] = Field(
         description="Failed destroys whose host is already gone, so no live row carries their status"
     )
-    locked_account_emails: tuple[str, ...] = Field(description="Accounts with synced secrets but no local key")
+    locked_account_emails: tuple[str, ...] = Field(
+        description="The window's account when it has synced secrets but no local key here, else empty"
+    )
     is_discovery_complete: bool = Field(description="Whether initial discovery has completed")
     has_restorable_workspaces: bool = Field(description="Whether the last-good topology knows any workspace")
 
@@ -366,21 +370,15 @@ def _read_pending_record(create_attempt_id: str) -> PendingCreateAttemptRecord |
     return store.read_record(create_attempt_id) if store is not None else None
 
 
-def _signed_in_account_id(account_id: str | None, accounts: tuple[CreateAccountOption, ...]) -> str:
-    """``account_id`` when it is one of the signed-in ``accounts``, else "".
-
-    A failed attempt's request keeps the account it was made with after that
-    account signs out; only a signed-in account can be pre-selected.
-    """
-    return account_id if account_id and any(account.user_id == account_id for account in accounts) else ""
-
-
 def _read_retry_prefill(
     retry_create_attempt_id: str,
-    accounts: tuple[CreateAccountOption, ...],
     cloud_accounts: tuple[CloudAccountOption, ...],
 ) -> CreateRetryPrefill | None:
-    """The ``?retry=<id>`` pre-fill from a pending record, when usable (not DONE)."""
+    """The ``?retry=<id>`` pre-fill from a pending record, when usable (not DONE).
+
+    The attempt's account is not part of it: a retry opens in the window of
+    the account the attempt was made under, and the form creates under that.
+    """
     record = _read_pending_record(retry_create_attempt_id)
     if record is None or record.state is PendingCreateAttemptState.DONE:
         return None
@@ -393,7 +391,6 @@ def _read_retry_prefill(
         docker_runtime=retry_request.docker_runtime.value,
         backup_provider=retry_request.backup_provider.value,
         backup_api_key_env=retry_request.backup_api_key_env,
-        account_id=_signed_in_account_id(retry_request.account_id, accounts),
         region=retry_request.region or "",
         cloud_account=retry_request.cloud_account,
         instance_type=retry_request.instance_type or "",
@@ -416,22 +413,31 @@ def _retry_unavailable_reason(cloud_account: str, cloud_accounts: Sequence[Cloud
     return RETRY_CONNECTION_REMOVED_REASON if is_connection_gone else ""
 
 
+def _window_account_option(
+    account_id: str, session_store: MultiAccountSessionStore | None, connection_store: ConnectionStore | None
+) -> CreateAccountOption | None:
+    """The window's account as the create form takes it, or None when it is the device or not signed in here."""
+    if account_id == LOCAL_PROFILE_USER_ID or session_store is None:
+        return None
+    account = session_store.get_session(account_id)
+    if account is None:
+        return None
+    return CreateAccountOption(
+        user_id=str(account.user_id),
+        email=str(account.email),
+        state=account_panel_state(session_store.record_store, str(account.user_id)),
+        is_connection_owner_eligible=is_connection_owner_eligible(connection_store, str(account.user_id)),
+    )
+
+
 def _handle_create_form_defaults() -> Response:
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
     state = get_state()
     session_store = state.session_store
-    record_store = session_store.record_store if session_store is not None else None
-    accounts = tuple(
-        CreateAccountOption(
-            user_id=str(account.user_id),
-            email=str(account.email),
-            state=account_panel_state(record_store, str(account.user_id)),
-            is_connection_owner_eligible=is_connection_owner_eligible(state.connection_store, str(account.user_id)),
-        )
-        for account in (session_store.list_accounts() if session_store is not None else [])
+    account = _window_account_option(
+        request.args.get(ACCOUNT_QUERY_PARAMETER, LOCAL_PROFILE_USER_ID), session_store, state.connection_store
     )
-    default_account_id = settle_default_account_id(state.minds_config, [account.user_id for account in accounts]) or ""
     region_options, region_selected = _region_form_context()
     cloud_accounts = tuple(available_cloud_account_options(state.connection_store))
     # The probe is injected so tests describe a machine rather than run docker;
@@ -444,8 +450,7 @@ def _handle_create_form_defaults() -> Response:
         host_platform = host_platform_from_system(platform.system())
         local_prerequisites = ()
     response = CreateFormDefaultsResponse(
-        accounts=accounts,
-        default_account_id=default_account_id,
+        account=account,
         launch_modes=tuple(mode.value for mode in LaunchMode if mode not in CONNECTION_ONLY_LAUNCH_MODES),
         selected_launch_mode=LaunchMode.IMBUE_CLOUD.value,
         docker_runtimes=tuple(runtime.value for runtime in DockerRuntime),
@@ -472,7 +477,7 @@ def _handle_create_form_defaults() -> Response:
         git_url=default_workspace_git_url(),
         branch=default_workspace_template_ref(),
         color=_suggested_create_color(state.backend_resolver),
-        prefill=_read_retry_prefill(request.args.get("retry", ""), accounts, cloud_accounts),
+        prefill=_read_retry_prefill(request.args.get("retry", ""), cloud_accounts),
         local_prerequisites=local_prerequisites,
         local_launch_mode=local_launch_mode_for(host_platform, local_prerequisites).value,
     )
@@ -567,13 +572,19 @@ def _handle_landing_extras() -> Response:
     state = get_state()
     backend_resolver = state.backend_resolver
     session_store = state.session_store
+    # The unlock banner is the window's: only the window's account is asked
+    # about, and the device's local profile has no synced secrets to unlock.
+    window_account_id = request.args.get(ACCOUNT_QUERY_PARAMETER, LOCAL_PROFILE_USER_ID)
     locked_emails: tuple[str, ...] = ()
-    if session_store is not None and session_store.record_store is not None and state.api_v1_paths is not None:
-        accounts = session_store.list_accounts()
-        locked_user_ids = set(
-            session_store.record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
-        )
-        locked_emails = tuple(str(account.email) for account in accounts if str(account.user_id) in locked_user_ids)
+    if (
+        window_account_id != LOCAL_PROFILE_USER_ID
+        and session_store is not None
+        and session_store.record_store is not None
+        and state.api_v1_paths is not None
+    ):
+        account = session_store.get_session(window_account_id)
+        if account is not None and session_store.record_store.locked_account_user_ids([str(account.user_id)]):
+            locked_emails = (str(account.email),)
     paths = state.api_v1_paths
     records = (
         list_destroying(paths, lambda agent_id: is_host_still_active(backend_resolver, paths, agent_id))

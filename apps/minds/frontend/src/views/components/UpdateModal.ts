@@ -132,7 +132,10 @@ export function updateVersionRow(label: string, value: string): m.Children {
 
 /** The go-ahead-without-backups confirmation, drawn in place of the press it
  * holds. Shared with the machine's Updates settings group. */
-export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCancel: () => void }): m.Children {
+export function noBackupConfirmPrompt(handlers: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}): m.Children {
   return m("div", { class: "flex flex-col gap-2" }, [
     m(
       "p",
@@ -155,17 +158,36 @@ export const STOPPED_UPDATES_LINE = "Start this workspace to see its updates.";
 export function skipConfirmPrompt(
   update: UiWorkspaceUpdate,
   isAutoUpdateEnabled: boolean,
-  handlers: { isSkipping: boolean; onConfirm: () => void; onCancel: () => void },
+  handlers: {
+    isSkipping: boolean;
+    onConfirm: () => void;
+    onCancel: () => void;
+  },
 ): m.Children {
   return m("div", { class: "flex flex-col gap-2" }, [
     m("p", { class: "type-helper text-primary" }, skipConfirmationLine(update, isAutoUpdateEnabled)),
     m("div", { class: "flex flex-wrap items-center gap-2" }, [
       m(
         Button,
-        { variant: "primary", id: "update-confirm-skip", disabled: handlers.isSkipping, onclick: handlers.onConfirm },
-        handlers.isSkipping ? m(Spinner, { size: "sm" }) : `Skip ${skippedVersionText(update)}`,
+        {
+          variant: "primary",
+          id: "update-confirm-skip",
+          disabled: handlers.isSkipping,
+          onclick: handlers.onConfirm,
+        },
+        handlers.isSkipping
+          ? m(Spinner, { size: "sm" })
+          : `Skip ${skippedVersionText(update)}`,
       ),
-      m(Button, { variant: "secondary", disabled: handlers.isSkipping, onclick: handlers.onCancel }, "Cancel"),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          disabled: handlers.isSkipping,
+          onclick: handlers.onCancel,
+        },
+        "Cancel",
+      ),
     ]),
   ]);
 }
@@ -478,7 +500,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
                 id: "update-modal-create-machine",
                 onclick: () => {
                   onClose();
-                  m.route.set("/create");
+                  shell.routeToHub("/create");
                 },
               },
               "Create a new workspace",

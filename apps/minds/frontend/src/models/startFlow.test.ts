@@ -8,6 +8,7 @@ import {
   FLOW,
   FLOW_OPTIONS_GAP_MS,
   MANIFESTO_ANSWER,
+  NO_WORKSPACES_ACK,
   MANIFESTO_OPENER,
   REPORTING_ACCEPT_LABEL,
   REPORTING_ASK,
@@ -15,6 +16,7 @@ import {
   answerStep,
   chooseExistingLogin,
   continueAsSaid,
+  continueExistingLoginWithoutWorkspaces,
   dismissPendingModal,
   finishPendingModal,
   initialStartFlowState,
@@ -333,6 +335,43 @@ describe("the existing-account way out", () => {
     const state = chooseExistingLogin(started());
     expect(state.pending).toBe("existing-login");
     expect(state.entries).toHaveLength(2);
+  });
+
+  it("an account with no workspaces answers the question with the receipt and asks where to run again", () => {
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    expect(state.pending).toBeNull();
+    expect(state.entries[1]).toMatchObject({
+      id: "run",
+      answer: "existing-login",
+      said: signedInSaid(ALICE.email),
+    });
+    expect(state.entries.at(-1)).toEqual({
+      kind: "step",
+      id: "again",
+      ack: NO_WORKSPACES_ACK,
+      answer: null,
+      said: "",
+    });
+    expect(openStepIndex(state)).toBe(2);
+  });
+
+  it("the re-asked question's cloud answer goes on to the account step naming the signed-in account", () => {
+    const continued = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    const after = answerStep(continued, continued.entries.length - 1, "cloud", SIGNED_IN);
+    expect(after.entries.at(-1)).toMatchObject({ id: "account", email: ALICE.email });
+  });
+
+  it("undoing the receipt reopens the first question", () => {
+    const continued = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    const undone = undoAnswer(continued, 1);
+    expect(undone.entries).toHaveLength(2);
+    expect(undone.entries[1]).toEqual({ kind: "step", id: "run", ack: "", answer: null, said: "" });
+    expect(openStepIndex(undone)).toBe(1);
+  });
+
+  it("continuing is ignored while the flow is not waiting on the existing-login sign-in", () => {
+    const state = started();
+    expect(continueExistingLoginWithoutWorkspaces(state, ALICE)).toBe(state);
   });
 });
 

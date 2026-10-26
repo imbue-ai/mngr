@@ -864,7 +864,6 @@ def run(
             session_store,
             connection_store,
             provider_materializer,
-            minds_config,
             backend_resolver.notify_change,
         ),
     )

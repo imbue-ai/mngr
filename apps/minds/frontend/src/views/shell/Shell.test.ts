@@ -106,8 +106,10 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
     displayedWorkspaceAgentId: () => WORKSPACE_ID,
+    accountId: "local",
     stores: {
       requests: { hasPendingForWorkspace: () => false },
+      accounts: { labelFor: () => "This device" },
       workspaces: {
         workspaces: [],
         toAgentScopedId: (anyId: string) => anyId,
@@ -323,9 +325,9 @@ describe("Shell request popup layer", () => {
     ).toBe(false);
   });
 
-  it("draws all five titlebar icons, not just the one the popup is", () => {
+  it("draws all six titlebar icons, not just the one the popup is", () => {
     // The popup covers the titlebar's icons, so drawing only its own key took
-    // the other four off screen for as long as it was open.
+    // the others off screen for as long as it was open.
     const { state } = makeShell();
     stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
@@ -446,8 +448,10 @@ describe("Shell notifications overlay", () => {
     return makeShell({
       isNotificationsOpen: true,
       closeNotifications: () => undefined,
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -771,6 +775,8 @@ describe("Shell app-overlay card chrome", () => {
       "/inbox",
       "/settings/ai-keys",
       "/create/template",
+      // The route the stepper is actually opened on: its account's hub.
+      "/account/local/create/template",
     ]) {
       expect(String(overlayAttrsAt(routePath).bodyClass), routePath).toContain(
         "overflow-y-auto",
@@ -786,8 +792,10 @@ describe("Shell notice band wiring", () => {
     // band's field, so a stuck machine on a blocked network is narrated as the
     // network rather than as its own failure.
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -830,8 +838,10 @@ describe("Shell notice band wiring", () => {
     // A band still saying "out of date" while the update runs is the two
     // surfaces disagreeing about one machine.
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -872,24 +882,28 @@ describe("Shell notice band wiring", () => {
       { is_workspace_readable: true, needs_sign_in: true },
       "This workspace can't update until an AI account is signed in to it.",
     ],
-  ])("under auto-update, a behind machine whose %s gets the band it should", (_name, fields, expectedMessage) => {
-    const { state } = makeShell({
-      stores: {
-        requests: { hasPendingForWorkspace: () => false },
-        workspaces: {
-          workspaces: [],
-          toAgentScopedId: (anyId: string) => anyId,
-          entryByAnyId: () => null,
+  ])(
+    "under auto-update, a behind machine whose %s gets the band it should",
+    (_name, fields, expectedMessage) => {
+      const { state } = makeShell({
+        accountId: "local",
+        stores: {
+          requests: { hasPendingForWorkspace: () => false },
+          accounts: { labelFor: () => "This device" },
+          workspaces: {
+            workspaces: [],
+            toAgentScopedId: (anyId: string) => anyId,
+            entryByAnyId: () => null,
+          },
+          health: {
+            statusFor: () => "healthy",
+            discoveryHealth: "healthy",
+            appEnvironmentCondition: () => "NONE",
+            recoveryKindFor: () => null,
+          },
+          updates: updatesStoreStub("OUT_OF_DATE", false, false, true, fields),
         },
-        health: {
-          statusFor: () => "healthy",
-          discoveryHealth: "healthy",
-          appEnvironmentCondition: () => "NONE",
-          recoveryKindFor: () => null,
-        },
-        updates: updatesStoreStub("OUT_OF_DATE", false, false, true, fields),
-      },
-    } as unknown as Partial<ShellState>);
+      } as unknown as Partial<ShellState>);
 
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
 
@@ -907,8 +921,10 @@ describe("Shell notice band wiring", () => {
     const { state } = makeShell({
       openWorkspaceChat,
       openUpdateModal,
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -945,8 +961,10 @@ describe("Shell notice band wiring", () => {
     // the machine breaking; the backdrop starts below the titlebar so the
     // switcher stays reachable.
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -983,8 +1001,10 @@ describe("Shell notice band wiring", () => {
 
   it("does not cover a machine while its update is only preparing", () => {
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1016,8 +1036,10 @@ describe("Shell notice band wiring", () => {
     // auto-raise back.
     let openedAgentId: string | null = null;
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1055,8 +1077,10 @@ describe("Shell notice band wiring", () => {
     // long enough to be convicted -- yet the band must already say what is
     // wrong rather than nothing at all.
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1094,8 +1118,10 @@ describe("Shell notice band wiring", () => {
     // field the Shell puts in it -- another boolean off the same row would
     // type-check, compile, and give every on-device machine a no-network band.
     const { state } = makeShell({
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1143,8 +1169,10 @@ describe("Shell toast layer", () => {
           entries.map((entry) => ({ id: entry.id, entry })),
         dismissToast: (id: string) => dismissed.push(id),
       } as unknown as ShellState["notificationsUi"],
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1189,8 +1217,10 @@ describe("Shell toast layer", () => {
         dismissToast: () => undefined,
       } as unknown as ShellState["notificationsUi"],
       isNotificationsOpen: true,
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
@@ -1235,7 +1265,11 @@ describe("Shell on the popout route", () => {
 
   function componentNames(root: AnyVnode): string[] {
     return collectVnodes(root)
-      .map((vnode) => (typeof vnode.tag === "function" ? ((vnode.tag as { name?: string }).name ?? "") : ""))
+      .map((vnode) =>
+        typeof vnode.tag === "function"
+          ? ((vnode.tag as { name?: string }).name ?? "")
+          : "",
+      )
       .filter((name) => name !== "");
   }
 

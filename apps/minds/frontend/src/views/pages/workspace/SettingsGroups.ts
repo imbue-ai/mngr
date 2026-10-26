@@ -452,203 +452,205 @@ function renderUpdatesGroup(
               },
             })
           : [
-            isScheduled
-              ? m("div", { class: "flex flex-col gap-1 mb-3" }, [
-                  m(
-                    "p",
-                    { class: "type-helper text-secondary" },
-                    scheduledLine(
-                      update,
-                      updates.updateWindow,
-                      isAutoUpdateEnabled,
+              isScheduled
+                ? m("div", { class: "flex flex-col gap-1 mb-3" }, [
+                    m(
+                      "p",
+                      { class: "type-helper text-secondary" },
+                      scheduledLine(
+                        update,
+                        updates.updateWindow,
+                        isAutoUpdateEnabled,
+                      ),
                     ),
-                  ),
-                  skipLine
-                    ? m("p", { class: "type-helper text-tertiary" }, skipLine)
-                    : null,
-                ])
-              : null,
-            // A press the workspace just refused for want of a sign-in already says so in its own words.
-            needsSignIn && forMachine(local.updateError, agentId) === null
-              ? m(
-                  "p",
-                  { class: "type-helper text-secondary mb-3" },
-                  "No AI account is signed in to this workspace, so its update can't start.",
-                )
-              : null,
-            // Schedule first, as in the modal: the update window is when nobody is in the machine.
-            m("div", { class: "flex items-center gap-2 flex-wrap" }, [
-              needsSignIn
+                    skipLine
+                      ? m("p", { class: "type-helper text-tertiary" }, skipLine)
+                      : null,
+                  ])
+                : null,
+              // A press the workspace just refused for want of a sign-in already says so in its own words.
+              needsSignIn && forMachine(local.updateError, agentId) === null
                 ? m(
-                    Button,
-                    {
-                      variant: "primary",
-                      id: "ws-update-sign-in-btn",
-                      disabled: isBusy,
-                      // Entering the workspace leaves this pane, so a refusal is explained in the modal.
-                      onclick: () => shell.signInForUpdateOrExplain(agentId),
-                    },
-                    "Sign in",
+                    "p",
+                    { class: "type-helper text-secondary mb-3" },
+                    "No AI account is signed in to this workspace, so its update can't start.",
                   )
                 : null,
-              plainScheduleTarget === null
-                ? null
-                : m(
-                    Button,
-                    {
-                      variant: "primary",
-                      id: "ws-update-schedule-btn",
-                      disabled: isPlainScheduleBlocked,
-                      onclick: () => requestSchedule(plainScheduleTarget),
-                    },
-                    pendingSchedule?.action === "schedule" &&
-                      pendingSchedule.targetRef === plainScheduleTarget
-                      ? m(Spinner, { size: "sm" })
-                      : "Schedule update",
-                  ),
-              isSkipOffered
-                ? m(
-                    Button,
-                    {
-                      variant: "secondary",
-                      id: "ws-update-skip-btn",
-                      disabled: isBusy,
-                      onclick: () => {
-                        local.skipConfirmAgentId = agentId;
+              // Schedule first, as in the modal: the update window is when nobody is in the machine.
+              m("div", { class: "flex items-center gap-2 flex-wrap" }, [
+                needsSignIn
+                  ? m(
+                      Button,
+                      {
+                        variant: "primary",
+                        id: "ws-update-sign-in-btn",
+                        disabled: isBusy,
+                        // Entering the workspace leaves this pane, so a refusal is explained in the modal.
+                        onclick: () => shell.signInForUpdateOrExplain(agentId),
                       },
-                    },
-                    `Skip ${skippedVersionText(update)}`,
-                  )
-                : isScheduled
+                      "Sign in",
+                    )
+                  : null,
+                plainScheduleTarget === null
+                  ? null
+                  : m(
+                      Button,
+                      {
+                        variant: "primary",
+                        id: "ws-update-schedule-btn",
+                        disabled: isPlainScheduleBlocked,
+                        onclick: () => requestSchedule(plainScheduleTarget),
+                      },
+                      pendingSchedule?.action === "schedule" &&
+                        pendingSchedule.targetRef === plainScheduleTarget
+                        ? m(Spinner, { size: "sm" })
+                        : "Schedule update",
+                    ),
+                isSkipOffered
                   ? m(
                       Button,
                       {
                         variant: "secondary",
-                        id: "ws-update-cancel-schedule-btn",
+                        id: "ws-update-skip-btn",
                         disabled: isBusy,
-                        onclick: () => writeSchedule("cancel"),
+                        onclick: () => {
+                          local.skipConfirmAgentId = agentId;
+                        },
                       },
-                      pendingSchedule?.action === "cancel"
-                        ? m(Spinner, { size: "sm" })
-                        : "Cancel schedule",
+                      `Skip ${skippedVersionText(update)}`,
+                    )
+                  : isScheduled
+                    ? m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "ws-update-cancel-schedule-btn",
+                          disabled: isBusy,
+                          onclick: () => writeSchedule("cancel"),
+                        },
+                        pendingSchedule?.action === "cancel"
+                          ? m(Spinner, { size: "sm" })
+                          : "Cancel schedule",
+                      )
+                    : null,
+                m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    id: "ws-update-now-btn",
+                    disabled: isDispatchBlocked,
+                    onclick: () => requestDispatch(""),
+                  },
+                  pending?.targetRef === ""
+                    ? m(Spinner, { size: "sm" })
+                    : "Update now",
+                ),
+                isDecisionPending && chatAgentId
+                  ? m(
+                      Button,
+                      {
+                        variant: "primary",
+                        id: "ws-update-open-chat-btn",
+                        onclick: () =>
+                          shell.openWorkspaceChat(agentId, chatAgentId),
+                      },
+                      "Open chat",
                     )
                   : null,
-              m(
-                Button,
-                {
-                  variant: "secondary",
-                  id: "ws-update-now-btn",
-                  disabled: isDispatchBlocked,
-                  onclick: () => requestDispatch(""),
-                },
-                pending?.targetRef === ""
-                  ? m(Spinner, { size: "sm" })
-                  : "Update now",
-              ),
-              isDecisionPending && chatAgentId
-                ? m(
-                    Button,
+              ]),
+              disabledUpdateReason(update),
+              // A named version is applied by the same in-place run, so a machine
+              // too old for one is too old for the other.
+              isRecreationRequired(update)
+                ? null
+                : m(
+                    Collapsible,
                     {
-                      variant: "primary",
-                      id: "ws-update-open-chat-btn",
-                      onclick: () =>
-                        shell.openWorkspaceChat(agentId, chatAgentId),
+                      id: "update-override",
+                      isOpen: local.isOverrideOpen,
+                      onToggle: () =>
+                        (local.isOverrideOpen = !local.isOverrideOpen),
+                      extra: "mt-4",
+                      triggerExtra:
+                        "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
+                      panelExtra: "flex flex-col gap-2 mt-2",
+                      summary: m("span", "Update to a specific version"),
                     },
-                    "Open chat",
-                  )
-                : null,
-            ]),
-            disabledUpdateReason(update),
-            // A named version is applied by the same in-place run, so a machine
-            // too old for one is too old for the other.
-            isRecreationRequired(update)
-              ? null
-              : m(
-                  Collapsible,
-                  {
-                    id: "update-override",
-                    isOpen: local.isOverrideOpen,
-                    onToggle: () =>
-                      (local.isOverrideOpen = !local.isOverrideOpen),
-                    extra: "mt-4",
-                    triggerExtra:
-                      "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
-                    panelExtra: "flex flex-col gap-2 mt-2",
-                    summary: m("span", "Update to a specific version"),
-                  },
-                  [
-                    m("div", { class: "flex items-center gap-2" }, [
-                      m(TextInput, {
-                        id: "update-override-input",
-                        name: "update_override_ref",
-                        value: overrideValue,
-                        placeholder: "minds-v0.4.2, main, or a git ref",
-                        spellcheck: "false",
-                        autocomplete: "off",
-                        "aria-label": "Version to update to",
-                        extra: "flex-1",
-                        oninput: (event: InputEvent) => {
-                          local.overrideDraft = {
-                            agentId,
-                            value: (event.target as HTMLInputElement).value,
-                          };
-                        },
-                      }),
+                    [
+                      m("div", { class: "flex items-center gap-2" }, [
+                        m(TextInput, {
+                          id: "update-override-input",
+                          name: "update_override_ref",
+                          value: overrideValue,
+                          placeholder: "minds-v0.4.2, main, or a git ref",
+                          spellcheck: "false",
+                          autocomplete: "off",
+                          "aria-label": "Version to update to",
+                          extra: "flex-1",
+                          oninput: (event: InputEvent) => {
+                            local.overrideDraft = {
+                              agentId,
+                              value: (event.target as HTMLInputElement).value,
+                            };
+                          },
+                        }),
+                        m(
+                          Button,
+                          {
+                            variant: "secondary",
+                            id: "update-override-btn",
+                            disabled:
+                              isBusy ||
+                              isUpdating ||
+                              isDecisionPending ||
+                              overrideValue.trim() === "",
+                            onclick: () =>
+                              requestDispatch(overrideValue.trim()),
+                          },
+                          pending !== null && pending.targetRef !== ""
+                            ? m(Spinner, { size: "sm" })
+                            : "Update to this version",
+                        ),
+                        // The same confirmation the press above is; scheduling only
+                        // changes when the run happens.
+                        m(
+                          Button,
+                          {
+                            variant: "secondary",
+                            id: "update-override-schedule-btn",
+                            disabled:
+                              isBusy ||
+                              isUpdating ||
+                              isDecisionPending ||
+                              overrideValue.trim() === "",
+                            onclick: () =>
+                              requestSchedule(overrideValue.trim()),
+                          },
+                          pendingSchedule?.action === "schedule" &&
+                            pendingSchedule.targetRef !== "" &&
+                            pendingSchedule.targetRef === overrideValue.trim()
+                            ? m(Spinner, { size: "sm" })
+                            : "Schedule",
+                        ),
+                      ]),
+                      prefill && draft === null
+                        ? m(
+                            "p",
+                            { class: "type-helper text-tertiary" },
+                            "Prefilled with the template ref this build of Imbue Studio runs from.",
+                          )
+                        : null,
                       m(
-                        Button,
-                        {
-                          variant: "secondary",
-                          id: "update-override-btn",
-                          disabled:
-                            isBusy ||
-                            isUpdating ||
-                            isDecisionPending ||
-                            overrideValue.trim() === "",
-                          onclick: () => requestDispatch(overrideValue.trim()),
-                        },
-                        pending !== null && pending.targetRef !== ""
-                          ? m(Spinner, { size: "sm" })
-                          : "Update to this version",
+                        "p",
+                        { class: "type-helper text-tertiary" },
+                        "Works on an up-to-date workspace too. A version newer than this Imbue Studio app, a branch, or a bare " +
+                          "ref is allowed and applied without further confirmation: it may not be a tested release, " +
+                          "parts of this workspace may stop working until the app catches up, and the update agent " +
+                          'offers a rollback afterwards. On a branch, this workspace may afterwards read as "version unknown".',
                       ),
-                      // The same confirmation the press above is; scheduling only
-                      // changes when the run happens.
-                      m(
-                        Button,
-                        {
-                          variant: "secondary",
-                          id: "update-override-schedule-btn",
-                          disabled:
-                            isBusy ||
-                            isUpdating ||
-                            isDecisionPending ||
-                            overrideValue.trim() === "",
-                          onclick: () => requestSchedule(overrideValue.trim()),
-                        },
-                        pendingSchedule?.action === "schedule" &&
-                          pendingSchedule.targetRef !== "" &&
-                          pendingSchedule.targetRef === overrideValue.trim()
-                          ? m(Spinner, { size: "sm" })
-                          : "Schedule",
-                      ),
-                    ]),
-                    prefill && draft === null
-                      ? m(
-                          "p",
-                          { class: "type-helper text-tertiary" },
-                          "Prefilled with the template ref this build of Imbue Studio runs from.",
-                        )
-                      : null,
-                    m(
-                      "p",
-                      { class: "type-helper text-tertiary" },
-                      "Works on an up-to-date workspace too. A version newer than this Imbue Studio app, a branch, or a bare " +
-                        "ref is allowed and applied without further confirmation: it may not be a tested release, " +
-                        "parts of this workspace may stop working until the app catches up, and the update agent " +
-                        'offers a rollback afterwards. On a branch, this workspace may afterwards read as "version unknown".',
-                    ),
-                  ],
-                ),
-          ],
+                    ],
+                  ),
+            ],
       errorMessage
         ? m(
             "div",
@@ -1372,6 +1374,15 @@ function renderAccountGroup(
   ]);
 }
 
+/**
+ * The workspace now belongs to another window's account (every window shows one
+ * account), so once an association change lands this window leaves for its
+ * own account's hub rather than keep showing a workspace that is no longer its.
+ */
+function leaveForHubIfMoved(isMoved: boolean): void {
+  if (isMoved) getAppContext().shell.routeToHub();
+}
+
 function renderAssociatePrompt(
   model: WorkspaceOptionsModel,
   accounts: { user_id: string; email: string }[],
@@ -1388,7 +1399,12 @@ function renderAssociatePrompt(
         { class: "type-body text-secondary" },
         m(
           "a",
-          { class: "text-primary underline", ...routeLinkAttrs("/accounts") },
+          {
+            class: "text-primary underline",
+            ...routeLinkAttrs(
+              m.buildPathname("/accounts", getAppContext().shell.overlayQuery()),
+            ),
+          },
           "Sign in or create an account",
         ),
       ),
@@ -1409,7 +1425,8 @@ function renderAssociatePrompt(
           {
             variant: "secondary",
             disabled: model.isAccountBusy,
-            onclick: () => void model.setAccount(account.user_id),
+            onclick: () =>
+              void model.setAccount(account.user_id).then(leaveForHubIfMoved),
           },
           `Link to ${account.email}`,
         ),
@@ -1520,8 +1537,9 @@ function renderUnlinkDialog(
             id: "unlink-confirm-btn",
             disabled: model.isAccountBusy,
             onclick: () => {
-              void model.setAccount(null).then(() => {
+              void model.setAccount(null).then((isMoved) => {
                 local.isUnlinkDialogOpen = false;
+                leaveForHubIfMoved(isMoved);
               });
             },
           },

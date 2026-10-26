@@ -22,7 +22,8 @@ import { electronBridge } from "../../electron-bridge";
 import type { OptionsTab } from "../../models/workspaceOptions";
 import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
-import { classifyRoute, isWorkspaceOverlayPath } from "./classify";
+import { classifyRoute, hubPagePath, isWorkspaceOverlayPath } from "./classify";
+import { AccountSwitcherButton } from "./AccountSwitcher";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
 
@@ -137,9 +138,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         );
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
-      // Every one of these five icons' surfaces (the docked options panel, the
+      // Every one of these six icons' surfaces (the docked options panel, the
       // request popup, the bell's feed, Get help) draws a raised copy of ALL
-      // FIVE at their measured rects, so hide all five here (by visibility,
+      // SIX at their measured rects, so hide all six here (by visibility,
       // which keeps their boxes and so those rects true) or the two strips
       // would ghost through each other -- matching the legacy
       // body.ws-options-open rule. The panel is still up, frozen, while an app
@@ -149,12 +150,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       //
       // The request popup hangs from #ws-tab-strip, and with no machine on
       // screen there is no strip: it falls back to a centered card that raises
-      // nothing, so the real five stay painted (as they do under every other
+      // nothing, so the real six stay painted (as they do under every other
       // centered app modal).
       const isTitlebarPopupOpen =
         isWorkspaceOverlayPath(routePath) ||
-        (routePath === "/inbox" && isWorkspace) ||
-        routePath === "/help" ||
+        (hubPagePath(routePath) === "/inbox" && isWorkspace) ||
+        hubPagePath(routePath) === "/help" ||
         shell.panelRouteBehindOverlay !== null ||
         shell.isNotificationsOpen;
       const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
@@ -176,7 +177,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               variant: "crumb",
               tone: isHomeSelected ? "default" : "muted",
               extra: "gap-1",
-              onclick: () => m.route.set("/"),
+              onclick: () => shell.routeToHub(),
             },
             [
               m(Icon16, { name: "home" }),
@@ -382,6 +383,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           "div",
           { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
           [
+            // The account this window shows, first in the group: left of the bell.
+            m(AccountSwitcherButton, { shell, popupHiddenClass }),
             notificationsBell(shell, popupHiddenClass),
             m(
               TitlebarButton,

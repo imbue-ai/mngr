@@ -47,8 +47,10 @@ function render(stripX: number | null, tab: OptionsTab = "permissions"): AnyVnod
     // The panel raises the whole titlebar icon strip, so it reads the bell's
     // count off the shell; nothing else in these geometry cases needs one.
     shell: {
+      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
+        accounts: { labelFor: () => "This device" },
         notifications: {
           unresolvedCount: 0,
         },

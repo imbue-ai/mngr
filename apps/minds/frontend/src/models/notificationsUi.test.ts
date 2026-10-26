@@ -659,7 +659,7 @@ describe("NotificationsUiController feed actions", () => {
       1,
       "/workspace/agent-aa11/backups",
     );
-    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts");
+    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts", undefined);
   });
 
   it("clears one entry (retiring its flash) and clears everything", () => {
@@ -768,6 +768,10 @@ function gestureContext(
     createAttemptStateOf: () => "",
     displayedWorkspaceAgentId: () => null,
     openInPlace: vi.fn(),
+    overlayQuery: (params: Record<string, string>) => ({
+      ...params,
+      account: "user-1",
+    }),
     currentRoutePath: () => "/",
     sendWorkspaceMessage: vi.fn(),
     ...overrides,
@@ -911,7 +915,10 @@ describe("NotificationGestures.openChat and .openSystemEvent", () => {
       1,
       "/workspace/agent-aa11/backups",
     );
-    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts");
+    // The accounts page floats over this window, so it carries the window's account.
+    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts", {
+      account: "user-1",
+    });
   });
 
   it("lands an event that names its own route there", () => {

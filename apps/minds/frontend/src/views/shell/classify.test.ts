@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   accentSourceForRoute,
+  accountHubRoute,
+  accountIdFromHubPath,
   classifyRoute,
+  hubPagePath,
+  isAccountId,
+  isHubPage,
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   popoutFromPath,
   workspaceDisplayIdFromPath,
+  workspacePageIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
 import { parseWorkspaceIdFromUrl } from "../../router";
@@ -177,6 +183,13 @@ describe("app overlay routing", () => {
       overlayBehindWorkspaceId("/create/template", "workspace=agent-ab12"),
     ).toBe("agent-ab12");
     expect(overlayBehindWorkspaceId("/create/template", "")).toBeNull();
+    // The stepper is a hub page: the route it is actually opened on carries the account.
+    expect(
+      overlayBehindWorkspaceId(
+        "/account/local/create/template",
+        "workspace=agent-ab12",
+      ),
+    ).toBe("agent-ab12");
     // The AI-keys mint dialog floats over the machine that opened it, keyed by
     // that machine's HOST id (the mint endpoint resolves the account from it).
     expect(
@@ -205,6 +218,21 @@ describe("workspaceSurfaceIdFromPath", () => {
       workspaceSurfaceIdFromPath("/workspace/agent-ab12/backups"),
     ).toBeNull();
     expect(workspaceSurfaceIdFromPath("/")).toBeNull();
+  });
+
+  it("names the workspace of every one of its pages, sub-pages included", () => {
+    expect(workspacePageIdFromPath("/workspace/agent-ab12")).toBe("agent-ab12");
+    expect(workspacePageIdFromPath("/workspace/host-99aa/options")).toBe(
+      "host-99aa",
+    );
+    expect(workspacePageIdFromPath("/workspace/agent-ab12/settings")).toBe(
+      "agent-ab12",
+    );
+    expect(workspacePageIdFromPath("/workspace/agent-ab12/backups")).toBe(
+      "agent-ab12",
+    );
+    expect(workspacePageIdFromPath("/workspace/agent-ab12/other")).toBeNull();
+    expect(workspacePageIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
   });
 
   it("keeps the display matcher strict to the bare surface", () => {
@@ -272,5 +300,52 @@ describe("popoutFromPath", () => {
     // the plain surface matcher stays strict to /workspace routes.
     expect(workspaceSurfaceIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
     expect(workspaceDisplayIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
+  });
+});
+
+describe("the hub routes' account segment", () => {
+  const USER = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c";
+
+  it("reads the account off a hub route and nothing else", () => {
+    expect(accountIdFromHubPath(`/account/${USER}/`)).toBe(USER);
+    expect(accountIdFromHubPath(`/account/${USER}/workspaces/shared`)).toBe(USER);
+    expect(accountIdFromHubPath("/account/local")).toBe("local");
+    expect(accountIdFromHubPath("/")).toBeNull();
+    expect(accountIdFromHubPath("/accounts")).toBeNull();
+    expect(accountIdFromHubPath("/workspace/agent-ab12")).toBeNull();
+    // A segment that is not an account id names no account.
+    expect(accountIdFromHubPath("/account/..%2Fetc/")).toBeNull();
+  });
+
+  it("tells an account id (a user id or local) from anything else", () => {
+    expect(isAccountId(USER)).toBe(true);
+    expect(isAccountId("local")).toBe(true);
+    expect(isAccountId("")).toBe(false);
+    expect(isAccountId("../etc")).toBe(false);
+    expect(isAccountId("-leading-dash")).toBe(false);
+    expect(isAccountId("a".repeat(65))).toBe(false);
+  });
+
+  it("builds an account's hub routes, the home page with its trailing slash", () => {
+    expect(accountHubRoute(USER)).toBe(`/account/${USER}/`);
+    expect(accountHubRoute(USER, "/create/template")).toBe(`/account/${USER}/create/template`);
+    expect(accountHubRoute("local", "/workspaces/destroyed")).toBe("/account/local/workspaces/destroyed");
+  });
+
+  it("strips the account off a hub path so every account's pages classify alike", () => {
+    expect(hubPagePath(`/account/${USER}/`)).toBe("/");
+    expect(hubPagePath(`/account/${USER}`)).toBe("/");
+    expect(hubPagePath(`/account/${USER}/create`)).toBe("/create");
+    expect(hubPagePath(`/account/${USER}/create/template/`)).toBe("/create/template");
+    expect(hubPagePath("/settings")).toBe("/settings");
+    expect(hubPagePath("/workspace/agent-ab12")).toBe("/workspace/agent-ab12");
+  });
+
+  it("knows the hub pages an account has", () => {
+    expect(isHubPage("/")).toBe(true);
+    expect(isHubPage("/create")).toBe(true);
+    expect(isHubPage("/workspaces/shared")).toBe(true);
+    expect(isHubPage("/settings")).toBe(false);
+    expect(isHubPage("/create/")).toBe(false);
   });
 });

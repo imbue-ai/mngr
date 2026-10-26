@@ -1,9 +1,9 @@
 // The Machines home screen: workspace rows, create-attempt rows, remote
 // records, the sync-unlock banner, the collapsed providers panel, and the
 // bottom-left app launchers. Live state comes from the channel stores; the
-// facts that do not ride the channel (destroy statuses, locked accounts) are
-// fetched from /ui/api/create/landing-extras and refetched whenever the
-// workspace list changes.
+// facts that do not ride the channel (destroy statuses, the window's
+// account's locked state) are fetched from /ui/api/create/landing-extras and
+// refetched whenever the workspace list or the window's account changes.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -21,6 +21,7 @@ import {
   recoveryRoute,
 } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
+import { webLogin } from "../../models/webLogin";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type {
   UiAccountProvidersEntry,
@@ -93,6 +94,11 @@ const UPDATE_BADGE_TONES: Record<UpdateBadgeTone, string> = {
 
 interface LandingState {
   extras: LandingExtras | null;
+  /** The account `extras` answers for; null until a fetch has landed. */
+  extrasAccountId: string | null;
+  /** The account of the newest extras request, in flight or landed, so a
+   * redraw does not re-ask and a stale answer does not overwrite a newer one. */
+  requestedExtrasAccountId: string | null;
   tracker: MindLivenessTracker;
   unsubscribe: (() => void) | null;
   isUnlockPending: boolean;
@@ -131,14 +137,35 @@ export function shouldRedirectToStartFlow(
   return extras.is_discovery_complete && !extras.has_restorable_workspaces;
 }
 
+/**
+ * Whether the sync-unlock banner is up: the loaded extras answer for the
+ * window's own account (a hub-to-hub navigation keeps the previous account's
+ * extras until the refetch lands) and name it as locked.
+ */
+export function isUnlockBannerDue(
+  extras: LandingExtras | null,
+  extrasAccountId: string | null,
+  windowAccountId: string,
+): boolean {
+  if (extras === null || extrasAccountId !== windowAccountId) return false;
+  return extras.locked_account_emails.length > 0;
+}
+
 function loadExtras(state: LandingState): void {
-  fetchLandingExtras()
+  const accountId = getAppContext().shell.accountId;
+  state.requestedExtrasAccountId = accountId;
+  fetchLandingExtras(accountId)
     .then((extras) => {
+      // An answer the window has navigated away from would overwrite the
+      // newer request's: drop it and let that request land.
+      if (state.requestedExtrasAccountId !== accountId) return;
       state.extras = extras;
+      state.extrasAccountId = accountId;
       state.isExtrasFailed = false;
       m.redraw();
     })
     .catch((error: unknown) => {
+      if (state.requestedExtrasAccountId !== accountId) return;
       // A failed fetch must not read as "still discovering" forever: record
       // it so the view can end the discovering state and offer a retry.
       console.error("Failed to load landing extras", error);
@@ -150,6 +177,8 @@ function loadExtras(state: LandingState): void {
 export const LandingPage: m.ClosureComponent = () => {
   const state: LandingState = {
     extras: null,
+    extrasAccountId: null,
+    requestedExtrasAccountId: null,
     tracker: new MindLivenessTracker(),
     unsubscribe: null,
     isUnlockPending: false,
@@ -172,7 +201,7 @@ export const LandingPage: m.ClosureComponent = () => {
       open(state.formDefaults);
       return;
     }
-    fetchCreateFormDefaults(null)
+    fetchCreateFormDefaults(null, getAppContext().shell.accountId)
       .then((defaults) => {
         state.formDefaults = defaults;
         open(defaults);
@@ -298,7 +327,9 @@ export const LandingPage: m.ClosureComponent = () => {
     )
       .then(async (response) => {
         if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           window.alert(body?.error ?? "Could not re-check the connection.");
         }
       })
@@ -1123,6 +1154,39 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
+  /**
+   * The Create button for this window's account, or the sign-in prompt that
+   * stands in for it on a signed-out account's hub: the account's workspaces
+   * are listed, and nothing new can be made under it until it signs in again.
+   */
+  function createControl(): m.Children {
+    const { shell } = getAppContext();
+    if (shell.isAccountSignedOut()) {
+      return m(
+        Button,
+        {
+          variant: "primary",
+          id: "landing-sign-in",
+          disabled: webLogin.isOpen,
+          onclick: () =>
+            void webLogin.start(
+              "Sign in again to create workspaces under this account.",
+            ),
+        },
+        "Sign in",
+      );
+    }
+    return m(
+      ButtonLink,
+      {
+        variant: "primary",
+        id: "landing-create",
+        ...routeLinkAttrs(shell.hubRoute("/create")),
+      },
+      "Create",
+    );
+  }
+
   // Every input (the extras landing, the workspace list, the onboarding copy)
   // arrives with a redraw, so the hook sees each change; view() stays free of
   // navigation.
@@ -1147,13 +1211,18 @@ export const LandingPage: m.ClosureComponent = () => {
       );
     },
     onupdate() {
+      // The component instance survives a hub-to-hub navigation (same route
+      // pattern, new account segment), so the account change is caught here.
+      if (getAppContext().shell.accountId !== state.requestedExtrasAccountId) {
+        loadExtras(state);
+      }
       redirectToStartFlowIfDue();
     },
     onremove() {
       state.unsubscribe?.();
     },
     view() {
-      const { stores } = getAppContext();
+      const { stores, shell } = getAppContext();
       const entries = stores.workspaces.workspaces;
       const liveEntries = entries.filter(
         (entry) =>
@@ -1214,14 +1283,11 @@ export const LandingPage: m.ClosureComponent = () => {
           ? m("div", [
               m("div", { class: "flex items-center justify-between mb-4" }, [
                 m("h1", { class: "type-heading text-primary" }, "Workspaces"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
+                createControl(),
               ]),
               bulkUpdateActions(),
-              extras !== null && extras.locked_account_emails.length > 0
+              extras !== null &&
+              isUnlockBannerDue(extras, state.extrasAccountId, shell.accountId)
                 ? m(Notice, { extra: "mb-4", id: "sync-unlock-banner" }, [
                     m("div", { class: "flex flex-col gap-2" }, [
                       m(
@@ -1295,20 +1361,12 @@ export const LandingPage: m.ClosureComponent = () => {
                     { class: "text-tertiary text-center" },
                     "Discovering workspaces...",
                   ),
-                  m(
-                    ButtonLink,
-                    { variant: "primary", ...routeLinkAttrs("/create") },
-                    "Create",
-                  ),
+                  createControl(),
                 ],
               )
             : m("div", { class: "text-center py-12" }, [
                 m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
+                createControl(),
               ]),
         m(
           "div",
@@ -1319,7 +1377,7 @@ export const LandingPage: m.ClosureComponent = () => {
               id: "landing-destroyed",
               class:
                 "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
-              ...routeLinkAttrs("/workspaces/destroyed"),
+              ...routeLinkAttrs(shell.hubRoute("/workspaces/destroyed")),
             },
             m("span", "Recently destroyed workspaces"),
           ),
@@ -1392,7 +1450,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 id: "landing-minds-settings",
                 class:
                   "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/settings"),
+                onclick: () => m.route.set("/settings", shell.overlayQuery()),
               },
               [
                 m(Icon16, { name: "settings", extra: "shrink-0" }),
@@ -1404,21 +1462,21 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 type: "button",
                 id: "landing-account",
-                "data-signed-in": stores.accounts.accountEmail
+                "data-signed-in": stores.accounts.isSignedIn(shell.accountId)
                   ? "true"
                   : "false",
                 class:
                   "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/accounts"),
+                onclick: () => m.route.set("/accounts", shell.overlayQuery()),
               },
               [
                 m(Icon16, { name: "user", extra: "shrink-0" }),
+                // The window's account: its name when it is signed in; the
+                // device and a signed-out account offer the sign-in instead.
                 m(
                   "span",
-                  stores.accounts.accountEmail
-                    ? stores.accounts.extraAccountCount > 0
-                      ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
-                      : stores.accounts.accountEmail
+                  stores.accounts.isSignedIn(shell.accountId)
+                    ? stores.accounts.labelFor(shell.accountId)
                     : "Log in",
                 ),
               ],

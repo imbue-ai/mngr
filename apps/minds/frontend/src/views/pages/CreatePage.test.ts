@@ -2,6 +2,7 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
+import type { UiAccountEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -10,9 +11,11 @@ import {
   collectVnodes,
   createFormDefaults,
   jsonResponse,
+  secondAccountEntry,
   settle,
 } from "../../testing";
 import type { CreateFormDefaults } from "../../models/create";
+import { webLogin } from "../../models/webLogin";
 import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
 import {
@@ -20,12 +23,35 @@ import {
   ONBOARDING_QUESTIONS_LABEL,
   ONBOARDING_QUESTIONS_SENTENCE,
   createFormModal,
-  signInOutcome,
 } from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
+
+// The sign-in the page asks for when Imbue Cloud needs an account: the tests
+// report its outcome through this stand-in rather than run the real flow.
+vi.mock("../../models/webLogin", () => ({
+  webLogin: {
+    start: vi.fn(async () => {}),
+    dismiss: vi.fn(),
+    noteSignedIn: vi.fn(),
+    state: "idle",
+    email: "",
+    isOpen: false,
+  },
+}));
+
+/** The accounts store as the page reads it: which accounts are signed in on this install. */
+interface AccountsForPage {
+  hasAccounts: boolean;
+  accounts: UiAccountEntry[];
+  isSignedIn: (accountId: string) => boolean;
+}
+
+function noAccounts(): AccountsForPage {
+  return { hasAccounts: false, accounts: [], isSignedIn: () => false };
+}
 
 /** Every page `loadedPage` built, torn down as the router would after each
  * test: a host-name check the page debounced would otherwise fire after the
@@ -48,29 +74,50 @@ function byId(root: unknown, id: string): AnyVnode | undefined {
 async function loadedPage(
   attrs: CreatePageAttrs = {},
   defaults: CreateFormDefaults = createFormDefaults(),
+  accounts: AccountsForPage = noAccounts(),
 ): Promise<{
   page: m.Component<CreatePageAttrs>;
   vnode: m.Vnode<CreatePageAttrs>;
+  /** The accounts the shell was asked to take up, in order. */
+  adoptedAccountIds: string[];
+  /** Every URL fetched, the defaults load included. */
+  requests: string[];
 }> {
-  // The page reads the accounts store for the sign-in gate and the providers
-  // store for the add-connection owner list; neither matters to these tests.
+  // The page reads the window's account off the shell, the accounts store for
+  // the sign-in gate, and the providers store for the add-connection owner
+  // list; the shell stub takes an account up the way the real one does.
+  const adoptedAccountIds: string[] = [];
+  const shell = {
+    accountId: defaults.account?.user_id ?? "local",
+    adoptAccount: (accountId: string) => {
+      adoptedAccountIds.push(accountId);
+      shell.accountId = accountId;
+    },
+    isAccountSignedOut: () =>
+      shell.accountId !== "local" && !accounts.isSignedIn(shell.accountId),
+  };
   registerAppContext({
     stores: {
-      accounts: { hasAccounts: false },
+      accounts,
       providers: { connectionOwnerOptions: () => [] },
     },
+    shell,
   } as unknown as AppContext);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(
     (() => undefined) as typeof m.route.param,
   );
-  vi.stubGlobal("fetch", () => Promise.resolve(jsonResponse(defaults)));
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", (url: string) => {
+    requests.push(url);
+    return Promise.resolve(jsonResponse(defaults));
+  });
   const vnode = m(CreatePage, attrs) as m.Vnode<CreatePageAttrs>;
   const page = CreatePage(vnode);
   page.oninit?.call(page, vnode);
   loadedPages.push(page);
   await settle();
-  return { page, vnode };
+  return { page, vnode, adoptedAccountIds, requests };
 }
 
 describe("CreatePage", () => {
@@ -174,8 +221,83 @@ describe("CreatePage", () => {
       initialPreset: "local",
       isOnboardingDrivenByAgent: true,
     });
-    const flowRow = byId(flowPage.view.call(flowPage, flowVnode), "onboarding-questions-row");
-    expect(attrsOf(byId(flowRow, "is_onboarding_driven_by_agent") as AnyVnode)["aria-checked"]).toBe("true");
+    const flowRow = byId(
+      flowPage.view.call(flowPage, flowVnode),
+      "onboarding-questions-row",
+    );
+    expect(
+      attrsOf(byId(flowRow, "is_onboarding_driven_by_agent") as AnyVnode)[
+        "aria-checked"
+      ],
+    ).toBe("true");
+  });
+});
+
+describe("CreatePage's sign-in for Imbue Cloud", () => {
+  const BOB = secondAccountEntry();
+
+  /** Press Create: the form's submit, as Enter or the button sends it. */
+  function submit(
+    page: m.Component<CreatePageAttrs>,
+    vnode: m.Vnode<CreatePageAttrs>,
+  ): void {
+    const form = byId(page.view.call(page, vnode), "create-form") as AnyVnode;
+    (attrsOf(form).onsubmit as (event: unknown) => void)({
+      preventDefault: () => undefined,
+    });
+  }
+
+  it("offers no Imbue Cloud card on the device and opens on this computer instead", async () => {
+    const { page, vnode, requests } = await loadedPage(
+      {},
+      createFormDefaults({ account: null }),
+      noAccounts(),
+    );
+    expect(requests).toEqual(["/ui/api/create/form-defaults?account=local"]);
+
+    const simple = page.view.call(page, vnode);
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
+    expect(attrsOf(cards).isRemoteOffered).toBe(false);
+    // The form cannot open on the selection it does not show.
+    expect(attrsOf(cards).selectedPreset).toBe("local");
+    expect(webLogin.start).not.toHaveBeenCalled();
+  });
+
+  it("asks for a sign-in when Imbue Cloud is submitted without an account, then takes up the one that lands", async () => {
+    // The sign-in gate's remaining entry points select Imbue Cloud outside the
+    // device's simple view (the template stepper, the advanced view), so the
+    // gate is exercised with the selection restored by hand.
+    const accounts = noAccounts();
+    const { page, vnode, adoptedAccountIds, requests } = await loadedPage(
+      {},
+      createFormDefaults({ account: null }),
+      accounts,
+    );
+    const simple = page.view.call(page, vnode);
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
+    (attrsOf(cards).onSelect as (name: PresetName) => void)("remote");
+
+    submit(page, vnode);
+
+    expect(webLogin.start).toHaveBeenCalledTimes(1);
+    expect(adoptedAccountIds).toEqual([]);
+
+    // Bob signs in: the accounts frame lists him and the flow reports done.
+    accounts.hasAccounts = true;
+    accounts.accounts = [BOB];
+    accounts.isSignedIn = (accountId) => accountId === BOB.user_id;
+    Object.assign(webLogin, { state: "done" });
+    try {
+      (page.onupdate as () => void).call(page);
+    } finally {
+      Object.assign(webLogin, { state: "idle" });
+    }
+
+    expect(adoptedAccountIds).toEqual([BOB.user_id]);
+    expect(requests).toEqual([
+      "/ui/api/create/form-defaults?account=local",
+      `/ui/api/create/form-defaults?account=${BOB.user_id}`,
+    ]);
   });
 });
 
@@ -197,22 +319,7 @@ describe("createFormModal", () => {
   });
 });
 
-describe("signInOutcome", () => {
-  it("counts the sign-in as landed on the flow's verdict or on an account reaching the channel first", () => {
-    expect(signInOutcome("done", false)).toBe("signed-in");
-    expect(signInOutcome("waiting", true)).toBe("signed-in");
-  });
-
-  it("drops the create once the modal is closed with no account", () => {
-    expect(signInOutcome("idle", false)).toBe("abandoned");
-  });
-
-  it("keeps waiting while the modal is up, including on an error it offers a retry for", () => {
-    for (const state of ["starting", "waiting", "finishing", "error"] as const) {
-      expect(signInOutcome(state, false)).toBe("pending");
-    }
-  });
-
+describe("CreatePage's notices", () => {
   it("warns that the workspace will be slow to start on any compute but Imbue Cloud", async () => {
     const { page, vnode } = await loadedPage();
 

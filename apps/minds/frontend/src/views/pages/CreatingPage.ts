@@ -66,6 +66,7 @@ import { wash } from "../../models/wash";
 import type { OnboardingAnswers } from "../../models/welcomeChat";
 import { postWelcomeChat, welcomeChatBody } from "../../models/welcomeChat";
 import { Button } from "../components/Button";
+import { ImageLightbox } from "../components/ImageLightbox";
 import { Notice } from "../components/Notice";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
@@ -120,6 +121,8 @@ interface CreatingState {
   isEntryCancelled: boolean;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
+  /** Whether the showcase recording is open enlarged over the page. */
+  isShowcaseLightboxOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
   washTimer: ReturnType<typeof setTimeout> | null;
   /** The start-flow transcript this create came out of, if this window's flow submitted it. */
@@ -138,7 +141,10 @@ export function enterWorkspaceFromRedirect(redirectUrl: string): void {
 }
 
 function isReducedMotion(): boolean {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 /**
@@ -202,6 +208,7 @@ function freshState(createAttemptId: string): CreatingState {
     isEntryCancelled: false,
     isActionPending: false,
     isRetryFormOpen: false,
+    isShowcaseLightboxOpen: false,
     progressTimer: null,
     washTimer: null,
     isFromStartFlow: startFlow.submittedCreateAttemptId === createAttemptId,
@@ -282,7 +289,10 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   /** Whether the page is still waiting on an answer that decides the welcome. */
   function isAwaitingAnswer(): boolean {
-    return isDrivenByAgent() && onboardingIntent(state.buildAnswer, state.pathAnswer) === null;
+    return (
+      isDrivenByAgent() &&
+      onboardingIntent(state.buildAnswer, state.pathAnswer) === null
+    );
   }
 
   function onboardingAnswers(): OnboardingAnswers {
@@ -356,11 +366,14 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   function dismissAttempt(): void {
     state.isActionPending = true;
-    fetch(`/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}`, {
-      method: "DELETE",
-      credentials: "same-origin",
-    })
-      .then(() => m.route.set("/"))
+    fetch(
+      `/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}`,
+      {
+        method: "DELETE",
+        credentials: "same-origin",
+      },
+    )
+      .then(() => getAppContext().shell.routeToHub())
       .catch(() => {
         state.isActionPending = false;
         m.redraw();
@@ -369,11 +382,14 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   function discardAttempt(): void {
     state.isActionPending = true;
-    fetch(`/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}/discard`, {
-      method: "POST",
-      credentials: "same-origin",
-    })
-      .then(() => m.route.set("/"))
+    fetch(
+      `/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}/discard`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+      },
+    )
+      .then(() => getAppContext().shell.routeToHub())
       .catch(() => {
         state.isActionPending = false;
         m.redraw();
@@ -649,7 +665,8 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /** The one app others have built, for a reader who asked to see examples: its recording with its title and
-   *  description under it, drawn the width of an agent turn. */
+   *  description under it, drawn the width of an agent turn. The recording opens enlarged on a click: it holds
+   *  more detail than the column width shows. */
   function showcaseBlock(app: ShowcaseApp, arriveAtMs: number): m.Children {
     return m(
       "div",
@@ -662,7 +679,18 @@ export const CreatingPage: m.ClosureComponent = () => {
         style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
       },
       [
-        m("img", { src: app.gifUrl, alt: app.title, class: "block w-full bg-fill-subtle object-contain" }),
+        m(
+          "button",
+          {
+            type: "button",
+            "aria-label": `View the ${app.title} recording larger`,
+            class: "block w-full cursor-zoom-in",
+            onclick: () => {
+              state.isShowcaseLightboxOpen = true;
+            },
+          },
+          m("img", { src: app.gifUrl, alt: app.title, class: "block w-full bg-fill-subtle object-contain" }),
+        ),
         m("div", { class: "px-4 py-3" }, [
           m("div", { class: "type-body font-semibold text-primary" }, app.title),
           m("div", { class: "mt-0.5 type-helper text-secondary" }, app.description),
@@ -811,14 +839,14 @@ export const CreatingPage: m.ClosureComponent = () => {
           }
           startWatching();
         } else if (detail.kind === "gone") {
-          m.route.set("/");
+          getAppContext().shell.routeToHub();
         }
         m.redraw();
       })
       .catch(() => {
         if (state !== own) return;
         own.detail = { kind: "gone", live: null, record: null };
-        m.route.set("/");
+        getAppContext().shell.routeToHub();
       });
   }
 
@@ -857,6 +885,18 @@ export const CreatingPage: m.ClosureComponent = () => {
           ...turns,
           scrollAnchor(prelude.length + turns.length),
           ...(state.isRetryFormOpen ? [retryForm()] : []),
+          ...(state.isShowcaseLightboxOpen
+            ? [
+                m(ImageLightbox, {
+                  key: "showcase-lightbox",
+                  imageUrl: SHOWCASE_APP.gifUrl,
+                  title: SHOWCASE_APP.title,
+                  onClose: () => {
+                    state.isShowcaseLightboxOpen = false;
+                  },
+                }),
+              ]
+            : []),
         ],
       );
     },

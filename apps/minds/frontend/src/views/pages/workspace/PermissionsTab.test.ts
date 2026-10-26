@@ -329,11 +329,13 @@ describe("PermissionsTab connection panel", () => {
     const { root } = await render(permissionsView());
     const controls = switches(root);
     expect(controls).toHaveLength(2);
-    expect(controls.map((node) => attrsOf(node)["aria-checked"])).toEqual(["false", "true"]);
-    expect(controls.map((node) => attrsOf(node)["data-perm-permission"])).toEqual([
-      "slack-chat-read",
-      "slack-chat-write",
+    expect(controls.map((node) => attrsOf(node)["aria-checked"])).toEqual([
+      "false",
+      "true",
     ]);
+    expect(
+      controls.map((node) => attrsOf(node)["data-perm-permission"]),
+    ).toEqual(["slack-chat-read", "slack-chat-write"]);
     expect(allText(root)).toContain("Read messages");
   });
 
@@ -674,36 +676,54 @@ describe("PermissionsTab connection panel", () => {
   it.each([
     { outcome: "closes the editor once the flip is saved", isRefused: false },
     { outcome: "keeps the draft when the flip is refused", isRefused: true },
-  ])("flips the switch over an open desktop egress draft and $outcome", async ({ isRefused }) => {
-    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "self"]), {
-      respond: (url) => {
-        if (!url.endsWith("/desktop-egress-route")) return null;
-        return Promise.resolve(
-          isRefused
-            ? { ok: false, status: 502, body: { error: "the machine did not take it" } }
-            : { ok: true, status: 200, body: egressView(["self"]) },
-        );
-      },
-    });
-    clickEgress(root, "data-desktop-egress-adjust");
-    clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
+  ])(
+    "flips the switch over an open desktop egress draft and $outcome",
+    async ({ isRefused }) => {
+      const { root, rerender, requests } = await render(
+        egressView(["host-here", "host-office", "self"]),
+        {
+          respond: (url) => {
+            if (!url.endsWith("/desktop-egress-route")) return null;
+            return Promise.resolve(
+              isRefused
+                ? {
+                    ok: false,
+                    status: 502,
+                    body: { error: "the machine did not take it" },
+                  }
+                : { ok: true, status: 200, body: egressView(["self"]) },
+            );
+          },
+        },
+      );
+      clickEgress(root, "data-desktop-egress-adjust");
+      clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
 
-    (attrsOf(switches(egressRow(rerender()))[0]).onclick as () => void)();
-    await settle();
+      (attrsOf(switches(egressRow(rerender()))[0]).onclick as () => void)();
+      await settle();
 
-    expect(requests.slice(1)).toEqual([
-      {
-        url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
-        body: { service_name: "slack", route: ["self"] },
-      },
-    ]);
-    expect(editorHops(rerender())).toEqual(isRefused ? ["1. This computer", "2. The workspace's own machine"] : []);
-  });
+      expect(requests.slice(1)).toEqual([
+        {
+          url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
+          body: { service_name: "slack", route: ["self"] },
+        },
+      ]);
+      expect(editorHops(rerender())).toEqual(
+        isRefused ? ["1. This computer", "2. The workspace's own machine"] : [],
+      );
+    },
+  );
 
   it("locks the open desktop egress editor while its save is in flight, except for Cancel", async () => {
-    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "host-studio"]), {
-      respond: (url) => (url.endsWith("/desktop-egress-route") ? new Promise(() => undefined) : null),
-    });
+    const { root, rerender, requests } = await render(
+      egressView(["host-here", "host-office", "host-studio"]),
+      {
+        respond: (url) =>
+          url.endsWith("/desktop-egress-route")
+            ? new Promise(() => undefined)
+            : null,
+      },
+    );
     clickEgress(root, "data-desktop-egress-adjust");
     clickEgress(rerender(), "data-desktop-egress-remove", "host-studio");
     const disabledStates = (attr: string): unknown[] =>
@@ -729,10 +749,12 @@ describe("PermissionsTab connection panel", () => {
   });
 
   it("spins the desktop egress row while its write is in flight and locks the other toggles", async () => {
-    const { root, rerender } = await render(
-      egressView(["self"]),
-      { respond: (url) => (url.endsWith("/desktop-egress-route") ? new Promise(() => undefined) : null) },
-    );
+    const { root, rerender } = await render(egressView(["self"]), {
+      respond: (url) =>
+        url.endsWith("/desktop-egress-route")
+          ? new Promise(() => undefined)
+          : null,
+    });
 
     (attrsOf(switches(root)[0]).onclick as () => void)();
     await settle();
@@ -763,7 +785,8 @@ describe("PermissionsTab connection panel", () => {
     // it, so the pane has to say so and refuse to be raced meanwhile.
     const { root, rerender } = await render(permissionsView(), {
       // Never resolves: the flip stays in flight for the whole test.
-      respond: (url) => (url.endsWith("/connector-toggle") ? new Promise(() => undefined) : null),
+      respond: (url) =>
+        url.endsWith("/connector-toggle") ? new Promise(() => undefined) : null,
     });
 
     (attrsOf(switches(root)[0]).onclick as () => void)();
@@ -867,12 +890,24 @@ describe("PermissionsTab connection panel", () => {
     await settleConnect();
     expect(gone.selectedSections).toEqual(["add-connection"]);
 
-    const notion = slackConnection({ service_name: "notion", display_name: "Notion" });
-    const survivor = await render(permissionsView({ connections: [slackConnection(), notion] }), {
-      viewAfterDisconnect: permissionsView({ connections: [notion] }),
+    const notion = slackConnection({
+      service_name: "notion",
+      display_name: "Notion",
     });
-    (attrsOf(withAttr(survivor.root, "data-perm-disconnect")[0]).onclick as () => void)();
-    (attrsOf(withAttr(survivor.rerender(), "data-perm-disconnect-confirm")[0]).onclick as () => void)();
+    const survivor = await render(
+      permissionsView({ connections: [slackConnection(), notion] }),
+      {
+        viewAfterDisconnect: permissionsView({ connections: [notion] }),
+      },
+    );
+    (
+      attrsOf(withAttr(survivor.root, "data-perm-disconnect")[0])
+        .onclick as () => void
+    )();
+    (
+      attrsOf(withAttr(survivor.rerender(), "data-perm-disconnect-confirm")[0])
+        .onclick as () => void
+    )();
     await settleConnect();
     expect(survivor.selectedSections).toEqual(["conn:notion:"]);
   });
@@ -1228,10 +1263,11 @@ describe("PermissionsTab service marks", () => {
 
 describe("permissions tab registration", () => {
   it("keeps the raised icon strip, the ?tab parse, and the titlebar in agreement", () => {
-    // The machine tabs lead the strip, in the ?tab order, with the two
+    // The machine tabs lead the strip, in the ?tab order, with the three
     // window-wide icons after them.
     expect(TITLEBAR_POPUP_ICONS.map((icon) => icon.id)).toEqual([
       ...OPTIONS_TABS,
+      "account",
       "notifications",
       "help",
     ]);
@@ -1360,9 +1396,15 @@ describe("PermissionsTab shared paths", () => {
 
   it("shows the whole path in a hover tooltip, since the pill cuts a long one short", async () => {
     const { root, remove } = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ path: "/home/me/notes", path_label: "~/notes" })] }),
+      permissionsView({
+        shared_paths: [
+          sharedPath({ path: "/home/me/notes", path_label: "~/notes" }),
+        ],
+      }),
     );
-    const pills = collectVnodes(pathRows(root)[0]).filter((node) => node.tag === "code");
+    const pills = collectVnodes(pathRows(root)[0]).filter(
+      (node) => node.tag === "code",
+    );
     expect(pills).toHaveLength(1);
     expect(attrsOf(pills[0])["data-tooltip"]).toBe("/home/me/notes");
     remove();
@@ -1501,9 +1543,13 @@ describe("PermissionsTab shared paths", () => {
 
   it("states which way changes travel, from the access rather than as a second choice", async () => {
     const readOnly = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "READ", sync: pathSync() })] }),
+      permissionsView({
+        shared_paths: [sharedPath({ access: "READ", sync: pathSync() })],
+      }),
     );
-    expect(allText(readOnly.root)).toContain("changes from your computer to this workspace in one direction");
+    expect(allText(readOnly.root)).toContain(
+      "changes from your computer to this workspace in one direction",
+    );
     readOnly.remove();
 
     const readWrite = await renderLocalFiles(
@@ -1515,7 +1561,9 @@ describe("PermissionsTab shared paths", () => {
 
   it("offers a way in for a file and for a folder, and names the other route", async () => {
     // The pickers only exist in the desktop shell, so the buttons only do.
-    const surface = globalThis as unknown as { window?: { mindsNative?: unknown } };
+    const surface = globalThis as unknown as {
+      window?: { mindsNative?: unknown };
+    };
     const restore = surface.window;
     surface.window = { mindsNative: {} };
     const { root, remove } = await renderLocalFiles(permissionsView());

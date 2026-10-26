@@ -15,11 +15,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import httpx
 import pytest
 from simple_websocket import Client as WebSocketClient
 from simple_websocket import ConnectionClosed
+from simple_websocket import Server as SimpleWebsocketServer
 
 from imbue.minds.desktop_client.app import _FocusedMainWindowReader
 from imbue.minds.desktop_client.app import _ScreenLockedReader
@@ -32,11 +34,15 @@ from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.testing import HandshakeDrainingWebSocketClient
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
+from imbue.minds.desktop_client.ui_channel import _SNAPSHOT_DERIVE_ATTEMPTS
+from imbue.minds.desktop_client.ui_channel import _read_client_frames_until_closed
+from imbue.minds.desktop_client.ui_channel import _send_account_snapshot
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
 from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
+from imbue.minds.errors import MindError
 
 
 def test_broadcaster_delivers_frames_to_every_registered_queue() -> None:
@@ -87,6 +93,35 @@ def test_broadcaster_evicts_a_client_on_the_first_dropped_frame() -> None:
         except queue.Empty:
             is_drained = True
     assert drained[-1] is None
+
+
+def test_send_to_client_evicts_a_connection_that_cannot_take_the_frames_and_counts_a_gone_one_as_sent() -> None:
+    """The snapshot sender enqueues through it, so a stuck connection is evicted the way a broadcast evicts."""
+    broadcaster = UiChannelBroadcaster()
+    stuck = broadcaster.register()
+    is_full = False
+    while not is_full:
+        try:
+            stuck.put_nowait("filler")
+        except queue.Full:
+            is_full = True
+
+    assert broadcaster.send_to_client(stuck, ["snapshot"]) is True
+
+    assert broadcaster.connection_count() == 0
+    drained: list[str | None] = []
+    is_drained = False
+    while not is_drained:
+        try:
+            drained.append(stuck.get_nowait())
+        except queue.Empty:
+            is_drained = True
+    assert drained[-1] is None
+
+    # A connection that is gone takes nothing, and nothing is owed to it.
+    gone: queue.Queue[str | None] = queue.Queue()
+    assert broadcaster.send_to_client(gone, ["snapshot"]) is True
+    assert gone.empty()
 
 
 def test_broadcaster_shutdown_pushes_sentinel_and_rejects_future_registrations_with_sentinel() -> None:
@@ -216,29 +251,57 @@ def test_unauthenticated_ws_upgrade_gets_plain_401_and_server_keeps_serving(tmp_
         assert followup.status_code == 200
 
 
-def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
+_SNAPSHOT_FRAME_TYPES = [
+    "workspaces",
+    "accounts",
+    "providers",
+    "requests",
+    "discovery_health",
+    "notifications",
+    "workspace_updates",
+    "environment",
+]
+
+
+def _report_window(client: WebSocketClient, client_id: str, account_id: str) -> None:
+    """What the SPA sends on open: which account this window shows."""
+    client.send(UiClientStateMessage(client_id=client_id, route="/", account_id=account_id).model_dump_json())
+
+
+def test_ws_connect_receives_hello_then_full_snapshot_once_the_window_names_its_account(tmp_path: Path) -> None:
     # Read exactly as many frames as the sequence is expected to carry, so a
     # frame added to it fails here rather than silently going unlooked-at (and
     # taking the frame after it, in whatever test reads one, with it).
-    expected_types = [
-        "workspaces",
-        "accounts",
-        "providers",
-        "requests",
-        "discovery_health",
-        "notifications",
-        "workspace_updates",
-        "environment",
-    ]
     with _serve_ws_capable_app(tmp_path) as (port, cookie, _state):
         client = _connect_ws(port, cookie)
         try:
-            frames = [json.loads(client.receive(timeout=5)) for _ in range(len(expected_types) + 1)]
+            _report_window(client, "win-a", "local")
+            frames = [json.loads(client.receive(timeout=5)) for _ in range(len(_SNAPSHOT_FRAME_TYPES) + 1)]
         finally:
             client.close()
         assert frames[0]["type"] == "hello"
         assert frames[0]["schema_version"] == UI_SCHEMA_VERSION
-        assert [frame["type"] for frame in frames[1:]] == expected_types
+        assert [frame["type"] for frame in frames[1:]] == _SNAPSHOT_FRAME_TYPES
+        accounts_frame = next(frame for frame in frames if frame["type"] == "accounts")
+        assert accounts_frame["account_id"] == "local"
+
+
+def test_ws_switching_the_windows_account_replays_that_accounts_snapshot(tmp_path: Path) -> None:
+    """A window that moves to another account (the switcher, a navigation) is told that account's state afresh."""
+    with _serve_ws_capable_app(tmp_path) as (port, cookie, _state):
+        client = _connect_ws(port, cookie)
+        try:
+            _report_window(client, "win-a", "local")
+            for _ in range(len(_SNAPSHOT_FRAME_TYPES) + 1):
+                client.receive(timeout=5)
+            _report_window(client, "win-a", "user-alice")
+            frames = [json.loads(client.receive(timeout=5)) for _ in range(len(_SNAPSHOT_FRAME_TYPES) + 1)]
+        finally:
+            client.close()
+        assert frames[0]["type"] == "hello"
+        assert [frame["type"] for frame in frames[1:]] == _SNAPSHOT_FRAME_TYPES
+        accounts_frame = next(frame for frame in frames if frame["type"] == "accounts")
+        assert accounts_frame["account_id"] == "user-alice"
 
 
 def test_broadcast_after_connect_reaches_the_ws_client(tmp_path: Path) -> None:
@@ -257,6 +320,119 @@ def test_broadcast_after_connect_reaches_the_ws_client(tmp_path: Path) -> None:
         assert pushed == {"type": "reload_ui"}
 
 
+def test_broadcaster_scopes_account_frames_to_the_windows_showing_that_account() -> None:
+    """A frame for one account reaches only the connections whose window reports it."""
+    broadcaster = UiChannelBroadcaster()
+    alice_queue = broadcaster.register()
+    device_queue = broadcaster.register()
+    unreported_queue = broadcaster.register()
+    broadcaster.set_client_state(alice_queue, UiClientStateMessage(client_id="a", route="/", account_id="user-alice"))
+    broadcaster.set_client_state(device_queue, UiClientStateMessage(client_id="d", route="/", account_id="local"))
+
+    broadcaster.broadcast_to_account("user-alice", "alice-frame")
+    broadcaster.broadcast("everyone-frame")
+
+    assert broadcaster.connected_account_ids() == {"user-alice", "local"}
+    assert [alice_queue.get_nowait(), alice_queue.get_nowait()] == ["alice-frame", "everyone-frame"]
+    assert device_queue.get_nowait() == "everyone-frame"
+    assert unreported_queue.get_nowait() == "everyone-frame"
+    assert device_queue.empty() and unreported_queue.empty()
+
+
+def test_set_client_state_reports_an_account_change_once_per_switch() -> None:
+    """The first report names the account; a report that keeps it is not a change; a switch is one."""
+    broadcaster = UiChannelBroadcaster()
+    client_queue = broadcaster.register()
+    on_alice = UiClientStateMessage(client_id="w", route="/", account_id="user-alice")
+
+    assert broadcaster.set_client_state(client_queue, on_alice) is True
+    unfocused_on_alice = UiClientStateMessage(client_id="w", route="/", account_id="user-alice", has_focus=False)
+    assert broadcaster.set_client_state(client_queue, unfocused_on_alice) is False
+    on_device = UiClientStateMessage(client_id="w", route="/", account_id="local")
+    assert broadcaster.set_client_state(client_queue, on_device) is True
+    assert broadcaster.set_client_state(client_queue, UiClientStateMessage(client_id="w", route="/")) is False
+
+
+def test_account_snapshot_is_derived_again_when_a_broadcast_overtakes_its_derive() -> None:
+    """A frame broadcast mid-derive may be newer than the snapshot, so the snapshot behind it is thrown away and re-derived."""
+    broadcaster = UiChannelBroadcaster()
+    client_queue = broadcaster.register()
+    broadcaster.set_client_state(client_queue, UiClientStateMessage(client_id="w", route="/", account_id="user-alice"))
+    derive_count = 0
+
+    def build_snapshot_frames(account_id: str) -> list[str]:
+        nonlocal derive_count
+        derive_count += 1
+        # The publisher's pass lands on the queue while the first derive runs.
+        if derive_count == 1:
+            broadcaster.broadcast_to_account(account_id, "newer-frame")
+        return ["hello", f"snapshot-{derive_count}"]
+
+    _send_account_snapshot(broadcaster, client_queue, build_snapshot_frames, "user-alice")
+
+    assert derive_count == 2
+    assert [client_queue.get_nowait() for _ in range(3)] == ["newer-frame", "hello", "snapshot-2"]
+    assert client_queue.empty()
+
+
+def test_account_snapshot_is_sent_on_the_last_attempt_whatever_overtakes_it() -> None:
+    broadcaster = UiChannelBroadcaster()
+    client_queue = broadcaster.register()
+    broadcaster.set_client_state(client_queue, UiClientStateMessage(client_id="w", route="/", account_id="user-alice"))
+    derive_count = 0
+
+    def build_snapshot_frames(account_id: str) -> list[str]:
+        nonlocal derive_count
+        derive_count += 1
+        broadcaster.broadcast("install-wide-frame")
+        return [f"snapshot-{derive_count}"]
+
+    _send_account_snapshot(broadcaster, client_queue, build_snapshot_frames, "user-alice")
+
+    assert derive_count == _SNAPSHOT_DERIVE_ATTEMPTS
+    frames = [client_queue.get_nowait() for _ in range(_SNAPSHOT_DERIVE_ATTEMPTS + 1)]
+    assert frames == ["install-wide-frame"] * _SNAPSHOT_DERIVE_ATTEMPTS + [f"snapshot-{_SNAPSHOT_DERIVE_ATTEMPTS}"]
+    assert client_queue.empty()
+
+
+class _ScriptedWebsocket:
+    """A peer that sends the given frames, then hangs up (``receive`` answers None)."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = list(frames)
+
+    def receive(self, timeout: float | None = None) -> str | None:
+        return self._frames.pop(0) if self._frames else None
+
+
+def test_reader_closes_the_connection_and_says_why_when_the_snapshot_derive_fails() -> None:
+    """A derive the publisher would skip (a settings file mid-write) must not escape the reader thread unlogged."""
+    broadcaster = UiChannelBroadcaster()
+    client_queue = broadcaster.register()
+    websocket = _ScriptedWebsocket(
+        [
+            UiClientStateMessage(client_id="w", route="/", account_id="user-alice").model_dump_json(),
+            UiClientStateMessage(client_id="w", route="/", account_id="local").model_dump_json(),
+        ]
+    )
+
+    def failing_build_snapshot_frames(account_id: str) -> list[str]:
+        raise MindError(f"no snapshot for {account_id}")
+
+    _read_client_frames_until_closed(
+        cast(SimpleWebsocketServer, websocket),
+        broadcaster,
+        client_queue,
+        failing_build_snapshot_frames,
+        lambda _client_state: None,
+    )
+
+    # The reader ended on the failure: the writer's sentinel is all it left, and the second report is unread.
+    assert client_queue.get_nowait() is None
+    assert client_queue.empty()
+    assert websocket.receive() is not None
+
+
 def test_client_state_report_is_recorded_server_side(tmp_path: Path) -> None:
     with _serve_ws_capable_app(tmp_path) as (port, cookie, state):
         client = _connect_ws(port, cookie)
@@ -273,6 +449,7 @@ def test_client_disconnect_leaves_server_healthy_and_releases_the_connection(tmp
     """The spike's crash scenario: a naive integration died with EBADF on the first client close."""
     with _serve_ws_capable_app(tmp_path) as (port, cookie, state):
         client = _connect_ws(port, cookie)
+        _report_window(client, "win-a", "local")
         client.receive(timeout=5)
         client.close()
 
@@ -286,6 +463,7 @@ def test_broadcaster_shutdown_evicts_live_connection_promptly(tmp_path: Path) ->
     """Ordered shutdown: the sentinel frees the WS worker thread without waiting out cheroot timeouts."""
     with _serve_ws_capable_app(tmp_path) as (port, cookie, state):
         client = _connect_ws(port, cookie)
+        _report_window(client, "win-a", "local")
         client.receive(timeout=5)
 
         started_at = time.monotonic()

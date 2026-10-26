@@ -62,7 +62,6 @@ from imbue.minds.desktop_client.connections.provider_settings import read_signed
 from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_or_none
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
 from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -355,7 +354,6 @@ def test_signout_pushes_a_connection_removal_still_queued_from_offline(
         session_store=device.session_store,
         connection_store=device.store,
         provider_materializer=device.materializer,
-        minds_config=None,
     )
 
     stored = device.cli.sync_documents_by_email[_EMAIL][CONNECTION_DOCUMENT_KIND][str(_CONNECTION_ID)]
@@ -381,7 +379,6 @@ def test_signout_leaves_the_account_alone_when_the_listing_fails(
         session_store=device.session_store,
         connection_store=device.store,
         provider_materializer=device.materializer,
-        minds_config=None,
     )
 
     assert device.cli.signed_out_accounts == []
@@ -413,8 +410,6 @@ def _scheduler_with_expired_session(
     )
     cli.auth_refresh_outcome_to_return = outcome
     assert session_store.record_store is not None
-    minds_config = MindsConfig(data_dir=device.data_dir)
-    minds_config.set_default_account_id(_USER_ID)
     resolver = MngrCliBackendResolver()
     instance = ProviderInstanceName(imbue_cloud_provider_name_for_user(_USER_ID))
     seed_provider_snapshots(
@@ -439,7 +434,7 @@ def _scheduler_with_expired_session(
         imbue_cloud_cli=cli,
         agent_creator=agent_creator,
         on_account_session_dead=lambda user_id: sign_out_dead_account(
-            user_id, cli, session_store, store, materializer, minds_config, _record_wake
+            user_id, cli, session_store, store, materializer, _record_wake
         ),
     )
     return scheduler, cli, settings_path, is_provider_gone_at_wake
@@ -463,8 +458,6 @@ def test_sync_pass_signs_out_an_account_whose_refresh_the_connector_refuses(
     assert cli.signed_out_accounts == [_EMAIL]
     assert imbue_cloud_provider_name_for_user(_USER_ID) not in _parsed(settings_path)["providers"]
     assert is_provider_gone_at_wake == [True]
-    # The retired account was the default; nothing is left to take over.
-    assert MindsConfig(data_dir=tmp_path / f".{_ROOT_NAME}").get_default_account_id() is None
 
 
 @pytest.mark.parametrize("is_create_on_the_account", [True, False])
@@ -521,7 +514,6 @@ def test_sync_pass_keeps_an_account_whose_refresh_did_not_prove_the_session_dead
     assert cli.signed_out_accounts == []
     assert is_provider_gone_at_wake == []
     assert imbue_cloud_provider_name_for_user(_USER_ID) in _parsed(settings_path)["providers"]
-    assert MindsConfig(data_dir=tmp_path / f".{_ROOT_NAME}").get_default_account_id() == _USER_ID
 
 
 def test_sync_pass_pulls_connections_and_materializes_when_a_row_changed(
@@ -584,7 +576,6 @@ def test_sync_pass_does_not_write_back_an_account_that_signed_out_during_its_pul
         _EMAIL, str(_CONNECTION_ID), {"backend": "modal", "alias": "synced modal", "identifier": "", "placement": {}}
     )
     assert device.session_store.record_store is not None
-    minds_config = MindsConfig(data_dir=device.data_dir)
 
     def _sign_out_bob_mid_pull(account: str) -> None:
         if account == _EMAIL:
@@ -594,7 +585,6 @@ def test_sync_pass_does_not_write_back_an_account_that_signed_out_during_its_pul
                 session_store=device.session_store,
                 connection_store=device.store,
                 provider_materializer=device.materializer,
-                minds_config=minds_config,
             )
 
     device.cli.on_sync_documents_pull = _sign_out_bob_mid_pull
@@ -766,8 +756,6 @@ def test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_
         assert error.type_name == "ImbueCloudAuthError"
         assert _RefusingRefreshConnectorHandler.refresh_count >= 1
 
-        minds_config = MindsConfig(data_dir=data_dir)
-        minds_config.set_default_account_id(_USER_ID)
         assert session_store.record_store is not None
         scheduler = WorkspaceSyncScheduler(
             record_store=session_store.record_store,
@@ -777,7 +765,7 @@ def test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_
             provider_materializer=materializer,
             imbue_cloud_cli=cli,
             on_account_session_dead=lambda user_id: sign_out_dead_account(
-                user_id, cli, session_store, store, materializer, minds_config, lambda: None
+                user_id, cli, session_store, store, materializer, lambda: None
             ),
         )
 

@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.connections.primitives import ConnectionId
 from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
@@ -65,6 +66,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
@@ -846,6 +848,43 @@ def make_session_store_for_test(
     )
 
 
+def make_sync_test_device(
+    base_dir: Path, name: str, cli: FakeImbueCloudCli
+) -> tuple[WorkspaceRecordStore, MultiAccountSessionStore]:
+    """One device of a multi-device sync test: its own stores (and device id) over ``cli``'s shared fake connector."""
+    paths = InstallationPaths(data_dir=base_dir / name)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    record_store = WorkspaceRecordStore(
+        paths=paths,
+        cli=cli,
+        device_id=device_id_for_test(name),
+        device_label=name,
+    )
+    session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
+    return record_store, session_store
+
+
+def make_fresh_device_scheduler(base_dir: Path, cli: FakeImbueCloudCli) -> WorkspaceSyncScheduler:
+    """A sync scheduler over a fresh device (no records pulled yet) sharing ``cli``'s fake connector."""
+    record_store, session_store = make_sync_test_device(base_dir, f"fresh-{uuid4().hex}", cli)
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    return WorkspaceSyncScheduler(record_store=record_store, session_store=session_store, resolver=empty_resolver)
+
+
+def push_remote_workspace_record(
+    base_dir: Path, cli: FakeImbueCloudCli, user_id: str, workspace_name: str = "ws-1"
+) -> None:
+    """Simulate another device having synced one active workspace for the account."""
+    _, session_store = make_sync_test_device(base_dir, f"pusher-{uuid4().hex}", cli)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    agents = [
+        {"id": str(agent_id), "labels": {"is_primary": "true"}, "host": {"id": str(host_id), "name": workspace_name}}
+    ]
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
+    session_store.associate_workspace(user_id, str(agent_id), resolver)
+
+
 def associate_hosted_workspace(
     store: MultiAccountSessionStore,
     agent_id: AgentId,
@@ -954,6 +993,13 @@ def add_modal_connection_for_test(
     return connection_id
 
 
+def lock_account_for_test(connection_store: ConnectionStore, user_id: str) -> None:
+    """Make ``user_id`` a locked account: a synced connection proves a master password elsewhere, and no DEK is here."""
+    unlock_account_with_master_password_for_test(connection_store.paths, user_id)
+    add_modal_connection_for_test(connection_store, user_id, "elsewhere modal")
+    delete_dek(connection_store.paths, user_id)
+
+
 def make_provider_materializer_for_test(
     root_name: str,
     connection_store: ConnectionStore,
@@ -1014,19 +1060,17 @@ def build_desktop_client_for_test(
 def build_desktop_client_with_accounts(
     tmp_path: Path,
     signed_in_user_ids: tuple[str, ...],
-    stored_default_account_id: str,
     cli: FakeImbueCloudCli | None = None,
 ) -> tuple[FlaskClient, MindsConfig]:
-    """An authenticated desktop client whose config stores ``stored_default_account_id`` as the default account.
+    """An authenticated desktop client with ``signed_in_user_ids`` signed in (as ``<user_id>@example.com``).
 
-    Each of ``signed_in_user_ids`` is signed in (as ``<user_id>@example.com``)
-    on ``cli``, a fresh fake by default. Returns the client and its config.
+    The accounts are signed in on ``cli``, a fresh fake by default. Returns the
+    client and its config.
     """
     effective_cli = cli or make_fake_imbue_cloud_cli()
     for user_id in signed_in_user_ids:
         effective_cli.add_account(user_id=user_id, email=f"{user_id}@example.com")
     minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    minds_config.set_default_account_id(stored_default_account_id)
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path,
         is_authenticated=True,

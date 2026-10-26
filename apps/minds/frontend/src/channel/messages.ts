@@ -22,7 +22,10 @@ import type {
   UiProvidersMessage,
   UiReloadMessage,
   UiRequestsMessage,
+  UiRouteAccountResponse,
   UiSnapshot,
+  UiSwitchAccountRequest,
+  UiSwitchAccountResponse,
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
@@ -51,7 +54,10 @@ export type {
   UiProvidersMessage,
   UiReloadMessage,
   UiRequestsMessage,
+  UiRouteAccountResponse,
   UiSnapshot,
+  UiSwitchAccountRequest,
+  UiSwitchAccountResponse,
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
@@ -92,6 +98,8 @@ export interface UiClientState {
   route: string;
   workspace_agent_id: string | null;
   has_focus: boolean;
+  /** The account this window shows; the server scopes its frames to it. */
+  account_id: string;
 }
 
 /** Parse one channel frame; null for frames that are not a known server message. */

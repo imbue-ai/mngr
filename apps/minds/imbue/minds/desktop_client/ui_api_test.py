@@ -3,11 +3,20 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_api import _record_recent_window_state
 from imbue.minds.desktop_client.ui_api import _sanitize_accent
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
+from imbue.minds.desktop_client.ui_models import UiClientStateMessage
+from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 
 def _write_manifest(tmp_path: Path) -> Path:
@@ -83,6 +92,57 @@ def test_ui_index_bootstrap_seed_reflects_mac_user_agent(tmp_path: Path, monkeyp
         response.get_data(as_text=True).split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
     )
     assert json.loads(bootstrap_json)["seed"]["is_mac"] is True
+
+
+def test_ui_index_serves_an_accounts_home_page_with_and_without_its_trailing_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/account/<id>/`` is what a new or restored window loads; both spellings must serve the index on that account."""
+    monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_manifest(tmp_path)))
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    for path in ("/account/local/", "/account/local"):
+        response = client.get(path)
+
+        assert response.status_code == 200, path
+        html = response.get_data(as_text=True)
+        bootstrap_json = html.split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
+        assert json.loads(bootstrap_json)["seed"]["account_id"] == "local"
+
+
+def test_ui_index_bootstrap_seeds_a_workspace_urls_account_from_its_record_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restored window names its workspace by host id; the owner comes from the records, discovery or not."""
+    monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_manifest(tmp_path)))
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-alice", email="alice@example.com")
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    host_id = str(HostId.generate())
+    # Discovery reports nothing: the workspace is a synced row this device never ran.
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+    session_store.associate_created_workspace(
+        user_id="user-alice",
+        agent_id=str(AgentId.generate()),
+        host_id=host_id,
+        display_name="ws",
+        color=None,
+        is_cloud_row=True,
+    )
+
+    def seed_account_id(path: str) -> str:
+        html = client.get(path).get_data(as_text=True)
+        bootstrap_json = html.split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
+        return json.loads(bootstrap_json)["seed"]["account_id"]
+
+    assert seed_account_id(f"/workspace/{host_id}") == "user-alice"
+    assert seed_account_id(f"/workspace/{HostId.generate()}") == "local"
 
 
 def test_ui_index_omits_sentry_bootstrap_when_reporting_is_off(
@@ -192,3 +252,58 @@ def test_sanitize_accent_accepts_hex_and_rejects_anything_else() -> None:
     assert _sanitize_accent("") == DEFAULT_WORKSPACE_COLOR
     assert _sanitize_accent("url(https://evil.example/x)") == DEFAULT_WORKSPACE_COLOR
     assert _sanitize_accent("#aabbcc; background: red") == DEFAULT_WORKSPACE_COLOR
+
+
+def test_a_windows_report_records_a_workspace_among_an_accounts_recents_only_when_it_is_that_accounts(
+    tmp_path: Path,
+) -> None:
+    """A window moving to another account reports the workspace it is leaving under the account it is going to."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-alice", email="alice@example.com")
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    _client, app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        minds_config=minds_config,
+    )
+    alices_agent_id = str(AgentId.generate())
+    session_store.associate_created_workspace(
+        user_id="user-alice",
+        agent_id=alices_agent_id,
+        host_id=str(HostId.generate()),
+        display_name="ws",
+        color=None,
+        is_cloud_row=False,
+    )
+    unassociated_agent_id = str(AgentId.generate())
+
+    def report(account_id: str, workspace_agent_id: str | None, window_kind: UiWindowKind = UiWindowKind.MAIN) -> None:
+        _record_recent_window_state(
+            get_state(app),
+            UiClientStateMessage(
+                client_id="win",
+                route="/",
+                workspace_agent_id=workspace_agent_id,
+                account_id=account_id,
+                window_kind=window_kind,
+            ),
+        )
+
+    report("user-alice", alices_agent_id)
+    report("user-bob", alices_agent_id)
+    report("local", unassociated_agent_id)
+    report("user-alice", unassociated_agent_id)
+    # A pulled-out window's report, and a window that has not named its account, count for nothing.
+    report("user-carol", alices_agent_id, UiWindowKind.POPOUT)
+    report("", alices_agent_id)
+    # So does a report naming something that is not an account id: it is never persisted.
+    report("../etc", alices_agent_id)
+
+    assert minds_config.get_recent_account_ids() == ["user-alice", "local", "user-bob"]
+    assert minds_config.get_recent_workspace_ids("user-alice") == [alices_agent_id]
+    assert minds_config.get_recent_workspace_ids("user-bob") == []
+    assert minds_config.get_recent_workspace_ids("local") == [unassociated_agent_id]

@@ -98,6 +98,7 @@ from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_cont
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
+from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
@@ -697,6 +698,50 @@ def test_build_workspace_list_never_flags_a_local_row_for_a_missing_key(tmp_path
     assert "key_state" not in rows[0]
 
 
+def test_build_workspace_list_names_each_rows_owning_account_signed_in_or_not(tmp_path: Path) -> None:
+    """A row carries its record's association as ``account_user_id`` whether or not that account is signed in here.
+
+    The per-window projection lists a row under that id, so a signed-out
+    account's workspaces stay its own (named by the email its replica last
+    synced under) rather than falling to the device, which only takes the rows
+    associated with no account.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-here", email="here@example.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    record_store = session_store.record_store
+    assert record_store is not None
+    here_agent, gone_agent, device_agent = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    backend_resolver = make_resolver_with_data(
+        agents_json=make_agents_json(here_agent, gone_agent, device_agent, host_name="ws")
+    )
+    session_store.associate_created_workspace(
+        user_id="user-here",
+        agent_id=str(here_agent),
+        host_id="host-here",
+        display_name="here-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+    record_store.upsert_local_record(
+        "user-gone",
+        "gone@example.com",
+        ReplicaRecord(host_id="host-gone", agent_id=str(gone_agent), display_name="gone-ws"),
+    )
+
+    rows = {row["id"]: row for row in _build_workspace_list(backend_resolver, session_store)}
+    assert (rows[str(here_agent)]["account_user_id"], rows[str(here_agent)]["account"]) == (
+        "user-here",
+        "here@example.com",
+    )
+    assert (rows[str(gone_agent)]["account_user_id"], rows[str(gone_agent)]["account"]) == (
+        "user-gone",
+        "gone@example.com",
+    )
+    assert "account_user_id" not in rows[str(device_agent)]
+    assert "account" not in rows[str(device_agent)]
+
+
 def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> None:
     """An agent with an alive destroy pid + still in the resolver shows up as running.
 
@@ -828,7 +873,7 @@ def test_workspaces_message_lists_a_failed_destroy_whose_host_is_gone(tmp_path: 
     publisher = get_state(app).ui_publisher
     assert publisher is not None
 
-    message = publisher.build_snapshot().workspaces
+    message = publisher.build_snapshot(LOCAL_PROFILE_USER_ID).workspaces
 
     assert message.failed_destroy_agent_ids == (str(agent_id),)
     assert message.destroying_agent_ids == (str(agent_id),)
@@ -1104,7 +1149,7 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = {"count": 0, "request_ids": [], "workspace_agent_ids": []}
+    expected = {"count": 0, "request_ids": [], "workspace_agent_ids": [], "workspace_agent_id_by_request_id": {}}
     assert _build_requests_payload(displayable_pending_requests(None, resolver), resolver) == expected
     assert (
         _build_requests_payload(displayable_pending_requests(StaticPendingRequests(), resolver), resolver) == expected
@@ -1282,21 +1327,6 @@ def test_old_requests_page_route_removed(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     response = client.get("/requests/evt-anything")
     assert response.status_code == 404
-
-
-def test_set_default_account(tmp_path: Path) -> None:
-    """Setting a default account works correctly."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.post(
-        "/accounts/set-default",
-        data={"user_id": "user-default-123"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_default_account_id() == "user-default-123"
 
 
 # error-reporting consent + settings tests
@@ -2164,6 +2194,9 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
     publisher = get_state(app).ui_publisher
     assert publisher is not None
     client_queue = publisher.broadcaster.register()
+    publisher.broadcaster.set_client_state(
+        client_queue, UiClientStateMessage(client_id="win", route="/", account_id=LOCAL_PROFILE_USER_ID)
+    )
 
     # With no outage of the machine's own yet, the errored poll is the freshest
     # thing said about that backend, so the band may name it. Publishing here

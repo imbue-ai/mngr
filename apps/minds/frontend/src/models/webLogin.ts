@@ -19,6 +19,7 @@ export type WebLoginState = "idle" | "starting" | "waiting" | "finishing" | "don
 interface FlowStatusBody {
   state?: string;
   login_url?: string | null;
+  user_id?: string | null;
   email?: string | null;
   error?: string | null;
 }
@@ -39,6 +40,10 @@ export class WebLoginModel {
   // auth_required message); shown above the wait copy.
   message = "";
   loginUrl = "";
+  // The account the flow signed in, once the poll has seen it land. A page
+  // waiting on this sign-in takes the user id up: the accounts frame that
+  // lists the account can arrive after the poll reads "done".
+  userId = "";
   email = "";
   error = "";
   private readonly fetchImpl: FetchLike;
@@ -86,6 +91,7 @@ export class WebLoginModel {
     this.isClosedOnSignIn = options.isClosedOnSignIn ?? false;
     this.loginUrl = "";
     this.error = "";
+    this.userId = "";
     this.email = "";
     this.hasRaisedApp = false;
     const generation = ++this.generation;
@@ -208,6 +214,7 @@ export class WebLoginModel {
     }
     if (flowId !== this.activeFlowId) return;
     this.loginUrl = body.login_url ?? this.loginUrl;
+    this.userId = body.user_id ?? this.userId;
     this.email = body.email ?? this.email;
     if (body.state === "done") {
       this.raiseApp();

@@ -565,6 +565,14 @@ class WorkspaceRecordStore(MutableModel):
                 result[user_id] = active
         return result
 
+    def active_agent_id_for_host(self, host_id: str) -> str | None:
+        """The agent id of the ACTIVE record on ``host_id``, whichever account holds it, or None."""
+        for records in self.list_all_records().values():
+            for record in records:
+                if record.host_id == host_id and record.state == RECORD_STATE_ACTIVE and record.agent_id:
+                    return record.agent_id
+        return None
+
     def find_active_record(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
         """Return ``(user_id, record)`` for the ACTIVE record of ``agent_id``, or None."""
         for user_id, records in self.list_all_records().items():
