@@ -20,7 +20,9 @@ from flask import request
 from loguru import logger
 from pydantic import ValidationError
 
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.responses import make_json_error_response
+from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import choose_switch_route
@@ -33,13 +35,6 @@ from imbue.minds.desktop_client.ui_models import UiSwitchAccountResponse
 from imbue.minds.desktop_client.ui_models import UiWindowKind
 
 
-def _workspace_account_id(state: DesktopClientState, workspace_any_id: str) -> str | None:
-    """The account a workspace (by either coordinate) is associated with, or None for none."""
-    if state.session_store is None:
-        return None
-    return state.session_store.get_owner_user_id_for_workspace(workspace_any_id)
-
-
 def _create_attempt_account_id(state: DesktopClientState, create_attempt_id: str) -> str | None:
     """The account a create attempt was submitted under, or None for none or an unknown attempt."""
     agent_creator = state.agent_creator
@@ -50,14 +45,37 @@ def _create_attempt_account_id(state: DesktopClientState, create_attempt_id: str
     return record.request.account_id or None
 
 
+def _signed_in_account_id_with_most_workspaces(state: DesktopClientState) -> str:
+    """The signed-in account that owns the most workspaces here, else the device.
+
+    An install upgraded from before the ``[recent]`` table has no recent account,
+    and a window it restores at a bare ``/`` belongs on the signed-in account, not
+    the device.
+
+    CLEANUP: drop this, with ``resolve_window_account_id``'s
+    ``resolve_account_id_when_none_recorded``, once no supported install predates
+    the ``[recent]`` table (a bare route then takes the device until a window
+    reports an account).
+    """
+    if state.session_store is None:
+        return LOCAL_PROFILE_USER_ID
+    accounts = [account for account in state.session_store.list_accounts() if account.workspace_ids]
+    if not accounts:
+        return LOCAL_PROFILE_USER_ID
+    return str(max(accounts, key=lambda account: len(account.workspace_ids)).user_id)
+
+
 def resolve_request_account_id(state: DesktopClientState, path: str, query: str) -> str:
     """The account a served URL's window shows at first paint (see ``resolve_window_account_id``)."""
     return resolve_window_account_id(
         path,
         query,
-        resolve_workspace_account_id=lambda any_id: _workspace_account_id(state, any_id),
+        resolve_workspace_account_id=lambda any_id: get_owning_account_id_for_workspace(
+            session_store=state.session_store, workspace_any_id=any_id
+        ),
         resolve_create_attempt_account_id=lambda attempt_id: _create_attempt_account_id(state, attempt_id),
         recent_account_ids=state.minds_config.get_recent_account_ids() if state.minds_config is not None else [],
+        resolve_account_id_when_none_recorded=lambda: _signed_in_account_id_with_most_workspaces(state),
     )
 
 

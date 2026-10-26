@@ -25,8 +25,8 @@ from flask import Response
 from flask import request
 from loguru import logger
 
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.onboarding_progress import resolve_is_onboarding_complete
+from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
@@ -266,14 +266,12 @@ def _record_recent_window_state(state: DesktopClientState, client_state: UiClien
         logger.warning("Ignoring a window's report of an account id that is not one: {!r}", client_state.account_id)
         return
     workspace_id = client_state.workspace_agent_id or None
-    if workspace_id is not None:
-        owner_user_id = (
-            state.session_store.get_owner_user_id_for_workspace(workspace_id)
-            if state.session_store is not None
-            else None
-        )
-        if (owner_user_id or LOCAL_PROFILE_USER_ID) != client_state.account_id:
-            workspace_id = None
+    if (
+        workspace_id is not None
+        and get_owning_account_id_for_workspace(session_store=state.session_store, workspace_any_id=workspace_id)
+        != client_state.account_id
+    ):
+        workspace_id = None
     try:
         minds_config.note_window_shows(client_state.account_id, workspace_id)
     except MindsConfigError as e:

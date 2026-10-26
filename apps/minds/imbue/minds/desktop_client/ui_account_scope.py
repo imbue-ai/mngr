@@ -9,6 +9,7 @@ URL rules are tested without a channel or an app.
 """
 
 import re
+from collections import Counter
 from collections.abc import Callable
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
@@ -100,12 +101,19 @@ def account_workspace_scope(workspaces: UiWorkspacesMessage, account_id: str) ->
 
 @pure
 def project_workspaces(message: UiWorkspacesMessage, account_id: str) -> UiWorkspacesMessage:
-    """The account's rows alone, named as its; the install-wide id lists stay, since restore and destroy span accounts."""
+    """The account's rows alone, named as its, with every account's row count.
+
+    The install-wide id lists stay, since restore and destroy span accounts.
+    """
     kept = tuple(entry for entry in message.workspaces if account_id_of_workspace_entry(entry) == account_id)
     kept_ids = {entry.id for entry in kept}
     return message.model_copy_update(
         to_update(message.field_ref().account_id, account_id),
         to_update(message.field_ref().workspaces, kept),
+        to_update(
+            message.field_ref().workspace_count_by_account_id,
+            dict(Counter(account_id_of_workspace_entry(entry) for entry in message.workspaces)),
+        ),
         to_update(
             message.field_ref().remote_workspace_states,
             {agent_id: state for agent_id, state in message.remote_workspace_states.items() if agent_id in kept_ids},
@@ -241,34 +249,30 @@ def account_id_from_query(query: str) -> str | None:
     return next((value for value in values if is_valid_account_id(value)), None)
 
 
-@pure
-def most_recent_account_id(recent_account_ids: Sequence[str]) -> str:
-    """The install's most recently shown account, or the device when no window has reported one yet."""
-    return recent_account_ids[0] if recent_account_ids else LOCAL_PROFILE_USER_ID
-
-
 def resolve_window_account_id(
     path: str,
     query: str,
-    # The account a workspace is associated with (None for none), by either workspace coordinate.
-    resolve_workspace_account_id: Callable[[str], str | None],
+    # The account whose windows list a workspace, by either workspace coordinate.
+    resolve_workspace_account_id: Callable[[str], str],
     # The account a create attempt was submitted under (None for none, or an unknown attempt).
     resolve_create_attempt_account_id: Callable[[str], str | None],
     recent_account_ids: Sequence[str],
+    # The account a bare route takes while no window has reported one yet.
+    resolve_account_id_when_none_recorded: Callable[[], str],
 ) -> str:
     """The account a served URL belongs to, which seeds the window's account at first paint.
 
-    The hub segment wins, then a named workspace's association (a workspace with none
-    belongs to the device), then a creation page's attempt, then the overlay's
-    ``?account=``; the start flow is the device's, and anything else (``/`` included)
-    takes the most recently used account.
+    The hub segment wins, then a named workspace's account, then a creation page's
+    attempt, then the overlay's ``?account=``; the start flow is the device's, and
+    anything else (``/`` included) takes the most recently used account, else
+    ``resolve_account_id_when_none_recorded``'s.
     """
     hub_account_id = account_id_from_hub_path(path)
     if hub_account_id is not None:
         return hub_account_id
     workspace_any_id = workspace_any_id_from_spa_path(path)
     if workspace_any_id is not None:
-        return resolve_workspace_account_id(workspace_any_id) or LOCAL_PROFILE_USER_ID
+        return resolve_workspace_account_id(workspace_any_id)
     create_attempt_id = create_attempt_id_from_spa_path(path)
     if create_attempt_id is not None:
         return resolve_create_attempt_account_id(create_attempt_id) or LOCAL_PROFILE_USER_ID
@@ -277,7 +281,7 @@ def resolve_window_account_id(
         return query_account_id
     if path.rstrip("/") in {device_path.rstrip("/") for device_path in _DEVICE_PATHS}:
         return LOCAL_PROFILE_USER_ID
-    return most_recent_account_id(recent_account_ids)
+    return recent_account_ids[0] if recent_account_ids else resolve_account_id_when_none_recorded()
 
 
 @pure

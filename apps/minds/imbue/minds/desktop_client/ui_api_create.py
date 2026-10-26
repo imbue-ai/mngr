@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.region_preference import known_regions_for_provi
 from imbue.minds.desktop_client.region_preference import modal_region_choices
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import ACCOUNT_QUERY_PARAMETER
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
@@ -244,7 +245,9 @@ class LandingExtrasResponse(FrozenModel):
         description="The window's account when it has synced secrets but no local key here, else empty"
     )
     is_discovery_complete: bool = Field(description="Whether initial discovery has completed")
-    has_restorable_workspaces: bool = Field(description="Whether the last-good topology knows any workspace")
+    has_restorable_workspaces: bool = Field(
+        description="Whether the window's account has a workspace that is live or in the last-good topology"
+    )
 
 
 class CreateAttemptRequestSummary(FrozenModel):
@@ -585,6 +588,13 @@ def _handle_landing_extras() -> Response:
         account = session_store.get_session(window_account_id)
         if account is not None and session_store.record_store.locked_account_user_ids([str(account.user_id)]):
             locked_emails = (str(account.email),)
+    # A workspace not yet re-listed this session has no row, so its account is
+    # read from its record's association, as its row's would be.
+    has_restorable_workspaces = any(
+        get_owning_account_id_for_workspace(session_store=session_store, workspace_any_id=str(agent_id))
+        == window_account_id
+        for agent_id in backend_resolver.list_restorable_workspace_ids()
+    )
     paths = state.api_v1_paths
     records = (
         list_destroying(paths, lambda agent_id: is_host_still_active(backend_resolver, paths, agent_id))
@@ -596,7 +606,7 @@ def _handle_landing_extras() -> Response:
         orphaned_failed_destroys=_orphaned_failed_destroys(records, backend_resolver, session_store),
         locked_account_emails=locked_emails,
         is_discovery_complete=backend_resolver.has_completed_initial_discovery(),
-        has_restorable_workspaces=bool(backend_resolver.list_restorable_workspace_ids()),
+        has_restorable_workspaces=has_restorable_workspaces,
     )
     return _json_response(response)
 

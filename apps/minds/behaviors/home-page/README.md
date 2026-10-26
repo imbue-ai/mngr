@@ -3,7 +3,7 @@
 Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
 The home page is where a browser lands once a session is authenticated on the *browser authorization component* (defined in `browser-authorization/`).
-Every window is for one account (the *window's account*, specified in `account-windows/`), and an account's home page is "/account/<account_id>/"; "/" redirects to the home page of the account most recently shown in any window, which is the device's, `local`, until an account has been shown.
+Every window is for one account (the *window's account*, specified in `account-windows/`), and an account's home page is "/account/<account_id>/"; "/" redirects to the home page of the account most recently shown in any window, and until an account has been shown, to the signed-in account with the most workspaces here, else the device's, `local`.
 This folder specifies what an already-*authenticated* user sees on a home page, and where "/post-login" sends them once they sign in.
 
 ## Boundary with browser-authorization
@@ -18,8 +18,9 @@ Once a session is authenticated, a background process discovers the user's works
 A home page concerns its account's workspaces only: the workspaces associated with that account, or, on the device's home page, the workspaces associated with no account.
 Before anything else, the one-time "Help improve Imbue Studio" consent screen is shown once per installation, overriding the normal home content until it is answered. Its one question is a checkbox, checked to start, whose answer becomes the error-reporting setting. A new install answers the same checkbox in the start flow, on the question that picks where to run the first workspace, so the screen is for an installation that has never answered it.
 While initial discovery is still running, the home page shows a self-refreshing progress page.
-After it finishes, the home page lists the account's workspaces if it has any; with none, it shows the new-workspace form once the installation's onboarding is complete, and otherwise hands over to the *start flow* -- the first-run chat at "/start" that creates the first workspace (the start flow's own contents are out of scope here).
+After it finishes, the home page lists the account's workspaces if it has any; with none, it shows the new-workspace form once the installation's onboarding is complete, and otherwise, when no account has a workspace here, hands over to the *start flow* -- the first-run chat at "/start" that creates the first workspace (the start flow's own contents are out of scope here).
 The home page of an account that is signed out offers to log in where it would offer to create a workspace.
+A home page with no workspaces of its own also offers to move the window to each account (or the device) that has workspaces here.
 The progress page names the unit by the corpus's workspace-vs-agent convention: its user-facing string reads "Discovering workspaces".
 
 ## Out of scope

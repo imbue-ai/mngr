@@ -208,6 +208,14 @@ class UiWorkspacesMessage(FrozenModel):
     remote_workspace_states: dict[str, RemoteTileState] = Field(
         description="agent_id -> derived access state (and its detail) for remote tiles"
     )
+    workspace_count_by_account_id: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "account id ('local' for the device) -> how many rows that account's windows list; every account's, "
+            "so a window with none of its own can point at the accounts that have some. Empty on the "
+            "install-wide list before the publisher projects it for a window"
+        ),
+    )
 
 
 class UiAccountEntry(FrozenModel):

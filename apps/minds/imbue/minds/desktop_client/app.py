@@ -123,6 +123,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
@@ -2290,9 +2291,7 @@ class _LegacyUiStateDeriver(MutableModel):
 
     def resolve_workspace_account_id(self, agent_id: str) -> str:
         """The account a workspace's frames go to: its association, else the device."""
-        if self.session_store is None:
-            return LOCAL_PROFILE_USER_ID
-        return self.session_store.get_owner_user_id_for_workspace(agent_id) or LOCAL_PROFILE_USER_ID
+        return get_owning_account_id_for_workspace(session_store=self.session_store, workspace_any_id=agent_id)
 
 
 def _read_default_update_window() -> tuple[int, int]:

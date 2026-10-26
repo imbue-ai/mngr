@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
@@ -154,6 +155,57 @@ def test_route_account_names_a_workspace_routes_owner_from_the_records_by_either
     # A workspace no record claims is the device's, and a hub route names its account outright.
     assert _route_account(client, f"/workspace/{AgentId.generate()}") == (200, {"account_id": "local"})
     assert _route_account(client, "/account/user-bob/create") == (200, {"account_id": "user-bob"})
+
+
+@pytest.mark.witnesses(
+    "home-page.bare-root-redirects",
+    partial="witnesses the account the server resolves a bare route to; the SPA's redirect to that "
+    "account's home page is a frontend concern",
+)
+def test_bare_route_takes_the_signed_in_account_with_the_most_workspaces_until_one_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """An install upgraded from before the recent list has none recorded; a signed-in account with workspaces wins over the device."""
+    cli = make_fake_imbue_cloud_cli()
+    for user_id in ("user-alice", "user-bob", "user-carol"):
+        cli.add_account(user_id=user_id, email=f"{user_id}@example.com")
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        minds_config=minds_config,
+    )
+    assert _route_account(client, "/") == (200, {"account_id": "local"})
+
+    for user_id, workspace_count in (("user-alice", 1), ("user-bob", 2)):
+        for _ in range(workspace_count):
+            session_store.associate_created_workspace(
+                user_id=user_id,
+                agent_id=str(AgentId.generate()),
+                host_id=str(HostId.generate()),
+                display_name="ws",
+                color=None,
+                is_cloud_row=True,
+            )
+
+    assert _route_account(client, "/") == (200, {"account_id": "user-bob"})
+    # An account signed out here does not stand in, however many workspaces its records name.
+    record_store = session_store.record_store
+    assert record_store is not None
+    for _ in range(3):
+        record_store.upsert_local_record(
+            "user-gone",
+            "gone@example.com",
+            ReplicaRecord(host_id=str(HostId.generate()), agent_id=str(AgentId.generate()), display_name="ws"),
+        )
+    assert _route_account(client, "/") == (200, {"account_id": "user-bob"})
+    # Once a window has shown an account, the recent list decides.
+    minds_config.note_window_shows("user-alice", None)
+    assert _route_account(client, "/") == (200, {"account_id": "user-alice"})
 
 
 def test_route_account_refuses_a_bad_path_and_an_unauthenticated_caller(tmp_path: Path) -> None:

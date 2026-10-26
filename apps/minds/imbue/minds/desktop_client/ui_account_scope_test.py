@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.update_status import UpdateAvailability
 
 ALICE = "user-alice"
 BOB = "user-bob"
+CAROL = "user-carol"
 
 
 def _entry(agent_id: str, account_user_id: str = "") -> UiWorkspaceEntry:
@@ -130,6 +131,11 @@ def _install_snapshot() -> UiSnapshot:
 
 
 @pytest.mark.witnesses("account-windows.one-account-per-window", partial="covers the channel projection only")
+@pytest.mark.witnesses(
+    "home-page.offers-accounts-with-workspaces",
+    partial="covers the per-account row counts the window receives; the offer and the switch are the "
+    "Mithril LandingPage's (frontend/src/views/pages/LandingPage.test.ts)",
+)
 def test_project_snapshot_keeps_one_accounts_rows_and_what_is_about_them() -> None:
     projected = project_snapshot(_install_snapshot(), ALICE)
 
@@ -138,6 +144,8 @@ def test_project_snapshot_keeps_one_accounts_rows_and_what_is_about_them() -> No
     assert list(projected.workspaces.remote_workspace_states) == ["agent-a1"]
     # The install-wide id lists stay: restore and destroy span accounts.
     assert projected.workspaces.destroying_agent_ids == ("agent-b1",)
+    # Every account's row count stays too, so a window with no rows can point at the accounts that have some.
+    assert projected.workspaces.workspace_count_by_account_id == {ALICE: 1, BOB: 1, LOCAL_PROFILE_USER_ID: 1}
     assert projected.accounts.account_id == ALICE
     assert [section.user_id for section in projected.providers.accounts] == [ALICE, LOCAL_PROFILE_USER_ID]
     # Bob's request goes; the request whose workspace is unnamed reaches every window.
@@ -193,8 +201,8 @@ def test_hub_path_and_query_parsing() -> None:
 
 
 def test_resolve_window_account_id_follows_the_hub_the_workspace_the_attempt_the_query_then_the_recent_list() -> None:
-    def workspace_owner(any_id: str) -> str | None:
-        return {"agent-a1": ALICE, "host-a1": ALICE}.get(any_id)
+    def workspace_owner(any_id: str) -> str:
+        return {"agent-a1": ALICE, "host-a1": ALICE}.get(any_id, LOCAL_PROFILE_USER_ID)
 
     def attempt_owner(attempt_id: str) -> str | None:
         return BOB if attempt_id == "create-attempt-0a1b2c3d" else None
@@ -206,6 +214,7 @@ def test_resolve_window_account_id_follows_the_hub_the_workspace_the_attempt_the
             resolve_workspace_account_id=workspace_owner,
             resolve_create_attempt_account_id=attempt_owner,
             recent_account_ids=[BOB, ALICE],
+            resolve_account_id_when_none_recorded=lambda: CAROL,
         )
 
     assert resolve(f"/account/{ALICE}/create") == ALICE
@@ -213,13 +222,11 @@ def test_resolve_window_account_id_follows_the_hub_the_workspace_the_attempt_the
     assert resolve("/workspace/host-a1/options") == ALICE
     assert resolve("/popout/agent-a1/win-0a1b") == ALICE
     assert resolve("/agents/agent-a1/recovery") == ALICE
-    # A workspace with no association is the device's.
-    assert resolve("/workspace/agent-d1") == LOCAL_PROFILE_USER_ID
     assert resolve("/creating/create-attempt-0a1b2c3d") == BOB
     assert resolve("/creating/create-attempt-ffffffff") == LOCAL_PROFILE_USER_ID
     assert resolve("/settings", f"account={ALICE}") == ALICE
     assert resolve("/start") == LOCAL_PROFILE_USER_ID
-    # A bare route takes the most recently used account, and the device when none was used yet.
+    # A bare route takes the most recently used account, and the stand-in when none was used yet.
     assert resolve("/") == BOB
     assert resolve("/accounts") == BOB
     assert (
@@ -229,8 +236,9 @@ def test_resolve_window_account_id_follows_the_hub_the_workspace_the_attempt_the
             resolve_workspace_account_id=workspace_owner,
             resolve_create_attempt_account_id=attempt_owner,
             recent_account_ids=[],
+            resolve_account_id_when_none_recorded=lambda: CAROL,
         )
-        == LOCAL_PROFILE_USER_ID
+        == CAROL
     )
 
 

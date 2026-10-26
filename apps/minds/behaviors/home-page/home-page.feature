@@ -1,18 +1,19 @@
 Feature: Home page routing
-  "/account/<account_id>/" is an account's home page, and "/" redirects to the most recently shown account's.
+  "/account/<account_id>/" is an account's home page, and "/" redirects to the most recently shown account's, or, until an account has been shown, to the signed-in account's with the most workspaces here, else the device's.
   For an authenticated user, what it shows depends on the one-time consent gate, whether initial workspace discovery has finished, which of the account's workspaces are known, and -- when none are -- whether the installation has ever been taken past the first-run start flow ("onboarding complete": a workspace create was started, or the user signed in from the start flow's "I have an account (log in)" answer to an account that already has workspaces).
 
   @bare-root-redirects
-  Scenario Outline: "/" is the home page of the account most recently shown in a window
+  Scenario Outline: "/" is the home page of the account most recently shown in a window, else of the signed-in account with the most workspaces
     Given an authenticated user who has answered the consent question
     And <history>
     When they visit "/"
     Then they land on <destination>
 
     Examples:
-      | history                                                       | destination                                        |
-      | no account has been shown in a window on this installation    | the device's home page, "/account/local/"          |
-      | the account "alice@example.com" was the last shown in a window | that account's home page, "/account/<alice's id>/" |
+      | history                                                                                                                            | destination                                        |
+      | no account has been shown in a window on this installation, and no signed-in account has workspaces on it                         | the device's home page, "/account/local/"          |
+      | no account has been shown in a window on this installation, and "alice@example.com" is the signed-in account with most workspaces | that account's home page, "/account/<alice's id>/" |
+      | the account "alice@example.com" was the last shown in a window                                                                     | that account's home page, "/account/<alice's id>/" |
 
   @consent-gate
   Scenario: The consent question is asked once, right after a session is authenticated
@@ -46,6 +47,16 @@ Feature: Home page routing
     And the initial workspace discovery finished without finding any workspace of the account
     When they visit the account's home page
     Then they see the new-workspace form, which creates under that account
+
+  @offers-accounts-with-workspaces
+  Scenario: A home page with no workspaces of its own offers the accounts that have some
+    Given an authenticated user who has answered the consent question
+    And the initial workspace discovery finished without finding any workspace of the device
+    And the account "alice@example.com" has workspaces on this installation
+    When they visit the device's home page
+    Then above the page's usual content it offers Alice's account, naming how many workspaces it has
+    When they choose it
+    Then the window moves to Alice's account as if they had chosen it in the account switcher
 
   @signed-out-account-offers-login
   Scenario: The home page of a signed-out account offers to log in instead of creating

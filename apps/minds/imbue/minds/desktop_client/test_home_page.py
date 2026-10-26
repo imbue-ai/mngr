@@ -15,11 +15,20 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 @pytest.mark.witnesses(
@@ -116,6 +125,66 @@ def test_empty_after_discovery_shows_the_create_form(tmp_path: Path) -> None:
 
 
 @pytest.mark.witnesses(
+    "home-page.empty-shows-create-form",
+    partial="witnesses the per-account server signal (an account with no workspace of its own is not "
+    "held in the discovering state by another account's restorable workspace); rendering the form is a "
+    "frontend concern",
+)
+def test_another_accounts_restorable_workspace_does_not_hold_a_home_page_in_discovering(tmp_path: Path) -> None:
+    # Given Alice's workspace, which an earlier discovery enumerated but this
+    # session's (finished) discovery has not re-listed yet: it is known only
+    # from the last-good topology and its record's association.
+    cli = make_fake_imbue_cloud_cli()
+    alice_user_id, bob_user_id = "user-alice", "user-bob"
+    cli.add_account(user_id=alice_user_id, email="alice@example.com")
+    cli.add_account(user_id=bob_user_id, email="bob@example.com")
+    session_store = make_session_store_for_test(tmp_path / "minds", cli=cli)
+    host_id, agent_id = HostId.generate(), AgentId.generate()
+    session_store.associate_created_workspace(
+        user_id=alice_user_id,
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        display_name="alices-workspace",
+        color=None,
+        is_cloud_row=False,
+    )
+    resolver = MngrCliBackendResolver(last_good_agents_path=tmp_path / "last_good_agent_topology.json")
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=agent_id,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+                ),
+            ),
+        )
+    )
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_active_workspace_ids() == ()
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver, session_store=session_store
+    )
+
+    payload_by_account_id = {
+        account_id: json.loads(
+            client.get(f"/ui/api/create/landing-extras?account={account_id}").get_data(as_text=True)
+        )
+        for account_id in (alice_user_id, bob_user_id, LOCAL_PROFILE_USER_ID)
+    }
+
+    # Alice's home page keeps discovering until her workspace is re-listed;
+    # Bob's and the device's have none of their own and settle.
+    assert all(payload["is_discovery_complete"] for payload in payload_by_account_id.values())
+    assert payload_by_account_id[alice_user_id]["has_restorable_workspaces"] is True
+    assert payload_by_account_id[bob_user_id]["has_restorable_workspaces"] is False
+    assert payload_by_account_id[LOCAL_PROFILE_USER_ID]["has_restorable_workspaces"] is False
+
+
+@pytest.mark.witnesses(
     "home-page.empty-starts-onboarding",
     partial="witnesses the server signals (discovery complete, zero workspaces, none restorable, "
     "onboarding incomplete) that hand the home page over to the start flow, and the sign-in path's "
@@ -138,9 +207,9 @@ def test_empty_after_discovery_hands_over_to_the_start_flow(tmp_path: Path) -> N
     # not past onboarding -- the home page hands over to the start flow.
     payload = json.loads(client.get("/ui/api/create/landing-extras").get_data(as_text=True))
     assert payload["is_discovery_complete"] is True
-    assert payload["has_restorable_workspaces"] is False
     status = json.loads(client.get("/ui/api/app-status").get_data(as_text=True))
     assert status["workspace_count"] == 0
+    assert status["restorable_workspace_ids"] == []
     assert status["is_onboarding_complete"] is False
 
     # And once they sign in from the start flow's "I have an account (log in)" answer

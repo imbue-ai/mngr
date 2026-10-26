@@ -22,7 +22,7 @@ import {
 } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
 import { webLogin } from "../../models/webLogin";
-import type { UiWorkspaceEntry } from "../../channel/messages";
+import type { UiAccountEntry, UiWorkspaceEntry } from "../../channel/messages";
 import type {
   UiAccountProvidersEntry,
   UiConnectionEntry,
@@ -66,6 +66,7 @@ import {
   rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
+import { accountSwitcherRows } from "../shell/AccountSwitcher";
 import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
 import {
@@ -124,17 +125,84 @@ interface LandingState {
 
 /**
  * An install that has never been taken past the start flow, with discovery
- * finished and nothing found, belongs on the start flow. Electron's startup
- * router lands there itself; this is the same rule for a plain browser, and
- * for a window that reaches home before the flow has completed.
+ * finished and no workspace under any account, belongs on the start flow.
+ * Electron's startup router lands there itself; this is the same rule for a
+ * plain browser, and for a window that reaches home before the flow has
+ * completed.
  */
 export function shouldRedirectToStartFlow(
   isOnboardingComplete: boolean,
-  hasRows: boolean,
+  hasWorkspacesOnInstall: boolean,
   extras: LandingExtras | null,
 ): boolean {
-  if (isOnboardingComplete || hasRows || extras === null) return false;
-  return extras.is_discovery_complete && !extras.has_restorable_workspaces;
+  if (isOnboardingComplete || hasWorkspacesOnInstall || extras === null) return false;
+  return extras.is_discovery_complete;
+}
+
+/** An account (or the device) other than the window's that has workspaces here. */
+export interface OtherAccountWithWorkspaces {
+  accountId: string;
+  label: string;
+  workspaceCount: number;
+}
+
+/** The accounts other than the window's with workspaces here, in the switcher's order. */
+export function otherAccountsWithWorkspaces(
+  windowAccountId: string,
+  workspaceCountByAccountId: Readonly<Record<string, number>>,
+  signedIn: readonly UiAccountEntry[],
+  signedOut: readonly UiAccountEntry[],
+): OtherAccountWithWorkspaces[] {
+  return accountSwitcherRows(windowAccountId, signedIn, signedOut)
+    .filter((row) => !row.isCurrent && (workspaceCountByAccountId[row.accountId] ?? 0) > 0)
+    .map((row) => ({
+      accountId: row.accountId,
+      label: row.label,
+      workspaceCount: workspaceCountByAccountId[row.accountId],
+    }));
+}
+
+function otherAccountsOfWindow(): OtherAccountWithWorkspaces[] {
+  const { stores, shell } = getAppContext();
+  return otherAccountsWithWorkspaces(
+    shell.accountId,
+    stores.workspaces.workspaceCountByAccountId,
+    stores.accounts.accounts,
+    stores.accounts.signedOutAccounts,
+  );
+}
+
+/** Offers to move the window to each account that has workspaces, for a home page with none of its own. */
+function otherAccountsNotice(others: readonly OtherAccountWithWorkspaces[]): m.Children {
+  if (others.length === 0) return null;
+  const { shell } = getAppContext();
+  return m(
+    Notice,
+    { id: "landing-other-accounts", extra: "mt-4" },
+    m("div", { class: "flex flex-col gap-2" }, [
+      m(
+        "span",
+        { class: "type-body text-primary" },
+        "Other accounts have workspaces here. Switch this window to:",
+      ),
+      m(
+        "div",
+        { class: "flex flex-wrap gap-2" },
+        others.map((other) =>
+          m(
+            Button,
+            {
+              variant: "secondary",
+              "data-account-id": other.accountId,
+              disabled: shell.isAccountSwitchPending,
+              onclick: () => void shell.switchAccount(other.accountId),
+            },
+            `${other.label} · ${other.workspaceCount} ${other.workspaceCount === 1 ? "workspace" : "workspaces"}`,
+          ),
+        ),
+      ),
+    ]),
+  );
 }
 
 /**
@@ -1191,11 +1259,16 @@ export const LandingPage: m.ClosureComponent = () => {
   // arrives with a redraw, so the hook sees each change; view() stays free of
   // navigation.
   function redirectToStartFlowIfDue(): void {
-    const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
+    const workspaces = getAppContext().stores.workspaces;
+    // Rows under any account, or a workspace discovery has not re-listed yet.
+    const hasWorkspacesOnInstall =
+      workspaces.workspaces.length > 0 ||
+      Object.values(workspaces.workspaceCountByAccountId).some((count) => count > 0) ||
+      workspaces.restorableWorkspaceIds.length > 0;
     if (
       shouldRedirectToStartFlow(
         onboardingProgress.isComplete,
-        hasRows,
+        hasWorkspacesOnInstall,
         state.extras,
       )
     ) {
@@ -1253,12 +1326,16 @@ export const LandingPage: m.ClosureComponent = () => {
           createEntries.length +
           remoteEntries.length >
         0;
+      // A hub-to-hub navigation keeps the previous account's extras until the
+      // refetch lands, and their restorable answer is that account's.
+      const windowExtras =
+        state.extrasAccountId === shell.accountId ? extras : null;
       const isDiscovering =
         !hasRows &&
         !state.isExtrasFailed &&
-        (extras === null ||
-          !extras.is_discovery_complete ||
-          extras.has_restorable_workspaces);
+        (windowExtras === null ||
+          !windowExtras.is_discovery_complete ||
+          windowExtras.has_restorable_workspaces);
       const providersStore = stores.providers;
 
       return m(PageContainer, [
@@ -1364,10 +1441,13 @@ export const LandingPage: m.ClosureComponent = () => {
                   createControl(),
                 ],
               )
-            : m("div", { class: "text-center py-12" }, [
-                m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                createControl(),
-              ]),
+            : [
+                otherAccountsNotice(otherAccountsOfWindow()),
+                m("div", { class: "text-center py-12" }, [
+                  m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
+                  createControl(),
+                ]),
+              ],
         m(
           "div",
           { class: "mt-6" },

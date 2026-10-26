@@ -27,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -413,6 +414,16 @@ class MultiAccountSessionStore(MutableModel):
         account = self._require_account(user_id)
         self.record_store.disassociate_workspace_or_raise(user_id, account.email, agent_id)
         logger.info("Disassociated machine {} from user {}", agent_id, user_id[:8])
+
+
+def get_owning_account_id_for_workspace(
+    session_store: MultiAccountSessionStore | None,
+    workspace_any_id: str,
+) -> str:
+    """The account whose windows list a workspace: its association's, else the device's."""
+    if session_store is None:
+        return LOCAL_PROFILE_USER_ID
+    return session_store.get_owner_user_id_for_workspace(workspace_any_id) or LOCAL_PROFILE_USER_ID
 
 
 def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> AccountSession:

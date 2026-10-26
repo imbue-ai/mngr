@@ -3,7 +3,7 @@ Feature: Account window invariants
 
   @one-account-per-window
   Rule: A window shows one account's state and nothing of another's
-    Everything a window lists, counts, or alerts about from the installation's state (e.g. (wlog) its workspaces, their permission requests, and the cloud providers on offer) concerns the window's account's workspaces and that account alone; the device's providers are offered in every window.
+    Everything a window lists, counts, or alerts about from the installation's state (e.g. (wlog) its workspaces, their permission requests, and the cloud providers on offer) concerns the window's account's workspaces and that account alone; the device's providers are offered in every window, and a home page with no workspaces of its own names the accounts that have some, with how many, only as places to switch the window to.
     Two windows for different accounts therefore show different lists of the same installation's state at the same moment.
     Rationale: a person who works under several accounts must be able to tell, from any window, which account a workspace they are about to create or act on belongs to.
 
