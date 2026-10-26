@@ -115,6 +115,15 @@ class ImbueCloudAccountSuspendedError(ImbueCloudError):
     """
 
 
+class ImbueCloudAccountDeletedError(ImbueCloudError):
+    """Raised when the connector refuses an action because the account is deleted.
+
+    Carries the connector's user-facing message from the structured 403
+    (``code: account_deleted``), which says the account has been deleted and
+    includes the support contact for the case where the holder did not do it.
+    """
+
+
 class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 

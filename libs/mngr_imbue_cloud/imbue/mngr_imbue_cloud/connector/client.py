@@ -38,6 +38,7 @@ from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -276,6 +277,16 @@ class ImbueCloudConnectorClient(MutableModel):
                 str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
             )
 
+    def _raise_if_account_deleted(self, response: httpx.Response) -> None:
+        """Raise the typed deletion error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        detail = _detail_dict_from_response(response)
+        if detail is not None and detail.get("code") == "account_deleted":
+            raise ImbueCloudAccountDeletedError(
+                str(detail.get("message", "This account has been deleted. Contact support@imbue.com."))
+            )
+
     def _raise_if_workspaces_present(self, response: httpx.Response) -> None:
         """Raise the typed refusal when a 403 carries the connector's ``workspaces_present`` detail."""
         if response.status_code != 403:
@@ -348,6 +359,7 @@ class ImbueCloudConnectorClient(MutableModel):
         self._raise_if_grant_budget_exhausted(response)
         self._raise_if_email_not_verified(response)
         self._raise_if_account_suspended(response)
+        self._raise_if_account_deleted(response)
         self._raise_if_auth_upstream_unavailable(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")

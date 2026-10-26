@@ -20,6 +20,7 @@ from imbue.mngr_imbue_cloud.connector.client import CLIENT_ID_HEADER
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -2787,6 +2788,25 @@ def test_account_suspended_403_raises_the_typed_error(monkeypatch: pytest.Monkey
 
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAccountSuspendedError, match="support@imbue.com"):
+        client.auth_device_token("code-1", "verifier-1", "http://127.0.0.1:1234/callback")
+
+
+def test_account_deleted_403_raises_the_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deleted holder's device-token exchange is refused in the connector's own words, not as an auth failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "account_deleted",
+                    "message": "This account has been deleted. If you believe this is a mistake, contact support@imbue.com.",
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAccountDeletedError, match="has been deleted"):
         client.auth_device_token("code-1", "verifier-1", "http://127.0.0.1:1234/callback")
 
 
