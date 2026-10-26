@@ -1,3 +1,4 @@
+import errno
 import gc
 import os
 import signal
@@ -6,6 +7,7 @@ import time
 import warnings
 from io import BytesIO
 from threading import Event
+from typing import Callable
 from typing import Final
 from typing import IO
 from typing import cast
@@ -304,6 +306,62 @@ def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() ->
     returncode = _shutdown_popen(process, exited_event, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
 
     assert returncode == 0
+
+
+class _SignalRefusingPopen(subprocess.Popen[bytes]):
+    """A real child whose every signal is refused with EPERM, as macOS does for a child in the middle of exiting.
+
+    Linux never refuses a signal to a same-user child, so the refusal is
+    raised here directly; ``on_refused_signal`` stands in for whatever the
+    child does on its own while the signal is being refused.
+    """
+
+    def __init__(self, args: list[str], on_refused_signal: Callable[["_SignalRefusingPopen"], None]) -> None:
+        super().__init__(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._on_refused_signal = on_refused_signal
+
+    def send_signal(self, sig: int) -> None:
+        self._on_refused_signal(self)
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+
+def _close_stdin(process: _SignalRefusingPopen) -> None:
+    assert process.stdin is not None
+    process.stdin.close()
+
+
+def test_shutdown_popen_reaps_a_child_that_exits_while_refusing_sigterm() -> None:
+    # A child that is already on its way out can refuse SIGTERM with EPERM; its own
+    # exit must still be reaped and its exit code returned. Closing ``cat``'s stdin
+    # makes it exit 0 while the signal is being refused.
+    process = _SignalRefusingPopen(["cat"], on_refused_signal=_close_stdin)
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+
+    returncode = _shutdown_popen(process, exited_event, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
+
+    assert returncode == 0
+
+
+def _ignore_refused_signal(process: _SignalRefusingPopen) -> None:
+    pass
+
+
+def test_shutdown_popen_reports_a_child_that_refuses_every_signal_as_unkilled() -> None:
+    # A child that refuses both SIGTERM and SIGKILL and never exits must come
+    # back as unkilled (None) through the existing "didn't die" path, rather
+    # than the refusal escaping as an exception out of the shutdown.
+    process = _SignalRefusingPopen(["sleep", LONG_SLEEP_SECONDS], on_refused_signal=_ignore_refused_signal)
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+    try:
+        returncode = _shutdown_popen(
+            process, exited_event, shutdown_timeout_sec=0.1, reason="the test requested shutdown"
+        )
+
+        assert returncode is None
+        assert not exited_event.is_set()
+    finally:
+        subprocess.Popen.send_signal(process, signal.SIGKILL)
+        assert exited_event.wait(timeout=5.0)
 
 
 _TRAP_ARMED_LINE: Final[str] = "trap-armed"
