@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+OpenCode agents now declare their process name (`opencode`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.
+
 ## 2026-10-23
 
 The `update_policy` help text (and the README table generated from it) now says what `"autoupdate": false` does on current opencode. From opencode 1.19.0 updates are never installed automatically, so NEVER only turns off the update check and its notice; on earlier versions it also stops opencode updating itself on launch. Behavior is unchanged.

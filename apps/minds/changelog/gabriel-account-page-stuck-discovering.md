@@ -1,5 +1,0 @@
-- Fixed: an account's home page with no workspaces of its own no longer stays on "Discovering workspaces..." forever while another account on the installation has workspaces. `GET /ui/api/create/landing-extras?account=` now reports `has_restorable_workspaces` for the window's account only, attributing a workspace not yet re-discovered this session by its record's association, as its row would be.
-
-- Fixed: on an install upgraded from before per-window accounts, a window restored at a bare `/` landed on the device's home page even while signed in. Until a window has shown an account, a bare route now resolves to the signed-in account with the most workspaces here, else the device.
-
-- New: an account's home page with no workspaces of its own, once discovery has finished, offers to switch the window to each other account (or the device) that has workspaces here, naming how many each has; choosing one switches the window as the titlebar switcher does. An install that hasn't finished onboarding is handed over to the start flow only when no account has workspaces here. The `workspaces` frame gains `workspace_count_by_account_id`, every account's row count.

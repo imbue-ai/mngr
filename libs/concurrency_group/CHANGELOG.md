@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Stopping a subprocess no longer raises when the OS refuses the stop signal (e.g. macOS "Operation not permitted" on a child mid-exit); the refusal is logged and the shutdown waits for the exit and falls back to SIGKILL as usual.
+
 ## [v0.1.21] - 2026-10-22
 
 ### Added

@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_pair` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+`mngr pair`'s first pass now always ends with a `pair_transferring` event carrying `is_transferring: false`, even when unison found nothing to move ("Nothing to do"). Before, a pairing whose two directories already agreed never said so: `pair_syncing` only means unison is up, and a quiet first pass is not an edge, so a caller could not tell "compared and level" from "still comparing". Human output prints `Up to date.` at that point too.
+
 ## 2026-10-13
 
 The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer misreads a live opencode agent as DONE; the agent class now declares its process name (`opencode`), which that listing reads.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

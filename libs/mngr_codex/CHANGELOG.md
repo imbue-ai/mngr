@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Codex agents read their process presence from the host's shared lifecycle snapshot (one tmux and `ps` read per host rather than one per agent), and read UNKNOWN rather than STOPPED when that snapshot can't be read.
+
+### Fixed
+
+- Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer reads live codex agents as DONE; the process name (`codex`) is now declared on the agent class, which that listing reads.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

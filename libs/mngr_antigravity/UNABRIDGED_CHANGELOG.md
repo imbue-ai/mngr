@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+Antigravity agents now declare their process name (`agy`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.
+
 ## 2026-10-22
 
 Fixed: the agy protobuf schema release test (`test_decoder_field_map_matches_installed_antigravity_binary`) passes again against agy 1.4.5. agy 1.4.5 did not change the schema the transcript decoder reads: `gemini_coder.Step`'s descriptor is byte-identical to the one in 1.4.4, and the `cortex.proto` messages and enums the decoder uses are unchanged. The test failed because the extractor dropped `gemini_coder.Step`, and that is now fixed. The test now also checks `ChatToolCall`'s `name` and `arguments_json` field numbers, which the decoder uses for tool calls. `regenerating_protobuf_schema.md` now says how to tell a descriptor the extractor missed from one agy renamed.

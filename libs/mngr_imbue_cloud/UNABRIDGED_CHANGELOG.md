@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+Added: `ImbueCloudAccountDeletedError`, raised when the connector refuses a call with 403 `account_deleted` (a deleted account's device-token exchange, which `mngr imbue_cloud login` completes through). It carries the connector's own message, which says the account has been deleted and names the support contact, where before the client raised `ImbueCloudAuthError("Unauthenticated (403): ...")` with the JSON body as text. The CLI emits it as `code: account_deleted`, mirroring `account_suspended`, so the minds desktop client can key off the refusal structurally.
+
 ## 2026-10-23
 
 Gen-2 slice VMs upgrade `ca-certificates` at provisioning (best effort, with retries) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.

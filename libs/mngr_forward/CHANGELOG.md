@@ -14,6 +14,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: Leaves minted for a service origin too long for an X.509 CommonName now carry a non-empty subject (`O=mngr forward local service`) instead of an empty one, which Chromium requires (it refused the old leaf with `ERR_CERT_INVALID`).
 
+### Fixed
+
+- Fixed: `mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it; enough of those (e.g. after sleep/wake) used to exhaust a tunnel's pool ("Proxy connection pool exhausted") until the forward was restarted. The proxy's HTTP clients now use `httpx2` instead of `httpx`.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+Claude agents now declare their process name (`claude`) on the agent class instead of in a method override; mngr core's listing for remote hosts reads it from there instead of from its own claude-only table. Claude agents themselves read as before. The code-guardian and fixme-fairy agent types inherit the name, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) now finds their claude process instead of looking for `(`, the first word of their launch command, and no longer misreads a live one as REPLACED or DONE.
+
 ## 2026-10-24
 
 Claude agents no longer report RUNNING forever after a turn is interrupted directly in the terminal (Esc in the Claude TUI). Claude fires no hook on an interrupt, so the `active` marker the UserPromptSubmit hook created stayed in place: `mngr list` and every other lifecycle consumer (Imbue Studio's chat status and update checks included) kept reporting the agent as working while the terminal sat idle at its prompt.

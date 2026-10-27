@@ -156,6 +156,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Developer knobs `MINDS_REMOTE_DEBUGGING_PORT` (Chromium DevTools protocol on 127.0.0.1, also a `just minds-start` argument), `MINDS_WINDOW_CONTROLS=mac`, `MINDS_LATCHKEY_CURL` (dev mode only) and `start-desktop.sh --reopen`.
 - Added: Imbue Studio 0.9.1 released.
 - Added: Bumped bundled Latchkey to 3.19.4 (restores Zoom sign-in through latchkey).
+- Added: Each Imbue Studio window belongs to one account, with an account switcher in the titlebar; a window's account lives in its URL and its live channel, and the install-wide default account is removed (phase 1 of user-profile state).
+- Added: An account's home page with no workspaces of its own offers to switch the window to each other account (or the device) that has workspaces on this computer, naming how many each has.
+- Added: `GET /api/v1/agents/<agent_id>/folder-syncs` lets an agent in a workspace read this desktop's folder syncs with it (local and workspace paths, state, progress, direction, conflict rule).
+- Added: A workspace app can ask Imbue Studio to open the Permissions pane's Local files section (embed contract v11, `minds:open-local-files`).
+- Added: Released Imbue Studio 0.9.2 (a patch over 0.9.1, template `minds-v0.9.2`) and promoted it to the alpha desktop and workspace channels.
 
 ### Changed
 
@@ -338,6 +343,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: A source run without `--config-file`/`MINDS_CLIENT_CONFIG_PATH` defaults to the production `client.toml`. Dev binaries are cached per user (`~/.cache/minds/binaries/`, override `MINDS_BINARY_CACHE_DIR`), and dev uses the pinned `limactl`.
 - Changed: From 0.9.0, Imbue Studio requires macOS 13 or later; an older Mac stays on its 0.8.x build until macOS is updated.
 - Changed: The one-time "Turn on auto-updates?" offer now also appears over a workspace, not only over Home.
+- Changed: A synced folder reads "Syncing" until unison's first pass has compared both sides and left them level, and only then "Synced"; it used to say "Synced" the moment unison started.
+- Changed: A popped-out window no longer merges back when dragged over the window showing its workspace; its close control and the taskbar's "Bring back to desktop" remain the ways back, and the re-dock drop target and desktop ghost are gone.
+- Changed: The backup, restore and apply-update gates count a chat whose state can't be read (UNKNOWN) as running, so they don't run underneath a live chat on a loaded workspace.
 
 ### Deprecated
 
@@ -493,6 +501,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The report-a-bug dialog an agent opens closes again (close X, Escape) after two quick agent requests, and Done returns to the machine the report is about.
 - Fixed: A workspace update whose apply has landed now reads "Finishing update…" until its verdict, instead of showing "Preparing an update for this workspace" again.
 - Fixed: The band over a workspace no longer flashes "Lost connection to this workspace" when its update starts landing.
+- Fixed: Adding a path that is already shared no longer re-grades it to read-only, which used to take away write access and turn a two-way sync one-way.
+- Fixed: The Permissions pane's once-a-second poll no longer shows a sync that failed to come back at launch as a plain "stopped" row while another sync is running; it reports the failure.
+- Fixed: Quitting Imbue Studio now reliably stops every folder sync, including one that was part-way to starting (which used to leave a `mngr pair` and its unison outliving the app).
 
 ### Security
 

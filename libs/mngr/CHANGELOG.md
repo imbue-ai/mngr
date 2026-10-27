@@ -9,10 +9,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `run_interactive_subprocess` and `popen_interactive_subprocess` now take an argv list only (the `shell` argument is removed); the one deliberate shell invocation (the `--help` pager) moved to the new `popen_interactive_shell_command`.
+- Changed: Commands now treat an agent whose state can't be read (UNKNOWN) conservatively: `mngr message` and chat sends fail with a `state_unknown` error instead of delivering or reviving, `mngr destroy` without `--force` refuses, and `mngr archive` treats it as running; `mngr exec`, `connect`, `capture` and `create --reuse` proceed as before.
 
 ### Fixed
 
 - Fixed: `mngr message` and typed key chords now preserve a trailing `;` instead of dropping it (tmux read it as a command separator).
+- Fixed: Live agents no longer read as STOPPED or DONE when their host is too loaded to answer in time (chats used to flip to paused and a send could restart a running agent); a listing now reads each host's tmux panes and process table once per host, each with its own 5s timeout, and an agent whose tmux read fails reads UNKNOWN.
+- Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer reads live codex, antigravity, pi or opencode agents as DONE (nor code-guardian, fixme-fairy or witness as REPLACED); agent classes now declare a `fixed_process_name` that both the batched listing and a loaded agent read.
 - Fixed: An extra tmux window whose launch command exceeds the pty line limit now runs (sourced from a file), so the ttyd web terminal starts on macOS again.
 
 ### Security

@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+`mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it. Enough of those used to fill a tunnel's 200-slot pool, after which every HTTP request to that service failed with "Proxy connection pool exhausted" until the forward was restarted.
+
+- The trigger is ordinary sleep/wake. After a wake, the first request rebuilds the tunnel while the page's other requests wait behind it, and some of those requests' clients disconnect in the meantime. When the proxy then cancels the backend request, httpcore 1.0.9 left the just-connected connection holding its slot forever (encode/httpcore#1099, still unmerged upstream). Two users' Imbue Studio chat panels went dead this way after about six days of uptime, while the chat WebSocket on the same tunnel kept working.
+
+- The proxy's HTTP clients now use `httpx2` (Pydantic's maintained fork of httpx, same API), which reclaims these connections. The plugin depends on `httpx2>=2.12.0` instead of `httpx`.
+
 ## 2026-10-24
 
 Added `local_ca_dir` and `local_ca_cert_path` to `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` to `imbue.mngr_forward.primitives`, so host applications can find the proxy's local CA certificate from the mngr host dir alone and pin it when they verify the proxy's TLS. The `mngr forward` CLI now derives the same paths through these helpers instead of spelling the layout out itself.

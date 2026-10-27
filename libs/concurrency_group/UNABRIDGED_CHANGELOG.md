@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+Stopping a subprocess no longer fails when the operating system refuses the stop signal. macOS can refuse a SIGTERM to our own child with "Operation not permitted" while that child is in the middle of exiting, and the refusal used to escape the shutdown as an exception: the wait for the child's exit and the SIGKILL fallback were skipped, and the error propagated to whoever was stopping the process (in Imbue Studio, it turned a routine pull timeout into a failed machine-record sync pass for every account). A refused signal is now logged with the pid and the shutdown waits for the exit as usual; a child that refuses both SIGTERM and SIGKILL and never exits is still reported through the existing "Process didn't die after kill()" error.
+
 ## 2026-10-13
 
 The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.

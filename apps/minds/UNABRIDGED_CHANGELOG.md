@@ -4,6 +4,70 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-26
+
+- Fixed: an account's home page with no workspaces of its own no longer stays on "Discovering workspaces..." forever while another account on the installation has workspaces. `GET /ui/api/create/landing-extras?account=` now reports `has_restorable_workspaces` for the window's account only, attributing a workspace not yet re-discovered this session by its record's association, as its row would be.
+
+- Fixed: on an install upgraded from before per-window accounts, a window restored at a bare `/` landed on the device's home page even while signed in. Until a window has shown an account, a bare route now resolves to the signed-in account with the most workspaces here, else the device.
+
+- New: an account's home page with no workspaces of its own, once discovery has finished, offers to switch the window to each other account (or the device) that has workspaces here, naming how many each has; choosing one switches the window as the titlebar switcher does. An install that hasn't finished onboarding is handed over to the start flow only when no account has workspaces here. The `workspaces` frame gains `workspace_count_by_account_id`, every account's row count.
+
+- A synced folder now reads "Syncing" until unison's first pass has actually compared the two sides and left them level, and only then "Synced". It used to say "Synced" the moment unison started, before anything had been compared or copied.
+
+- New `GET /api/v1/agents/<agent_id>/folder-syncs`, so an agent in a workspace can read this desktop's folder syncs with it: the desktop's device id, and per folder its local path, its workspace path (from the workspace's home, `~/...`), whether it is on, its state, transfer progress, direction, and conflict rule. Any agent of the workspace may ask under its own id; it is reachable through the gateway's existing per-agent rule.
+
+- The Permissions pane's once-a-second poll no longer turns a sync that failed to come back at launch into a plain "stopped" row while another sync is running; it reports the failure, as the full view does.
+
+- A workspace app can now ask Imbue Studio to open the Permissions pane's Local files section, where the user shares files and folders from this computer and turns syncing on (embed contract v11). The chrome says it takes the ask with the new `opensLocalFiles: true` on `minds:embedder-capabilities`; the workspace sends `minds:open-local-files`.
+
+- Adding a path that is already shared, from the Permissions pane's Add buttons, leaves it as it is. It used to re-grade it to read-only, taking away write access and turning a two-way sync one-way.
+
+- Cut the Imbue Studio 0.9.2 release: the app version is 0.9.2 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.2`, carrying everything that landed on `main` since `minds-v0.9.1`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: each window belongs to one account, with an account switcher in the titlebar; Files shows each synced folder's real sync state; a popped-out window no longer merges back when dragged over the main window; an agent whose state cannot be read under load reads as unknown rather than stopped; and chat panels no longer die after the Mac sleeps.
+
+- Fixed a race in folder sync where a click landing just as a folder's previous move finished could have its own move marked as finished early, so a wait on the folder returned while its sync was still coming up, and a further click could start a second, duplicate mover for the same folder.
+
+- A click on a folder whose sync had just given up after too many moves is no longer dropped; it is carried out.
+
+- Quitting Imbue Studio now reliably stops every folder sync: a sync that was part-way to starting when the app shut down no longer brings up a `mngr pair` (and the unison under it) that outlives the app.
+
+- The launch-to-msg e2e accepts the device window's account home (`/account/local/`) wherever it waited for `/`, so it passes against a build with per-window accounts as well as an older one.
+
+- The backup, restore and apply-update gates now count a chat whose state mngr could not read (UNKNOWN) as running. On a loaded workspace a live chat can read UNKNOWN, and treating it as stopped would let a restore or an update run underneath it.
+
+- The update watchdog no longer counts an update lead or worker whose state reads UNKNOWN as idle, so it stops trying (and failing) to remind a lead that may be mid-turn on a loaded workspace.
+
+A window opened in its own window ("Open in its own window", or torn out by dragging its title bar) can now be moved freely: dragging it over the Imbue Studio window showing its workspace no longer merges it back into the workspace, and that window no longer lights up a "Drop to return this window to the desktop" target while you drag. Closing the window's own window (its close control, the red traffic light on macOS, `Cmd+W`) still returns it to the workspace where it was, and its taskbar entry's "Bring back to desktop" still works. The desktop no longer keeps a ghost placeholder for the window while it is out (that half ships in the workspace template).
+
+- Promote Imbue Studio 0.9.2 to the alpha channels: the desktop alpha channel serves ToDesktop build `261027i58sda8x0` (mac and Linux, 100%; mac still needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created alpha workspaces pin to `minds-v0.9.2`. Beta stays on 0.8.7 and stable on 0.8.5.
+
+- `mac-runner-reset.sh` deletes the runner's `minds-host-*` Lima instances with `limactl delete --force` instead of the `--all` flags Lima rejects (logging limactl's error when a delete fails), and clears the `/tmp` diagnostic directories the workflow uploads, so a run's artifact no longer carries an earlier run's probe log or screenshots.
+
+- The launch-to-msg e2e's pre-run sweep removes `/tmp/minds-electron-relaunch.log` beside `/tmp/minds-electron.log`, so a run that fails before the relaunch step does not leave an earlier run's relaunch log for the artifact.
+
+Phase 1 of the user profile state spec (`specs/user-profile-state/spec.md`): every Imbue Studio window is for exactly one account.
+
+- A window's account is in its URL: `/account/<account_id>/` is an account's home page, with `/create`, `/create/template`, `/workspaces/destroyed`, and `/workspaces/shared` under it; `<account_id>` is a signed-in account's user id or `local` for the device. A bare `/` (and the bare hub paths) redirects to the most recently shown account's. Overlays such as Settings, Manage Accounts, the inbox, and Get help carry `?account=` so a reload keeps the window's account.
+
+- A new account switcher in the titlebar, left of the bell, names the window's account (display name, else email, or "This device") and lists every signed-in account, every signed-out account that still has workspaces here, the device, and "Add account". Choosing one moves only that window, to the account's most recently opened workspace no other window shows (and whose destroy is not running or failed), else its home page (`POST /ui/api/windows/switch-account`).
+
+- The live channel is scoped per window: each window receives its account's workspaces, providers section, permission requests, notification feed, health, and update notices. The `client_state` report names the window's account, and a connection receives its snapshot once it has reported one (a snapshot that a broadcast overtook while it was derived is derived again, so the window never lands behind a newer frame). `UI_SCHEMA_VERSION` is 28: the `accounts` and `workspaces` frames carry the window's `account_id`, the `accounts` frame lists the signed-out accounts and drops `is_default`, `account_email`, and `extra_account_count`; workspace rows and notification entries carry their account.
+
+- The install-wide default account is removed: `default_account_id` is gone from `config.toml`, along with `POST /accounts/set-default` and the account card's "Default" control. The create form no longer asks for an account and creates under the window's; `/ui/api/create/form-defaults` takes `?account=`, and its `?retry=` prefill no longer carries the attempt's account (a retry opens in that account's window). `POST /api/v1/desktop/cloud-accounts` requires an explicit owner. Signing in from the start flow or from the Imbue Cloud gate of the create form or the template stepper adopts the landed account into the window (the account the sign-in's poll names, so the create goes out under it even before the accounts frame lists it); a window on a signed-out account is asked to sign in again rather than handed another account. Associating a workspace with another account sends the window to its own account's home page. A window that lands on a workspace its own account's list does not carry (a step back after a switch) asks `GET /ui/api/windows/route-account` whose it is and becomes that account's.
+
+- `config.toml` gains a `[recent]` table (`accounts`, `workspaces_by_account`) recording which accounts were last shown and which of each account's workspaces were last opened, fed by the windows' `client_state` reports (a report naming something that is not an account id is ignored with a warning, as the SPA ignores a malformed `?account=`). A `config.toml` write the filesystem refuses is now reported as a `MindsConfigError`, like a failed read, so a report that cannot be recorded is logged as a warning and the window's channel stays up.
+
+- Electron saves a window on a home page as `/account/<account_id>/` in `window-state.json`, so a restore puts it back on its account, and `Cmd+N`, `File > New Window`, and the dock menu open the focused window's account's home page.
+
+- The home page's master-password banner is the window's account's, where it listed every locked account on the install: `GET /ui/api/create/landing-extras` takes `?account=` and reports only that account's locked state (the device has no synced secrets to unlock, so its home page never prompts). The landing page refetches the extras when the window's account changes and keeps the banner down until the answer for the new account lands.
+
+- The start flow's "I have an account (log in)" answer no longer ends onboarding outright: after the sign-in it asks the new `GET /ui/api/onboarding/signin-landing?account=` (briefly, while the account's first record fetch may still be in flight) whether the account has any synced workspaces. With workspaces it marks onboarding complete and leaves for the account's home page, as before; with none -- or when the fetch fails or the wait runs out -- the sign-in receipt answers the open where-to-run question, the window adopts the signed-in account, and the conversation asks where to run again, so a new user still picks their first workspace instead of landing on the bare create form. Onboarding then completes through the create, as on the cloud branch.
+
+- The creation page's "See examples" recording is a new publish of the to-do list showcase (a new content-addressed name on the onboarding-media bucket), and it opens enlarged over the page on a click -- a full-screen viewer with the title and a close control, dismissed by its X, the backdrop, or Escape.
+
+- The create form in a window on the device no longer offers the Imbue Cloud card (a cloud workspace is made from an account's window) and opens on "This computer"; an account's window keeps all three cards. The Create from Template stepper follows the same rule.
+
+- The behaviors corpus gains `account-windows/` and the home page scenarios are restated per account; the docs (`desktop-app.md`, `overview.md`, the desktop client README) describe account-scoped windows.
+
 ## 2026-10-24
 
 A workspace update no longer reads "Preparing an update for this workspace" again after it has landed. Once the workspace's run record says the apply went live, Imbue Studio reports the update as finishing ("This workspace is updated. Its update agent is finishing its checks.", and "Finishing update…" on the row) until the run records its verdict.
