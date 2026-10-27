@@ -571,9 +571,13 @@ def _read_conversation_records(input_file: str) -> list[Mapping[str, Any]]:
     """Parse the raw transcript into its usable user/assistant records, in file order.
 
     A message the user sent mid-turn is included as a user record (see ``_mid_turn_user_record``).
+
+    Claude gives each session line its own uuid, so a uuid seen twice is one line
+    recorded twice rather than two events; only the first is kept.
     """
     records: list[Mapping[str, Any]] = []
     absorbed_at_by_command: dict[str, str] = {}
+    seen_uuids: set[str] = set()
     with open(input_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -596,12 +600,16 @@ def _read_conversation_records(input_file: str) -> list[Mapping[str, Any]]:
             if raw.get("type") not in ("user", "assistant"):
                 # Noise: progress, file-history-snapshot, system, result, etc.
                 continue
-            if not raw.get("uuid") or not raw.get("timestamp"):
+            uuid = raw.get("uuid")
+            if not uuid or not raw.get("timestamp"):
                 continue
             if not isinstance(raw.get("message"), dict):
                 # A null/missing message carries no usable content -- drop the line
                 # rather than emit an empty event or crash.
                 continue
+            if uuid in seen_uuids:
+                continue
+            seen_uuids.add(uuid)
             records.append(raw)
     return records
 
@@ -615,12 +623,6 @@ def convert(input_file: str, output_file: str, is_input_complete: bool = False, 
 
     ``agent_id`` seeds the stream's header event id; the production entrypoint
     passes the agent state directory's basename.
-
-    Even that flush reads a file stream_transcript.sh appends to without taking the
-    convert lock, so a pass can in theory materialize the input mid-append and see a
-    half-written final line. That line is dropped as malformed and read complete on
-    the next pass, and the inference it belongs to is only emitted once a later line
-    closes it -- the accepted risk is a moment of lag, never a truncated record.
     """
     existing_ids = _load_existing_ids(output_file)
 

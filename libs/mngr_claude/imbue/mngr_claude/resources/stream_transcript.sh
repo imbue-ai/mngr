@@ -7,6 +7,7 @@
 #   - Restarts (reconciles per-session offsets against the output file)
 #   - Late-appearing session files (re-checks each poll cycle, no timeouts)
 #   - Sessions added out of order or with gaps
+#   - Two instances at once: the poll daemon and a `--single-pass` flush
 #
 # Per-session line offsets are stored in
 # <agent-state-dir>/plugin/claude/.transcript_offsets/<session_id> so the
@@ -15,6 +16,10 @@
 # is wrong (e.g. crash between emit and offset save), the script works
 # backwards through the session file to find the last line that actually
 # made it into the output.
+#
+# The output file and an offset are only consistent with each other while the
+# shared convert lock is held, so both the emit (read offset, append, write
+# offset) and the reconciliation that reads the pair run under it.
 #
 # Each cycle also clears the 'active' marker a terminal interrupt strands
 # (see "Interrupt-stranded marker heal" below).
@@ -46,6 +51,8 @@ _MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/stream_transcript/events.jsonl
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 # shellcheck source=mngr_transcript_lib.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh"
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 
 # Per-session state (bash 4+ associative arrays)
 # Note: explicit =() is required for set -u compatibility (empty associative
@@ -168,6 +175,41 @@ _try_resolve_file() {
 # come from mngr_transcript_lib.sh. The shared helpers operate on the
 # global _MNGR_TRANSCRIPT_ID_SET, populated by mngr_transcript_build_id_set.
 
+# Reconcile the stored offsets of the given sessions against the output file.
+#
+# Runs under the convert lock: reading the output file and the offsets unlocked
+# can pair a pre-append output with a post-append offset, and reconciling that
+# pair rewinds the offset onto lines the other instance already streamed.
+# Unresolved sessions are skipped, so their stored offset stands until the cycle
+# that resolves them.
+_reconcile_offsets_locked() {
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "Could not acquire transcript lock to reconcile offsets; keeping stored offsets"
+        return
+    fi
+
+    mngr_transcript_build_id_set "$OUTPUT_FILE" "uuid"
+
+    local sid stored reconciled
+    for sid in "$@"; do
+        if [ -z "${_FILE_BY_SID[$sid]:-}" ]; then
+            continue
+        fi
+        stored="${_OFFSET_BY_SID[$sid]}"
+        reconciled=$(mngr_transcript_reconcile_offset "${_FILE_BY_SID[$sid]}" "uuid")
+        _OFFSET_BY_SID[$sid]=$reconciled
+        if [ "$reconciled" != "$stored" ]; then
+            log_info "Reconciled offset for $sid: $stored -> $reconciled"
+            _save_offset "$sid" "$reconciled"
+        fi
+    done
+
+    # Free the UUID set -- not needed until next reconciliation
+    _MNGR_TRANSCRIPT_ID_SET=()
+
+    mngr_common_transcript_release_lock
+}
+
 # Session processing
 
 # Check a session file for new lines and append them to the output.
@@ -181,7 +223,6 @@ _try_resolve_file() {
 _emit_new_lines() {
     local sid="$1"
     local session_file="${_FILE_BY_SID[$sid]}"
-    local offset="${_OFFSET_BY_SID[$sid]}"
 
     # Use the count captured for this cycle when there is one; fall back to a
     # direct count for callers outside a poll cycle (the startup backlog pass)
@@ -193,7 +234,24 @@ _emit_new_lines() {
         file_lines=$(_line_count "$session_file")
     fi
 
+    if [ "$file_lines" -le "${_OFFSET_BY_SID[$sid]}" ]; then
+        return
+    fi
+
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "Could not acquire transcript lock for session $sid; deferring emit"
+        return
+    fi
+
+    # Re-read under the lock: this script's other instance may have advanced the
+    # offset since this process last looked, and the in-memory value would
+    # re-emit every line that instance streamed.
+    local offset
+    offset=$(_load_stored_offset "$sid")
+    _OFFSET_BY_SID[$sid]=$offset
+
     if [ "$file_lines" -le "$offset" ]; then
+        mngr_common_transcript_release_lock
         return
     fi
 
@@ -203,6 +261,8 @@ _emit_new_lines() {
     local new_count=$((file_lines - offset))
     _OFFSET_BY_SID[$sid]=$file_lines
     _save_offset "$sid" "$file_lines"
+
+    mngr_common_transcript_release_lock
 
     log_debug "Emitted $new_count line(s) from session $sid (offset $offset -> $file_lines)"
 }
@@ -243,25 +303,15 @@ _initialize() {
 
     log_info "Loaded ${#_FILE_BY_SID[@]} session(s) from history"
 
-    # Build UUID set from the output file for reconciliation
-    mngr_transcript_build_id_set "$OUTPUT_FILE" "uuid"
-
-    # Resolve files and reconcile offsets for all known sessions
+    # Resolve files for all known sessions, then reconcile their offsets together
+    local sid
     for sid in "${!_FILE_BY_SID[@]}"; do
-        if _try_resolve_file "$sid"; then
-            local stored="${_OFFSET_BY_SID[$sid]}"
-            local reconciled
-            reconciled=$(mngr_transcript_reconcile_offset "${_FILE_BY_SID[$sid]}" "uuid")
-            _OFFSET_BY_SID[$sid]=$reconciled
-            if [ "$reconciled" != "$stored" ]; then
-                log_info "Reconciled offset for $sid: $stored -> $reconciled"
-                _save_offset "$sid" "$reconciled"
-            fi
-        fi
+        _try_resolve_file "$sid" || true
     done
 
-    # Free the UUID set -- not needed until next reconciliation
-    _MNGR_TRANSCRIPT_ID_SET=()
+    if [ "${#_FILE_BY_SID[@]}" -gt 0 ]; then
+        _reconcile_offsets_locked "${!_FILE_BY_SID[@]}"
+    fi
 }
 
 # Interrupt-stranded marker heal
@@ -428,15 +478,7 @@ _run_one_cycle() {
             fi
             # File just appeared -- reconcile against the output file to
             # find the true offset (handles both fresh starts and restarts)
-            mngr_transcript_build_id_set "$OUTPUT_FILE" "uuid"
-            stored="${_OFFSET_BY_SID[$sid]}"
-            reconciled=$(mngr_transcript_reconcile_offset "${_FILE_BY_SID[$sid]}" "uuid")
-            _OFFSET_BY_SID[$sid]=$reconciled
-            if [ "$reconciled" != "$stored" ]; then
-                log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
-                _save_offset "$sid" "$reconciled"
-            fi
-            _MNGR_TRANSCRIPT_ID_SET=()
+            _reconcile_offsets_locked "$sid"
         fi
 
         _emit_new_lines "$sid"

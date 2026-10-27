@@ -11,10 +11,12 @@ then exit, so tests are fast and deterministic.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from datetime import datetime
@@ -25,6 +27,8 @@ from uuid import uuid4
 
 import pytest
 
+from imbue.mngr import resources as mngr_resources
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 
 # Helpers
@@ -34,6 +38,11 @@ def _make_jsonl_line(uuid: str | None = None) -> str:
     """Create a minimal Claude session JSONL line with a uuid field."""
     line_uuid = uuid if uuid is not None else uuid4().hex
     return json.dumps({"uuid": line_uuid, "type": "assistant", "timestamp": "2026-01-01T00:00:00Z"})
+
+
+def _append_lines(path: Path, lines: list[str]) -> None:
+    with path.open("a") as f:
+        f.write("".join(line + "\n" for line in lines))
 
 
 def _iso_z_timestamp(epoch: float) -> str:
@@ -127,11 +136,20 @@ class ScriptRunner:
         lib_path.write_text(mngr_transcript_lib_sh)
         lib_path.chmod(0o755)
 
+        # The streamer sources the real shared lib to take the convert lock.
+        convert_lib_path = self.agent_state_dir / "commands" / "mngr_common_transcript_lib.sh"
+        convert_lib_path.write_text(
+            importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+        )
+        convert_lib_path.chmod(0o755)
+
         # Standard paths
         self.script_path = Path(__file__).parent / "stream_transcript.sh"
         self.history_file = self.agent_state_dir / "claude_session_id_history"
         self.output_file = self.agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
         self.offset_dir = self.agent_state_dir / "plugin" / "claude" / ".transcript_offsets"
+        # The mkdir-based mutex the streamer takes around its emit and reconciliation.
+        self.lock_dir = self.agent_state_dir / ".common_transcript_convert.lock"
 
     def add_session(self, session_id: str, lines: list[str]) -> Path:
         """Create a session JSONL file and add the session to the history."""
@@ -162,6 +180,37 @@ class ScriptRunner:
 
     def get_output_uuids(self) -> list[str]:
         return _extract_uuids(self.get_output_lines())
+
+    def start_daemon(self) -> subprocess.Popen[bytes]:
+        """Start the real poll loop (no --single-pass); it never exits on its own.
+
+        Its own process group, so stop_daemon can reach the whole loop with one
+        signal. The caller owns the handle and must stop it by that exact handle.
+        """
+        return subprocess.Popen(
+            ["bash", str(self.script_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir),
+                "HOME": str(self.fake_home),
+                "CLAUDE_CONFIG_DIR": str(self.fake_home / ".claude"),
+            },
+            start_new_session=True,
+        )
+
+    def stop_daemon(self, daemon: subprocess.Popen[bytes]) -> None:
+        """Stop a daemon started by ``start_daemon``, along with anything it is running.
+
+        The kill precedes the wait: waiting frees bash's pid, which is also the group
+        id, and a later killpg could hit an unrelated group.
+        """
+        try:
+            os.killpg(daemon.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        daemon.wait(timeout=10)
 
     def set_current_session(self, session_id: str) -> None:
         """Write the claude_session_id marker the SessionStart hook maintains."""
@@ -607,6 +656,51 @@ def test_multiple_sessions_partial_reconciliation(
     assert output_uuids == set(uuids_a + uuids_b)
     assert runner.get_offset("sess-a") == 4
     assert runner.get_offset("sess-b") == 4
+
+
+def test_daemon_does_not_re_emit_what_a_flush_streamed(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A running daemon must not re-stream lines a concurrent flush already emitted.
+
+    The daemon keeps its offsets in memory across cycles while the turn-end
+    ``--single-pass`` flush advances the persisted one, so a cycle that trusts the
+    in-memory value re-appends every line the flush emitted. The lock is held across
+    the whole setup so the daemon cannot act on a half-built state, and a further
+    batch appended before the release gives the first unblocked cycle something to
+    emit -- which is what makes "it emitted only that batch" observable.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    streamed = [uuid4().hex for _ in range(5)]
+    session_file = runner.add_session("sess-1", [_make_jsonl_line(u) for u in streamed])
+
+    daemon = runner.start_daemon()
+    try:
+        assert poll_until(condition=lambda: runner.get_output_uuids() == streamed, timeout=30.0, poll_interval=0.2), (
+            f"daemon never streamed the first batch: {runner.get_output_uuids()}"
+        )
+
+        runner.lock_dir.mkdir()
+
+        # What the flush does once it holds the lock: emit the new range, then
+        # advance the persisted offset past it.
+        flushed = [uuid4().hex for _ in range(5)]
+        _append_lines(session_file, [_make_jsonl_line(u) for u in flushed])
+        _append_lines(runner.output_file, [_make_jsonl_line(u) for u in flushed])
+        runner.set_offset("sess-1", len(streamed) + len(flushed))
+
+        remaining = [uuid4().hex for _ in range(5)]
+        _append_lines(session_file, [_make_jsonl_line(u) for u in remaining])
+
+        runner.lock_dir.rmdir()
+
+        assert poll_until(
+            condition=lambda: remaining[-1] in runner.get_output_uuids(), timeout=30.0, poll_interval=0.2
+        ), f"daemon never streamed the batch left for it: {runner.get_output_uuids()}"
+        assert runner.get_output_uuids() == streamed + flushed + remaining
+        assert runner.get_offset("sess-1") == len(streamed) + len(flushed) + len(remaining)
+    finally:
+        runner.stop_daemon(daemon)
 
 
 # Claude fires no hook when a turn is interrupted in the terminal (Esc), so the
