@@ -62,11 +62,10 @@ interface UpdateModalState {
  * release raises `SECURITY_FLOOR_VERSION`, since that release's fix is the one
  * every workspace below the floor lacks. */
 const SECURITY_FIX_DETAILS =
-  "Eight intermediate certificates issued under eMudhra's emSign root certificate authority were compromised: " +
-  "anyone can recover their private keys. Software that still trusts them can be tricked into connecting to an " +
-  "impostor posing as any website, which could then read or change what this workspace sends and receives, " +
-  "including credentials. This update moves the workspace's tools and certificate stores to versions that no " +
-  "longer trust them.";
+  "Eight certificates issued under eMudhra's emSign authority (an Indian certificate provider trusted by major " +
+  "browsers and operating systems) were compromised, which means they could be used to impersonate a real " +
+  "website. This update stops your workspace from trusting them, so your data and credentials only reach the " +
+  "sites they're meant for.";
 
 /** Where to go when a run ended without landing: its own chat has the details,
  * and whatever it found, the next step is a conversation with it. */
@@ -364,7 +363,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       // Wherever the machine is still below the security floor and an update is on offer.
       const securityNotice = (): m.Children =>
         isSecurityUpdate(update)
-          ? m(Notice, { variant: "error" }, [
+          ? m(Notice, { variant: "warn" }, [
               m("p", "This update includes a critical security fix."),
               m(
                 Collapsible,

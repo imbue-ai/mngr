@@ -1,0 +1,1 @@
+The update modal's security-fix notice is drawn in the warning (orange) palette instead of the error (red) one, and its "See details" text explains the emSign/eMudhra certificate compromise in plainer terms.
