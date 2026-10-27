@@ -252,7 +252,8 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
     rule_description=(
         "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
-        "`# ty: ignore[code]` and Bandit's `# nosec BNNN` (naming the test it suppresses) are exempt, since those tools "
+        "`# ty: ignore[code]`, Bandit's `# nosec BNNN` (naming the test it suppresses), and a bare `# noqa` or "
+        "`# noqa: CODE` ending its line (a `noqa` followed by an explanation is not) are exempt, since those tools "
         "only honor a directive on the flagged line; so are hex colors, `#NNNN` issue and PR references (in prose or "
         "in a string literal), and `#{...}` interpolation/format tokens (e.g. tmux format strings), which are not "
         "comments."
@@ -260,6 +261,7 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     pattern_string=(
         r"[^\s#].*[ \t](?<![Pp][Rr] )#(?!\{)(?!\d+\b)(?![0-9a-fA-F]{3,6}[;\s\"'])(?!\s*ty:\s*ignore\[)"
         r"(?!\s*nosec B\d{3}\b)"
+        r"(?![ \t]*noqa(?::[ \t]*[A-Z]+[0-9]+(?:[ \t]*,[ \t]*[A-Z]+[0-9]+)*)?[ \t]*(?:\n|\Z))"
     ),
 )
 
