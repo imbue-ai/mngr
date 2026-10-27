@@ -102,8 +102,10 @@ from pydantic import SecretStr
 
 from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import minds_dir_for_role
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
 from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
+from imbue.minds.desktop_client.ui_account_scope import account_hub_route
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 
 
@@ -183,6 +185,8 @@ PERMISSION_REQUESTS_DIR = LATCHKEY_DIR / "permission_requests" / "v3"
 
 HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
+# The device window's home: its account hub, or `/` on a build without per-window accounts.
+DEVICE_HOME_PATHS = ("/", account_hub_route(LOCAL_PROFILE_USER_ID))
 # WORKSPACE_COUNT=1 (default) preserves the single-workspace flow for local
 # repro; CI sets =2 to drive the second workspace + cross-workspace follow-up
 # pings as an end-to-end isolation check on the same Imbue Studio.app session.
@@ -2006,7 +2010,7 @@ def run_e2e() -> int:
             # app-level Settings page and was dropped from the workspace one
             # when the breadcrumb titlebar took over navigation (64e92ec9a7).
             click_in_chrome(win, "#home-btn")
-            wait_for_live_url(win, origin + "/", timeout=10.0)
+            wait_for_live_url(win, *(origin + path for path in DEVICE_HOME_PATHS), timeout=10.0)
             snap_page(win, "18a-back-to-workspaces-from-settings")
             win.goto(origin + f"/workspace/{w2_agent_id}/settings")
             win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
@@ -2030,10 +2034,16 @@ def run_e2e() -> int:
             snap_page(win, "18b3-w2-destroy-modal-reopened")
             click_in_chrome(win, "#destroy-confirm-btn")
             # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
-            # routes to /destroying/<agent_id>, which falls back to / once the
-            # teardown finishes. Either is the confirm having landed; which one
-            # is showing just says whether the VM outlived the navigation.
-            wait_for_live_url(win, origin + f"/destroying/{w2_agent_id}", origin + "/", timeout=30.0)
+            # routes to /destroying/<agent_id>, which falls back to the window's
+            # home once the teardown finishes. Either is the confirm having
+            # landed; which one is showing just says whether the VM outlived the
+            # navigation.
+            wait_for_live_url(
+                win,
+                origin + f"/destroying/{w2_agent_id}",
+                *(origin + path for path in DEVICE_HOME_PATHS),
+                timeout=30.0,
+            )
             snap_page(win, "18c-w2-destroy-initiated")
 
             # Poll /api/v1/workspaces/operations/destroy/<id> until the host is actually gone

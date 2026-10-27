@@ -1,0 +1,1 @@
+- The launch-to-msg e2e accepts the device window's account home (`/account/local/`) wherever it waited for `/`, so it passes against a build with per-window accounts as well as an older one.
