@@ -13,7 +13,9 @@ the workspace root. Each tick:
   a verdict retires the file;
 - **watches** any run whose record has no verdict: a lead that is gone is closed out (``STUCK``,
   its worker stopped with its branch kept, its leases released), and a lead that sits idle with an
-  idle worker is reminded that it owes a verdict.
+  idle worker is reminded that it owes a verdict;
+- **holds** the run's lead and worker out of the memory guard's way while the run has no verdict,
+  and hands them back to the template's own banding once it has one.
 
 This module also holds what the command modes share with the tick: the state files, the agents
 listing, the account check, and the update chat's create.
@@ -24,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,6 +45,7 @@ from typing import Final
 from typing import TypedDict
 from typing import assert_never
 
+from imbue.minds.workspace_programs.background_task_markers import busy_chat_ids
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import emit_marker_json
 from imbue.minds.workspace_programs.program_support import run_command
@@ -139,6 +143,19 @@ _RESOLVER_TIMEOUT_SECONDS: Final[float] = 90
 _DETAIL_MAX_CHARS: Final[int] = 1000
 _SECONDS_PER_DAY: Final[int] = 24 * 60 * 60
 
+PROC_ROOT: Final[str] = "/proc"
+# The template's agent-pid registry: one ``<pid>.json`` per agent main process, naming its agent.
+AGENT_PIDS_DIR: Final[str] = "data/.state/oom_priority/agent_pids"
+# A run's lead and worker are held above every band the template gives its own services and below user
+# services and terminals, so the memory guard sheds them only after everything a user can lose and rebuild.
+_UPDATE_AGENT_OOM_SCORE_ADJ: Final[int] = 90
+# Where the template launches a chat and a worker.
+_CHAT_LAUNCH_OOM_SCORE_ADJ: Final[int] = 560
+_WORKER_OOM_SCORE_ADJ: Final[int] = 600
+# The key a held lead's registry entry keeps its agent id under, where the template's chat prioritizer
+# does not look, so it leaves the held value alone.
+_HELD_AGENT_ID_KEY: Final[str] = "agent_id_held_by_update_dispatcher"
+
 # Exit statuses of the template's chat messenger: delivered, refused, and no verdict at all
 # (python's own status for a missing script, argparse's for an argument the script lacks).
 _MESSAGE_CHAT_DELIVERED: Final[int] = 0
@@ -206,6 +223,8 @@ class ProgramContext(TypedDict):
     # The program's own archive, which the installing modes copy in as the dispatcher.
     program_path: str
     live_cron_dir: str
+    proc_root: str
+    agent_pids_dir: str
     now: float
     agent_environment: AgentEnvironment
 
@@ -427,7 +446,8 @@ def find_run_lead(agents: Sequence[Mapping[str, str]], run: Mapping[str, object]
 
 
 def busy_agents(agent_environment: AgentEnvironment) -> BusyAgents:
-    """The names, ids and chat ids the template's background-task CLI reports busy; empty sets without it.
+    """The names, ids and chat ids the template's background-task CLI reports busy; without it, the chats its
+    marker files hold live tasks for, as the CLI's own file fallback reports them.
 
     An agent the CLI does not report reads by its own state: RUNNING is a turn in flight.
     """
@@ -435,7 +455,10 @@ def busy_agents(agent_environment: AgentEnvironment) -> BusyAgents:
     agent_ids: set[str] = set()
     chat_ids: set[str] = set()
     if not os.path.isfile(_BACKGROUND_TASKS_SCRIPT):
-        return names, agent_ids, chat_ids
+        # CLEANUP: return empty sets here again once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7,
+        # the first release that ships the CLI.
+        marker_chat_ids = busy_chat_ids()
+        return names, set(marker_chat_ids), set(marker_chat_ids)
     listed = run_command(
         [sys.executable or "python3", _BACKGROUND_TASKS_SCRIPT, "list", "--format", "tsv"],
         _SHORT_COMMAND_TIMEOUT_SECONDS,
@@ -1333,8 +1356,173 @@ def _tick_watchdog(now: float, agent_environment: AgentEnvironment) -> None:
             assert_never(unreachable)
 
 
+def _read_proc_file(proc_root: str, pid: int, name: str) -> str | None:
+    """The file's text, or None when it cannot be read; None without a log line only when the process is gone."""
+    path = os.path.join(proc_root, str(pid), name)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError as exc:
+        write_log_line("could not read %s: %s" % (path, exc))
+        return None
+
+
+def _is_agent_process(proc_root: str, pid: int, agent_name: str) -> bool:
+    """Whether ``pid`` is a live process, not a thread of another, that mngr launched as ``agent_name``.
+
+    A registry entry outlives its process, and a later process or thread can take its pid.
+    """
+    status = _read_proc_file(proc_root, pid, "status")
+    environ = _read_proc_file(proc_root, pid, "environ")
+    if status is None or environ is None:
+        return False
+    tgid = next((line.partition(":")[2].strip() for line in status.splitlines() if line.startswith("Tgid:")), "")
+    return tgid == str(pid) and "MNGR_AGENT_NAME=" + agent_name in environ.split("\0")
+
+
+def _oom_score_adj_of(proc_root: str, pid: int) -> int | None:
+    text = _read_proc_file(proc_root, pid, "oom_score_adj")
+    try:
+        return int(text) if text is not None else None
+    except ValueError:
+        write_log_line("could not parse pid %d's oom_score_adj %r" % (pid, text))
+        return None
+
+
+def _set_oom_score_adj(proc_root: str, pid: int, value: int) -> bool:
+    try:
+        with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w", encoding="utf-8") as handle:
+            handle.write(str(value))
+    except OSError as exc:
+        write_log_line("could not set pid %d's oom_score_adj to %d: %s" % (pid, value, exc))
+        return False
+    return True
+
+
+def _rewrite_registry_entry(path: str, entry: Mapping[str, object]) -> bool:
+    """Replace a registry entry atomically, keeping the owner and mode of the file it replaces; whether it did.
+
+    The template's own registry writers run as the workspace's user, and this runs as root.
+    """
+    try:
+        existing = os.stat(path)
+        handle, scratch = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".", suffix=".tmp")
+    except OSError as exc:
+        write_log_line("could not rewrite %s: %s" % (path, exc))
+        return False
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(json.dumps(dict(entry)))
+        os.chmod(scratch, stat.S_IMODE(existing.st_mode))
+        if (existing.st_uid, existing.st_gid) != (os.geteuid(), os.getegid()):
+            os.chown(scratch, existing.st_uid, existing.st_gid)
+        os.replace(scratch, path)
+    except OSError as exc:
+        write_log_line("could not rewrite %s: %s" % (path, exc))
+        if os.path.exists(scratch):
+            os.unlink(scratch)
+        return False
+    return True
+
+
+def _reset_held_process(proc_root: str, pid: int, agent_name: str, value: int) -> bool:
+    """Put a live agent process the dispatcher held back at ``value``; whether it did."""
+    return (
+        _oom_score_adj_of(proc_root, pid) == _UPDATE_AGENT_OOM_SCORE_ADJ
+        and _is_agent_process(proc_root, pid, agent_name)
+        and _set_oom_score_adj(proc_root, pid, value)
+    )
+
+
+def _hold_update_agent(
+    proc_root: str, pid: int, path: str, agent_name: str, entry: Mapping[str, object], is_lead: bool
+) -> None:
+    if not _is_agent_process(proc_root, pid, agent_name):
+        return
+    changes: list[str] = []
+    # CLEANUP: drop setting the lead's agent id aside, and releasing it, once the oldest release the app
+    # updates in place (``OLDEST_IN_PLACE_UPDATABLE_VERSION``) protects an update's agents from the memory
+    # guard itself: until then the template's chat prioritizer, which finds a chat's process by this id,
+    # would put the lead back in a chat's band within seconds.
+    if is_lead and "agent_id" in entry:
+        held_entry = {key: value for key, value in entry.items() if key != "agent_id"}
+        held_entry[_HELD_AGENT_ID_KEY] = entry["agent_id"]
+        if _rewrite_registry_entry(path, held_entry):
+            changes.append("agent id set aside")
+    if _oom_score_adj_of(proc_root, pid) != _UPDATE_AGENT_OOM_SCORE_ADJ and _set_oom_score_adj(
+        proc_root, pid, _UPDATE_AGENT_OOM_SCORE_ADJ
+    ):
+        changes.append("oom_score_adj %d" % _UPDATE_AGENT_OOM_SCORE_ADJ)
+    if changes:
+        write_log_line("holding update agent %s (pid %d): %s" % (agent_name, pid, ", ".join(changes)))
+
+
+def _release_held_lead(proc_root: str, pid: int, path: str, agent_name: str, entry: Mapping[str, object]) -> None:
+    restored_entry = {key: value for key, value in entry.items() if key != _HELD_AGENT_ID_KEY}
+    restored_entry["agent_id"] = entry[_HELD_AGENT_ID_KEY]
+    if not _rewrite_registry_entry(path, restored_entry):
+        return
+    is_reset = _reset_held_process(proc_root, pid, agent_name, _CHAT_LAUNCH_OOM_SCORE_ADJ)
+    reset_note = ", oom_score_adj %d" % _CHAT_LAUNCH_OOM_SCORE_ADJ if is_reset else ""
+    write_log_line("released update lead %s (pid %d): agent id restored%s" % (agent_name, pid, reset_note))
+
+
+def _release_held_process(proc_root: str, pid: int, agent_name: str, entry: Mapping[str, object]) -> None:
+    """Return an agent process still at the hold's value, which no template band uses, to its launch band.
+
+    Covers every held process with no agent id set aside: a worker, and a lead registered without an id.
+    """
+    value = _WORKER_OOM_SCORE_ADJ if entry.get("is_worker") is True else _CHAT_LAUNCH_OOM_SCORE_ADJ
+    if _reset_held_process(proc_root, pid, agent_name, value):
+        write_log_line("released update agent %s (pid %d): oom_score_adj %d" % (agent_name, pid, value))
+
+
+def _tick_update_agent_hold(proc_root: str, agent_pids_dir: str) -> None:
+    """Hold the in-flight run's lead and worker at ``_UPDATE_AGENT_OOM_SCORE_ADJ``, and release them once it is over.
+
+    A template older than the agents' own protection bands them as any chat and worker, so the memory guard
+    can shed the update ahead of what it would shed for any other work. Every process of either agent the
+    template's agent-pid registry names is held (codex registers two). A held lead goes back to a chat's launch
+    band and a held worker to a worker's, for the template to band them again; an agent restarted mid-run
+    registers afresh, and is held at the next tick.
+    """
+    run = read_json_object(RUN_RECORD_PATH)
+    lead_name = ""
+    worker_name = ""
+    if run is not None and _run_verdict(run) is None:
+        lead_name = str(run.get("chat_agent_name") or "")
+        worker_name = str(run.get("worker_agent_name") or "") if lead_name else ""
+    try:
+        file_names = sorted(os.listdir(agent_pids_dir))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        write_log_line("could not list the agent-pid registry %s: %s" % (agent_pids_dir, exc))
+        return
+    for file_name in file_names:
+        pid_text, _, extension = file_name.partition(".")
+        if extension != "json" or not pid_text.isdecimal():
+            continue
+        path = os.path.join(agent_pids_dir, file_name)
+        entry = read_json_object(path)
+        if entry is None:
+            continue
+        pid = int(pid_text)
+        agent_name = str(entry.get("agent_name") or "")
+        if agent_name and agent_name in (lead_name, worker_name):
+            _hold_update_agent(proc_root, pid, path, agent_name, entry, is_lead=agent_name == lead_name)
+        elif _HELD_AGENT_ID_KEY in entry:
+            _release_held_lead(proc_root, pid, path, agent_name, entry)
+        else:
+            _release_held_process(proc_root, pid, agent_name, entry)
+
+
 def mode_tick(context: ProgramContext) -> None:
     """The dispatcher's minute, run by cron from the installed archive."""
     _bound_dispatcher_log()
+    # Ahead of the agents listing, which can take minutes on a workspace short of memory.
+    _tick_update_agent_hold(context["proc_root"], context["agent_pids_dir"])
     _tick_watchdog(context["now"], context["agent_environment"])
     _tick_schedule(context["now"], context["agent_environment"])

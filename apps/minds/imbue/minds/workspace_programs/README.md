@@ -42,8 +42,11 @@ the rest of the app.
   those strings into its own enums in `desktop_client/update_status.py`, and
   `update_workspace_command_test.py` pins them to the enums' values.
 - `update_workspace.py`: the update program (its modes `arm`, `now`, `cancel`,
-  `read` and `tick`); `update_dispatcher.py`: the dispatcher its `tick` runs,
+  `read`, `tick` and `busy`); `update_dispatcher.py`: the dispatcher its `tick` runs,
   and what the modes share with it.
+- `background_task_markers.py`: reads the template's background-task marker
+  files where the template has no CLI of its own to read them, for the
+  dispatcher's watchdog and the `busy` mode.
 
 ## Sharing code and constants
 
@@ -74,6 +77,12 @@ tools first on `PATH` and mngr's unknown config tolerated
 The archive is also a standalone file: `python3 <archive> <args>` runs it from
 any file name. A program that must persist in the workspace (run later by cron,
 say) writes its archive's bytes to its own path and runs from there.
+
+The app's update-run probe is the one reader that runs an installed copy rather
+than shipping its own: in a template without the background-task CLI it runs
+the installed dispatcher's `busy` mode, so it sends no archive on every poll.
+Where no copy is installed, or the installed one predates that mode, the probe
+reads no chat as busy.
 
 ## Testing
 

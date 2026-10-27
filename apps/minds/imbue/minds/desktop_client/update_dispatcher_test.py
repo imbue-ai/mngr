@@ -1,6 +1,8 @@
 """The workspace dispatcher: its window, its dispatch decisions, its watchdog, and whole cron ticks."""
 
 import json
+import os
+import shutil
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -12,9 +14,11 @@ import pytest
 from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
 from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
+from imbue.minds.desktop_client.testing import exited_process_pid
 from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
+from imbue.minds.desktop_client.testing import write_background_task_marker
 from imbue.minds.workspace_programs import update_dispatcher
 from imbue.minds.workspace_programs import update_workspace
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
@@ -279,6 +283,11 @@ def _tick(staged: StagedUpdateWorkspace, now: float) -> None:
     update_dispatcher.mode_tick(update_program_context(staged, [], now))
 
 
+def _dispatcher_log_lines(staged: StagedUpdateWorkspace) -> list[str]:
+    log_path = staged.root / "data" / ".state" / "update-apply" / "dispatcher.log"
+    return log_path.read_text().splitlines() if log_path.exists() else []
+
+
 @pytest.mark.witnesses("workspace-updates.runs-without-the-app")
 def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -342,7 +351,7 @@ def test_a_tick_held_back_logs_why_once_until_the_reason_changes(
     skill.write_text(skill_text)
     _tick(staged, _IN_WINDOW + 240)
 
-    log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
+    log_lines = _dispatcher_log_lines(staged)
     held = [line.rsplit(": ", 1)[-1] for line in log_lines if "held the scheduled update back" in line]
     assert held == ["LEASE_HELD", "DISPATCH_FAILED"]
     assert len(staged.chat_creates()) == 1
@@ -625,7 +634,7 @@ def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(
     dispatch = staged.read_state("last-dispatch.json")
     assert dispatch is not None
     assert (dispatch["chat_agent_name"], dispatch["chat_id"]) == (_LEAD, _LEAD_ID)
-    log_lines = (staged.root / "data" / ".state" / "update-apply" / "dispatcher.log").read_text().splitlines()
+    log_lines = _dispatcher_log_lines(staged)
     assert any(line.endswith(f"adopted update chat {_LEAD} (scheduled, target minds-v0.9.0)") for line in log_lines)
     assert not any("created update chat" in line for line in log_lines)
 
@@ -828,3 +837,171 @@ def test_a_lead_waiting_on_a_background_task_is_not_reminded(tmp_path: Path, mon
         _tick(staged, _IN_WINDOW + 60 * minute)
 
     assert staged.tool_calls("message_chat.py") == []
+
+
+# CLEANUP: drop with the marker fallback in ``update_dispatcher.busy_agents``.
+@pytest.mark.witnesses(
+    "workspace-updates.idle-lead-on-a-background-task-in-an-older-template-is-not-waiting",
+    partial="the workspace's reminder only; not the app's report",
+)
+@pytest.mark.parametrize(("is_runner_alive", "reminder_count"), ((True, 0), (False, 1)), ids=["live", "exited"])
+def test_a_lead_waiting_on_a_background_command_in_a_template_without_the_cli_is_reminded_only_once_it_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_runner_alive: bool, reminder_count: int
+) -> None:
+    """A template from before the CLI still holds the marker the update's staged ``run_in_background.py`` wrote."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_LEAD, "WAITING", _LEAD_ID), _agent(_WORKER, "WAITING")])
+    write_background_task_marker(staged.root, _LEAD_ID, os.getpid() if is_runner_alive else exited_process_pid())
+
+    for minute in range(5):
+        _tick(staged, _IN_WINDOW + 60 * minute)
+
+    assert len(staged.tool_calls("message_chat.py")) == reminder_count
+
+
+_LEAD_PID = 4100
+_WORKER_PID = 4200
+_WORKER_ID = "agent-" + "2" * 32
+_HELD_AGENT_ID_KEY = "agent_id_held_by_update_dispatcher"
+
+
+def _stage_running_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StagedUpdateWorkspace:
+    """A run with no verdict whose lead and worker are both working, each registered at its launch band."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_LEAD, "RUNNING", _LEAD_ID), _agent(_WORKER, "RUNNING", _WORKER_ID)])
+    staged.register_agent_process(_LEAD_PID, _LEAD, is_worker=False, agent_id=_LEAD_ID, oom_score_adj=560)
+    staged.register_agent_process(_WORKER_PID, _WORKER, is_worker=True, agent_id=_WORKER_ID, oom_score_adj=600)
+    return staged
+
+
+@pytest.mark.witnesses(
+    "workspace-updates.update-agents-shed-last",
+    partial="the values the dispatcher writes into a stand-in /proc; not the memory guard's choice of victim",
+)
+def test_an_in_flight_runs_lead_and_worker_are_held_and_the_lead_is_hidden_from_the_chat_prioritizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    staged.register_agent_process(4300, "my-chat", is_worker=False, agent_id="agent-" + "3" * 32, oom_score_adj=560)
+
+    for minute in range(2):
+        _tick(staged, _IN_WINDOW + 60 * minute)
+
+    assert (staged.oom_score_adj(_LEAD_PID), staged.oom_score_adj(_WORKER_PID)) == (90, 90)
+    assert staged.registry_entry(_LEAD_PID) == {"agent_name": _LEAD, "is_worker": False, _HELD_AGENT_ID_KEY: _LEAD_ID}
+    assert staged.registry_entry(_WORKER_PID) == {"agent_name": _WORKER, "is_worker": True, "agent_id": _WORKER_ID}
+    assert staged.oom_score_adj(4300) == 560
+    assert staged.registry_entry(4300)["agent_id"] == "agent-" + "3" * 32
+    # Logged when the hold began, not again on the tick that found it in place.
+    assert len([line for line in _dispatcher_log_lines(staged) if "holding update agent" in line]) == 2
+
+
+@pytest.mark.parametrize(
+    ("environ_agent_name", "tgid"),
+    [
+        # A stale entry whose pid a different agent now has.
+        ("my-chat", None),
+        # A stale entry whose pid is now a thread of another process.
+        (None, 77),
+    ],
+)
+def test_an_entry_whose_process_is_not_that_agent_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ_agent_name: str | None, tgid: int | None
+) -> None:
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    staged.register_agent_process(
+        4101,
+        _LEAD,
+        is_worker=False,
+        agent_id=_LEAD_ID,
+        oom_score_adj=300,
+        environ_agent_name=environ_agent_name,
+        tgid=tgid,
+    )
+
+    _tick(staged, _IN_WINDOW)
+
+    assert staged.oom_score_adj(4101) == 300
+    assert staged.registry_entry(4101) == {"agent_name": _LEAD, "is_worker": False, "agent_id": _LEAD_ID}
+    assert staged.oom_score_adj(_LEAD_PID) == 90
+
+
+def test_a_process_whose_identity_cannot_be_read_is_left_alone_and_the_failure_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    environ_path = staged.proc_root / str(_LEAD_PID) / "environ"
+    environ_path.unlink()
+    environ_path.mkdir()
+
+    _tick(staged, _IN_WINDOW)
+
+    assert staged.oom_score_adj(_LEAD_PID) == 560
+    assert staged.registry_entry(_LEAD_PID)["agent_id"] == _LEAD_ID
+    assert any(f"could not read {environ_path}" in line for line in _dispatcher_log_lines(staged))
+
+
+def test_once_the_run_has_a_verdict_its_agents_are_handed_back_to_the_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    _tick(staged, _IN_WINDOW)
+
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": "UPDATED"})
+    for minute in range(1, 3):
+        _tick(staged, _IN_WINDOW + 60 * minute)
+
+    assert staged.registry_entry(_LEAD_PID) == {"agent_name": _LEAD, "is_worker": False, "agent_id": _LEAD_ID}
+    assert (staged.oom_score_adj(_LEAD_PID), staged.oom_score_adj(_WORKER_PID)) == (560, 600)
+    assert len([line for line in _dispatcher_log_lines(staged) if "released update" in line]) == 2
+
+
+def test_a_lead_registered_without_an_agent_id_is_released_once_the_run_has_a_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    staged.register_agent_process(_LEAD_PID, _LEAD, is_worker=False, agent_id=None, oom_score_adj=560)
+    _tick(staged, _IN_WINDOW)
+    assert staged.oom_score_adj(_LEAD_PID) == 90
+
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": "UPDATED"})
+    _tick(staged, _IN_WINDOW + 60)
+
+    assert staged.oom_score_adj(_LEAD_PID) == 560
+    assert staged.registry_entry(_LEAD_PID) == {"agent_name": _LEAD, "is_worker": False}
+
+
+def test_a_lead_restarted_mid_run_is_held_again_and_both_its_entries_released_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart registers the lead afresh under its new pid; the old pid's entry stays until the template prunes it."""
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    _tick(staged, _IN_WINDOW)
+    shutil.rmtree(staged.proc_root / str(_LEAD_PID))
+    staged.register_agent_process(4101, _LEAD, is_worker=False, agent_id=_LEAD_ID, oom_score_adj=560)
+
+    _tick(staged, _IN_WINDOW + 60)
+
+    assert staged.oom_score_adj(4101) == 90
+    assert staged.registry_entry(4101) == {"agent_name": _LEAD, "is_worker": False, _HELD_AGENT_ID_KEY: _LEAD_ID}
+
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": "UPDATED"})
+    _tick(staged, _IN_WINDOW + 120)
+
+    assert staged.oom_score_adj(4101) == 560
+    for pid in (_LEAD_PID, 4101):
+        assert staged.registry_entry(pid) == {"agent_name": _LEAD, "is_worker": False, "agent_id": _LEAD_ID}
+
+
+def test_every_process_of_a_lead_that_registers_two_is_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """codex registers its TUI and its app-server under one agent."""
+    staged = _stage_running_update(tmp_path, monkeypatch)
+    staged.register_agent_process(4101, _LEAD, is_worker=False, agent_id=_LEAD_ID, oom_score_adj=560)
+
+    _tick(staged, _IN_WINDOW)
+
+    for pid in (_LEAD_PID, 4101):
+        assert staged.oom_score_adj(pid) == 90
+        assert staged.registry_entry(pid) == {"agent_name": _LEAD, "is_worker": False, _HELD_AGENT_ID_KEY: _LEAD_ID}

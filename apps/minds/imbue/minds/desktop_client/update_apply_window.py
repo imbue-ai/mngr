@@ -41,12 +41,17 @@ from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import parse_update_run_status
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
+from imbue.minds.workspace_programs.update_protocol import BUSY_CHAT_IDS_FIELD
+from imbue.minds.workspace_programs.update_protocol import BUSY_MODE
 from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
 from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
 from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
+from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -88,7 +93,8 @@ BUSY_END_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_END"
 # Printed when the workspace's cron runs the update dispatcher, whose watchdog restarts a stopped lead.
 WATCHDOG_INSTALLED_SENTINEL: Final[str] = "MNGR_UPDATE_WATCHDOG_INSTALLED"
 
-# The template's background-task CLI, relative to the work_dir; a template that predates it prints nothing.
+# The template's background-task CLI, relative to the work_dir; a template that predates it is read through the
+# installed dispatcher's ``busy`` mode instead.
 BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
 
 # The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
@@ -185,13 +191,19 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
             "tsv",
         ]
     )
+    # CLEANUP: drop this fallback (and the answer it prints, which ``_parse_busy_agents`` reads) once
+    # ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7, the first release that ships the CLI.
+    inner_busy_from_markers = build_in_workspace_command(
+        ["timeout", str(_BACKGROUND_TASKS_TIMEOUT_SECONDS), "python3", DISPATCHER_ARCHIVE_PATH, BUSY_MODE]
+    )
     script = (
         f"{_RUN_RECORD_READ_SCRIPT}; "
         f"echo {AGENTS_BEGIN_SENTINEL}; "
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
         f"echo {AGENTS_END_SENTINEL}; "
         f"echo {BUSY_BEGIN_SENTINEL}; "
-        f"{inner_busy} 2>/dev/null || true; "
+        f"if test -f {shlex.quote(BACKGROUND_TASKS_SCRIPT_PATH)}; then {inner_busy}; "
+        f"else {inner_busy_from_markers}; fi 2>/dev/null || true; "
         f"echo {BUSY_END_SENTINEL}; "
         f"test -f {shlex.quote(LIVE_CRON_DIRECTORY + '/' + DISPATCHER_CRON_NAME)} && echo {WATCHDOG_INSTALLED_SENTINEL}; true"
     )
@@ -290,12 +302,20 @@ def _parse_busy_agents(busy_lines: list[str] | None) -> _BusyAgents:
     """The busy agents in ``background_tasks.py list --format tsv`` output; none when it printed nothing.
 
     Each line is one chat with pending tasks: chat id, active agent id, active agent name,
-    ``true``/``false`` busy, task count. A template that predates the CLI prints nothing,
-    so its agents read as not busy.
+    ``true``/``false`` busy, task count. A template that predates the CLI gets the dispatcher's
+    ``busy`` answer instead, whose chats count the way the CLI's file fallback reports them.
     """
     names: set[str] = set()
     agent_ids: set[str] = set()
     chat_ids: set[str] = set()
+    # CLEANUP: drop this branch with the probe's marker fallback in ``build_update_run_probe_args``.
+    busy_answer = extract_marker_json("\n".join(busy_lines or []), UPDATE_COMMAND_RESULT_MARKER)
+    if busy_answer is not None:
+        busy_chat_ids = busy_answer.get(BUSY_CHAT_IDS_FIELD)
+        marker_chat_ids = (
+            frozenset(str(chat_id) for chat_id in busy_chat_ids) if isinstance(busy_chat_ids, list) else frozenset()
+        )
+        return _BusyAgents(names=frozenset(), agent_ids=marker_chat_ids, chat_ids=marker_chat_ids)
     for line in busy_lines or []:
         fields = [field.strip() for field in line.split("\t")]
         if len(fields) < 4 or fields[3] != "true":

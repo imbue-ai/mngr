@@ -175,6 +175,16 @@ Feature: Running an update
     Then the app reports that workspace as updating
     But a workspace that cannot be reached leaves the report as it is
 
+  @update-agents-shed-last
+  Scenario: An update's agents are the last work a workspace short of memory gives up
+    A workspace short of memory stops processes to recover, and an update stopped partway has to start over.
+    Its agents are kept running for as long as anything a user can lose and start again is still there to stop instead.
+    Given a workspace with a scheduler of its own and an update in flight
+    When the workspace runs short of memory
+    Then the update's agent and the worker it handed off to are stopped only after every other chat and worker, user service and terminal
+    But the commands those agents run are stopped as early as any other agent's
+    And once the update has a result, its agents are stopped in the same order as any other chat and worker
+
   @one-run-per-workspace
   Rule: A workspace runs at most one update at a time
     A second request to update a workspace that is already updating starts nothing.
@@ -206,11 +216,20 @@ Feature: Running an update
     @idle-lead-on-a-background-task-is-not-waiting
     Example: A run whose agent is idle only because it waits on a background task is still reported as updating
       An agent that ended its turn to wait for a command it started in the background will resume on its own when that command finishes, so nothing is waiting on the user.
-      A workspace whose template cannot report background tasks reports none.
       Given a workspace with an update in flight
       And the workspace repeatedly reports the run's agent as alive but idle
       And the workspace reports that agent's conversation as waiting on a background task
       Then the app still reports that update as preparing
+
+    @idle-lead-on-a-background-task-in-an-older-template-is-not-waiting
+    Example: A run in a workspace too old to report background tasks is still reported as updating while its agent waits on the update's own background command
+      A workspace whose template cannot report background tasks still keeps a record of each background command the update starts with its own tooling, and that record is read in the template's place.
+      The update's background agent records its own background commands too once it has merged in the release, which brings the release's recorder; a command it started before then, or one the run's agent starts without the update's tooling, leaves no record and goes unseen.
+      Given a workspace with an update in flight, whose template cannot report background tasks
+      And the workspace repeatedly reports the run's agent as alive but idle
+      And that agent is waiting on a background command the update started with its own tooling
+      Then the app still reports that update as preparing
+      And the workspace does not remind the agent that it owes a result
 
     @hold-is-reported-with-its-detail
     Example: A run that has stopped for the user's go-ahead says what it is waiting on

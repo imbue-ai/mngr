@@ -1,6 +1,7 @@
 """The apply window: what it silences, what opens and closes it, and what it hands back."""
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -20,9 +21,11 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
 from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import exited_process_pid
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
+from imbue.minds.desktop_client.testing import write_background_task_marker
 from imbue.minds.desktop_client.update_apply_window import APPLY_GRACE_SECONDS
 from imbue.minds.desktop_client.update_apply_window import RUN_STATUS_PATH
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
@@ -33,11 +36,14 @@ from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
@@ -314,6 +320,31 @@ def test_the_probe_script_reads_busy_chats_from_the_templates_cli_when_it_has_on
 ) -> None:
     stdout = _run_probe_script_with_a_busy_lead(
         tmp_path, is_cli_present=is_cli_present, timeout_function=_PASS_THROUGH_TIMEOUT_FUNCTION
+    )
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is is_waiting
+
+
+# CLEANUP: drop with the probe's marker fallback in ``build_update_run_probe_args``.
+@pytest.mark.witnesses(
+    "workspace-updates.idle-lead-on-a-background-task-in-an-older-template-is-not-waiting",
+    partial="the app's reading only; not the workspace's reminder",
+)
+@pytest.mark.parametrize(("is_runner_alive", "is_waiting"), ((True, False), (False, True)), ids=["live", "exited"])
+def test_the_probe_script_reads_busy_chats_from_the_marker_files_in_a_template_without_the_cli(
+    tmp_path: Path, is_runner_alive: bool, is_waiting: bool
+) -> None:
+    """A template from before the CLI still holds the marker the update's staged ``run_in_background.py`` wrote,
+    which the dispatcher the update program installed reads instead."""
+    archive = tmp_path / DISPATCHER_ARCHIVE_PATH
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(build_workspace_program_archive(update_workspace))
+    write_background_task_marker(tmp_path, _LEAD_ID, os.getpid() if is_runner_alive else exited_process_pid())
+
+    stdout = _run_probe_script_with_a_busy_lead(
+        tmp_path, is_cli_present=False, timeout_function=_PASS_THROUGH_TIMEOUT_FUNCTION
     )
     probe = parse_update_run_probe(stdout, _CHAT)
 

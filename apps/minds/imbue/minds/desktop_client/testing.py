@@ -123,6 +123,8 @@ from imbue.minds.primitives import DeviceId
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.background_task_markers import MARKER_ROOT
+from imbue.minds.workspace_programs.update_dispatcher import AGENT_PIDS_DIR
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
 from imbue.minds.workspace_programs.update_dispatcher import ProgramContext
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
@@ -1743,6 +1745,8 @@ class StagedUpdateWorkspace(FrozenModel):
     calls_log: Path = Field(description="One JSON argv per line, for every stub mngr and tk call")
     agents_file: Path = Field(description="What the stub ``mngr list`` answers")
     live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
+    proc_root: Path = Field(description="Stands in for /proc")
+    agent_pids_dir: Path = Field(description="The template's agent-pid registry, at its place in the workspace")
     program_archive: Path = Field(description="The update program's zip application, as the app ships it")
 
     def set_agents(self, agents: Sequence[Mapping[str, str]], *, is_services_agent_listed: bool = True) -> None:
@@ -1782,6 +1786,38 @@ class StagedUpdateWorkspace(FrozenModel):
     def read_state(self, name: str) -> dict[str, Any] | None:
         path = self.root / "data" / ".state" / "update-apply" / name
         return json.loads(path.read_text()) if path.exists() else None
+
+    def register_agent_process(
+        self,
+        pid: int,
+        agent_name: str,
+        *,
+        is_worker: bool,
+        agent_id: str | None,
+        oom_score_adj: int,
+        environ_agent_name: str | None = None,
+        tgid: int | None = None,
+    ) -> None:
+        """A live agent main process as the template's launch wrapper leaves it: its registry entry (with no
+        ``agent_id`` key when ``agent_id`` is None) and its ``/proc`` files, whose agent name and thread group
+        default to the entry's own."""
+        self.agent_pids_dir.mkdir(parents=True, exist_ok=True)
+        entry: dict[str, object] = {"agent_name": agent_name, "is_worker": is_worker}
+        if agent_id is not None:
+            entry["agent_id"] = agent_id
+        (self.agent_pids_dir / f"{pid}.json").write_text(json.dumps(entry))
+        process_dir = self.proc_root / str(pid)
+        process_dir.mkdir(parents=True, exist_ok=True)
+        (process_dir / "status").write_text(f"Name:\tclaude\nTgid:\t{pid if tgid is None else tgid}\nPid:\t{pid}\n")
+        environ = f"HOME=/home/user\0MNGR_AGENT_NAME={environ_agent_name or agent_name}\0"
+        (process_dir / "environ").write_bytes(environ.encode())
+        (process_dir / "oom_score_adj").write_text(f"{oom_score_adj}\n")
+
+    def registry_entry(self, pid: int) -> dict[str, Any]:
+        return json.loads((self.agent_pids_dir / f"{pid}.json").read_text())
+
+    def oom_score_adj(self, pid: int) -> int:
+        return int((self.proc_root / str(pid) / "oom_score_adj").read_text())
 
 
 def _write_executable(path: Path, text: str) -> None:
@@ -1843,6 +1879,8 @@ def stage_update_workspace(
         calls_log=tmp_path / "stub-calls.jsonl",
         agents_file=tmp_path / "stub-agents.json",
         live_cron_dir=live_cron_dir,
+        proc_root=tmp_path / "proc",
+        agent_pids_dir=root / AGENT_PIDS_DIR,
         program_archive=program_archive,
     )
     staged.set_agents([])
@@ -1868,6 +1906,8 @@ def update_program_context(staged: StagedUpdateWorkspace, argv: Sequence[str], n
         "argv": list(argv),
         "program_path": str(staged.program_archive),
         "live_cron_dir": str(staged.live_cron_dir),
+        "proc_root": str(staged.proc_root),
+        "agent_pids_dir": str(staged.agent_pids_dir),
         "now": now,
         "agent_environment": AgentEnvironment(),
     }
@@ -1878,6 +1918,33 @@ def read_update_program_answer(captured_stdout: str) -> dict[str, Any]:
     payload = extract_marker_json(captured_stdout, UPDATE_COMMAND_RESULT_MARKER)
     assert payload is not None, captured_stdout
     return dict(payload)
+
+
+# CLEANUP: drop with ``background_task_markers`` and its tests, once ``OLDEST_IN_PLACE_UPDATABLE_VERSION``
+# reaches minds-v0.8.7.
+def write_background_task_marker(workspace_root: Path, chat_id: str, pid: int) -> None:
+    """Record a background command pending for ``chat_id`` the way the template's ``run_in_background.py`` does,
+    run by the process ``pid``."""
+    chat_dir = workspace_root / MARKER_ROOT / chat_id
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    marker = {
+        "source": "run_in_background",
+        "id": f"20261027T174227Z-16f569-{pid}",
+        "description": "Watch the update's background worker",
+        "command": "sleep 3600",
+        "started_at": "2026-10-27T17:42:27+00:00",
+        "pid": pid,
+        "pid_start": "",
+    }
+    (chat_dir / f"run_in_background-{marker['id']}.json").write_text(json.dumps(marker))
+
+
+# CLEANUP: drop with ``write_background_task_marker``.
+def exited_process_pid() -> int:
+    """The pid of a process that has already exited."""
+    process = subprocess.Popen(["true"])
+    process.wait()
+    return process.pid
 
 
 def update_command_exec_result(payload: Mapping[str, Any]) -> MngrCallResult:

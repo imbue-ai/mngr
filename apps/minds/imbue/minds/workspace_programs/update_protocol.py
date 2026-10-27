@@ -18,6 +18,13 @@ UPDATE_COMMAND_RESULT_MARKER: Final[str] = "MINDS_UPDATE_COMMAND_JSON:"
 # Asks the command's ``read`` whether an account is signed in.
 UPDATE_COMMAND_CHECK_SIGN_IN_FLAG: Final[str] = "--check-sign-in"
 
+# The mode the app's run probe runs from the installed dispatcher in a template without the background-task
+# CLI, and the answer's list of chats with a live background task.
+# CLEANUP: drop both once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7, the first release that
+# ships ``system/scripts/background_tasks.py``.
+BUSY_MODE: Final[str] = "busy"
+BUSY_CHAT_IDS_FIELD: Final[str] = "busy_chat_ids"
+
 # How a run was started, as the program stamps it in ``last-dispatch.json`` (the app's ``UpdateStartedBy``,
 # lower-cased).
 STARTED_BY_SCHEDULED: Final[str] = "scheduled"

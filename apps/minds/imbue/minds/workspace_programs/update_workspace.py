@@ -12,7 +12,9 @@ workspace root. Each mode is idempotent and prints one marker-wrapped JSON answe
 - ``read``: the schedule file, the run record and the last dispatch, the detection sweep's one
   read; given the app's current values, an armed file is first refreshed with them, and asked,
   it says whether an account is signed in;
-- ``tick``: the dispatcher's own minute (``update_dispatcher``), run by cron from the installed copy.
+- ``tick``: the dispatcher's own minute (``update_dispatcher``), run by cron from the installed copy;
+- ``busy``: the chats the workspace's background-task marker files hold live tasks for, which the app's run
+  probe reads from the installed copy in a template without the background-task CLI.
 
 The program ships as a zip application, and ``arm``, ``now`` and a refreshing ``read`` copy that
 archive into the workspace as ``data/.state/update-apply/dispatcher.pyz``, so the dispatcher cron runs
@@ -26,10 +28,13 @@ from collections.abc import Callable
 from typing import Final
 from typing import TypedDict
 
+from imbue.minds.workspace_programs.background_task_markers import busy_chat_ids
+from imbue.minds.workspace_programs.update_dispatcher import AGENT_PIDS_DIR
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
 from imbue.minds.workspace_programs.update_dispatcher import CreateResult
 from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_LOG_PATH
+from imbue.minds.workspace_programs.update_dispatcher import PROC_ROOT
 from imbue.minds.workspace_programs.update_dispatcher import ProgramContext
 from imbue.minds.workspace_programs.update_dispatcher import UPDATE_PROGRAM_SCHEMA
 from imbue.minds.workspace_programs.update_dispatcher import chat_id_of
@@ -50,6 +55,8 @@ from imbue.minds.workspace_programs.update_dispatcher import run_started_at
 from imbue.minds.workspace_programs.update_dispatcher import write_file_if_changed
 from imbue.minds.workspace_programs.update_dispatcher import write_json_atomically
 from imbue.minds.workspace_programs.update_dispatcher import write_log_line
+from imbue.minds.workspace_programs.update_protocol import BUSY_CHAT_IDS_FIELD
+from imbue.minds.workspace_programs.update_protocol import BUSY_MODE
 from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
 from imbue.minds.workspace_programs.update_protocol import DURABLE_CRON_PATH
 from imbue.minds.workspace_programs.update_protocol import LAST_DISPATCH_FILE_PATH
@@ -280,12 +287,20 @@ def mode_read(context: ProgramContext) -> None:
     )
 
 
+# CLEANUP: drop this mode once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7, the first release
+# that ships ``system/scripts/background_tasks.py``.
+def mode_busy(context: ProgramContext) -> None:
+    """The chats the workspace's background-task marker files hold live tasks for."""
+    emit_update_answer({"mode": BUSY_MODE, BUSY_CHAT_IDS_FIELD: sorted(busy_chat_ids())})
+
+
 MODES: Final[dict[str, Callable[[ProgramContext], None]]] = {
     "arm": mode_arm,
     "now": mode_now,
     "cancel": mode_cancel,
     "read": mode_read,
     "tick": mode_tick,
+    BUSY_MODE: mode_busy,
 }
 
 
@@ -301,6 +316,8 @@ def main() -> int:
             # Run as ``python3 <archive>``, the program's own path is its archive.
             "program_path": os.path.abspath(sys.argv[0]),
             "live_cron_dir": LIVE_CRON_DIRECTORY,
+            "proc_root": PROC_ROOT,
+            "agent_pids_dir": AGENT_PIDS_DIR,
             "now": time.time(),
             "agent_environment": AgentEnvironment(),
         }
