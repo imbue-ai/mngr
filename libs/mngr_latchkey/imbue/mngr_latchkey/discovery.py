@@ -1196,6 +1196,18 @@ class LatchkeyDiscoveryHandler(MutableModel):
         (we never silently miss a provisioning failure). The pending flag is
         always cleared in ``finally`` so a later discovery fire retries.
         """
+        # Passes are coalesced per host but run concurrently across hosts; this
+        # count, taken as the pass starts, says whether other hosts were
+        # provisioning alongside a failure that follows in this thread.
+        with self._remote_hosts_lock:
+            provisioning_host_count = len(self._provisioning_hosts)
+        logger.debug(
+            "Provisioning the VPS-resident Latchkey gateway for agent {} on host {} "
+            "({} host(s) provisioning in this process, this one included)",
+            agent_id,
+            host_id,
+            provisioning_host_count,
+        )
         try:
             self._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name, device_port)
         except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:

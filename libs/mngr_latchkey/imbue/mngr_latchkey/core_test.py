@@ -2907,6 +2907,38 @@ def test_non_transient_provisioning_failure_still_escapes_the_worker(
     assert streaks == {}
 
 
+def test_provisioning_pass_logs_how_many_hosts_are_provisioning_concurrently(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Each pass records how many hosts are provisioning at once, to tell concurrent failures from lone ones."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="vps.example.test", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionFailureHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+        )
+        handler._error_to_raise = RemoteGatewayError("Malformed permissions file")
+        _mark_provisioning_in_flight(handler, AgentId(), HostId())
+        _mark_provisioning_in_flight(handler, agent_id, host_id)
+        with _captured_log_records() as captured:
+            with pytest.raises(RemoteGatewayError):
+                handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
+
+    entry_logs = [
+        message for level, message in captured if level == "DEBUG" and "Provisioning the VPS-resident" in message
+    ]
+    assert len(entry_logs) == 1, captured
+    assert str(host_id) in entry_logs[0]
+    assert "2 host(s) provisioning in this process" in entry_logs[0]
+
+
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
     """Build a fake ``latchkey`` that handles ``gateway`` (blocking),
     ``gateway create-jwt`` (deterministic stub), and ``ensure-browser``
