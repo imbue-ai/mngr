@@ -9,6 +9,12 @@ const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp')
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 const { backgroundLaunchEnv } = require('./background-launch');
 const { bundledGitEnv } = require('./git-env');
+const {
+  createStderrTail,
+  describeLaunch,
+  formatEarlyExitDetails,
+  formatSpawnFailureDetails,
+} = require('./backend-exit-diagnostics');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -109,6 +115,12 @@ const SECRET_STDOUT_EVENT_FIELDS = {
 };
 
 const REDACTED_PLACEHOLDER = '***';
+
+// How long a backend that died before its login URL may take to finish
+// draining its pipes before startup is failed with whatever stderr has arrived.
+// A dead process's pipes drain in milliseconds, so this only bites when a
+// grandchild inherited them.
+const STDIO_DRAIN_GRACE_MS = 500;
 
 /**
  * Return a copy of a backend stdout line safe to persist to minds.log.
@@ -460,6 +472,17 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         };
       }
 
+      // Logged (and so a Sentry breadcrumb) before the spawn, and repeated in a
+      // startup error: which launch path and config source a failing backend ran
+      // under.
+      const launch = describeLaunch({
+        isDev: paths.isDev(),
+        hasConfigFileArg: configFileArgs.length > 0,
+        hasInheritedClientConfigEnv: Boolean(process.env.MINDS_CLIENT_CONFIG_PATH),
+      });
+      console.log(`[backend] spawning backend (${launch})`);
+
+      const spawnedAt = Date.now();
       const child = spawn(uvBin, args, {
         env,
         cwd,
@@ -473,6 +496,17 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // because every line logged below is stamped individually.
       const stdoutSplitter = createLineSplitter();
       const stderrSplitter = createLineSplitter();
+
+      // The backend's latest stderr lines and how many JSONL events it got out,
+      // for the error raised if it dies before the login URL. Fed only until
+      // startup settles, so a long-running backend pays nothing for them.
+      const stderrTail = createStderrTail();
+      let stdoutEventCount = 0;
+      // Set when the backend exits before the login URL; the rejection waits for
+      // its stderr to drain (see rejectEarlyExit).
+      let earlyExit = null;
+      let isEarlyExitReported = false;
+      const isCollectingStartupDiagnostics = () => !isResolved || (earlyExit !== null && !isEarlyExitReported);
 
       // Flush any buffered (newline-less) trailing stdout to the log so a final
       // fragment emitted right before exit is never dropped. Redacted like every
@@ -491,6 +525,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const remainder = stderrSplitter.flush();
         if (remainder !== null) {
           logStream.write(formatTimestampedLine(remainder));
+          if (isCollectingStartupDiagnostics()) stderrTail.push(remainder);
         }
       };
 
@@ -508,6 +543,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
+            if (isCollectingStartupDiagnostics()) stdoutEventCount += 1;
             if (event.event === 'login_url' && event.login_url) {
               if (!isResolved) {
                 isResolved = true;
@@ -545,6 +581,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // still writes the raw text, keeping the interactive console untouched.
         for (const line of stderrSplitter.push(text)) {
           logStream.write(formatTimestampedLine(line));
+          if (isCollectingStartupDiagnostics()) stderrTail.push(line);
           // The loading document's log, so a cold launch does not look frozen.
           if (!isResolved && line.trim()) onLogLine(line.trim());
         }
@@ -578,19 +615,41 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         finalizeLog();
         if (!isResolved) {
           isResolved = true;
-          reject(new Error(`Failed to start backend: ${err.message}`));
+          reject(new Error(formatSpawnFailureDetails({ errorMessage: err.message, launch })));
         }
       });
 
-      child.on('close', finalizeLog);
+      // 'exit' can fire before the dead backend's last stderr has been read, and
+      // that last output (the traceback, uv's `error:` line) is the point of the
+      // tail. So the rejection waits for 'close', when both pipes have drained,
+      // but no longer than STDIO_DRAIN_GRACE_MS: a grandchild that inherited the
+      // pipes would hold 'close' off for as long as it lives.
+      let drainTimer = null;
+      const rejectEarlyExit = () => {
+        if (earlyExit === null || isEarlyExitReported) return;
+        isEarlyExitReported = true;
+        clearTimeout(drainTimer);
+        reject(new Error(formatEarlyExitDetails({
+          ...earlyExit,
+          stdoutEventCount,
+          launch,
+          stderrLines: stderrTail.lines(),
+        })));
+      };
 
-      child.on('exit', (code) => {
+      child.on('close', () => {
+        finalizeLog();
+        rejectEarlyExit();
+      });
+
+      child.on('exit', (code, signal) => {
         backendProcess = null;
         if (!isResolved) {
+          // Settled now, so a login URL still buffered in the pipe cannot
+          // resolve startup against a backend that is already gone.
           isResolved = true;
-          reject(new Error(
-            `Backend exited with code ${code} before emitting login URL`
-          ));
+          earlyExit = { code, signal, elapsedMs: Date.now() - spawnedAt };
+          drainTimer = setTimeout(rejectEarlyExit, STDIO_DRAIN_GRACE_MS);
         }
       });
     }).catch(reject);
