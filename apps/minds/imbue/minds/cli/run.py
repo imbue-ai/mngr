@@ -47,6 +47,7 @@ from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.minds.cli.latchkey_bundle_diagnostics import log_latchkey_bundle_diagnostics
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import InstallationPaths
@@ -309,7 +310,11 @@ def run(
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    latchkey.initialize()
+    try:
+        latchkey.initialize()
+    except LatchkeyError:
+        log_latchkey_bundle_diagnostics(latchkey.latchkey_binary)
+        raise
 
     # The same-machine API socket doubles as this tier's single-instance guard:
     # a second Imbue Studio for the tier is refused here, before anything below
