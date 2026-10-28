@@ -14,6 +14,11 @@ Connect to an existing agent via the terminal.
 Attaches to the agent's tmux session, roughly equivalent to SSH'ing into
 the agent's machine and attaching to the tmux session.
 
+If the connection to a remote agent drops, the terminal modes the session
+switched on (mouse reporting, the alternate screen) are switched off and the
+session is reattached. A host that paused while disconnected is restored
+first, unless --no-start is given.
+
 If no agent is specified, shows an interactive selector to choose from
 available agents. The selector allows typeahead search to filter agents
 by name.

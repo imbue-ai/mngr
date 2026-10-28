@@ -51,6 +51,10 @@ class ConnectionOptions(FrozenModel):
         default=False,
         description="Whether to allow connecting to hosts with unknown SSH keys",
     )
+    is_auto_start_allowed: bool = Field(
+        default=True,
+        description="Whether to restore the host and agent when the connection drops because the host paused",
+    )
 
 
 class GcResourceTypes(FrozenModel):

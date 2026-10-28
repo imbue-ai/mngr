@@ -159,6 +159,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         retry_delay=mngr_ctx.config.retry.connect_retry_delay,
         session_command=opts.session_command,
         is_unknown_host_allowed=opts.allow_unknown_host,
+        is_auto_start_allowed=opts.start,
     )
 
     connect_to_agent(agent, host, mngr_ctx, connection_opts)
@@ -171,6 +172,11 @@ CommandHelpMetadata(
     synopsis="mngr [connect|conn] [AGENT] [--agent <AGENT>] [--[no-]start] [--connect-command <CMD>] [--[no-]allow-unknown-host]",
     description="""Attaches to the agent's tmux session, roughly equivalent to SSH'ing into
 the agent's machine and attaching to the tmux session.
+
+If the connection to a remote agent drops, the terminal modes the session
+switched on (mouse reporting, the alternate screen) are switched off and the
+session is reattached. A host that paused while disconnected is restored
+first, unless --no-start is given.
 
 If no agent is specified, shows an interactive selector to choose from
 available agents. The selector allows typeahead search to filter agents

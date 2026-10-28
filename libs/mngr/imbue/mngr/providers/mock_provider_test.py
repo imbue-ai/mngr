@@ -11,6 +11,7 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -184,6 +185,25 @@ class MockProviderInstance(BaseProviderInstance):
 
     def get_connector(self, host: HostInterface | HostId) -> PyinfraHost:
         raise NotImplementedError()
+
+
+class RestorableMockProviderInstance(MockProviderInstance):
+    """Mock provider whose start_host brings an offline host back as a configured online host."""
+
+    mock_restored_host: Host | None = Field(default=None)
+    started_hosts: list[HostId] = Field(default_factory=list)
+    cache_resets: int = Field(default=0)
+
+    def reset_caches(self) -> None:
+        self.cache_resets += 1
+
+    def start_host(self, host: HostInterface | HostId, snapshot_id: SnapshotId | None = None) -> Host:
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.started_hosts.append(host_id)
+        if self.mock_restored_host is None:
+            raise NotImplementedError("No restored host configured")
+        self.mock_hosts = [self.mock_restored_host]
+        return self.mock_restored_host
 
 
 def make_offline_host(
