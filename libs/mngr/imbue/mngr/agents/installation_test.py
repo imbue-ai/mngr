@@ -5,6 +5,7 @@ import pluggy
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import is_pinned_version_present
 from imbue.mngr.agents.installation import verify_pinned_cli_version
@@ -13,6 +14,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_mngr_ctx
 
 _BINARY = "fakecli"
@@ -139,36 +141,62 @@ def _version_probe_host(tmp_path: Path, *, stdout: str = "", stderr: str = "", s
 
 def test_verify_pinned_cli_version_passes_on_match(tmp_path: Path) -> None:
     host = _version_probe_host(tmp_path, stdout="fakecli 1.2.3")
-    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+    verify_pinned_cli_version(
+        host, binary_name=_BINARY, pinned_version="1.2.3", mismatch_policy=VersionMismatchPolicy.ERROR
+    )
 
 
 def test_verify_pinned_cli_version_reads_version_from_stderr(tmp_path: Path) -> None:
     # Some CLIs (e.g. pi) print --version to stderr; both streams must be inspected.
     host = _version_probe_host(tmp_path, stdout="", stderr="0.74.2")
-    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="0.74.2")
+    verify_pinned_cli_version(
+        host, binary_name=_BINARY, pinned_version="0.74.2", mismatch_policy=VersionMismatchPolicy.ERROR
+    )
     with pytest.raises(AgentInstallationError, match="version mismatch"):
-        verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="0.74.3")
+        verify_pinned_cli_version(
+            host, binary_name=_BINARY, pinned_version="0.74.3", mismatch_policy=VersionMismatchPolicy.ERROR
+        )
 
 
 def test_verify_pinned_cli_version_passes_on_prerelease_pin(tmp_path: Path) -> None:
     # A pre-release pin verifies verbatim -- the case that a semver-extracting check got wrong.
     host = _version_probe_host(tmp_path, stdout="fakecli 1.2.3-rc1")
-    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3-rc1")
+    verify_pinned_cli_version(
+        host, binary_name=_BINARY, pinned_version="1.2.3-rc1", mismatch_policy=VersionMismatchPolicy.ERROR
+    )
 
 
 def test_verify_pinned_cli_version_raises_on_mismatch(tmp_path: Path) -> None:
     host = _version_probe_host(tmp_path, stdout="fakecli 1.2.4")
     with pytest.raises(AgentInstallationError, match="version mismatch"):
-        verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+        verify_pinned_cli_version(
+            host, binary_name=_BINARY, pinned_version="1.2.3", mismatch_policy=VersionMismatchPolicy.ERROR
+        )
+
+
+def test_verify_pinned_cli_version_warns_and_continues_on_mismatch_under_warn(tmp_path: Path) -> None:
+    host = _version_probe_host(tmp_path, stdout="fakecli 1.2.4")
+    with capture_loguru() as log_output:
+        verify_pinned_cli_version(
+            host, binary_name=_BINARY, pinned_version="1.2.3", mismatch_policy=VersionMismatchPolicy.WARN
+        )
+    warning = log_output.getvalue()
+    assert "fakecli version mismatch" in warning
+    assert "fakecli 1.2.4" in warning
+    assert "'1.2.3'" in warning
 
 
 def test_verify_pinned_cli_version_raises_when_pin_absent_from_nonempty_output(tmp_path: Path) -> None:
     # Non-empty banner that lacks the pin is a genuine mismatch signal; the error shows the output.
     host = _version_probe_host(tmp_path, stdout="some unexpected banner")
     with pytest.raises(AgentInstallationError, match="some unexpected banner"):
-        verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+        verify_pinned_cli_version(
+            host, binary_name=_BINARY, pinned_version="1.2.3", mismatch_policy=VersionMismatchPolicy.ERROR
+        )
 
 
 def test_verify_pinned_cli_version_skips_when_probe_fails(tmp_path: Path) -> None:
     host = _version_probe_host(tmp_path, stdout="", success=False)
-    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+    verify_pinned_cli_version(
+        host, binary_name=_BINARY, pinned_version="1.2.3", mismatch_policy=VersionMismatchPolicy.ERROR
+    )

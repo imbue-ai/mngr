@@ -273,6 +273,16 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gitconfig.write_text("[safe]\n\tdirectory = *\n")
 
 
+def put_fake_cli_reporting_version_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binary_name: str, version_banner: str
+) -> None:
+    """Put a ``binary_name`` first on PATH that prints ``version_banner`` for ``--version``."""
+    fake_bin_dir = tmp_path / f"fake_{binary_name}_bin"
+    fake_bin_dir.mkdir()
+    write_executable_script(fake_bin_dir / binary_name, f"#!/bin/sh\necho {shlex.quote(version_banner)}\n")
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
 @contextmanager
 def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Give a test its own isolated tmux server.

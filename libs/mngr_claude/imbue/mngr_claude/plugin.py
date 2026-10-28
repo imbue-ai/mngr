@@ -35,7 +35,9 @@ from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
@@ -64,7 +66,6 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.config.field_markers import SettingsPatchField
-from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -369,9 +370,15 @@ class ClaudeAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the Claude Code version to install (e.g., '2.1.50'). "
-        "When set, installation uses this specific version and provisioning verifies the installed version matches. "
+        "When set, installation uses this specific version and provisioning verifies the installed version matches "
+        "(see `version_mismatch`), whether or not `check_installation` is set. "
         'If None, uses the latest available version. Pin alongside `update_policy = "NEVER"` to keep the '
         "binary on the pinned version (claude's auto-updater would otherwise move it off the pin).",
+    )
+    version_mismatch: VersionMismatchPolicy = Field(
+        default=VersionMismatchPolicy.ERROR,
+        description="What provisioning does when the installed claude does not report the pinned `version`. "
+        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
@@ -928,19 +935,6 @@ def _parse_claude_version_output(output: str) -> str | None:
         return None
     parts = stripped.split()
     return parts[0] if parts else None
-
-
-def _get_claude_version(host: OnlineHostInterface) -> str | None:
-    """Get the installed claude version on the host.
-
-    Returns the version string (e.g., '2.1.50') or None if claude is not installed
-    or the version cannot be determined.
-    """
-    result = host.execute_idempotent_command("claude --version", timeout_seconds=10.0)
-    if not result.success:
-        logger.debug("Failed to get claude version on host: {}", result.stderr)
-        return None
-    return _parse_claude_version_output(result.stdout)
 
 
 def _get_local_claude_version(concurrency_group: ConcurrencyGroup) -> str | None:
@@ -2130,10 +2124,11 @@ class ClaudeCoreAgent(
 
             # Ensure claude is installed via the shared helper (consent-gated locally,
             # config-gated remotely; claude's get_install_command pins the version),
-            # then reconcile the present binary's version against any pin.
+            # then reconcile the installed binary's version against any pin, whether or
+            # not the install check ran.
             if config.check_installation:
                 ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-                self.reconcile_installed_version(host, mngr_ctx)
+            self.reconcile_installed_version(host, mngr_ctx)
 
             # no matter what, *always* dismiss the cost popup, it's pointless. In
             # shared mode this targets the user's global config (the file claude
@@ -2257,21 +2252,19 @@ class ClaudeCoreAgent(
         """Verify the installed claude matches the pinned version, if one is set.
 
         claude pins a specific version when ``config.version`` is set, otherwise it
-        follows its own auto-update (nothing to enforce). With a pin, the installed
-        binary must match -- a mismatch means the wrong version is on PATH, which the
-        user must resolve (re-install or update the pin).
+        follows its own auto-update (nothing to enforce). With a pin, a mismatch means
+        the wrong version is on PATH; ``config.version_mismatch`` decides whether that
+        fails provisioning or only warns.
         """
         pinned_version = self.agent_config.version
         if pinned_version is None:
             return
-        installed_version = _get_claude_version(host)
-        if installed_version != pinned_version:
-            raise AgentInstallationError(
-                f"Claude version mismatch: installed version is {installed_version!r}, "
-                f"but agent config pins version {pinned_version!r}. "
-                "Re-install claude with the correct version or update the pinned version in your agent config."
-            )
-        logger.debug("Claude version {} matches pinned version", installed_version)
+        verify_pinned_cli_version(
+            host,
+            binary_name=self.get_install_binary_name(),
+            pinned_version=pinned_version,
+            mismatch_policy=self.agent_config.version_mismatch,
+        )
 
     def get_install_binary_name(self) -> str:
         return "claude"

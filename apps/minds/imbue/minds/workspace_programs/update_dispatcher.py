@@ -121,6 +121,8 @@ _ENDED_AGENT_STATES: Final[tuple[str, ...]] = ("DONE", "STOPPED")
 _UPDATE_LEASE_TITLE: Final[str] = "updating workspace"
 _CRITICAL_APP_LEASE_PREFIX: Final[str] = "editing critical app "
 _AUTO_OPEN_LABELS: Final[tuple[str, ...]] = ("assist", "auto_open")
+# CLEANUP: remove this setting (and its use in _create_through_mngr) once no supported workspace is
+# on a template from before version_mismatch = "WARN".
 _SKIP_CLAUDE_INSTALLATION_CHECK_SETTING: Final[str] = "agent_types.claude.check_installation=false"
 
 # A chat dispatched this window is not replaced sooner than this, however soon its lead ends: a

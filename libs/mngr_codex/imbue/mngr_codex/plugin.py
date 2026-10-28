@@ -95,6 +95,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -502,9 +503,15 @@ class CodexAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the codex CLI version to install (e.g., '0.139.0'). When set, installation runs "
-        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring "
-        "on a mismatch. When None (the default), installs the latest version. A pin also suppresses the "
-        "provision-time update check (`update_policy` is ignored), since updating would defeat the pin.",
+        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches (see "
+        "`version_mismatch`), whether or not `check_installation` is set. When None (the default), installs "
+        "the latest version. A pin also suppresses the provision-time update check (`update_policy` is "
+        "ignored), since updating would defeat the pin.",
+    )
+    version_mismatch: VersionMismatchPolicy = Field(
+        default=VersionMismatchPolicy.ERROR,
+        description="What provisioning does when the installed codex does not report the pinned `version`. "
+        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
     )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
@@ -1257,7 +1264,7 @@ class CodexAgent(
         return get_agent_idle_since(self)
 
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        # With a pinned version, verify the installed codex matches and error on a mismatch --
+        # With a pinned version, verify the installed codex matches (per version_mismatch) --
         # and skip the update check entirely, since prompting to update would defeat the pin.
         if self.agent_config.version is not None:
             self._verify_pinned_codex_version(host)
@@ -1268,12 +1275,11 @@ class CodexAgent(
         self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
 
     def _verify_pinned_codex_version(self, host: OnlineHostInterface) -> None:
-        """Verify the installed codex matches ``config.version``, erroring on a mismatch.
+        """Verify the installed codex matches ``config.version``, per ``config.version_mismatch``.
 
         Called only when a version is pinned. A mismatch means the wrong codex is on
         PATH (e.g. a pre-existing global install that ``check_installation`` left in
-        place), which the user must resolve -- re-install the pinned version or update
-        the pin. Delegates to the shared verifier so codex matches the pin the same
+        place). Delegates to the shared verifier so codex matches the pin the same
         (scheme-agnostic) way as the other agents.
         """
         pinned_version = self.agent_config.version
@@ -1281,9 +1287,9 @@ class CodexAgent(
             return
         verify_pinned_cli_version(
             host,
-            command=str(self.agent_config.command),
             binary_name=self.get_install_binary_name(),
             pinned_version=pinned_version,
+            mismatch_policy=self.agent_config.version_mismatch,
         )
 
     def get_install_binary_name(self) -> str:

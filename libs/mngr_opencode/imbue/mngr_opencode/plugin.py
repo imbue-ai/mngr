@@ -66,6 +66,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import describe_failed_send_command
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -289,8 +290,14 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the opencode version to install (e.g., '0.4.10'). When set, installation runs the "
-        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches, "
-        "erroring on a mismatch. When None (the default), installs the latest version.",
+        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches "
+        "(see `version_mismatch`), whether or not `check_installation` is set. When None (the default), "
+        "installs the latest version.",
+    )
+    version_mismatch: VersionMismatchPolicy = Field(
+        default=VersionMismatchPolicy.ERROR,
+        description="What provisioning does when the installed opencode does not report the pinned `version`. "
+        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
@@ -520,13 +527,13 @@ class OpenCodeAgent(
         """
         if self.agent_config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-            if self.agent_config.version is not None:
-                verify_pinned_cli_version(
-                    host,
-                    command=str(self.agent_config.command),
-                    binary_name=self.get_install_binary_name(),
-                    pinned_version=self.agent_config.version,
-                )
+        if self.agent_config.version is not None:
+            verify_pinned_cli_version(
+                host,
+                binary_name=self.get_install_binary_name(),
+                pinned_version=self.agent_config.version,
+                mismatch_policy=self.agent_config.version_mismatch,
+            )
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_agent_instructions(host)
