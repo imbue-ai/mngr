@@ -44,8 +44,10 @@ import json
 import os
 import threading
 import time
+import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -64,13 +66,20 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.agent_address import agent_address_for_instance
 from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.connections.data_types import SignedInAccount
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.primitives import is_connection_instance_name
+from imbue.minds.desktop_client.connections.primitives import is_derived_provider_instance_name
+from imbue.minds.desktop_client.connections.provider_settings import legacy_imbue_cloud_provider_name_for_account
+from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_in
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
@@ -88,8 +97,11 @@ from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SEC
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_ssh_tunnel import is_loopback_host
+from imbue.minds.errors import AccountsIndexUnreadableError
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.mngr_settings.file_store import FileMindsSettingsStore
+from imbue.minds.mngr_settings.profile_paths import resolve_active_settings_path_in
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
@@ -97,12 +109,14 @@ from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import parse_provider_unavailable_reason
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
+from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 # Stand-in provider name for the "Can't connect to ..." headline, for a provider
@@ -700,6 +714,135 @@ def _report_recovery_step_failure(
         "" if exc.output_tail is None else f"\nsubprocess output:\n{exc.output_tail}",
     )
     _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+
+
+def _log_recovery_step_failure_context(
+    step_label: str,
+    workspace_agent_id: AgentId,
+    pinned_instance: DiscoveredAgent | None,
+    is_pinned_from_live_snapshot: bool,
+    backend_resolver: BackendResolverInterface,
+    mngr_host_dir: Path,
+) -> None:
+    """Log where the failed step's address pointed, and whether this device could still resolve it.
+
+    A step that ``mngr`` rejected names the provider instance it could not use
+    (``Unknown provider backend: <instance>``) but not why minds addressed it:
+    discovery may have placed the machine from a lifecycle-transition retention
+    rather than a live snapshot, the settings file the subprocess loaded may lack
+    the instance's block, or the account that owns it may have signed out. Each
+    of those is a different fix, so each is recorded here, at info level just
+    before the step's error record, where it reaches minds.log and rides that
+    record to error reporting as a breadcrumb.
+
+    Account-derived and connection instance names are logged by class only (an
+    account instance is named from a user id, or from an email slug in the legacy
+    form); any other name is a backend's own instance and is logged as is. Runs
+    on the failure path only, reading the profile's config, settings and
+    accounts index, and must not raise: it runs before the step's error record,
+    which an escaping exception would replace.
+    """
+    if pinned_instance is None:
+        logger.info(
+            "{} step of host recovery for {} failed with an unpinned address (discovery placed the machine on no "
+            "single host)",
+            step_label,
+            workspace_agent_id,
+        )
+        return
+    provider_name = str(pinned_instance.provider_name)
+    instance_class, owner_signed_in, account_count = _classify_pinned_instance(provider_name, mngr_host_dir)
+    backend = "unknown"
+    poll_age = "unknown"
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+        for provider in backend_resolver.list_providers():
+            if str(provider.provider_name) == provider_name:
+                backend = str(provider.config.backend)
+        completed_poll_at = backend_resolver.get_last_completed_poll_at_for_provider(pinned_instance.provider_name)
+        if completed_poll_at is not None:
+            poll_age = f"{(datetime.now(timezone.utc) - completed_poll_at).total_seconds():.0f}s ago"
+        else:
+            poll_age = "never"
+    host_state = backend_resolver.get_host_state(pinned_instance.host_id)
+    logger.info(
+        "{} step of host recovery for {} failed with an address pinned to {} (backend {}), placed from {}; "
+        "settings block: {}; owning account signed in: {}; signed-in accounts: {}; host state: {}; "
+        "provider's last completed poll: {}",
+        step_label,
+        workspace_agent_id,
+        instance_class,
+        backend,
+        "the live discovery snapshot" if is_pinned_from_live_snapshot else "a lifecycle-transition retention",
+        _describe_provider_block(mngr_host_dir, provider_name),
+        owner_signed_in,
+        account_count,
+        "unknown" if host_state is None else host_state.value,
+        poll_age,
+    )
+
+
+def _classify_pinned_instance(provider_name: str, mngr_host_dir: Path) -> tuple[str, str, str]:
+    """The instance's class, whether a signed-in account owns it, and how many accounts are signed in.
+
+    An ``imbue_cloud_``-prefixed name outside the user-id form is either an
+    account's legacy email-slug name or a backend's own instance (such as
+    ``imbue_cloud_slice``), which no account owns; it is checked against every
+    signed-in account's legacy spelling rather than assumed to be either.
+    """
+    try:
+        accounts = read_signed_in_accounts_from_index_in(mngr_host_dir)
+    except (AccountsIndexUnreadableError, OSError, UnicodeDecodeError) as e:
+        logger.warning("Could not read the accounts index to diagnose a failed recovery step: {}", type(e).__name__)
+        accounts = None
+    if is_connection_instance_name(provider_name):
+        instance_class = "a connection instance"
+        owner_names: set[str] | None = None
+    elif is_derived_provider_instance_name(provider_name):
+        instance_class = "an account instance (user-id name)"
+        owner_names = (
+            None if accounts is None else {imbue_cloud_provider_name_for_user(account.user_id) for account in accounts}
+        )
+    elif provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
+        instance_class = "an imbue_cloud_-prefixed instance not in the user-id form"
+        owner_names = None if accounts is None else _legacy_account_instance_names(accounts)
+    else:
+        return f"the instance {provider_name!r}", "n/a", "unknown" if accounts is None else str(len(accounts))
+    if accounts is None:
+        return instance_class, "unknown (accounts index unreadable)", "unknown"
+    if owner_names is None:
+        return instance_class, "n/a", str(len(accounts))
+    return instance_class, "yes" if provider_name in owner_names else "no", str(len(accounts))
+
+
+def _legacy_account_instance_names(accounts: Sequence[SignedInAccount]) -> set[str]:
+    """The legacy email-slug instance names of ``accounts``, skipping an email that has no slug."""
+    names: set[str] = set()
+    for account in accounts:
+        try:
+            names.add(legacy_imbue_cloud_provider_name_for_account(account.email))
+        except InvalidImbueCloudAccount:
+            continue
+    return names
+
+
+def _describe_provider_block(mngr_host_dir: Path, provider_name: str) -> str:
+    """Whether the settings file a ``MNGR_HOST_DIR=mngr_host_dir`` subprocess loads defines ``provider_name``."""
+    try:
+        settings_path = resolve_active_settings_path_in(mngr_host_dir)
+        document = None if settings_path is None else FileMindsSettingsStore(settings_path=settings_path).read()
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        # The class only: an OSError's message carries the path, and with it the user's home dir.
+        logger.warning(
+            "Could not read the mngr settings file to diagnose a failed recovery step: {}", type(e).__name__
+        )
+        return f"unreadable ({type(e).__name__})"
+    if document is None:
+        return "no active mngr profile"
+    providers = document.get("providers", {})
+    block = providers.get(provider_name) if isinstance(providers, dict) else None
+    if not isinstance(block, dict):
+        return "absent"
+    return "present, disabled" if block.get("is_enabled") is False else "present, enabled"
 
 
 def read_environment_block(
@@ -1470,8 +1613,11 @@ def run_host_recovery_sequence(
 
     # Read before the stop step, so both commands address the same machine. The
     # post-recovery read further down is a separate question (where the machine
-    # ended up) and deliberately takes its own, later snapshot.
-    services_agent_address = build_agent_address(services_agent_id, backend_resolver)
+    # ended up) and deliberately takes its own, later snapshot. The step-failure
+    # diagnostics share this read, so they describe the pin the commands were given.
+    pinned_instance = backend_resolver.find_sole_agent_instance(services_agent_id)
+    is_pinned_from_live_snapshot = services_agent_id in backend_resolver.list_known_agent_ids()
+    services_agent_address = agent_address_for_instance(services_agent_id, pinned_instance)
 
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
@@ -1508,6 +1654,14 @@ def run_host_recovery_sequence(
                         workspace_agent_id, "Provider does not support stopping the host; skipping stop step."
                     )
                 else:
+                    _log_recovery_step_failure_context(
+                        "Stop",
+                        workspace_agent_id,
+                        pinned_instance,
+                        is_pinned_from_live_snapshot,
+                        backend_resolver,
+                        mngr_host_dir,
+                    )
                     _report_recovery_step_failure(
                         "Stop",
                         exc,
@@ -1548,6 +1702,14 @@ def run_host_recovery_sequence(
             tracker.suppress_unattended_recovery(workspace_agent_id)
             tracker.mark_stuck(workspace_agent_id)
             return
+        _log_recovery_step_failure_context(
+            "Start",
+            workspace_agent_id,
+            pinned_instance,
+            is_pinned_from_live_snapshot,
+            backend_resolver,
+            mngr_host_dir,
+        )
         _report_recovery_step_failure(
             "Start",
             exc,

@@ -33,7 +33,12 @@ def resolve_active_settings_path(root: MindsRoot) -> Path | None:
     Returns ``None`` if mngr hasn't been initialized in this host_dir yet.
     Callers should treat ``None`` as "skip silently" since there's nothing useful to write to.
     """
-    settings_dir = read_active_profile_dir(root.mngr_host_dir)
+    return resolve_active_settings_path_in(root.mngr_host_dir)
+
+
+def resolve_active_settings_path_in(mngr_host_dir: Path) -> Path | None:
+    """:func:`resolve_active_settings_path` for a caller that holds the host dir rather than the env's root."""
+    settings_dir = read_active_profile_dir(mngr_host_dir)
     if settings_dir is None or not settings_dir.exists():
         return None
     return settings_dir / "settings.toml"

@@ -22,10 +22,13 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.provider_settings import legacy_imbue_cloud_provider_name_for_account
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
@@ -71,6 +74,7 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
+from imbue.minds.desktop_client.workspace_recovery import _log_recovery_step_failure_context
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_recovery_step_failure
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
@@ -83,6 +87,8 @@ from imbue.minds.desktop_client.workspace_recovery import run_host_recovery_sequ
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
+from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.testing import write_imbue_cloud_accounts_index
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
@@ -544,6 +550,137 @@ def test_run_host_recovery_sequence_fails_when_stop_command_errors(tmp_path: Pat
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert "Stop step" in (tracker.get_last_recovery_error(workspace_agent) or "")
     assert len(error_records) == 1, error_records
+
+
+_DIAGNOSTICS_ROOT_NAME = "minds-dev-recovery-diag"
+_DIAGNOSTICS_USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
+_DIAGNOSTICS_EMAIL = "user@example.com"
+
+
+def test_a_failed_step_logs_whether_its_pinned_instance_was_still_configured_and_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``Unknown provider backend`` shape: pinned to an account instance whose block and session are gone.
+
+    Logged before the step's error record, by class rather than by name, so the
+    account's user id never reaches the line.
+    """
+    stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    write_imbue_cloud_accounts_index(_DIAGNOSTICS_ROOT_NAME, [])
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
+    resolver = build_resolver_with_system_services(
+        workspace_agent,
+        services_agent,
+        provider_name=ProviderInstanceName(imbue_cloud_provider_name_for_user(_DIAGNOSTICS_USER_ID)),
+    )
+
+    with (
+        capture_loguru(level="INFO") as log_output,
+        ConcurrencyGroup(name="test-restart-diagnostics") as cg,
+        capture_error_logs() as error_records,
+    ):
+        run_host_recovery_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
+            mngr_host_dir=mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
+        )
+
+    assert len(error_records) == 1, error_records
+    context_lines = [line for line in log_output.getvalue().splitlines() if "address pinned to" in line]
+    assert len(context_lines) == 1, log_output.getvalue()
+    context = context_lines[0]
+    assert f"Stop step of host recovery for {workspace_agent}" in context
+    assert "an account instance (user-id name)" in context
+    assert "placed from the live discovery snapshot" in context
+    assert "settings block: absent" in context
+    assert "owning account signed in: no" in context
+    assert "signed-in accounts: 0" in context
+    assert _DIAGNOSTICS_USER_ID not in context
+
+
+def test_failed_step_context_names_a_retained_legacy_placement_without_its_email_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pin from a transition retention onto a legacy email-slug instance whose block and account are present."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    legacy_instance = legacy_imbue_cloud_provider_name_for_account(_DIAGNOSTICS_EMAIL)
+    settings_path.write_text(f'[providers.{legacy_instance}]\nbackend = "imbue_cloud"\n')
+    write_imbue_cloud_accounts_index(
+        _DIAGNOSTICS_ROOT_NAME, [{"email": _DIAGNOSTICS_EMAIL, "user_id": _DIAGNOSTICS_USER_ID}]
+    )
+    workspace_agent = AgentId.generate()
+    pinned_instance = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName(legacy_instance),
+    )
+
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context(
+            "Start",
+            workspace_agent,
+            pinned_instance,
+            False,
+            MngrCliBackendResolver(),
+            mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+        )
+
+    context = log_output.getvalue()
+    assert "an imbue_cloud_-prefixed instance not in the user-id form" in context
+    assert "placed from a lifecycle-transition retention" in context
+    assert "settings block: present, enabled" in context
+    assert "owning account signed in: yes" in context
+    assert "signed-in accounts: 1" in context
+    assert "host state: unknown" in context
+    assert "provider's last completed poll: never" in context
+    assert legacy_instance not in context
+
+
+def test_failed_step_context_survives_an_unslugifiable_account_and_an_undecodable_settings_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The context runs before the step's error record, so nothing it reads may raise past it."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    settings_path.write_bytes(b"\xff\xfe not utf-8")
+    write_imbue_cloud_accounts_index(_DIAGNOSTICS_ROOT_NAME, [{"email": "---", "user_id": _DIAGNOSTICS_USER_ID}])
+    pinned_instance = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName("imbue_cloud_slice"),
+    )
+
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context(
+            "Stop",
+            AgentId.generate(),
+            pinned_instance,
+            True,
+            MngrCliBackendResolver(),
+            mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+        )
+
+    context = log_output.getvalue()
+    assert "settings block: unreadable (UnicodeDecodeError)" in context
+    assert "owning account signed in: no" in context
+
+
+def test_failed_step_context_reports_an_unpinned_address(tmp_path: Path) -> None:
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context("Stop", AgentId.generate(), None, False, MngrCliBackendResolver(), tmp_path)
+
+    assert "failed with an unpinned address" in log_output.getvalue()
 
 
 def test_run_host_recovery_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:

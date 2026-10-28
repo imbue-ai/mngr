@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.errors import AccountsIndexUnreadableError
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.testing import write_imbue_cloud_accounts_index
+from imbue.mngr.utils.testing import capture_loguru
 
 _ROOT_NAME = "minds-dev-tname"
 _ROOT = MindsRoot(_ROOT_NAME)
@@ -393,6 +394,19 @@ def test_reconcile_keeps_every_block_when_the_providers_tables_are_out_of_order(
 def test_reconcile_skips_when_mngr_is_uninitialized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     assert reconcile_provider_settings(_ROOT, {}).is_changed is False
+
+
+def test_reconcile_warns_when_due_blocks_are_skipped_for_an_uninitialized_mngr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A block that was due and never written is what a later ``Unknown provider backend`` traces back to."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    account_instance = imbue_cloud_provider_name_for_user(_USER_ID)
+    with capture_loguru(level="WARNING") as log_output:
+        result = reconcile_provider_settings(_ROOT, {account_instance: {"backend": "imbue_cloud"}})
+    assert result.is_changed is False
+    assert "Skipped writing 1 managed provider block(s)" in log_output.getvalue()
+    assert _USER_ID not in log_output.getvalue()
 
 
 def test_is_provider_polled_here_reads_enabled_blocks_and_backend_defaults_and_keeps_everything_when_unreadable(

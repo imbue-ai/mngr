@@ -456,6 +456,15 @@ def reconcile_provider_settings(
     """
     store = settings_store_for(root)
     if store is None:
+        # Nothing to write to yet, which is routine before mngr first initializes
+        # this host dir -- but blocks that were due and not written are exactly
+        # what a later "Unknown provider backend" from a command addressing one of
+        # them is diagnosed from, so that case is not silent.
+        if desired:
+            logger.warning(
+                "Skipped writing {} managed provider block(s): no active mngr profile under the host dir yet",
+                len(desired),
+            )
         return ProviderReconcileResult(is_changed=False, removed_instance_names=())
     removed_instance_names: list[str] = []
     is_modified = store.update(
@@ -518,7 +527,12 @@ def migrate_imbue_cloud_state_dirs(root: MindsRoot, accounts: Sequence[SignedInA
 
 def imbue_cloud_accounts_index_path(root: MindsRoot) -> Path | None:
     """The plugin's ``accounts.json`` session index for the active profile, or None while no profile is set."""
-    profile_dir = read_active_profile_dir(root.mngr_host_dir)
+    return imbue_cloud_accounts_index_path_in(root.mngr_host_dir)
+
+
+def imbue_cloud_accounts_index_path_in(mngr_host_dir: Path) -> Path | None:
+    """:func:`imbue_cloud_accounts_index_path` for a caller that holds the host dir rather than the env's root."""
+    profile_dir = read_active_profile_dir(mngr_host_dir)
     if profile_dir is None:
         return None
     return get_sessions_dir(profile_dir) / "accounts.json"
@@ -535,7 +549,12 @@ def read_signed_in_accounts_from_index(root: MindsRoot) -> list[SignedInAccount]
     be read as one raises ``AccountsIndexUnreadableError``, since a failed
     listing must not be materialized as "no accounts".
     """
-    accounts_path = imbue_cloud_accounts_index_path(root)
+    return read_signed_in_accounts_from_index_in(root.mngr_host_dir)
+
+
+def read_signed_in_accounts_from_index_in(mngr_host_dir: Path) -> list[SignedInAccount]:
+    """:func:`read_signed_in_accounts_from_index` for a caller that holds the host dir rather than the env's root."""
+    accounts_path = imbue_cloud_accounts_index_path_in(mngr_host_dir)
     if accounts_path is None or not accounts_path.is_file():
         return []
     try:
