@@ -1,4 +1,4 @@
-const { BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const { BrowserWindow, Menu, Notification, Tray, clipboard, crashReporter, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -6,7 +6,8 @@ const { spawn, execFile } = require('child_process');
 const paths = require('./paths');
 const { initElectronLogging, closeElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
-const { initSentry, captureManualReport } = require('./sentry');
+const { initSentry, captureManualReport, isNativeCrashReportingEnabled } = require('./sentry');
+const { createCrashAnnotator } = require('./crash-annotations');
 const { ensureLegacyLatchkeyLink, migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
@@ -196,6 +197,13 @@ initConsoleCapture(paths.getLogDir());
 // Initialize Sentry as early as possible. The SDK only sends when the user has
 // enabled error reporting (read live per event) -- see electron/sentry.js.
 initSentry({ getRendererName: rendererNameForWebContents });
+// Crashpad annotations recording what the main process was doing, copied into
+// a native-crash minidump (see electron/crash-annotations.js). Only valid once
+// initSentry has started Crashpad.
+const crashAnnotations = createCrashAnnotator(isNativeCrashReportingEnabled() ? crashReporter : null);
+// How often the memory annotation is refreshed: often enough that the dump's
+// reading is at most a minute old, rare enough to cost nothing.
+const MEMORY_ANNOTATION_INTERVAL_MS = 60 * 1000;
 
 // Expose Chromium's DevTools protocol (CDP) when MINDS_REMOTE_DEBUGGING_PORT is
 // set, for driving the real client with Playwright/CDP during development.
@@ -810,8 +818,13 @@ function wireBundleWindowEvents(bundle) {
     }));
     relayFocus(true);
     console.log(formatFocusRelayEnd({ windowId }));
+    crashAnnotations.recordMainEvent('window-focus');
   });
-  win.on('blur', () => relayFocus(false));
+  win.on('blur', () => {
+    relayFocus(false);
+    crashAnnotations.recordMainEvent('window-blur');
+  });
+  win.on('show', () => crashAnnotations.recordMainEvent('window-show'));
 
   win.on('maximize', () => { bundle._maximizedByUs = true; });
   win.on('unmaximize', () => { bundle._maximizedByUs = false; });
@@ -877,6 +890,30 @@ function wireBundleWindowEvents(bundle) {
 
 function wireBundleNavigationEvents(bundle) {
   const wc = bundle.window.webContents;
+
+  // Navigation milestones of every frame, as crashpad annotations: a native
+  // browser-process crash mid-navigation then names the phase it died in and
+  // the class of the target (see electron/crash-annotations.js). Registered
+  // before the handlers below so each milestone precedes the work it triggers.
+  const windowId = bundle.window.id;
+  const annotateNavigation = (phase, url, isMainFrame, isSameDocument) => {
+    crashAnnotations.recordNavigation({ windowId, isMainFrame, phase, url, isSameDocument });
+  };
+  wc.on('did-start-navigation', (event) => {
+    annotateNavigation('start', event.url, event.isMainFrame, event.isSameDocument);
+  });
+  wc.on('did-redirect-navigation', (event) => {
+    annotateNavigation('redirect', event.url, event.isMainFrame, event.isSameDocument);
+  });
+  wc.on('did-frame-navigate', (_e, url, _code, _status, isMainFrame) => {
+    annotateNavigation('commit', url, isMainFrame, false);
+  });
+  wc.on('did-navigate-in-page', (_e, url, isMainFrame) => {
+    annotateNavigation('commit', url, isMainFrame, true);
+  });
+  wc.on('did-fail-load', (_e, _code, _description, validatedURL, isMainFrame) => {
+    annotateNavigation('fail', validatedURL, isMainFrame, false);
+  });
 
   // Top-level navigation: the SPA's routes (hub pages and /workspace/<id>).
   // The SPA owns the UI; main records what it needs for session persistence,
@@ -2255,21 +2292,36 @@ async function onReady() {
     // flashes a dock icon the user did not ask for.
     syncDockIcon();
   }
-  powerMonitor.on('resume', () => repaintAllWindowsAfterWake('resume'));
+  powerMonitor.on('suspend', () => crashAnnotations.recordMainEvent('power-suspend'));
+  powerMonitor.on('resume', () => {
+    crashAnnotations.recordMainEvent('power-resume');
+    repaintAllWindowsAfterWake('resume');
+  });
   powerMonitor.on('unlock-screen', () => {
+    crashAnnotations.recordMainEvent('power-unlock-screen');
     repaintAllWindowsAfterWake('unlock-screen');
     relayScreenLockToAllWindows(false);
   });
   // Relayed so each window's client_state carries it: the backend's banner
   // gate stops trusting focus, and watched chats, while the screen is locked.
-  powerMonitor.on('lock-screen', () => relayScreenLockToAllWindows(true));
+  powerMonitor.on('lock-screen', () => {
+    crashAnnotations.recordMainEvent('power-lock-screen');
+    relayScreenLockToAllWindows(true);
+  });
 
   // A background start opens no window: the startup sequence runs without
   // one, the one-time code is still consumed, and the first-window route is
   // held for whichever window is asked for first (see startBackendWithRetry).
   initialBundle = isBackgroundStart ? null : createBundle();
   if (initialBundle !== null) sizeFromSavedSession(initialBundle);
-  updater.init({ onStatus: broadcastUpdateStatus });
+  updater.init({
+    onStatus: (status) => {
+      crashAnnotations.recordMainEvent(`updater-${status.type}`);
+      broadcastUpdateStatus(status);
+    },
+  });
+  annotateMemory();
+  setInterval(annotateMemory, MEMORY_ANNOTATION_INTERVAL_MS);
   // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the Imbue
   // Studio build has been on stable long enough for installs to have launched
   // once (specs/imbue-studio-rename/05_cleanup.md).
@@ -2279,6 +2331,18 @@ async function onReady() {
     setImmediate(removeLegacyNameDirs);
   }
   await runStartupSequence(initialBundle);
+}
+
+// Refresh the crashpad memory annotation (see electron/crash-annotations.js).
+// macOS's memory-pressure level is not exposed to Electron apps, so the
+// system's free memory stands in for it. Runs on a timer, so it must never
+// throw: a failure is logged and the previous reading stays in place.
+function annotateMemory() {
+  try {
+    crashAnnotations.recordMemory(app.getAppMetrics(), process.getSystemMemoryInfo());
+  } catch (err) {
+    console.warn(`[crash-annotations] could not read memory metrics: ${err.message || err}`);
+  }
 }
 
 function broadcastUpdateStatus(status) {
@@ -2923,6 +2987,7 @@ function handleNotification(event) {
   // exposes no permission-check API to app code, so this is the closest
   // thing to a confirmation we get).
   notification.on('show', () => {
+    crashAnnotations.recordMainEvent('notification-show');
     console.log(`[notification] shown by the OS: ${JSON.stringify(title)}`);
   });
   // A definitive OS-reported failure -- distinct from getting neither 'show'
@@ -2931,7 +2996,10 @@ function handleNotification(event) {
   notification.on('failed', () => {
     console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
-  notification.on('click', () => openNotificationDestination(event.url, null, event.entry));
+  notification.on('click', () => {
+    crashAnnotations.recordMainEvent('notification-click');
+    openNotificationDestination(event.url, null, event.entry);
+  });
   liveBanners.remember(event.entry && event.entry.chat_agent_id, notification);
   notification.show();
   console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
@@ -3823,6 +3891,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', (event) => {
+  crashAnnotations.recordMainEvent('app-before-quit');
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   if (isShuttingDown) return;
   event.preventDefault();
