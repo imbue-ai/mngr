@@ -112,7 +112,9 @@ CLI flag > env var > settings.toml > built-in default.
   `latchkey gateway` subprocess's output is routed through the same log
   (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
   timestamped and rotated too rather than living in a separate unrotated
-  file.
+  file. When a gateway spawn never binds its port, the gateway's last 20
+  output lines are also logged at `WARNING` (with its listen password and
+  encryption key redacted), next to the bind-timeout error.
 
 - `latchkey_forward.log` -- the raw stdout/stderr capture of the
   supervisor process. Its file descriptor is handed straight to the

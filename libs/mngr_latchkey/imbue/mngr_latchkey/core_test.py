@@ -63,7 +63,13 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
+from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINES
+from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS
+from imbue.mngr_latchkey.core import _GatewayOutputTail
+from imbue.mngr_latchkey.core import _allocate_free_port
+from imbue.mngr_latchkey.core import _describe_port_bindability
 from imbue.mngr_latchkey.core import _log_gateway_output_line
+from imbue.mngr_latchkey.core import _terminate_and_diagnose_unbound_gateway
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import parse_coded_latchkey_failure
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
@@ -114,6 +120,69 @@ def test_gateway_output_is_routed_through_loguru() -> None:
         _log_gateway_output_line("hello from the gateway\n", is_stdout=True)
 
     assert ("DEBUG", "[latchkey gateway] hello from the gateway") in captured
+
+
+def test_gateway_output_tail_keeps_routing_and_reports_the_last_lines_redacted() -> None:
+    """The tail still logs every line at DEBUG, keeps only the newest ones, and redacts and truncates on render."""
+    tail = _GatewayOutputTail()
+    secret = "listen-password-value"
+    with _captured_log_records() as captured:
+        for index in range(_GATEWAY_OUTPUT_TAIL_MAX_LINES + 5):
+            tail.on_output(f"line {index}\n", is_stdout=True)
+        tail.on_output(f"config: password={secret}\n", is_stdout=False)
+        tail.on_output("x" * (_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS + 50) + "\n", is_stdout=False)
+
+    assert ("DEBUG", "[latchkey gateway] line 0") in captured
+    rendered_lines = tail.render((secret, "")).split("\n")
+    assert len(rendered_lines) == _GATEWAY_OUTPUT_TAIL_MAX_LINES
+    assert "line 0" not in rendered_lines
+    assert rendered_lines[-2] == "config: password=<redacted>"
+    assert rendered_lines[-1] == "x" * _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS + "...<truncated>"
+    assert all(secret not in line for line in rendered_lines)
+
+
+def test_describe_port_bindability_names_the_errno_of_a_held_port() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        held_port = holder.getsockname()[1]
+        assert _describe_port_bindability("127.0.0.1", held_port) == "EADDRINUSE"
+
+
+def test_describe_port_bindability_reports_a_released_port_as_free() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        released_port = probe.getsockname()[1]
+    assert _describe_port_bindability("127.0.0.1", released_port) == "free"
+
+
+def test_diagnosing_a_silent_gateway_still_starting_on_a_fresh_port(tmp_path: Path) -> None:
+    """A gateway alive but unbound at the deadline is terminated and reported as still running on a fresh port."""
+    port = _allocate_free_port("127.0.0.1")
+    events_log_path = tmp_path / "events.jsonl"
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        process = cg.run_process_in_background(command=["sleep", "30"], is_checked_by_group=False)
+        tail = _GatewayOutputTail()
+        with _captured_log_records() as captured:
+            error = _terminate_and_diagnose_unbound_gateway(
+                process=process,
+                output_tail=tail,
+                host="127.0.0.1",
+                port=port,
+                is_reused_port=False,
+                redacted_values=("secret",),
+                events_log_path=events_log_path,
+            )
+        assert process.poll() is not None
+
+    assert (
+        f"(gateway still running at the deadline; port free after cleanup; fresh port); see {events_log_path}"
+        in str(error)
+    )
+    assert (
+        "WARNING",
+        f"Latchkey gateway output before it failed to bind 127.0.0.1:{port}:\n<no output>",
+    ) in captured
 
 
 # The previous on-disk gateway-record tests went away when the record
@@ -838,9 +907,19 @@ def test_start_gateway_respawns_dead_gateway_on_same_port(tmp_path: Path) -> Non
         first_process.terminate()
         assert not manager.is_gateway_running
 
-        respawned_port = manager.start_gateway(cg)
+        with _captured_log_records() as captured:
+            respawned_port = manager.start_gateway(cg)
         assert respawned_port == original_port
         assert manager.is_gateway_running
+        assert (
+            "INFO",
+            f"Respawning shared Latchkey gateway on its previous port 127.0.0.1:{original_port} "
+            "(last running gateway exit code 0; 0 consecutive failed spawn(s) before this attempt)",
+        ) in captured
+        assert any(
+            level == "INFO" and message.startswith(f"Latchkey gateway bound 127.0.0.1:{original_port} ")
+            for level, message in captured
+        )
         running_after = manager._running_gateway
         assert running_after is not None
         assert running_after.process is not first_process

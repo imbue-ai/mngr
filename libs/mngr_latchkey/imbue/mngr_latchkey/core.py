@@ -17,6 +17,7 @@ locking concerns, and exactly one place to mock or replace when something
 needs to change.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -91,6 +93,13 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 # liveness probe would fail and trigger a spurious second spawn.
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+
+# How much of a spawning gateway's own output a failed bind reports: the last
+# lines it printed, each cut to a bounded length. Enough to hold a startup
+# error and the frames just above it, small enough to stay one readable log
+# record (and so one Sentry breadcrumb) per failed spawn.
+_GATEWAY_OUTPUT_TAIL_MAX_LINES: Final[int] = 20
+_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS: Final[int] = 300
 
 # Maximum request body size the gateway accepts, passed as ``--max-body-size``
 # to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote.provisioning`).
@@ -475,6 +484,27 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
     # One last probe in case the port came up between the final sleep
     # and the deadline, so a slow CI host doesn't false-fail.
     return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
+
+
+def _describe_port_bindability(host: str, port: int) -> str:
+    """Report whether ``host:port`` could be bound right now: ``"free"``, or the errno name that refused it.
+
+    Separates "the port is held by something else" (e.g. ``EADDRINUSE``) from
+    "the port was free and the gateway still never listened". ``SO_REUSEADDR``
+    is set as the gateway's own listener sets it, so a socket of the dead
+    gateway lingering in ``TIME_WAIT`` does not read as a conflict the gateway
+    itself would not hit. Any ``OSError`` is reported rather than raised, so
+    the diagnosis never replaces the bind-timeout error it annotates.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError as e:
+        if e.errno is None:
+            return type(e).__name__
+        return errno.errorcode.get(e.errno, str(e.errno))
+    return "free"
 
 
 def _parse_one_credential_status(raw_status: object, service_name: str) -> CredentialStatus:
@@ -1063,7 +1093,8 @@ def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
     """Forward one line of ``latchkey gateway`` output to the supervisor's structured log.
 
     :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through a
-    per-line callback; this plays that callback role. The gateway is a
+    per-line callback; :meth:`_GatewayOutputTail.on_output` (that callback for
+    the gateway) hands each line here. The gateway is a
     subprocess whose output is unstructured text we cannot emit as native JSONL
     events ourselves, so instead of teeing it into a separate, unrotated file we
     route each line through loguru at DEBUG. That folds it into the supervisor's
@@ -1075,6 +1106,96 @@ def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
     """
     del is_stdout
     logger.debug("[latchkey gateway] {}", line.rstrip("\n"))
+
+
+class _GatewayOutputTail(MutableModel):
+    """Rolling record of the last few output lines of one ``latchkey gateway`` spawn.
+
+    The gateway's output otherwise only reaches the local JSONL log at DEBUG (see
+    :func:`_log_gateway_output_line`), so a gateway that fails at startup leaves
+    nothing in the error a remote reader sees. :meth:`on_output` keeps that DEBUG
+    routing and also remembers the newest lines, so a failed bind can report what
+    the gateway said before it died. Holds at most
+    :data:`_GATEWAY_OUTPUT_TAIL_MAX_LINES` lines however long the gateway runs.
+    """
+
+    # Appended from the process's output reader thread, read from the spawning thread.
+    _lines: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=_GATEWAY_OUTPUT_TAIL_MAX_LINES))
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def on_output(self, line: str, is_stdout: bool) -> None:
+        """``on_output`` callback for the gateway subprocess: route the line to the log and remember it."""
+        _log_gateway_output_line(line, is_stdout)
+        with self._lock:
+            self._lines.append(line.rstrip("\n"))
+
+    def render(self, redacted_values: Collection[str]) -> str:
+        """Return the remembered lines, newest last, with every ``redacted_values`` occurrence replaced.
+
+        The gateway's environment carries its listen password and the
+        credential-store encryption key; replacing those exact values keeps
+        them out of the log even if the gateway ever echoed its configuration.
+        Each line is cut to :data:`_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS`.
+        """
+        with self._lock:
+            lines = list(self._lines)
+        rendered: list[str] = []
+        for line in lines:
+            for value in redacted_values:
+                if value:
+                    line = line.replace(value, "<redacted>")
+            if len(line) > _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS:
+                line = line[:_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS] + "...<truncated>"
+            rendered.append(line)
+        return "\n".join(rendered)
+
+
+def _terminate_and_diagnose_unbound_gateway(
+    process: RunningProcess,
+    output_tail: _GatewayOutputTail,
+    host: str,
+    port: int,
+    is_reused_port: bool,
+    redacted_values: Collection[str],
+    events_log_path: Path,
+) -> LatchkeyError:
+    """Terminate a gateway that never bound ``host:port`` and return the error that says why.
+
+    Logs the gateway's redacted output tail at WARNING, then builds an error
+    naming whether the gateway had exited (and with which code) or was still
+    starting, whether the port is bindable once the gateway is gone, and
+    whether the attempt reused the previous gateway's port.
+    """
+    # Read before ``terminate()`` so it reflects the gateway itself: an exit
+    # code means it died on its own (a port conflict or a startup fault),
+    # ``None`` that it was still starting. The output is logged here too, so
+    # it is recorded even if ``terminate()`` raises.
+    exit_code_at_deadline = process.poll()
+    logger.warning(
+        "Latchkey gateway output before it failed to bind {}:{}:\n{}",
+        host,
+        port,
+        output_tail.render(redacted_values) or "<no output>",
+    )
+    try:
+        process.terminate()
+    except (OSError, RuntimeError) as e:
+        logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
+    # After cleanup, so the probe sees whatever holds the port other than this spawn.
+    port_bindability = _describe_port_bindability(host, port)
+    gateway_state = "still running" if exit_code_at_deadline is None else f"exited with code {exit_code_at_deadline}"
+    return LatchkeyError(
+        "Spawned latchkey gateway did not bind {}:{} within {:.1f}s "
+        "(gateway {} at the deadline; port {} after cleanup; {}); see {} for details".format(
+            host,
+            port,
+            _GATEWAY_BIND_TIMEOUT_SECONDS,
+            gateway_state,
+            port_bindability,
+            "reused the previous gateway's port" if is_reused_port else "fresh port",
+            events_log_path,
+        )
+    )
 
 
 class _RunningGateway(FrozenModel):
@@ -1159,6 +1280,10 @@ class Latchkey(MutableModel):
     # ``_lock`` (which is held only for short state-mutation critical
     # sections) so the slow spawn path doesn't block fast-path readers.
     _spawn_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Spawn attempts that have failed since the last successful one. Read and
+    # written only while holding ``_spawn_lock``. Logged with every respawn so a
+    # gateway that keeps failing to come back reads as one counted streak.
+    _consecutive_failed_spawns: int = PrivateAttr(default=0)
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
@@ -1278,7 +1403,31 @@ class Latchkey(MutableModel):
             if running is not None and running.process.poll() is None:
                 return running.port
             preferred_port = running.port if running is not None else None
+            failed_spawns_before = self._consecutive_failed_spawns
+            # ``running`` is the last gateway that came up: a failed spawn is
+            # never recorded, so after a failure streak this is still the gateway
+            # whose death began the streak, and the exit code logged is its own.
+            if running is not None:
+                logger.info(
+                    "Respawning shared Latchkey gateway on its previous port {}:{} "
+                    "(last running gateway exit code {}; {} consecutive failed spawn(s) before this attempt)",
+                    self.listen_host,
+                    preferred_port,
+                    running.process.poll(),
+                    failed_spawns_before,
+                )
+            # Counted as failed until it returns, so every way out of
+            # ``_spawn_gateway`` other than success extends the streak.
+            self._consecutive_failed_spawns = failed_spawns_before + 1
             port, process = self._spawn_gateway(concurrency_group, plugin_dir, preferred_port=preferred_port)
+            self._consecutive_failed_spawns = 0
+            if failed_spawns_before > 0:
+                logger.info(
+                    "Shared Latchkey gateway came up on {}:{} after {} consecutive failed spawn(s)",
+                    self.listen_host,
+                    port,
+                    failed_spawns_before,
+                )
             with self._lock:
                 self._running_gateway = _RunningGateway(port=port, process=process)
         return port
@@ -2266,6 +2415,7 @@ class Latchkey(MutableModel):
         # Reuse the previously-bound port when respawning a dead gateway; otherwise
         # allocate a fresh free port for the first spawn.
         port = preferred_port if preferred_port is not None else _allocate_free_port(self.listen_host)
+        encryption_key = self._load_encryption_key()
         env = _build_gateway_env(
             listen_host=self.listen_host,
             listen_port=port,
@@ -2274,8 +2424,9 @@ class Latchkey(MutableModel):
             listen_password=password,
             extension_permissions_root=plugin_dir,
             local_device=self.device,
-            encryption_key=self._load_encryption_key(),
+            encryption_key=encryption_key,
         )
+        output_tail = _GatewayOutputTail()
 
         with log_span(
             "Starting shared Latchkey gateway on {}:{}",
@@ -2286,7 +2437,7 @@ class Latchkey(MutableModel):
                 process = concurrency_group.run_process_in_background(
                     command=[self.latchkey_binary, "gateway", "--max-body-size", str(GATEWAY_MAX_BODY_SIZE_BYTES)],
                     env=env,
-                    on_output=_log_gateway_output_line,
+                    on_output=output_tail.on_output,
                     # The supervisor's own gateway health check owns respawning a dead
                     # gateway, so this is not a group-checked strand: were it checked, a
                     # mid-session crash (non-zero exit) would make every subsequent
@@ -2297,6 +2448,7 @@ class Latchkey(MutableModel):
                 )
             except (ConcurrencyExceptionGroup, OSError) as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
+            spawned_at = time.monotonic()
 
             # Block until the freshly-spawned subprocess actually binds
             # its port. Returning earlier would let a caller use the
@@ -2305,15 +2457,21 @@ class Latchkey(MutableModel):
             # it so the caller doesn't end up with a half-started
             # subprocess they don't know about.
             if not _wait_for_port_listening(self.listen_host, port, timeout=_GATEWAY_BIND_TIMEOUT_SECONDS):
-                try:
-                    process.terminate()
-                except (OSError, RuntimeError) as e:
-                    logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
-                raise LatchkeyError(
-                    "Spawned latchkey gateway did not bind {}:{} within {:.1f}s; see {} for details".format(
-                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, forward_events_log_path(plugin_dir)
-                    )
+                raise _terminate_and_diagnose_unbound_gateway(
+                    process=process,
+                    output_tail=output_tail,
+                    host=self.listen_host,
+                    port=port,
+                    is_reused_port=preferred_port is not None,
+                    redacted_values=(password, encryption_key.get_secret_value()),
+                    events_log_path=forward_events_log_path(plugin_dir),
                 )
+            logger.info(
+                "Latchkey gateway bound {}:{} {:.2f}s after spawning",
+                self.listen_host,
+                port,
+                time.monotonic() - spawned_at,
+            )
 
         return port, process
 
