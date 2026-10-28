@@ -2,8 +2,8 @@
 
 Every control here is the one a user presses: the landing page and its
 consent screen, the Manage Accounts page's sign-in, the create form, the
-launcher's new chat and its composer, the Share tab, and the Settings tab's
-destroy. What the UI did is then confirmed by reading the app's own routes,
+desktop's launcher field, the Share tab, and the Settings tab's destroy.
+What the UI did is then confirmed by reading the app's own routes,
 through a same-origin fetch on a page it already has open -- the chrome page
 for the desktop's routes, the chat's page for the workspace's -- so each
 one's session authenticates the call.
@@ -33,12 +33,11 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.desktop_client.e2e_workspace_runner import CHAT_INPUT_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import CHAT_PAGE_URL_PATTERN
 from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import USER_TURN_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
-from imbue.minds.desktop_client.e2e_workspace_runner import start_new_chat_from_launcher
+from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.smoke_tests.data_types import StudioAppSession
@@ -77,6 +76,8 @@ _HOST_NAME_FIELD: Final[str] = "#host_name"
 _CREATE_ACCOUNT_LABEL: Final[str] = "#create-account"
 _LAUNCH_MODE_SELECT: Final[str] = "#launch_mode"
 _REGION_SELECT: Final[str] = "#region"
+# The form's "Enable sharing and web access" switch.
+_CREATE_SHARING_SWITCH: Final[str] = "#enable_web_access"
 _CREATE_SUBMIT: Final[str] = "#create-submit"
 _CREATING_PAGE: Final[str] = "#creating"
 IMBUE_CLOUD_LAUNCH_MODE: Final[str] = "IMBUE_CLOUD"
@@ -102,7 +103,7 @@ _MINT_AI_KEY_PATH: Final[str] = "/settings/ai-keys/mint"
 # paired with a base URL (which is what makes the workspace talk through Imbue's proxy).
 _SUBMIT_CREDENTIALS_PATH: Final[str] = "/api/claude-auth/submit-credentials"
 _IMBUE_AUTH_MODE: Final[str] = "imbue"
-# Its listing of the chats it knows, which is what a chat has to be in before it can be sent to.
+# Its listing of the chats it knows, which names the workspace's main chat.
 _CHATS_PATH: Final[str] = "/api/chats"
 _SHARING_PATH: Final[str] = "/api/v1/workspace-sharing/{agent_id}"
 _SHARING_READINESS_PATH: Final[str] = "/api/v1/workspace-sharing/{agent_id}/readiness"
@@ -118,10 +119,10 @@ _CREATE_TIMEOUT_SECONDS: Final[int] = 1200
 _DESKTOP_TIMEOUT_MS: Final[float] = 180_000.0
 # The welcome chat is framed by the desktop's app list, which arrives after the backdrop.
 _CHAT_FRAME_TIMEOUT_SECONDS: Final[float] = 240.0
-# A chat minted from the launcher is created asynchronously before its composer shows.
-_CHAT_INPUT_TIMEOUT_MS: Final[float] = 240_000.0
-# Its agent is started after that again, and only then is the chat something to send to.
-_CHAT_LISTED_TIMEOUT_SECONDS: Final[float] = 300.0
+# The chat app answers its listing only once it has read the agent list from mngr.
+_MAIN_CHAT_TIMEOUT_SECONDS: Final[float] = 120.0
+# The launcher's text reaches the main chat through the chat app's intake, which the chat's page then sends.
+_PROMPT_SHOWN_TIMEOUT_SECONDS: Final[float] = 120.0
 # Publishing dials the relay and waits on a certificate before the link shows.
 _PUBLISH_TIMEOUT_MS: Final[float] = 300_000.0
 _POLL_SECONDS: Final[float] = 2.0
@@ -139,6 +140,10 @@ _REPLY_TEXT_PRESENT_JS: Final[str] = f"""(text) => {{
         if (el.textContent !== null && el.textContent.trim() === text) return true;
     }}
     return false;
+}}"""
+_PROMPT_SHOWN_JS: Final[str] = f"""(marker) => {{
+    {_SCROLL_CHAT_TO_TAIL_JS}
+    return [...document.querySelectorAll('{USER_TURN_SELECTOR}')].some((el) => (el.textContent ?? '').includes(marker));
 }}"""
 _SELECT_VALUE_JS: Final[str] = "(select) => select.value"
 _ACCOUNT_LABEL_SHOWN_JS: Final[str] = f"""(email) => {{
@@ -224,8 +229,8 @@ def start_web_login(session: StudioAppSession, landed_on: str) -> str:
     """Open the app's web-login flow the way the page it landed on offers it; return the hosted sign-in URL.
 
     A fresh install is in its start flow, whose first question has a quiet
-    "I already have a workspace (log in)" way out; an install past onboarding
-    signs in from Manage Accounts.
+    "I have an account (log in)" way out; an install past onboarding signs in
+    from Manage Accounts.
     """
     if landed_on == _START_FLOW:
         return _start_web_login_from_start_flow(session)
@@ -329,6 +334,9 @@ def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str,
     region = str(page.eval_on_selector(_REGION_SELECT, _SELECT_VALUE_JS))
     if not region:
         raise SmokeAppError("The create form offers no Imbue Cloud region to create the workspace in.")
+    # The form shares a workspace on an account as it is created; the journey
+    # shares it from the Share tab instead, which only publishes an unshared one.
+    _turn_switch_off(page, _CREATE_SHARING_SWITCH)
     logger.info("Creating Imbue Cloud workspace {!r} as {} in region {}", workspace_name, account_email, region)
     page.click(_CREATE_SUBMIT)
     page.wait_for_selector(_CREATING_PAGE, state="attached", timeout=_PAGE_TIMEOUT_MS)
@@ -336,6 +344,13 @@ def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str,
     workspace_frame.wait_for_selector(DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_DESKTOP_TIMEOUT_MS)
     logger.info("The workspace's desktop rendered at {}", workspace_frame.url)
     return workspace_frame
+
+
+def _turn_switch_off(page: Page, switch: str) -> None:
+    """Flip a ``role="switch"`` control off unless it already is, and wait until it says it is off."""
+    if page.get_attribute(switch, "aria-checked") == "true":
+        page.click(switch)
+    page.wait_for_selector(f'{switch}[aria-checked="false"]', state="visible", timeout=_PAGE_TIMEOUT_MS)
 
 
 def agent_id_of_workspace_frame(session: StudioAppSession, workspace_frame: Frame) -> str:
@@ -365,58 +380,6 @@ def open_welcome_chat(workspace_frame: Frame) -> Frame:
     chat = chat_frame(workspace_frame, _CHAT_FRAME_TIMEOUT_SECONDS)
     logger.info("The workspace's welcome chat is framed at {}", chat.url)
     return chat
-
-
-def open_new_chat(workspace_frame: Frame) -> Frame:
-    """Start a chat from the desktop's launcher and return its frame once its composer is ready.
-
-    The welcome chat cannot take the prompt: a workspace that booted without
-    AI credentials renders the no-provider notice in place of its composer,
-    and the page reads its accounts only as it boots, so the composer appears
-    only after a reload -- which the welcome chat does not survive, since its
-    chat is created by its own first send and a reloaded page sends to a chat
-    the workspace does not have yet ("Chat '<id>' not found").
-
-    A chat started from the launcher is minted by the chat app at that
-    moment, on the account signed in by then: the launcher re-reads the
-    accounts before choosing one, so the credentials adopted out of band are
-    the account it starts on.
-    """
-    chat = start_new_chat_from_launcher(workspace_frame)
-    chat.wait_for_selector(CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_MS)
-    _wait_until_chat_is_listed(chat, _CHAT_LISTED_TIMEOUT_SECONDS)
-    logger.info("A new chat is open at {}", chat.url)
-    return chat
-
-
-def _wait_until_chat_is_listed(chat: Frame, timeout_seconds: float) -> None:
-    """Wait until the chat app lists ``chat``, which is when the chat is something to send to.
-
-    A create answers as soon as the chat has an id, and its composer renders
-    at once, but its agent is still starting; the chat app lists a chat only
-    once mngr has registered that agent, and a send before then is refused
-    with "Chat '<id>' not found".
-    """
-    match = CHAT_PAGE_URL_PATTERN.search(chat.url.split("?", 1)[0])
-    if match is None:
-        raise SmokeAppError(f"The chat page at {chat.url} does not name a chat in its URL.")
-    chat_id = match.group(1)
-    deadline = time.monotonic() + timeout_seconds
-    last_outcome = "not asked"
-    while time.monotonic() < deadline:
-        answer = _fetch_in_chat(chat, "GET", _CHATS_PATH, None)
-        body = answer.json_body() if answer.status == 200 else None
-        rows = body.get("chats", []) if isinstance(body, dict) else []
-        listed = [str(row.get("chat_id")) for row in rows if isinstance(row, dict)]
-        if chat_id in listed:
-            return
-        last_outcome = (
-            f"status {answer.status}, listed {listed}" if answer.status == 200 else f"status {answer.status}"
-        )
-        threading.Event().wait(timeout=_POLL_SECONDS)
-    raise SmokeAppError(
-        f"The chat app did not list chat {chat_id} within {timeout_seconds:.0f}s; last answer: {last_outcome}"
-    )
 
 
 def mint_workspace_llm_credentials(session: StudioAppSession, agent_id: str) -> str:
@@ -457,18 +420,66 @@ def adopt_imbue_credentials(chat: Frame, credential_blob: str) -> str:
     return account_id
 
 
-def send_prompt(chat: Frame, prompt: str) -> None:
-    """Type ``prompt`` into the chat's composer and send it; the user turn must render."""
-    chat.fill(CHAT_INPUT_SELECTOR, prompt)
-    chat.press(CHAT_INPUT_SELECTOR, "Enter")
-    chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=_PAGE_TIMEOUT_MS)
+def send_prompt_to_main_chat(workspace_frame: Frame, welcome_chat: Frame, prompt: str, marker: str) -> str:
+    """Send ``prompt`` with the desktop launcher's Enter, which sends a text to the workspace's main chat; return that
+    chat's id once its page shows the prompt (``marker`` is a string only the prompt carries).
+
+    A fresh workspace's main chat is its welcome chat, still awaiting its first send: the prompt is that send, and it
+    launches the chat's agent on the account signed in by then, so the credentials are adopted before this runs.
+    """
+    main_chat_id = _main_chat_id(welcome_chat, _MAIN_CHAT_TIMEOUT_SECONDS)
+    send_to_main_chat_from_launcher(workspace_frame, prompt)
+    _wait_until_chat_shows(
+        workspace_frame, main_chat_id, _PROMPT_SHOWN_JS, marker, _PROMPT_SHOWN_TIMEOUT_SECONDS, "the prompt"
+    )
+    logger.info("Confirmed that the main chat {} shows the prompt", main_chat_id)
+    return main_chat_id
 
 
-def wait_for_reply(chat: Frame, text: str, timeout_seconds: float) -> float:
-    """Wait for the chat to show a message whose whole text is ``text``; return how long it took."""
+def _main_chat_id(chat: Frame, timeout_seconds: float) -> str:
+    """The workspace's main chat, as the chat app's listing names it."""
+    deadline = time.monotonic() + timeout_seconds
+    last_outcome = "not asked"
+    while time.monotonic() < deadline:
+        answer = _fetch_in_chat(chat, "GET", _CHATS_PATH, None)
+        body = answer.json_body() if answer.status == 200 else None
+        main_chat_id = body.get("main_chat_id") if isinstance(body, dict) else None
+        if isinstance(main_chat_id, str) and main_chat_id:
+            return main_chat_id
+        last_outcome = f"status {answer.status}: {answer.body[:300]!r}"
+        threading.Event().wait(timeout=_POLL_SECONDS)
+    raise SmokeAppError(
+        f"GET {_CHATS_PATH} named no main chat within {timeout_seconds:.0f}s; last answer {last_outcome}"
+    )
+
+
+def wait_for_reply(workspace_frame: Frame, chat_id: str, text: str, timeout_seconds: float) -> float:
+    """Wait for chat ``chat_id`` to show a message whose whole text is ``text``; return how long it took."""
+    return _wait_until_chat_shows(workspace_frame, chat_id, _REPLY_TEXT_PRESENT_JS, text, timeout_seconds, repr(text))
+
+
+def _wait_until_chat_shows(
+    workspace_frame: Frame, chat_id: str, predicate_js: str, arg: str, timeout_seconds: float, what: str
+) -> float:
+    """Poll the page of chat ``chat_id`` until ``predicate_js`` holds for ``arg``; return how long it took.
+
+    The page is looked up again on every poll: a text arriving through the intake navigates the window showing the
+    chat, so its frame can be a new one.
+    """
     started_at = time.monotonic()
-    chat.wait_for_function(_REPLY_TEXT_PRESENT_JS, arg=text, timeout=timeout_seconds * 1000)
-    return time.monotonic() - started_at
+    deadline = started_at + timeout_seconds
+    last_outcome = "no page shows the chat"
+    while time.monotonic() < deadline:
+        chat = find_chat_frame(workspace_frame, chat_id)
+        if chat is not None:
+            try:
+                if chat.evaluate(predicate_js, arg):
+                    return time.monotonic() - started_at
+                last_outcome = f"its page at {chat.url} does not show it yet"
+            except PlaywrightError as exc:
+                last_outcome = f"its page at {chat.url} could not be read: {exc}"
+        threading.Event().wait(timeout=_POLL_SECONDS)
+    raise SmokeAppError(f"Chat {chat_id} did not show {what} within {timeout_seconds:.0f}s; {last_outcome}")
 
 
 def publish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:

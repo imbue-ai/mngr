@@ -367,13 +367,15 @@ the resource guards' shim directory on `PATH` are dropped, and
 explicitly. The `BROWSER` it is given is a no-op, so its web-login never
 reaches the operator's own browser (which would hand whatever account is
 signed in there to the app); the suite opens the hosted sign-in URL from the
-start flow's "I already have a workspace" aside and completes it in its own
+start flow's "I have an account (log in)" aside and completes it in its own
 headless Chromium.
 
 The workspace is created in the region the form already points at, which is
 the app's own choice for where this machine's workspaces run; a run therefore
 fails when that region is out of pool capacity, which is a true thing to
-report about the tier.
+report about the tier. The form shares a workspace on an account as it is
+created unless its sharing switch is turned off; the journey turns it off, so
+that its share step publishes the workspace from the Share tab.
 
 A fresh workspace boots with no AI credentials. A user gives it the account's
 own through the chat's provider chooser: its "Sign in with Imbue" lane floats
@@ -383,17 +385,14 @@ routes behind that lane directly -- `POST /settings/ai-keys/mint` on the
 desktop, then `POST /api/claude-auth/submit-credentials` into the chat,
 requiring the workspace to report back the proxied `imbue` auth mode -- without
 driving the lane's own controls; exercising those is a follow-up recorded in
-the spec. The prompt then goes to a chat started
-from the desktop's launcher, which the chat app mints on the account signed in
-by then (it re-reads the account list before choosing one). The suite waits for
-that chat to appear in the app's own `GET /api/chats` before typing: a create
-answers as soon as the chat has an id, and its composer renders at once, but a
-send before mngr has registered the chat's agent is refused with "Chat '<id>'
-not found". The seeded welcome chat cannot take the prompt: a workspace that
-booted without credentials renders the no-provider notice in place of its
-composer, and the page reads its accounts only as it boots -- while the reload
-that would show the composer loses the welcome chat's own creation, so its
-send is refused the same way.
+the spec. The prompt is then typed into the desktop's launcher field and sent
+with Enter, which sends a text to the workspace's main chat (the chat app's
+`main` launch path): in a fresh workspace that is the welcome chat, named
+"Main", still awaiting its first send. The prompt is that first send, so it
+launches the chat's agent on the account signed in by then. The suite reads
+the main chat's id from the chat app's own `GET /api/chats` (`main_chat_id`)
+before pressing Enter, then waits for that chat's page to show the prompt and
+the reply.
 
 **Running it locally.** The suite runs from a developer laptop against staging
 or production with nothing but this branch, so a developer can see whether the
@@ -415,8 +414,9 @@ tier passes or fails before any CI exists. What a run needs:
   operator call.
 - Toolchain: `uv run playwright install chromium` once (the hosted sign-in page
   and the share visit run in the suite's own headless Chromium). For the
-  dev-checkout build, the pinned Node on `PATH`
-  (`export PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH"`), then
+  dev-checkout build, the Node `apps/minds/.nvmrc` pins and its pnpm on `PATH`
+  (installed as `apps/minds/docs/dev-setup.md` describes; from the repo root,
+  `export PATH="$HOME/.nvm/versions/node/v$(cat apps/minds/.nvmrc)/bin:$PATH"`), then
   `cd apps/minds && pnpm install --frozen-lockfile && node scripts/ensure-binaries.js && pnpm run build:ui`.
 - The build under test, named by one env var: `MINDS_SMOKE_DEV_CHECKOUT=1` runs
   this checkout's Electron (the laptop default, and the only mode exercised so

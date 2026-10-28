@@ -33,12 +33,11 @@ from imbue.minds.smoke_tests.app_flows import destroy_workspace_from_settings
 from imbue.minds.smoke_tests.app_flows import is_workspace_gone
 from imbue.minds.smoke_tests.app_flows import list_workspaces
 from imbue.minds.smoke_tests.app_flows import mint_workspace_llm_credentials
-from imbue.minds.smoke_tests.app_flows import open_new_chat
 from imbue.minds.smoke_tests.app_flows import open_welcome_chat
 from imbue.minds.smoke_tests.app_flows import publish_share_from_panel
 from imbue.minds.smoke_tests.app_flows import read_sharing_status
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
-from imbue.minds.smoke_tests.app_flows import send_prompt
+from imbue.minds.smoke_tests.app_flows import send_prompt_to_main_chat
 from imbue.minds.smoke_tests.app_flows import start_web_login
 from imbue.minds.smoke_tests.app_flows import unpublish_share_from_panel
 from imbue.minds.smoke_tests.app_flows import wait_for_account_in_create_form
@@ -211,12 +210,13 @@ def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
         logger.info("Step 3: created workspace {} ({}, pool row {})", workspace_name, agent_id, host_db_id)
         screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
 
-        adopt_imbue_credentials(
-            open_welcome_chat(workspace_frame), mint_workspace_llm_credentials(studio_app, agent_id)
+        welcome_chat = open_welcome_chat(workspace_frame)
+        adopt_imbue_credentials(welcome_chat, mint_workspace_llm_credentials(studio_app, agent_id))
+        prompt = _HELLO_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=nonce, service=_HELLO_SERVICE)
+        main_chat_id = send_prompt_to_main_chat(workspace_frame, welcome_chat, prompt, nonce)
+        reply_seconds = wait_for_reply(
+            workspace_frame, main_chat_id, _READY_REPLY_TEMPLATE.format(nonce=nonce), _AGENT_REPLY_TIMEOUT_SECONDS
         )
-        chat = open_new_chat(workspace_frame)
-        send_prompt(chat, _HELLO_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=nonce, service=_HELLO_SERVICE))
-        reply_seconds = wait_for_reply(chat, _READY_REPLY_TEMPLATE.format(nonce=nonce), _AGENT_REPLY_TIMEOUT_SECONDS)
         logger.info("Step 4: the agent reported READY after {:.0f}s", reply_seconds)
         screenshot_every_page(studio_app.browser, smoke_output_dir, "05-agent-ready")
 

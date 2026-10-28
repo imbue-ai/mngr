@@ -1090,6 +1090,8 @@ _LAUNCHER_FIELD_SELECTOR: Final[str] = "[data-launcher-field]"
 _LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] textarea"
 _LAUNCHER_OVERLAY_SELECTOR: Final[str] = "[data-launcher-overlay]"
 NEW_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:new"]'
+# The chat's ``main`` launch path, "Send to main chat".
+MAIN_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:main"]'
 NEW_TERMINAL_ROW_SELECTOR: Final[str] = '[data-launch="terminal:new"]'
 _LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
 # How long the shell gets to frame the new chat's page after the row is pressed.
@@ -1274,6 +1276,11 @@ def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
     return matched
 
 
+def find_chat_frame(workspace: Page | Frame, chat_id: str) -> Frame | None:
+    """The frame of the page showing chat ``chat_id`` inside the workspace, or None while no page shows it."""
+    return next((frame for frame, frame_chat_id in _chat_frames_with_ids(workspace) if frame_chat_id == chat_id), None)
+
+
 def _find_chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[str]) -> Frame | None:
     """The first chat page's frame whose chat is not among ``known_chat_ids``, or None while there is none."""
     return next((frame for frame, chat_id in _chat_frames_with_ids(workspace) if chat_id not in known_chat_ids), None)
@@ -1324,6 +1331,22 @@ def start_new_chat_from_launcher(
     workspace.click(visible_row_selector)
     logger.info("Started a new chat from the launcher; waiting up to {:.0f}s for its frame", timeout_seconds)
     return _chat_frame_other_than(workspace, known_chat_ids, timeout_seconds)
+
+
+def send_to_main_chat_from_launcher(workspace: Page | Frame, text: str) -> None:
+    """Type ``text`` into the taskbar's launcher field and press Enter, which sends it to the workspace's main chat.
+
+    Focusing the field opens the launcher; Enter runs the highlighted row, so the press waits until that is the
+    main chat's row.
+    """
+    workspace.fill(_LAUNCHER_INPUT_SELECTOR, text)
+    workspace.wait_for_selector(
+        f'{visible_launcher_row_selector(MAIN_CHAT_ROW_SELECTOR)}[data-highlighted="true"]',
+        state="visible",
+        timeout=_LAUNCHER_ROW_TIMEOUT_SECONDS * 1000,
+    )
+    workspace.press(_LAUNCHER_INPUT_SELECTOR, "Enter")
+    logger.info("Sent a text to the main chat from the launcher")
 
 
 def _message_welcome_chat(page: Page | Frame, token: str) -> None:

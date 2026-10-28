@@ -13,6 +13,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from imbue.minds.desktop_client.e2e_workspace_runner import E2E_HARNESS_MARKER_ENV_VAR
+from imbue.minds.desktop_client.e2e_workspace_runner import MAIN_CHAT_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import NEW_CHAT_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import NEW_TERMINAL_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
@@ -25,7 +26,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import open_terminal_from_launcher
+from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import start_new_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 
@@ -285,6 +288,17 @@ def test_chat_frame_is_found_under_the_chat_root_the_desktop_frames() -> None:
     assert chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
 
 
+def test_find_chat_frame_is_the_page_of_the_chat_it_names_and_none_while_no_page_shows_it() -> None:
+    welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
+    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
+    root = _FakeFrame(
+        urls=[f"https://chat-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/"], child_frames=[welcome, chat]
+    )
+    workspace = _FakeWorkspaceFrame(child_frame_lists=[[root]])
+    assert find_chat_frame(cast(Frame, workspace), _CHAT_AGENT_ID) is cast(Frame, chat)
+    assert find_chat_frame(cast(Frame, workspace), _WORKSPACE_AGENT_ID) is None
+
+
 def test_chat_frame_polls_until_the_chat_attaches() -> None:
     # The shell frames the chat's page after the row is pressed, so it is not
     # there on the first scan; the poll runs through Playwright's own wait.
@@ -364,8 +378,35 @@ class _FakeTerminalLauncherWorkspace(_FakeLauncherWorkspace):
         self.waited_for.append(selector)
 
 
+class _FakeTypingLauncherWorkspace(_FakeWorkspaceFrame):
+    """The launcher fake for a text typed into the field: records every fill, wait and key press, in order."""
+
+    def __init__(self) -> None:
+        super().__init__(child_frame_lists=[])
+        self.actions: list[tuple[str, ...]] = []
+
+    def fill(self, selector: str, value: str) -> None:
+        self.actions.append(("fill", selector, value))
+
+    def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
+        self.actions.append(("wait", selector))
+
+    def press(self, selector: str, key: str) -> None:
+        self.actions.append(("press", selector, key))
+
+
 _VISIBLE_NEW_CHAT_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_CHAT_ROW_SELECTOR}"
 _VISIBLE_NEW_TERMINAL_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_TERMINAL_ROW_SELECTOR}"
+
+
+def test_send_to_main_chat_types_the_text_and_presses_enter_once_the_main_chat_row_is_the_highlighted_one() -> None:
+    workspace = _FakeTypingLauncherWorkspace()
+    send_to_main_chat_from_launcher(cast(Frame, workspace), "build me a thing")
+    assert workspace.actions == [
+        ("fill", _LAUNCHER_INPUT_SELECTOR, "build me a thing"),
+        ("wait", f'{_LAUNCHER_OVERLAY_SELECTOR}:visible {MAIN_CHAT_ROW_SELECTOR}[data-highlighted="true"]'),
+        ("press", _LAUNCHER_INPUT_SELECTOR, "Enter"),
+    ]
 
 
 def test_open_terminal_presses_the_terminal_row_and_waits_for_its_frame() -> None:
