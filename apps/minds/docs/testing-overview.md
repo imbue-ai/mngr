@@ -141,10 +141,10 @@ is the only thing that runs them.
   `test_claude_version_alignment.py`, `test_sse_redirect.py` (Chromium installed
   in-job), and `test_aws_workspace_release.py` (skips without AWS opt-in) run.
 
-`.github/workflows/release-tests.yml` (`workflow_dispatch` + `v*` tags) -- the
-*mngr* release suite only. Both jobs exclude the whole `apps/minds` tree by path
-(`--ignore apps/minds`); all Imbue Studio release tests run from `test-minds-release`
-above (the Imbue Studio release procedure is a manual dispatch, not a `v*` tag):
+`.github/workflows/release-tests.yml` (`workflow_dispatch`, and called by the mngr
+release pipeline in `publish.yml`) -- the *mngr* release suite only. Both jobs
+exclude the whole `apps/minds` tree by path (`--ignore apps/minds`); all Imbue
+Studio release tests run from `test-minds-release` above:
 
 - **`test-mngr-release-docker`** -- `(docker or docker_sdk) and release`, with
   `--ignore apps/minds`.

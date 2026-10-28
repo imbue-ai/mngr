@@ -1,0 +1,1 @@
+The release test that checks the version-pinned help-topic doc URL resolves now skips a version that is not on PyPI yet: the release pipeline runs the release tests before it publishes and tags the version, so that version's tag cannot exist during the run.

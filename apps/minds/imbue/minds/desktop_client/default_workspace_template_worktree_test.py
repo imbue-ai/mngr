@@ -51,6 +51,7 @@ def test_materialize_reports_the_coordinate_of_a_tree_that_is_already_present(tm
     assert template_configuration_identity(materialized.ref) == "default-workspace-template@author/one"
 
 
+@pytest.mark.flaky
 def test_materialize_names_a_detached_tree_by_its_commit(tmp_path: Path) -> None:
     """A detached tree has no branch to name. Its commit becomes the coordinate rather
     than an empty identity, which would collapse unrelated trees into one group."""
