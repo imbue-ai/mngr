@@ -1,0 +1,1 @@
+Test-only: `test_create_workspace_ignores_stale_ai_provider_field` no longer starts a real background create attempt. It cloned `https://example/repo` over the network, and a slow clone could outlive the test's concurrency-group teardown and fail it. It now uses the recording agent creator, like the other create-route happy-path tests.

@@ -3,12 +3,14 @@
 import importlib.resources
 import os
 import shlex
+import signal
 import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+import psutil
 import pytest
 
 from imbue.mngr import resources as mngr_resources
@@ -357,3 +359,40 @@ def test_a_signal_file_left_by_an_earlier_connect_does_not_stop_the_agent_on_a_p
 
     assert exit_code_file.read_text().strip() == "0"
     assert list((host_dir / "signals").iterdir()) == []
+
+
+def _find_child_sleep_pid(parent_pid: int) -> int | None:
+    return next((child.pid for child in psutil.Process(parent_pid).children() if child.name() == "sleep"), None)
+
+
+@pytest.mark.tmux
+def test_sigwinch_panes_script_run_is_unaffected_by_an_in_place_rewrite(mngr_test_prefix: str, tmp_path: Path) -> None:
+    """Rewriting the script in place while a run sits in its delay must not change what that run executes.
+
+    bash re-reads a script from its current offset between top-level commands, so the replacement
+    puts a comment under every offset the run could resume at, followed by ``exit 71``.
+    """
+    script_path = tmp_path / "sigwinch_panes.sh"
+    original_script = Path(_SIGWINCH_PANES_SCRIPT_PATH).read_bytes()
+    script_path.write_bytes(original_script)
+    process = subprocess.Popen(
+        ["bash", str(script_path), f"{mngr_test_prefix}sigwinch-rewrite", "agent", "nudge"],
+        env={**os.environ, "MNGR_SIGWINCH_DELAY_SECONDS": "73915"},
+        start_new_session=True,
+    )
+    try:
+        wait_for(
+            lambda: _find_child_sleep_pid(process.pid) is not None,
+            timeout=10.0,
+            error_message="sigwinch_panes.sh did not reach its delay",
+        )
+        script_path.write_bytes(b"#" * len(original_script) + b"\nexit 71\n")
+        sleep_pid = _find_child_sleep_pid(process.pid)
+        assert sleep_pid is not None
+        os.kill(sleep_pid, signal.SIGTERM)
+
+        assert process.wait(timeout=10) == 0
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()

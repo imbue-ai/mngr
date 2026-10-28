@@ -1506,7 +1506,8 @@ def test_create_workspace_ignores_stale_ai_provider_field(
     # The AI provider moved into the workspace's own sign-in modal. A stale
     # client still sending ai_provider (even a value that used to require an
     # API key) must be accepted -- the field is silently ignored.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.post(
         "/api/v1/workspaces",

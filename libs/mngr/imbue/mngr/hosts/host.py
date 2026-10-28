@@ -4395,7 +4395,7 @@ def _build_start_agent_shell_command(
     # those format tokens at hook-set time. In "fit" mode (the default sizing policy above)
     # the script also resizes the manual-pinned window to the attaching client, so we pass
     # #{client_width}/#{client_height} -- which tmux *does* expand at hook-fire time to the
-    # attaching client's geometry (verified) -- as trailing args. `run-shell -b` backgrounds
+    # attaching client's geometry (verified) -- as trailing args. `if-shell -b` backgrounds
     # it so the attach is never blocked, and the script delays before signaling so the
     # window has settled first. This uses a distinct hook slot ([98]) from the onboarding
     # hook ([99]) and, unlike that one-shot hook, is persistent (no `set-hook -u`).
@@ -4409,7 +4409,9 @@ def _build_start_agent_shell_command(
     if sigwinch_mode == _SIGWINCH_MODE_FIT:
         # Appended raw (not shlex-quoted) so tmux expands the format tokens at hook-fire.
         sigwinch_argv += " #{client_width} #{client_height}"
-    sigwinch_hook_value = f'run-shell -b "{sigwinch_argv}"'
+    # if-shell with an empty command runs the script without tmux ever displaying its output or
+    # exit status.
+    sigwinch_hook_value = f'if-shell -b "{sigwinch_argv}" ""'
     steps.append(
         f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
     )

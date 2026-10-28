@@ -1197,11 +1197,13 @@ def test_build_start_agent_shell_command_includes_sigwinch_hook(
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
-    # running the shipped script via run-shell -b against this session's window.
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]), running the
+    # shipped script via if-shell -b with an empty command, so tmux never displays its result.
     assert "set-hook" in result
     assert "client-attached[98]" in result
-    assert "run-shell -b" in result
+    assert 'if-shell -b "bash ' in result
+    assert 'fit #{client_width} #{client_height}" ""\'' in result
+    assert "run-shell" not in result
     assert "commands/sigwinch_panes.sh" in result
     # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
     assert "set-hook -u -t" not in result
