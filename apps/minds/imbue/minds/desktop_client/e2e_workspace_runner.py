@@ -1435,6 +1435,16 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
     chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
     _raise_chat_window(workspace, label=label)
+    # Try again shows only once the chooser has stopped asking for its provider list by itself;
+    # press it the way a user would.
+    chat.wait_for_selector("[data-e2e=lane-anthropic], [data-e2e=retry-providers]", timeout=60_000)
+    if chat.query_selector("[data-e2e=lane-anthropic]") is None:
+        logger.warning(
+            "[{}] the chooser could not load its providers; pressing Try again: {!r}",
+            label,
+            chat.inner_text("[data-e2e=provider-chooser]"),
+        )
+        _click_in_chat(workspace, chat, "[data-e2e=retry-providers]", label=label)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
     # the lane's primary method is the browser sign-in, which needs a human. When the
     # desktop app relays that sign-in, the chooser waits on the browser, and the other
