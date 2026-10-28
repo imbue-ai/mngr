@@ -1,0 +1,1 @@
+Changed: the "Timed out stopping a warm mngr process" error now records whether the call had timed out, the wall-clock and monotonic seconds the stop waited, and the function names on the warm process's reader thread at that moment, so the next occurrence shows whether the machine slept during the stop, the killed child was never reaped, or the backend was starved.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextvars
+import sys
+import traceback
 from pathlib import Path
 from queue import Queue
 from subprocess import TimeoutExpired
@@ -162,6 +164,25 @@ class RunningProcess:
         if thread.is_alive():
             stdout, stderr = self._read_output_for_error()
             raise TimeoutExpired(self._error_display, force_kill_seconds, stdout, stderr)
+
+    def get_reader_thread_stack(self) -> tuple[str, ...] | None:
+        """The ``module.function`` names on the reader thread's current stack, outermost first.
+
+        Shows which step a thread that outlived :meth:`terminate` is still in. Only code
+        names are returned (no file paths, arguments or locals), so the result is safe to
+        log. ``None`` when the thread is not running.
+        """
+        thread = self._thread
+        if thread is None or thread.ident is None:
+            return None
+        frame = sys._current_frames().get(thread.ident)
+        if frame is None:
+            return None
+        names = [
+            f"{stack_frame.f_globals.get('__name__', '<unknown>')}.{stack_frame.f_code.co_qualname}"
+            for stack_frame, _ in traceback.walk_stack(frame)
+        ]
+        return tuple(reversed(names))
 
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
