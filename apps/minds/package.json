@@ -28,7 +28,7 @@
   "devDependencies": {
     "@playwright/test": "1.60.0",
     "@todesktop/cli": "^1.28.1",
-    "electron": "45.0.0",
+    "electron": "45.1.0",
     "playwright": "1.60.0"
   },
   "engines": {

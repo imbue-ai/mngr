@@ -19,10 +19,10 @@ minimumReleaseAgeExclude:
   # too-new playwright even though the lockfile already carries it.
   - playwright
   - playwright-core
-  # Electron 45 carries the blocklist for the compromised eMudhra
-  # intermediates (electron/electron#55126), so it ships inside its cooldown.
-  # CLEANUP: remove after 2026-11-04, when 45.0.0 clears the 14-day window.
-  - electron@45.0.0
+  # Electron 45.1.0 carries the Node.js 24.22.1 security release, so it ships
+  # inside its cooldown.
+  # CLEANUP: remove after 2026-11-10, when 45.1.0 clears the 14-day window.
+  - electron@45.1.0
   - zod@4.6.7
 # Refuse a release whose publish-trust evidence (trusted publisher, provenance)
 # is weaker than an earlier release of the same package had.
