@@ -32,6 +32,7 @@ but coalescing avoids spinning up a redundant worker just to find an
 existing tunnel and exit.
 """
 
+import errno
 import threading
 import time
 from collections.abc import Iterator
@@ -42,6 +43,7 @@ from typing import Final
 
 import paramiko
 from loguru import logger
+from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -54,6 +56,9 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
+from imbue.imbue_common.suspension import ClockReading
+from imbue.imbue_common.suspension import read_clocks
+from imbue.imbue_common.suspension import was_suspended_since
 from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -73,6 +78,7 @@ from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.registry import resolve_backend_name
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -156,6 +162,9 @@ class _TransientFailureStreak(FrozenModel):
 
     length: PositiveInt = Field(description="How many discovery cycles in a row the step has failed")
     started_at: datetime = Field(description="When the streak's first failure happened")
+    started_clocks: ClockReading = Field(
+        description="Both clocks at the streak's first failure, to tell whether this machine slept during the streak"
+    )
     first_ssh_info: RemoteSSHInfo | None = Field(
         description="The SSH info the streak's first attempt used, or None for a step that is not given one"
     )
@@ -172,6 +181,7 @@ class _ObservedHostState(FrozenModel):
     is_after_change: bool = Field(
         description="Whether ``since`` is a change from an earlier state, rather than the first report of the host"
     )
+    provider_name: str = Field(description="The provider instance discovery last attributed the host to")
 
 
 @pure
@@ -186,13 +196,14 @@ def _changed_ssh_info_fields(first: RemoteSSHInfo | None, current: RemoteSSHInfo
 
 @pure
 def _advance_transient_failure_streak(
-    previous: _TransientFailureStreak | None, ssh_info: RemoteSSHInfo | None, now: datetime
+    previous: _TransientFailureStreak | None, ssh_info: RemoteSSHInfo | None, now: ClockReading
 ) -> _TransientFailureStreak:
     """The streak after one more transient failure, made with ``ssh_info``: a new one when there was none."""
     if previous is None:
         return _TransientFailureStreak(
             length=PositiveInt(1),
-            started_at=now,
+            started_at=datetime.fromtimestamp(now.wall_seconds, timezone.utc),
+            started_clocks=now,
             first_ssh_info=ssh_info,
             changed_ssh_info_fields=frozenset(),
         )
@@ -210,6 +221,35 @@ def _exception_chain(error: BaseException) -> Iterator[BaseException]:
     yield error
     if error.__cause__ is not None:
         yield from _exception_chain(error.__cause__)
+
+
+@pure
+def _describe_connect_errors(error: BaseException) -> str:
+    """The per-address socket errors behind a refused or unreachable connect, by errno name.
+
+    Paramiko folds ``ECONNREFUSED`` and ``EHOSTUNREACH`` into one
+    ``NoValidConnectionsError`` whose own errno is ``None`` (it prints as
+    ``[Errno None]``), keeping each address's original error in ``errors``.
+    Which of the two it was says whether anything is listening on the
+    endpoint's interface at all: a refusal is an absent listener on a reachable
+    address, an unreachable host is a network that does not lead there.
+    """
+    for link in _exception_chain(error):
+        if isinstance(link, NoValidConnectionsError):
+            return ", ".join(
+                f"{address[0]}:{address[1]} {_errno_name(socket_error)}"
+                for address, socket_error in sorted(link.errors.items(), key=lambda item: str(item[0]))
+            )
+    return "n/a (not a refused or unreachable connect)"
+
+
+@pure
+def _errno_name(error: BaseException) -> str:
+    """The symbolic errno of a socket error (``ECONNREFUSED``), or its type name when it carries none."""
+    error_number = error.errno if isinstance(error, OSError) else None
+    if error_number is None:
+        return type(error).__name__
+    return errno.errorcode.get(error_number, str(error_number))
 
 
 @pure
@@ -263,6 +303,15 @@ def _describe_observed_host_state(observed: _ObservedHostState | None) -> str:
     state_name = "unknown" if observed.state is None else observed.state.value
     origin = "a change this process saw" if observed.is_after_change else "the first report this process saw"
     return f"host state {state_name} since {observed.since.isoformat()} ({origin})"
+
+
+@pure
+def _describe_provider(observed: _ObservedHostState | None, mngr_ctx: MngrContext) -> str:
+    """The provider instance and backend a host belongs to, for a failure streak's report."""
+    if observed is None:
+        return "provider never reported to this process"
+    backend = resolve_backend_name(ProviderInstanceName(observed.provider_name), mngr_ctx)
+    return f"provider {observed.provider_name} (backend {backend})"
 
 
 @pure
@@ -378,7 +427,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provider_name: str,
         host_state: HostState | None,
     ) -> None:
-        self._observe_host_state(host_id, host_state)
+        self._observe_host_state(host_id, host_state, provider_name)
 
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
@@ -448,13 +497,20 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 self._pending_remote_agents.discard(instance_key_str)
             raise
 
-    def _observe_host_state(self, host_id: HostId, host_state: HostState | None) -> None:
-        """Remember the state discovery reported for a host, and when it last changed."""
+    def _observe_host_state(self, host_id: HostId, host_state: HostState | None, provider_name: str) -> None:
+        """Remember the state discovery reported for a host, when it last changed, and the host's provider."""
         with self._remote_hosts_lock:
             observed = self._observed_host_state_by_host_id.get(str(host_id))
             if observed is None or observed.state is not host_state:
                 self._observed_host_state_by_host_id[str(host_id)] = _ObservedHostState(
-                    state=host_state, since=datetime.now(timezone.utc), is_after_change=observed is not None
+                    state=host_state,
+                    since=datetime.now(timezone.utc),
+                    is_after_change=observed is not None,
+                    provider_name=provider_name,
+                )
+            else:
+                self._observed_host_state_by_host_id[str(host_id)] = observed.model_copy_update(
+                    to_update(observed.field_ref().provider_name, provider_name)
                 )
 
     def _run_remote_setup(
@@ -845,7 +901,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
         The report also says when the streak began, whether the SSH info changed
         during it, and since when the host has been in its reported state, which
         separate a host that moved or restarted under a running streak from one
-        that kept refusing the same connection all along.
+        that kept refusing the same connection all along. It names the host's
+        provider and backend, the per-address errno behind a refused or
+        unreachable connect, and whether this machine slept during the streak;
+        the streak's first (info) line carries the provider and errnos too.
         """
         if not is_transient_remote_wiring_error(error):
             logger.opt(exception=error).error("Failed to {}: {}", attempt_description, error)
@@ -853,7 +912,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         key = _TransientFailureStreakKey(host_id=host_id, step=step)
         with self._remote_hosts_lock:
             streak = _advance_transient_failure_streak(
-                self._transient_failure_streak_by_key.get(key), ssh_info, datetime.now(timezone.utc)
+                self._transient_failure_streak_by_key.get(key), ssh_info, read_clocks()
             )
             self._transient_failure_streak_by_key[key] = streak
             observed_host_state = self._observed_host_state_by_host_id.get(str(host_id))
@@ -862,19 +921,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
             logger.opt(exception=error).error(
                 "Failed to {} on {} consecutive discovery cycles with transient SSH errors while the host "
                 "reports as running; still retrying every cycle. Streak started at {}; SSH info changed during "
-                "the streak: {}; {}. Latest: {}",
+                "the streak: {}; {}; {}; connect errors: {}; machine suspended during the streak: {}. Latest: {}",
                 attempt_description,
                 streak_length,
                 streak.started_at.isoformat(),
                 _describe_ssh_info_changes(streak),
                 _describe_observed_host_state(observed_host_state),
+                _describe_provider(observed_host_state, self.mngr_ctx),
+                _describe_connect_errors(error),
+                "yes" if was_suspended_since(streak.started_clocks) else "no",
                 error,
             )
         elif streak_length == 1:
             logger.info(
-                "Failed to {} ({}); retrying on the next discovery cycle",
+                "Failed to {} ({}; {}; connect errors: {}); retrying on the next discovery cycle",
                 attempt_description,
                 error,
+                _describe_provider(observed_host_state, self.mngr_ctx),
+                _describe_connect_errors(error),
             )
         else:
             logger.debug(

@@ -298,7 +298,21 @@ class DiscoveryStreamConsumer(MutableModel):
         ssh_info = _convert_ssh_info(event.ssh)
         host_id_str = str(event.host_id)
         with self._lock:
+            previous_ssh_info = self._ssh_by_host_id.get(host_id_str)
             self._ssh_by_host_id[host_id_str] = ssh_info
+        if previous_ssh_info is not None and (previous_ssh_info.host, previous_ssh_info.port) != (
+            ssh_info.host,
+            ssh_info.port,
+        ):
+            # Says whether a host's endpoint moved under a tunnel that keeps failing to reach it.
+            logger.debug(
+                "SSH endpoint for host {} changed from {}:{} to {}:{}",
+                host_id_str,
+                previous_ssh_info.host,
+                previous_ssh_info.port,
+                ssh_info.host,
+                ssh_info.port,
+            )
         # Re-fire the discovery callback for every agent on this host so
         # ``LatchkeyDiscoveryHandler`` can set up the reverse tunnel now that
         # SSH info is finally available. The aggregator is the authoritative

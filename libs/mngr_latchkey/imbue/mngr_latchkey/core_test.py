@@ -8,6 +8,8 @@ import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -23,6 +25,9 @@ from pyinfra.api.exceptions import ConnectError
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.suspension import ClockReading
+from imbue.imbue_common.suspension import read_clocks
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -80,7 +85,12 @@ from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import TRANSIENT_FAILURE_REPORT_THRESHOLD
 from imbue.mngr_latchkey.discovery import _ContainerEndpoint
 from imbue.mngr_latchkey.discovery import _GatewayRoute
+from imbue.mngr_latchkey.discovery import _ObservedHostState
 from imbue.mngr_latchkey.discovery import _RemoteWiringStep
+from imbue.mngr_latchkey.discovery import _TransientFailureStreak
+from imbue.mngr_latchkey.discovery import _TransientFailureStreakKey
+from imbue.mngr_latchkey.discovery import _describe_connect_errors
+from imbue.mngr_latchkey.discovery import _describe_provider
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
@@ -2606,17 +2616,23 @@ def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_
     assert _error_messages_mentioning(captured, host_id) == errors_at_threshold
 
 
-def _desktop_tunnel_streak_report(
+def _desktop_tunnel_streak_logs(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
+    error: BaseException,
     observed_host_states: tuple[HostState, ...],
     ssh_info_per_attempt: tuple[RemoteSSHInfo, ...],
-) -> str:
-    """Fail the desktop gateway tunnel once per given SSH info, and return the error the streak is reported with."""
+    seeded_streak_start: ClockReading | None = None,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Fail a docker host's desktop gateway tunnel with ``error`` once per SSH info; return the agent id and logs.
+
+    ``seeded_streak_start``, when given, seeds a streak one attempt short of
+    the threshold that began at that reading, so the next attempt reports it.
+    """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     tunnel_manager = _ConfigurableFailureTunnelManager()
-    tunnel_manager._error_to_raise = paramiko.AuthenticationException("Authentication timeout.")
+    tunnel_manager._error_to_raise = error
     agent_id = AgentId()
     host_id = HostId()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
@@ -2628,11 +2644,38 @@ def _desktop_tunnel_streak_report(
             device=_DEVICE,
         )
         for host_state in observed_host_states:
-            handler._observe_host_state(host_id, host_state)
+            handler._observe_host_state(host_id, host_state, "docker")
+        if seeded_streak_start is not None:
+            key = _TransientFailureStreakKey(host_id=host_id, step=_RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL)
+            with handler._remote_hosts_lock:
+                handler._transient_failure_streak_by_key[key] = _TransientFailureStreak(
+                    length=PositiveInt(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1),
+                    started_at=datetime.fromtimestamp(seeded_streak_start.wall_seconds, timezone.utc),
+                    started_clocks=seeded_streak_start,
+                    first_ssh_info=ssh_info_per_attempt[0],
+                    changed_ssh_info_fields=frozenset(),
+                )
         with _captured_log_records() as captured:
             for ssh_info in ssh_info_per_attempt:
                 handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
-    errors = [message for level, message in captured if level == "ERROR" and str(agent_id) in message]
+    return str(agent_id), captured
+
+
+def _desktop_tunnel_streak_report(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    observed_host_states: tuple[HostState, ...],
+    ssh_info_per_attempt: tuple[RemoteSSHInfo, ...],
+) -> str:
+    """Fail the desktop gateway tunnel once per given SSH info, and return the error the streak is reported with."""
+    agent_id, captured = _desktop_tunnel_streak_logs(
+        tmp_path,
+        temp_mngr_ctx,
+        paramiko.AuthenticationException("Authentication timeout."),
+        observed_host_states,
+        ssh_info_per_attempt,
+    )
+    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
     assert len(errors) == 1, captured
     return errors[0]
 
@@ -2669,6 +2712,106 @@ def test_a_reported_streak_on_unchanged_ssh_info_says_so(tmp_path: Path, temp_mn
     assert "(the first report this process saw)" in report
 
 
+# A loopback endpoint refused outright, beside an address the network cannot route to.
+_REFUSED_LOOPBACK_CONNECT_ERROR = NoValidConnectionsError(
+    {
+        ("127.0.0.1", 50161): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+        ("127.0.0.2", 50161): OSError(errno.EHOSTUNREACH, "No route to host"),
+    }
+)
+
+
+def _refused_loopback_ssh_info(tmp_path: Path) -> RemoteSSHInfo:
+    return RemoteSSHInfo(user="root", host="127.0.0.1", port=50161, key_path=tmp_path / "k")
+
+
+def test_a_reported_refused_connect_streak_names_the_provider_and_each_address_errno(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The streak's first line and its report both say which provider owns the host and how each address failed.
+
+    ``NoValidConnectionsError`` prints as ``[Errno None]``; the per-address
+    errnos are what tell an absent listener from an unroutable address.
+    """
+    agent_id, captured = _desktop_tunnel_streak_logs(
+        tmp_path,
+        temp_mngr_ctx,
+        _REFUSED_LOOPBACK_CONNECT_ERROR,
+        (HostState.RUNNING,),
+        (_refused_loopback_ssh_info(tmp_path),) * TRANSIENT_FAILURE_REPORT_THRESHOLD,
+    )
+
+    infos = [message for level, message in captured if level == "INFO" and agent_id in message]
+    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
+    assert len(infos) == 1, captured
+    assert len(errors) == 1, captured
+    for message in (infos[0], errors[0]):
+        assert "provider docker (backend docker)" in message
+        assert "connect errors: 127.0.0.1:50161 ECONNREFUSED, 127.0.0.2:50161 EHOSTUNREACH" in message
+    assert "machine suspended during the streak: no" in errors[0]
+
+
+def test_a_reported_streak_says_when_the_machine_slept_during_it(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    now = read_clocks()
+    # The wall clock ran an hour further than the monotonic one since the streak began: a sleep.
+    started_before_a_sleep = ClockReading(
+        wall_seconds=now.wall_seconds - 3900.0, monotonic_seconds=now.monotonic_seconds - 300.0
+    )
+
+    agent_id, captured = _desktop_tunnel_streak_logs(
+        tmp_path,
+        temp_mngr_ctx,
+        _REFUSED_LOOPBACK_CONNECT_ERROR,
+        (HostState.RUNNING,),
+        (_refused_loopback_ssh_info(tmp_path),),
+        seeded_streak_start=started_before_a_sleep,
+    )
+
+    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
+    assert len(errors) == 1, captured
+    assert "machine suspended during the streak: yes" in errors[0]
+
+
+def test_describe_provider_names_the_configured_backend_of_a_provider_instance(temp_mngr_ctx: MngrContext) -> None:
+    observed = _ObservedHostState(
+        state=HostState.RUNNING,
+        since=datetime.now(timezone.utc),
+        is_after_change=False,
+        provider_name="my-docker",
+    )
+    config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("my-docker"): ProviderInstanceConfig(backend=ProviderBackendName("docker"))},
+        )
+    )
+    configured_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
+    unconfigured_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(
+            temp_mngr_ctx.field_ref().config,
+            temp_mngr_ctx.config.model_copy_update(to_update(temp_mngr_ctx.config.field_ref().providers, {})),
+        )
+    )
+
+    assert _describe_provider(observed, configured_ctx) == "provider my-docker (backend docker)"
+    assert _describe_provider(observed, unconfigured_ctx) == "provider my-docker (backend my-docker)"
+    assert _describe_provider(None, configured_ctx) == "provider never reported to this process"
+
+
+def test_describe_connect_errors_finds_a_wrapped_refusal_and_says_when_there_is_none() -> None:
+    wrapped = _raised_from(
+        RemoteGatewayError("Failed to reach the gateway"),
+        NoValidConnectionsError({("127.0.0.3", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "refused")}),
+    )
+    without_errno = NoValidConnectionsError({("127.0.0.3", 22002): ConnectionRefusedError()})
+
+    assert _describe_connect_errors(wrapped) == "127.0.0.3:22002 ECONNREFUSED"
+    assert _describe_connect_errors(without_errno) == "127.0.0.3:22002 ConnectionRefusedError"
+    assert _describe_connect_errors(paramiko.SSHException("No existing session")) == (
+        "n/a (not a refused or unreachable connect)"
+    )
+
+
 def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_threshold(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2681,7 +2824,7 @@ def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     tunnel_manager = _ConfigurableFailureTunnelManager()
     tunnel_manager._error_to_raise = NoValidConnectionsError(
-        {("203.0.113.9", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")}
+        {("127.0.0.3", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")}
     )
     agent_id = AgentId()
     host_id = HostId()

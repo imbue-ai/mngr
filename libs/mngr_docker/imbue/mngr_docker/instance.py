@@ -1378,7 +1378,15 @@ kill -TERM 1
             # mapping cannot be read right now (e.g. it stopped in the window
             # since the caller's status check) must not break paths that
             # previously worked, so keep the recorded port.
-            logger.warning("Could not read live SSH port for host {}: {}", host_record.certified_host_data.host_id, e)
+            logger.warning(
+                "Could not read live SSH port for host {} (keeping recorded port {}; container status {}; "
+                "published container ports: {}): {}",
+                host_record.certified_host_data.host_id,
+                recorded_ssh_port,
+                container.status,
+                ", ".join(sorted(port for port, bindings in (container.ports or {}).items() if bindings)) or "none",
+                e,
+            )
             return recorded_ssh_port
 
         if live_ssh_port == recorded_ssh_port:

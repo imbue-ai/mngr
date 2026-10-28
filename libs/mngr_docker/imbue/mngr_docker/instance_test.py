@@ -1617,7 +1617,9 @@ class _FakePortedContainer:
         self.status = "running"
         self.id = f"fake-container-{host_id}"
         self.short_id = self.id[:10]
-        self.ports = {f"{CONTAINER_SSH_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(ssh_host_port)}]}
+        self.ports: dict[str, list[dict[str, str]] | None] = {
+            f"{CONTAINER_SSH_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(ssh_host_port)}]
+        }
 
     def reload(self) -> None:
         """No-op: the fake's attributes are fixed."""
@@ -1786,7 +1788,7 @@ def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
     container_without_mapping = _FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT)
-    container_without_mapping.ports = {}
+    container_without_mapping.ports = {f"{CONTAINER_SSH_PORT}/tcp": None}
 
     with capture_loguru() as log_output:
         host = provider._create_host_from_container(_as_sdk_container(container_without_mapping))
@@ -1799,6 +1801,8 @@ def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
     assert stored_record.last_discovered_ssh_port == _RECORDED_STALE_SSH_PORT
 
     assert "Could not read live SSH port" in log_output.getvalue()
+    assert f"keeping recorded port {_RECORDED_STALE_SSH_PORT}" in log_output.getvalue()
+    assert "published container ports: none" in log_output.getvalue()
 
 
 def test_get_ssh_keypair_links_known_hosts_next_to_a_per_host_key(temp_mngr_ctx: MngrContext) -> None:
