@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.22] - 2026-10-28
+
 ### Added
 
 - Added: `RunningProcess.get_reader_thread_stack()` returns the reader thread's `module.function` names (no paths, arguments, or locals) for diagnosing a `terminate()` that timed out.

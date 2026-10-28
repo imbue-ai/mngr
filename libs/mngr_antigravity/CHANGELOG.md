@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-10-28
+
 ### Added
 
 - Added: The statusline records agy's reasoning effort as `effort` in `model_state.json` alongside the model, dropping the matching tier suffix from the model name.

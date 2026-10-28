@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-10-28
+
 ### Added
 
 - Added: `ImbueCloudAccountDeletedError`, raised when the connector refuses a call with 403 `account_deleted` (e.g. a deleted account's device-token exchange during `mngr imbue_cloud login`); it carries the connector's own message and the CLI emits it as `code: account_deleted` (mirroring `account_suspended`), so the minds desktop client can key off the refusal structurally.

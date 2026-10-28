@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-10-28
+
 ### Added
 
 - Added: `version_mismatch` setting on the pi-coding agent type: `ERROR` (default) fails `mngr create` on a version mismatch; `WARN` logs a warning and creates on the installed binary.

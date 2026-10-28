@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-10-28
+
 ### Added
 
 - Added: `version_mismatch` setting on the claude agent type: `ERROR` (default) fails `mngr create` when the installed claude does not report the pinned `version`; `WARN` logs a warning and creates on the installed binary.

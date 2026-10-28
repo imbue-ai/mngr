@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-10-28
+
 ### Changed
 
 - Changed: A failed `latchkey auth re-encrypt` during a credential export now reports counts and flags (timeout elapsed, run duration, services requested, whether a destination key and account were given — never names), so a signal kill such as `-15` is diagnosable.

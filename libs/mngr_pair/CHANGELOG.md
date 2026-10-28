@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-10-28
+
 ### Fixed
 
 - Fixed: `mngr pair`'s first pass now always ends with a `pair_transferring` event carrying `is_transferring: false`, even when unison found nothing to move, so a caller can tell "compared and level" from "still comparing"; human output prints `Up to date.` at that point.

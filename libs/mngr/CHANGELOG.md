@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-10-28
+
 ### Added
 
 - Added: `VersionMismatchPolicy` (`ERROR`/`WARN`) and a `mismatch_policy` argument on `verify_pinned_cli_version`, letting an agent type choose whether a CLI that does not report its pinned version fails provisioning or only logs a warning.

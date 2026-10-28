@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-10-28
+
 ### Added
 
 - Added: `local_ca_dir` and `local_ca_cert_path` in `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` in `imbue.mngr_forward.primitives`, so host applications can locate the proxy's local CA certificate from the mngr host dir alone and pin it when verifying the proxy's TLS.
