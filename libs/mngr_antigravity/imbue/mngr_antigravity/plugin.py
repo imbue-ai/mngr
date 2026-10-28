@@ -111,10 +111,12 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
+from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -586,6 +588,14 @@ class AntigravityAgent(
     # spans the terminal width, which at the minimum width is just two ``─`` -- hence
     # ``{2,}`` rather than a longer run.
     TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
+
+    # agy shows a pasted message as e.g. ``[Pasted text #1 +20 lines]`` or ``[Pasted text #1 1500 chars]``.
+    PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]] = ("[Pasted text ",)
+
+    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+        return build_unsubmitted_message_retry_gate(
+            message=message, paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES
+        )
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy

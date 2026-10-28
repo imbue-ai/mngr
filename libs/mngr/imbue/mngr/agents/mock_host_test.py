@@ -1,5 +1,7 @@
 """Shared host mocks for agent unit tests (imported explicitly, defines no tests)."""
 
+import shlex
+import subprocess
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -8,6 +10,21 @@ import pydantic
 
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
+
+
+def run_bash_against_stand_in_pane(script: str, pane_content: str) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` under bash with ``tmux`` replaced by a shell function, so no tmux server is involved.
+
+    ``tmux capture-pane`` prints ``pane_content``; any other tmux command prints itself instead,
+    e.g. ``tmux send-keys -t =s:0 Enter``.
+    """
+    stand_in_tmux = (
+        f"tmux() {{ if [ \"$1\" = capture-pane ]; then printf '%s\\n' {shlex.quote(pane_content)}; "
+        "else printf 'tmux %s\\n' \"$*\"; fi; }"
+    )
+    return subprocess.run(
+        ["bash", "-c", f"{stand_in_tmux}\n{script}"], capture_output=True, text=True, check=False, timeout=5.0
+    )
 
 
 def is_send_preflight_command(command: str) -> bool:

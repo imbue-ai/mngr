@@ -1,7 +1,9 @@
 """Unit tests for InteractiveTuiAgent's contract."""
 
 import contextlib
+import inspect
 import re
+import shlex
 from typing import Final
 from typing import Generator
 from typing import Sequence
@@ -9,14 +11,21 @@ from typing import cast
 
 import pytest
 
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.mock_host_test import ScriptedHost
+from imbue.mngr.agents.mock_host_test import run_bash_against_stand_in_pane
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import _PANE_SHOWS_MESSAGE_FUNCTION
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
+from imbue.mngr.agents.tui_utils import build_normalized_message_probe
+from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.errors import InvalidPastePlaceholderPrefixesError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -26,6 +35,12 @@ from imbue.mngr.primitives import AgentName
 
 class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
     TUI_READY_INDICATOR = "probe-banner"
+    PASTE_PLACEHOLDER_PREFIXES = ("[Pasted text ",)
+
+    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+        return build_unsubmitted_message_retry_gate(
+            message=message, paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES
+        )
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -125,6 +140,12 @@ def test_build_submission_evidence_probes_is_abstract_on_interactive_tui_agent()
     """Every subclass must declare its durable submission evidence."""
     assert "_build_submission_evidence_probes" in InteractiveTuiAgent.__abstractmethods__
     assert "_build_submission_evidence_probes" not in _ProbeTuiAgent.__abstractmethods__
+
+
+def test_build_enter_retry_gate_is_abstract_on_interactive_tui_agent() -> None:
+    """Every subclass must say when a swallowed Enter may be re-sent."""
+    assert "_build_enter_retry_gate" in InteractiveTuiAgent.__abstractmethods__
+    assert "_build_enter_retry_gate" not in _ProbeTuiAgent.__abstractmethods__
 
 
 def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
@@ -285,6 +306,105 @@ def test_send_message_records_cleared_event_instead_of_warning_when_restored_com
     assert "cleared_restored_input_text" in event_commands[0]
     assert "/restored-command-71935" in event_commands[0]
     assert any("send-keys -t =s:0 Enter" in command for command in host.captured)
+
+
+class _ChipPastingTuiAgent(_RecordingTuiAgent):
+    PASTE_PLACEHOLDER_PREFIXES = ("[Pasted: ",)
+
+
+@pytest.mark.parametrize(
+    ("agent_class", "pane_content"),
+    [
+        pytest.param(_RecordingTuiAgent, "probe-banner > [Pasted text #1 +20 lines]", id="pasted_text_placeholder"),
+        pytest.param(_ChipPastingTuiAgent, "probe-banner > [Pasted: 3 lines]", id="declared_placeholder"),
+    ],
+)
+def test_send_message_counts_a_paste_placeholder_as_the_visible_paste(
+    agent_class: type[_RecordingTuiAgent], pane_content: str
+) -> None:
+    """The input box shows only the TUI's paste placeholder, never the message text, and the send still proceeds."""
+    agent = _make_recording_agent(pane_content, agent_class=agent_class)
+    agent.send_message(_RESUME_MESSAGE)
+    assert agent.steps == ["preflight", "paste"]
+    (submit_command,) = cast(ScriptedHost, agent.host).sent_commands
+    _, _, submit_script = shlex.split(submit_command)
+    result = run_bash_against_stand_in_pane(submit_script, pane_content)
+    assert result.stdout.splitlines() == ["tmux send-keys -t =s:0 Enter"]
+
+
+@pytest.mark.parametrize(
+    "declared_prefixes",
+    [
+        pytest.param("[Pasted: ", id="bare_string_missing_tuple_comma"),
+        pytest.param(("[Pasted: ", ""), id="empty_prefix"),
+        pytest.param(["[Pasted: "], id="list"),
+        pytest.param((b"[Pasted: ",), id="non_string_prefix"),
+    ],
+)
+def test_declaring_malformed_paste_placeholders_fails_when_the_class_is_defined(declared_prefixes: object) -> None:
+    with pytest.raises(InvalidPastePlaceholderPrefixesError):
+        type(
+            "_MalformedPlaceholderTuiAgent",
+            (_ProbeTuiAgent,),
+            {"PASTE_PLACEHOLDER_PREFIXES": declared_prefixes, "__module__": __name__},
+        )
+
+
+def test_a_concrete_tui_agent_that_leaves_out_paste_placeholders_fails_when_the_class_is_defined() -> None:
+    with pytest.raises(InvalidPastePlaceholderPrefixesError, match="must declare PASTE_PLACEHOLDER_PREFIXES"):
+
+        class _UndeclaredPlaceholderTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
+            TUI_READY_INDICATOR = "probe-banner"
+
+            def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+                return None
+
+            def _build_submission_evidence_probes(
+                self, message: str, policy: SubmissionConfirmationPolicy
+            ) -> Sequence[SubmissionEvidenceProbe]:
+                return []
+
+
+def test_an_abstract_tui_agent_base_may_leave_the_paste_placeholders_to_its_subclasses() -> None:
+    class _AbstractTuiAgentBase(InteractiveTuiAgent[AgentTypeConfig]):
+        TUI_READY_INDICATOR = "probe-banner"
+
+    class _ConcreteTuiAgent(_AbstractTuiAgentBase):
+        PASTE_PLACEHOLDER_PREFIXES = ()
+
+        def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+            return None
+
+        def _build_submission_evidence_probes(
+            self, message: str, policy: SubmissionConfirmationPolicy
+        ) -> Sequence[SubmissionEvidenceProbe]:
+            return []
+
+    assert inspect.isabstract(_AbstractTuiAgentBase)
+    assert not hasattr(_AbstractTuiAgentBase, "PASTE_PLACEHOLDER_PREFIXES")
+    assert not inspect.isabstract(_ConcreteTuiAgent)
+
+
+def test_send_message_confirms_through_the_agents_own_enter_retry_gate() -> None:
+    """The subclass's own gate, not ``build_unsubmitted_message_retry_gate``'s, is what the confirmation script runs before a retry."""
+
+    class _FooterGatedTuiAgent(_RecordingTuiAgent):
+        def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+            return EnterRetryGate(condition_command=NonEmptyStr("test -e /tmp/footer-gate-marker-28417"))
+
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}",
+        CommandResult(stdout="MNGR_CONFIRMED never\n", stderr="", success=True),
+        probes=[_never_confirming_probe()],
+        agent_class=_FooterGatedTuiAgent,
+    )
+    agent.send_message(_RESUME_MESSAGE)
+    confirmation_commands = [c for c in cast(ScriptedHost, agent.host).sent_commands if "MNGR_CONFIRMED" in c]
+    assert len(confirmation_commands) == 1
+    retry_loop = confirmation_commands[0][confirmation_commands[0].index("while :") :]
+    assert "test -e /tmp/footer-gate-marker-28417" in retry_loop
+    assert shlex.quote(build_normalized_message_probe(_RESUME_MESSAGE)) not in retry_loop
+    assert _PANE_SHOWS_MESSAGE_FUNCTION not in retry_loop
 
 
 @pytest.mark.allow_warnings

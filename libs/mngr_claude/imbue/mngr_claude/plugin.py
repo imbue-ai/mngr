@@ -39,6 +39,7 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -46,6 +47,7 @@ from imbue.mngr.agents.tui_utils import TUI_READY_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
+from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_key_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
@@ -2405,6 +2407,9 @@ class ClaudeAgent(
     # get_tui_ready_indicator below rather than as a pattern here, because the question is
     # positional -- see has_input_prompt_line.
 
+    # Claude Code shows a pasted message as e.g. ``[Pasted text #2 +20 lines]``.
+    PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]] = ("[Pasted text ",)
+
     # Path expression for mngr's always-provisioned raw mirror of Claude's
     # session JSONL, read by the submission-evidence probes. The embedded
     # $MNGR_AGENT_STATE_DIR is evaluated on the host by the env prefix each
@@ -2520,6 +2525,11 @@ class ClaudeAgent(
             baseline_command=self._build_transcript_size_baseline_command(file_path_expression),
             poll_command=poll_command,
             is_rejection=True,
+        )
+
+    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+        return build_unsubmitted_message_retry_gate(
+            message=message, paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES
         )
 
     def _build_submission_evidence_probes(

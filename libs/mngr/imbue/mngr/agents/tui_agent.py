@@ -8,8 +8,10 @@ durable evidence probes that prove their TUI accepted a submitted message.
 
 from __future__ import annotations
 
+import inspect
 import re
 from abc import abstractmethod
+from typing import Any
 from typing import Callable
 from typing import ClassVar
 from typing import Sequence
@@ -20,6 +22,7 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.tui_utils import DEFAULT_CONFIRMATION_TIMEOUT_SECONDS
+from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import RELAXED_CONFIRMATION_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -28,6 +31,7 @@ from imbue.mngr.agents.tui_utils import is_slash_command_message
 from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import submit_message_and_confirm
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
+from imbue.mngr.errors import InvalidPastePlaceholderPrefixesError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
@@ -53,6 +57,15 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
       ``wait_for_ready_signal``. A startup-only banner is unsuitable: it does not
       render when resuming a saved session, so prefer the input prompt glyph (or
       the input-box chrome) over a welcome banner.
+    * ``PASTE_PLACEHOLDER_PREFIXES`` -- what the input box shows in place of a pasted
+      message, which hides the message's own text until it is submitted (for example
+      ``[Pasted text #2 +20 lines]``); ``()`` for a TUI that echoes a paste as text.
+    * ``_build_enter_retry_gate`` -- the pane test that says whether a swallowed Enter
+      may be re-sent: whether the message is still waiting in the input box, which only
+      the TUI's own screen can tell apart from a message it already took (shown in the
+      scrollback or as a queued entry). ``build_unsubmitted_message_retry_gate`` builds
+      the test for a TUI that keeps an accepted message off the input box and in which
+      an Enter on an empty input box does nothing.
     * ``_build_submission_evidence_probes`` -- the durable on-disk evidence
       (transcript records, marker files) that proves the TUI accepted a
       submitted message. The submit-and-confirm engine in ``tui_utils``
@@ -67,11 +80,28 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     """
 
     TUI_READY_INDICATOR: ClassVar[str | re.Pattern[str] | Callable[[str], bool]]
+    PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]]
 
     confirmation_timeout_seconds: float = Field(
         default=DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
         description="How long to poll for durable submission evidence before a strict send fails",
     )
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        if not hasattr(cls, "PASTE_PLACEHOLDER_PREFIXES"):
+            if inspect.isabstract(cls):
+                return
+            raise InvalidPastePlaceholderPrefixesError(
+                f"{cls.__name__} must declare PASTE_PLACEHOLDER_PREFIXES: what its input box shows in place of a "
+                "pasted message, or () when it shows the pasted text"
+            )
+        prefixes = cls.PASTE_PLACEHOLDER_PREFIXES
+        if not isinstance(prefixes, tuple) or not all(isinstance(prefix, str) and prefix != "" for prefix in prefixes):
+            raise InvalidPastePlaceholderPrefixesError(
+                f"{cls.__name__}.PASTE_PLACEHOLDER_PREFIXES must be a tuple of non-empty strings, got {prefixes!r}"
+            )
 
     def get_tui_ready_indicator(self) -> str | re.Pattern[str] | Callable[[str], bool]:
         return self.TUI_READY_INDICATOR
@@ -87,6 +117,13 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         frozen at create time, so a probe that needs a newly provisioned hook
         would silently never confirm on an existing agent. An empty sequence
         degrades the send to a best-effort Enter.
+        """
+
+    @abstractmethod
+    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
+        """Return the pane test that decides whether a swallowed Enter is re-sent for this message.
+
+        None re-sends Enter at every retry offset without reading the pane.
         """
 
     def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
@@ -216,6 +253,8 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                 tmux_target=target_arg,
                 message=message,
                 probes=probes,
+                paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES,
+                enter_retry_gate=self._build_enter_retry_gate(message),
                 timeout_seconds=timeout_seconds,
             )
             if outcome.is_confirmed and outcome.is_rejection:

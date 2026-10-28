@@ -230,6 +230,10 @@ class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
+class InvalidPastePlaceholderPrefixesError(AgentError, TypeError):
+    """Raised when a concrete TUI agent type omits PASTE_PLACEHOLDER_PREFIXES, or any TUI agent type sets it to anything but a tuple of non-empty strings."""
+
+
 class TrajectoryBuildError(AgentError):
     """Raised when a common-transcript stream cannot be assembled into a valid ATIF trajectory."""
 

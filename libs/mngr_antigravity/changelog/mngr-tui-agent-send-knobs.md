@@ -1,0 +1,1 @@
+The antigravity agent type declares its own paste placeholder (`[Pasted text `, which agy 1.4 shows as `[Pasted text #N +M lines]` or `[Pasted text #N K chars]`) and Enter-retry test, which `InteractiveTuiAgent` now requires of every TUI agent type. Sending behaves exactly as before.

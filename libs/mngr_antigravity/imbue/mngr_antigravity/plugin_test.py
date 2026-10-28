@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
+from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
@@ -156,6 +157,15 @@ def test_submission_evidence_probes_watch_the_active_marker(
     # Slash commands use the same (only) evidence agy has.
     relaxed_probes = agent._build_submission_evidence_probes("/model", SubmissionConfirmationPolicy.RELAXED)
     assert [p.name for p in relaxed_probes] == ["active-marker"]
+
+
+def test_antigravity_re_sends_enter_while_the_pane_shows_the_message_or_its_pasted_text_chip(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    assert AntigravityAgent.PASTE_PLACEHOLDER_PREFIXES == ("[Pasted text ",)
+    assert antigravity_agent._build_enter_retry_gate("fix the parser") == build_unsubmitted_message_retry_gate(
+        message="fix the parser", paste_placeholder_prefixes=("[Pasted text ",)
+    )
 
 
 def test_register_agent_type_returns_antigravity_class_and_config() -> None:

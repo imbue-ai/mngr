@@ -28,6 +28,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import _deliver_text
@@ -1638,6 +1639,17 @@ def test_get_expected_process_name_returns_claude(
     """ClaudeAgent.get_expected_process_name should return 'claude'."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     assert agent.get_expected_process_name() == "claude"
+
+
+def test_claude_re_sends_enter_while_the_pane_shows_the_message_or_its_pasted_text_chip(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    assert ClaudeAgent.PASTE_PLACEHOLDER_PREFIXES == ("[Pasted text ",)
+    assert agent._build_enter_retry_gate("fix the parser") == build_unsubmitted_message_retry_gate(
+        message="fix the parser", paste_placeholder_prefixes=("[Pasted text ",)
+    )
 
 
 def test_tui_ready_indicator_matches_column_zero_input_prompt_only(
