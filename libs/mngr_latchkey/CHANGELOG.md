@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: A failed `latchkey auth re-encrypt` during a credential export now reports counts and flags (timeout elapsed, run duration, services requested, whether a destination key and account were given — never names), so a signal kill such as `-15` is diagnosable.
 - Changed: Bump Latchkey to 3.19.4.
 - Changed: `mngr latchkey forward` logs far more diagnostic detail for transient wiring failures (provider instance/backend, connect errnos, host-sleep), gateway spawn/bind failures (exit code, port state, last output with secrets redacted), provisioning concurrency, and a startup install baseline; its Sentry events now carry a `process_started_at` tag.
 

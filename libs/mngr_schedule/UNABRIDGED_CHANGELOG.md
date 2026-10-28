@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-28
+
+`test_schedule_run_and_remove_modal_trigger` is marked flaky: its `mngr schedule add` deploy, normally about 300s, ran past its 600s budget on both OSes in one release-tests run and passed when the shards were re-run.
+
 ## 2026-10-27
 
 Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.

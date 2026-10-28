@@ -1,1 +1,0 @@
-The `agent_types.claude.check_installation=false` setting that the bare-`mngr create` fallback adds to assist and update chats is now marked for removal. It only still matters for workspaces on templates from before `version_mismatch = "WARN"`: on newer templates a drifted claude only logs a warning, and mngr no longer ties the version check to `check_installation`.

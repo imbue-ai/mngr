@@ -8,6 +8,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Released Imbue Studio 0.9.4 and promoted it to the alpha desktop and browser channels (`FALLBACK_BRANCH` pinned to `minds-v0.9.4`; beta stays 0.8.7, stable 0.8.5), carrying harness-version-mismatch warnings, Antigravity reasoning-effort recording, and clearing of the data-encryption key after logout.
+- Added: Native crashes of the desktop app's main process now carry crashpad annotations on their Sentry minidump (last navigation milestone, a once-a-minute memory snapshot, and the last main-process event handled) to diagnose an unsymbolicated `EXC_BREAKPOINT` crash.
 - Added: Imbue Studio asks before a workspace opens a custom-scheme link (e.g. `paseo://`, `slack://`, `vscode://`), with a per-scheme "Always allow"; workspace apps on newer templates can handle such links themselves.
 - Added: Workspaces update themselves unattended -- scheduling and the update run inside the workspace, so a scheduled update no longer needs Imbue Studio open or the laptop awake, with an opt-in auto-update setting and a per-release security floor.
 - Added: minds 0.9.0 released.

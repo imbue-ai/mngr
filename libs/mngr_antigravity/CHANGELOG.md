@@ -6,8 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The statusline records agy's reasoning effort as `effort` in `model_state.json` alongside the model, dropping the matching tier suffix from the model name.
+
 ### Fixed
 
+- Fixed: Sending a slash command (e.g. `/model`) to an antigravity agent returns as soon as agy handles it instead of waiting out the full 15-second confirmation window.
 - Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer misreads a live antigravity agent as DONE; the agent class now declares its process name (`agy`), which that listing reads.
 
 ## [v0.2.0] - 2026-10-22

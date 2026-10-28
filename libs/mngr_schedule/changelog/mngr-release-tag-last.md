@@ -1,1 +1,0 @@
-`test_schedule_run_and_remove_modal_trigger` is marked flaky: its `mngr schedule add` deploy, normally about 300s, ran past its 600s budget on both OSes in one release-tests run and passed when the shards were re-run.

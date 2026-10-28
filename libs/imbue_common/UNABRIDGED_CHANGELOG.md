@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-28
+
+The `@pytest.mark.release` time-limit docstring no longer says release tests run on `v*` tag pushes.
+
 ## 2026-10-27
 
 The trailing-comment ratchet (`PREVENT_TRAILING_COMMENTS`) no longer counts a bare `# noqa` or `# noqa: CODE[, CODE]` that ends its line. Like `# ty: ignore[...]`, a `noqa` directive has to trail the line it suppresses, so it was never the readability problem the rule targets. A `noqa` followed by an explanation still counts.

@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-28
+
+Added `VersionMismatchPolicy` (`ERROR` / `WARN`) and a `mismatch_policy` argument on the shared `verify_pinned_cli_version`, so an agent type can choose whether an installed CLI that does not report its pinned version fails provisioning or only logs a warning naming the harness, the installed version, and the pin.
+
+The version probe now runs `<binary> --version` (the binary `ensure_cli_installed` checks for) instead of the agent's launch `command`. A launch command can be a wrapper that only resolves inside the agent's environment, and a probe that fails is skipped silently, so a wrapped harness was never checked at all.
+
+The release test that checks the version-pinned help-topic doc URL resolves now skips a version that is not on PyPI yet: the release pipeline runs the release tests before it publishes and tags the version, so that version's tag cannot exist during the run.
+
 ## 2026-10-27
 
 The agent release harness now reports the records behind its two duplicate-detection

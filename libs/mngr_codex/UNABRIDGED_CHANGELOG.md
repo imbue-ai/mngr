@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-28
+
+New `version_mismatch` setting on the codex agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.
+
+codex already ran the check whenever `version` was set, so only the new setting changes for it. The version is now probed with the binary itself rather than the configured launch `command`, so a wrapper command no longer makes the check skip.
+
 ## 2026-10-27
 
 Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.

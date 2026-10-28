@@ -6,8 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `version_mismatch` setting on the codex agent type: `ERROR` (default) fails `mngr create` on a version mismatch; `WARN` logs a warning and creates on the installed binary.
+
 ### Changed
 
+- Changed: The pinned version is probed with the binary itself rather than the configured launch command, so a wrapper command no longer makes the check skip.
 - Changed: Codex agents read their process presence from the host's shared lifecycle snapshot (one tmux and `ps` read per host rather than one per agent), and read UNKNOWN rather than STOPPED when that snapshot can't be read.
 
 ### Fixed
