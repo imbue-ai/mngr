@@ -19,10 +19,10 @@ from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR
-from imbue.mngr_imbue_cloud.providers.slice_provider import _ENV_D_BROWSER_UNIT
+from imbue.mngr_imbue_cloud.providers.slice_provider import _ENV_D_SCREEN_UNIT
 from imbue.mngr_imbue_cloud.providers.slice_provider import _GUEST_FIRST_BOOT_TIMEOUT_SECONDS
 from imbue.mngr_imbue_cloud.providers.slice_provider import _IMAGE_CACHE_WAIT_ROUNDS
-from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
+from imbue.mngr_imbue_cloud.providers.slice_provider import _SCREEN_UNIT_CTX_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import container_ca_trust_files
 from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
 from imbue.mngr_imbue_cloud.providers.slice_provider import render_remove_authorized_key_command
@@ -166,22 +166,22 @@ class _RecordingOuter(MutableModel):
         return CommandResult(stdout="", stderr="", success=True)
 
 
-def test_build_playwright_derived_image_renders_marker_and_build_command() -> None:
+def test_build_screen_unit_derived_image_renders_marker_and_build_command() -> None:
     provider = SliceVpsDockerProvider.model_construct()
     outer = _RecordingOuter()
-    provider._build_playwright_derived_image(
+    provider._build_screen_unit_derived_image(
         outer=cast(OuterHostInterface, outer), base_image="mngr-build-xyz", target_tag=_TAG
     )
     # The staged context Dockerfile is shipped base64-encoded; decode it and assert the
-    # baked-browser contract every loaded slice relies on (the env.d unit's fast
-    # satisfied-check finds the engine already installed).
+    # baked-stack contract every loaded slice relies on (the env.d unit's fast
+    # satisfied-check finds the Screen stack already installed).
     stage_command = next(c for c in outer.recorded if "base64 -d" in c)
     encoded = stage_command.split("echo ")[1].split(" | base64 -d")[0].strip().strip("'")
     dockerfile = base64.b64decode(encoded).decode()
     assert dockerfile.startswith("FROM mngr-build-xyz")
-    # The bake runs the exact env.d browser unit the workspace runs at boot,
+    # The bake runs the exact env.d Screen unit the workspace runs at boot,
     # pointed at the relocated build tree.
-    assert _ENV_D_BROWSER_UNIT in dockerfile
+    assert _ENV_D_SCREEN_UNIT in dockerfile
     assert "ENV_CONVERGE_WORKSPACE_DIR=" in dockerfile
     # Guards the DEFAULT_WORKSPACE_TEMPLATE build-code path so a relocated layout fails fast with a clear message.
     assert f"test -d {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR}" in dockerfile
@@ -191,7 +191,7 @@ def test_build_playwright_derived_image_renders_marker_and_build_command() -> No
     assert syntax_check.returncode == 0, syntax_check.stderr
     build_command = next(c for c in outer.recorded if "docker build" in c)
     assert _TAG in build_command
-    assert f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile" in build_command
+    assert f"{_SCREEN_UNIT_CTX_DIR}/Dockerfile" in build_command
 
 
 def test_transfer_key_authorize_and_deauthorize_render_expected_commands() -> None:

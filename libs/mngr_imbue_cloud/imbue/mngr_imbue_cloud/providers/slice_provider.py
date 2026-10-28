@@ -86,26 +86,29 @@ _ESTIMATED_DEFAULT_WORKSPACE_TEMPLATE_IMAGE_BYTES: Final[int] = 15 * 1024**3
 # ``mngr create`` timeout bounds the total wall clock well below the worst case.
 _IMAGE_CACHE_WAIT_ROUNDS: Final[int] = 4
 # Generous cap for the seeding slice's base DEFAULT_WORKSPACE_TEMPLATE image build (the inner create budget
-# is 45 min; the build is the long pole, the Playwright derive + save the rest).
+# is 45 min; the build is the long pole, the Screen-unit derive + save the rest).
 _SEED_BASE_BUILD_TIMEOUT_SECONDS: Final[float] = 1800.0
-# The Playwright-derived image RUNs a chromium download + apt; retry transient
-# failures a few times before hard-failing the seed.
-_PLAYWRIGHT_BUILD_ATTEMPTS: Final[int] = 3
-_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS: Final[float] = 900.0
-_PLAYWRIGHT_CTX_DIR: Final[str] = "/tmp/default-workspace-template-playwright-ctx"
+# The Screen-unit-derived image RUNs the Screen stack's apt installs plus the
+# Fortress and neko downloads; retry transient failures a few times before
+# hard-failing the seed.
+_SCREEN_UNIT_BUILD_ATTEMPTS: Final[int] = 3
+_SCREEN_UNIT_BUILD_TIMEOUT_SECONDS: Final[float] = 1800.0
+_SCREEN_UNIT_CTX_DIR: Final[str] = "/tmp/default-workspace-template-screen-ctx"
 _BUILDER_PRUNE_TIMEOUT_SECONDS: Final[float] = 120.0
 # The DEFAULT_WORKSPACE_TEMPLATE Dockerfile relocates the built workspace here (off the /mngr volume mount)
-# before first boot; the Playwright derive runs ``uv run`` from it. This is a DEFAULT_WORKSPACE_TEMPLATE image
+# before first boot; the Screen-unit derive runs ``uv run`` from it. This is a DEFAULT_WORKSPACE_TEMPLATE image
 # contract -- if DEFAULT_WORKSPACE_TEMPLATE moves it, the derive's guard fails fast with a clear message.
 _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
-# The env-converge browser unit's satisfied condition: baking the Fortress
-# engine (and its Chromium apt libs) into the seeded image makes the unit a
-# fast no-op on every loaded slice -- there are no marker files anymore, the
-# unit checks the real installed state. The path is relative to the workspace
-# repo root (which the DEFAULT_WORKSPACE_TEMPLATE Dockerfile relocates to
-# /docker_build_code) and must match where env-converge finds its units
+# The env-converge Screen unit's satisfied condition: baking the Screen stack
+# (Xorg/XFCE/PulseAudio/GStreamer apt packages, the neko binary and its input
+# driver, the Fortress engine with its Chromium apt libs, and the browser
+# command) into the seeded image makes the unit a fast no-op on every loaded
+# slice -- there are no marker files anymore, the unit checks the real
+# installed state. The path is relative to the workspace repo root (which the
+# DEFAULT_WORKSPACE_TEMPLATE Dockerfile relocates to /docker_build_code) and
+# must match where env-converge finds its units
 # (``<workspace>/system/scripts/env.d/``).
-_ENV_D_BROWSER_UNIT: Final[str] = "system/scripts/env.d/1000-playwright-fortress.sh"
+_ENV_D_SCREEN_UNIT: Final[str] = "system/scripts/env.d/2000-screen.sh"
 
 # How long to wait for a freshly-carved guest's first-boot cloud-init to
 # finish before touching the VM. Its sshd answers well before the first boot
@@ -699,7 +702,7 @@ class SliceVpsDockerProvider(VpsProvider):
         image_tag: str,
         build_args: Sequence[str] | None,
     ) -> None:
-        """Build the DEFAULT_WORKSPACE_TEMPLATE image (+ baked Playwright) and seed the box tar; this slice runs that image too."""
+        """Build the DEFAULT_WORKSPACE_TEMPLATE image (+ baked Screen stack) and seed the box tar; this slice runs that image too."""
         logger.info("Building + seeding box tar {} (first slice on this box for this tag)", image_tag)
         parsed = self._parse_build_args(build_args)
         # Build the base DEFAULT_WORKSPACE_TEMPLATE image via the same shared helper the realizer's build path
@@ -716,7 +719,7 @@ class SliceVpsDockerProvider(VpsProvider):
             builder=self.config.builder,
             build_timeout_seconds=_SEED_BASE_BUILD_TIMEOUT_SECONDS,
         )
-        self._build_playwright_derived_image(outer=outer, base_image=base_image, target_tag=image_tag)
+        self._build_screen_unit_derived_image(outer=outer, base_image=base_image, target_tag=image_tag)
         cache.check_free_disk(_ESTIMATED_DEFAULT_WORKSPACE_TEMPLATE_IMAGE_BYTES)
         with self._transfer_key_authorized(cache, outer) as transfer_key:
             cache.save_image_from_slice(image_tag, vm_ssh_port=vm_ssh_port, transfer_key=transfer_key)
@@ -726,18 +729,18 @@ class SliceVpsDockerProvider(VpsProvider):
 
     @retry(
         retry=retry_if_exception_type(MngrError),
-        stop=stop_after_attempt(_PLAYWRIGHT_BUILD_ATTEMPTS),
+        stop=stop_after_attempt(_SCREEN_UNIT_BUILD_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    def _build_playwright_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
-        """Build target_tag as base_image + a baked Fortress/Chromium layer.
+    def _build_screen_unit_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
+        """Build target_tag as base_image + a baked Screen-stack layer (Fortress among it).
 
-        The browser engine is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is
-        shared with the desktop Lima path); baking it cloud-side here -- by running the exact
-        env.d unit the workspace runs at boot -- keeps the desktop path unchanged while letting
-        every loaded slice's env-converge unit hit its fast satisfied-check (the engine binary is
-        already in place; no marker files are involved).
+        The Screen stack (and the Fortress browser engine in it) is deliberately not in the
+        DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is shared with the desktop Lima path); baking it
+        cloud-side here -- by running the exact env.d unit the workspace runs at boot -- keeps the
+        desktop path unchanged while letting every loaded slice's env-converge unit hit its fast
+        satisfied-check (the stack is already in place; no marker files are involved).
 
         The RUN first guards that the DEFAULT_WORKSPACE_TEMPLATE build-code dir exists, so a future DEFAULT_WORKSPACE_TEMPLATE image
         that relocates it fails fast with a clear message instead of a confusing
@@ -760,22 +763,22 @@ class SliceVpsDockerProvider(VpsProvider):
             f"FROM {base_image}\n"
             f"RUN {guard} "
             f"&& cd {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} "
-            f"&& ENV_CONVERGE_WORKSPACE_DIR={_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} bash {_ENV_D_BROWSER_UNIT}\n"
+            f"&& ENV_CONVERGE_WORKSPACE_DIR={_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} bash {_ENV_D_SCREEN_UNIT}\n"
         )
         encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()
         stage_command = (
-            f"rm -rf {_PLAYWRIGHT_CTX_DIR} && mkdir -p {_PLAYWRIGHT_CTX_DIR} && "
-            f"echo {shlex.quote(encoded_dockerfile)} | base64 -d > {_PLAYWRIGHT_CTX_DIR}/Dockerfile"
+            f"rm -rf {_SCREEN_UNIT_CTX_DIR} && mkdir -p {_SCREEN_UNIT_CTX_DIR} && "
+            f"echo {shlex.quote(encoded_dockerfile)} | base64 -d > {_SCREEN_UNIT_CTX_DIR}/Dockerfile"
         )
         stage_result = outer.execute_idempotent_command(stage_command, timeout_seconds=30.0)
         if not stage_result.success:
             raise BoxImageCacheError(
-                f"failed to stage the Playwright Dockerfile on the slice: {stage_result.stderr.strip()}"
+                f"failed to stage the Screen-unit Dockerfile on the slice: {stage_result.stderr.strip()}"
             )
         run_docker(
             outer,
-            ["build", "-t", target_tag, "-f", f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile", _PLAYWRIGHT_CTX_DIR],
-            timeout_seconds=_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS,
+            ["build", "-t", target_tag, "-f", f"{_SCREEN_UNIT_CTX_DIR}/Dockerfile", _SCREEN_UNIT_CTX_DIR],
+            timeout_seconds=_SCREEN_UNIT_BUILD_TIMEOUT_SECONDS,
         )
 
     @contextmanager
