@@ -1,4 +1,5 @@
 const { BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -92,6 +93,12 @@ const {
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
 const { formatGpuProcessGone } = require('./gpu-diagnostics');
+const {
+  formatActivateStart,
+  formatActivateEnd,
+  formatFocusRelayStart,
+  formatFocusRelayEnd,
+} = require('./activation-diagnostics');
 const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
 const { createExternalLinkPermissions } = require('./external-link-permissions');
 
@@ -787,11 +794,22 @@ function wireBundleWindowEvents(bundle) {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return;
     try { win.webContents.send('window-focus-changed', isFocused); } catch { /* noop */ }
   };
+  // Read up front, so the focus lines never read the id off a destroyed window.
+  const windowId = win.id;
   win.on('focus', () => {
     const idx = mruWindows.indexOf(bundle);
     if (idx >= 0) mruWindows.splice(idx, 1);
     mruWindows.unshift(bundle);
+    // See activation-diagnostics.js for why the relay is bracketed.
+    const isWindowDestroyed = win.isDestroyed();
+    console.log(formatFocusRelayStart({
+      windowId,
+      isWindowDestroyed,
+      isContentsDestroyed: isWindowDestroyed || win.webContents.isDestroyed(),
+      isPopout: isPopoutBundle(bundle),
+    }));
     relayFocus(true);
+    console.log(formatFocusRelayEnd({ windowId }));
   });
   win.on('blur', () => relayFocus(false));
 
@@ -3757,6 +3775,13 @@ app.on('child-process-gone', (_event, details) => {
   } catch (err) {
     console.error(`[gpu] could not read the GPU feature status: ${err.message || err}`);
   }
+  // Every app process's working set (main, renderers, GPU, utilities), in KB.
+  let appMemoryKb = null;
+  try {
+    appMemoryKb = app.getAppMetrics().reduce((total, metric) => total + metric.memory.workingSetSize, 0);
+  } catch (err) {
+    console.error(`[gpu] could not read the app's process metrics: ${err.message || err}`);
+  }
   console.error(formatGpuProcessGone({
     reason: details.reason,
     exitCode: details.exitCode,
@@ -3765,6 +3790,8 @@ app.on('child-process-gone', (_event, details) => {
     terminationSignal: firstTerminationSignal,
     uptimeSeconds: process.uptime(),
     featureStatus,
+    freeMemoryBytes: os.freemem(),
+    appMemoryBytes: appMemoryKb === null ? null : appMemoryKb * 1024,
   }));
 });
 
@@ -3783,14 +3810,16 @@ app.on('window-all-closed', () => {
 // when none remain. A popout is such a window: the OS raises it too, and a
 // main window is a Cmd+N away.
 app.on('activate', () => {
-  if (!shouldOpenWindowOnActivate({
+  const hasLiveWindow = getMostRecentWindow({ includePopouts: true }) != null;
+  const opensWindow = shouldOpenWindowOnActivate({
     isShuttingDown,
     isQuitSequenceRunning,
-    hasLiveWindow: getMostRecentWindow({ includePopouts: true }) != null,
-  })) {
-    return;
-  }
-  openOrFocusWindow({ isReopen: true });
+    hasLiveWindow,
+  });
+  // See activation-diagnostics.js for why the handler is bracketed.
+  console.log(formatActivateStart({ hasLiveWindow, isShuttingDown, isQuitSequenceRunning, opensWindow }));
+  if (opensWindow) openOrFocusWindow({ isReopen: true });
+  console.log(formatActivateEnd({ openedWindow: opensWindow }));
 });
 
 app.on('before-quit', (event) => {
