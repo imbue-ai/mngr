@@ -1664,6 +1664,7 @@ class Latchkey(MutableModel):
         # reading it, so the child must always see EOF.
         stdin_bytes = b"" if destination_key is None else destination_key.get_secret_value().encode("utf-8")
         cg = ConcurrencyGroup(name="latchkey-reencrypt")
+        start_time = time.monotonic()
         try:
             with cg:
                 result = cg.run_process_to_completion(
@@ -1677,11 +1678,23 @@ class Latchkey(MutableModel):
             if not group.only_exception_is_instance_of(ProcessSetupError):
                 raise
             raise LatchkeyError(f"Failed to launch 'latchkey auth re-encrypt': {group}") from group
+        elapsed_seconds = time.monotonic() - start_time
         if result.returncode != 0:
+            # A signal exit (e.g. -15) reads the same whether our own timeout
+            # killed the child or something outside this process did, so the
+            # message carries what tells them apart: whether the timeout had
+            # passed and how long the run took.
             raise LatchkeyError(
-                "'latchkey auth re-encrypt' exited {} writing {}: {}".format(
+                "'latchkey auth re-encrypt' exited {} writing {} (timed_out={}, "
+                "elapsed={:.2f}s of {:.0f}s timeout, services={}, has_destination_key={}, has_account={}): {}".format(
                     result.returncode,
                     destination,
+                    result.is_timed_out,
+                    elapsed_seconds,
+                    _REENCRYPT_TIMEOUT_SECONDS,
+                    len(service_names),
+                    destination_key is not None,
+                    account is not None,
                     result.stderr.strip() or result.stdout.strip(),
                 )
             )

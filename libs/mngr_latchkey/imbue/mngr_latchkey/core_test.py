@@ -2,6 +2,7 @@ import base64
 import errno
 import hashlib
 import json
+import signal
 import socket
 import threading
 import time
@@ -20,6 +21,7 @@ from loguru import logger
 from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -71,6 +73,7 @@ from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINES
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS
 from imbue.mngr_latchkey.core import _GatewayOutputTail
+from imbue.mngr_latchkey.core import _REENCRYPT_TIMEOUT_SECONDS
 from imbue.mngr_latchkey.core import _allocate_free_port
 from imbue.mngr_latchkey.core import _describe_port_bindability
 from imbue.mngr_latchkey.core import _log_gateway_output_line
@@ -1084,8 +1087,47 @@ def test_export_credentials_subset_raises_on_failure(tmp_path: Path) -> None:
     script.chmod(0o755)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
-    with pytest.raises(LatchkeyError, match="re-encrypt"):
+    with pytest.raises(LatchkeyError, match="re-encrypt") as exc_info:
         manager.export_credentials_subset(tmp_path / "out.enc", {"slack"})
+    message = str(exc_info.value)
+    assert "exited 1 " in message
+    assert "timed_out=False, " in message
+    assert "services=1, has_destination_key=False, has_account=False" in message
+    assert message.endswith(": boom")
+
+
+def test_export_credentials_subset_failure_tells_an_outside_kill_from_a_timeout(tmp_path: Path) -> None:
+    """A child SIGTERMed by something other than our timeout reports ``timed_out=False`` and its short run time.
+
+    The exit code alone (-15) is the same for both, so the message must carry
+    what separates them -- and must never name the services or the account.
+    """
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
+        "    sys.exit(0)\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+    )
+    script.chmod(0o755)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
+    with pytest.raises(LatchkeyError) as exc_info:
+        manager.export_credentials_subset(
+            tmp_path / "out.enc",
+            {"slack", "github"},
+            destination_key=SecretStr("synthetic-destination-key"),
+            account="user@example.com",
+        )
+    message = str(exc_info.value)
+    assert f"exited {-signal.SIGTERM} " in message
+    assert "timed_out=False, " in message
+    assert f"of {_REENCRYPT_TIMEOUT_SECONDS:.0f}s timeout" in message
+    assert "services=2, has_destination_key=True, has_account=True" in message
+    assert "slack" not in message
+    assert "user@example.com" not in message
 
 
 def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path) -> None:
