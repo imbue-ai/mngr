@@ -57,6 +57,16 @@ class CleanupError(RuntimeError):
     """A Modal cleanup subprocess exited non-zero after retries."""
 
 
+class EndpointNotServingError(RuntimeError):
+    """Modal answered a request to the deployed endpoint itself, or nothing answered at all."""
+
+
+# Modal's HTTP frontend prefixes the bodies of the responses it gives on an
+# endpoint's behalf, such as `404 modal-http: invalid function call` while it
+# is not routing to the endpoint.
+_MODAL_FRONTEND_ANSWER_PREFIX = "modal-http:"
+
+
 def _get_test_app_name() -> str:
     """Generate a unique test app name with the mngr-test prefix."""
     return f"{MODAL_TEST_APP_PREFIX}snapshot-{get_short_random_string()}"
@@ -180,19 +190,27 @@ def _stop_app_and_delete_volume(app_name: str, volume_name: str, environment_nam
                 )
 
 
-def _warmup_function(url: str) -> None:
-    """Send a warmup request to trigger cold start before tests run.
+@retry(
+    retry=retry_if_exception_type(EndpointNotServingError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _await_endpoint_serving(url: str) -> None:
+    """Return once the deployed endpoint itself answers a request, cold-starting its container.
 
-    This ensures the Modal container is warm and subsequent test requests
-    complete within reasonable timeouts.
+    Any answer the endpoint gives counts, since judging it is the tests' job.
+    The per-attempt timeout is sized so every attempt, plus the deploy, fits
+    inside one test's own timeout.
     """
-    # Send a simple request that will fail validation but warm up the function
-    # Use a longer timeout since this is the cold start
     try:
-        httpx.post(url, json={}, timeout=180)
-    except httpx.HTTPError:
-        # Ignore errors - we just want to trigger the cold start
-        pass
+        response = httpx.post(url, json={}, timeout=45)
+    except httpx.TransportError as e:
+        raise EndpointNotServingError(f"Nothing answered {url}: {e!r}") from e
+    if response.text.startswith(_MODAL_FRONTEND_ANSWER_PREFIX):
+        raise EndpointNotServingError(
+            f"Modal answered {url} instead of the endpoint: {response.status_code} {response.text.strip()}"
+        )
 
 
 def _create_test_sandbox(app_name: str, environment_name: str) -> tuple[modal.Sandbox, str]:
@@ -279,8 +297,7 @@ def deployed_snapshot_function(
         modal_interface = DirectModalInterface()
         _ensure_modal_environment(modal_interface, environment_name)
         url = _deploy_snapshot_function_with_propagation_retry(modal_interface, app_name, environment_name)
-        # Warm up the function to avoid cold start timeouts in tests
-        _warmup_function(url)
+        _await_endpoint_serving(url)
         yield (app_name, url, environment_name)
     finally:
         _stop_app_and_delete_volume(app_name, volume_name, environment_name)
@@ -355,7 +372,6 @@ def test_snapshot_and_shutdown_success(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
-@pytest.mark.flaky
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:
@@ -368,7 +384,7 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
         timeout=60,
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 400, f"Expected 400, got {response.status_code}: {response.text}"
     assert "sandbox_id" in response.text.lower()
 
 
@@ -388,7 +404,7 @@ def test_snapshot_and_shutdown_missing_host_id(
         timeout=60,
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 400, f"Expected 400, got {response.status_code}: {response.text}"
     assert "host_id" in response.text.lower()
 
 
@@ -415,14 +431,13 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
         timeout=60,
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 404, f"Expected 404, got {response.status_code}: {response.text}"
     assert "sandbox" in response.text.lower() or "not found" in response.text.lower()
 
 
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
-@pytest.mark.flaky
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:
@@ -443,7 +458,7 @@ def test_snapshot_and_shutdown_nonexistent_host_record(
             timeout=60,
         )
 
-        assert response.status_code == 404
+        assert response.status_code == 404, f"Expected 404, got {response.status_code}: {response.text}"
         assert "host" in response.text.lower() or "not found" in response.text.lower()
 
     finally:
