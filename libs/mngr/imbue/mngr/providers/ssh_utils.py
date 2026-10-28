@@ -17,6 +17,7 @@ from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PyinfraConnectorUnavailableError
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import clear_endpoint_pins
@@ -25,6 +26,7 @@ from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import pin_host_key
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.pyinfra_install import take_pyinfra_install_snapshot
 
 # A word on vocabulary, since "SSH protocol banner" turns up all over this file.
 # The banner is the server's identification string: the plaintext line, something
@@ -709,7 +711,12 @@ def create_pyinfra_host(
     }
 
     names_data = ([(hostname, host_data)], {})
-    inventory = Inventory(names_data)
+    try:
+        inventory = Inventory(names_data)
+    except KeyError as e:
+        snapshot = take_pyinfra_install_snapshot()
+        logger.error("pyinfra has no {} connector; pyinfra install as seen now: {}", e, snapshot)
+        raise PyinfraConnectorUnavailableError(f"pyinfra has no {e} connector to reach {hostname} with") from e
     state = PyinfraState(inventory=inventory)
 
     pyinfra_host = inventory.get_host(hostname)

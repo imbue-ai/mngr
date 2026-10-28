@@ -127,6 +127,16 @@ class HostAuthenticationError(HostConnectionError):
     """Raised when unable to connect to a host because authentication failed."""
 
 
+class PyinfraConnectorUnavailableError(HostError, KeyError):
+    """Raised when pyinfra cannot find the connector needed to build a host object.
+
+    pyinfra looks its connectors up from installed package metadata each time,
+    so this can start happening in a process that built hosts fine earlier.
+    Still a ``KeyError``, which is what pyinfra raises here, so handlers written
+    against pyinfra's error keep catching it.
+    """
+
+
 class CorruptedAgentDataError(HostError):
     """Raised when an agent's data.json is unreadable after retries.
 

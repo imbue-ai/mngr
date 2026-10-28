@@ -53,8 +53,10 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.providers.deploy_utils import detect_mngr_install_mode
 from imbue.mngr.providers.local.instance import get_or_create_local_host_id
 from imbue.mngr.utils.parent_process import start_pid_death_watcher
+from imbue.mngr.utils.pyinfra_install import take_pyinfra_install_snapshot
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
@@ -781,6 +783,12 @@ def _run_forward_supervisor(
         "Started shared Latchkey gateway at http://{}:{}",
         latchkey.listen_host,
         gateway_port,
+    )
+    # A baseline for the snapshot create_pyinfra_host logs if pyinfra later loses a connector.
+    logger.info(
+        "mngr install mode: {}; pyinfra install at startup: {}",
+        detect_mngr_install_mode().value.lower(),
+        take_pyinfra_install_snapshot(),
     )
 
     try:
