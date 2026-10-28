@@ -123,6 +123,10 @@ _GIT_ENSURE_OFFICIAL_REMOTE_COMMAND: str = (
     f"{shlex.join(('git', 'remote', 'set-url', OFFICIAL_REMOTE_NAME, OFFICIAL_REMOTE_URL))} >/dev/null 2>&1 "
     f"|| {shlex.join(('git', 'remote', 'add', OFFICIAL_REMOTE_NAME, OFFICIAL_REMOTE_URL))} >/dev/null 2>&1"
 )
+_GIT_READ_MARKER_AND_TAG_COMMAND: str = (
+    f'marker="$({shlex.join(_GIT_UPDATE_SELF_ARGS)})"; {_GIT_DESCRIBE_INTO_TAG_COMMAND}'
+)
+_PRINT_MARKER_AND_TAG_COMMAND: str = 'printf \'%s\\n\' "$marker" "$tag"'
 # Both version reads in one exec: the marker line (empty when there is none)
 # and then the tag. Every git step is allowed to fail -- a tagless clone, a
 # workspace with no network -- so the command ends on the ``printf`` that
@@ -135,14 +139,18 @@ _GIT_ENSURE_OFFICIAL_REMOTE_COMMAND: str = (
 # only for one with neither -- which is why the condition is both being empty,
 # not the tag alone.
 _GIT_CURRENT_VERSION_COMMAND: str = (
-    f'marker="$({shlex.join(_GIT_UPDATE_SELF_ARGS)})"; '
-    f"{_GIT_DESCRIBE_INTO_TAG_COMMAND}; "
+    f"{_GIT_READ_MARKER_AND_TAG_COMMAND}; "
     f'if [ -z "$marker" ] && [ -z "$tag" ] && {_GIT_FETCH_IS_WORTH_TRYING_CONDITION}; then '
     f"{_GIT_ENSURE_OFFICIAL_REMOTE_COMMAND}; "
     f"{shlex.join(_TIME_BOUNDED_GIT_FETCH_TAGS_ARGS)} >/dev/null; "
     f"{_GIT_DESCRIBE_INTO_TAG_COMMAND}; "
     "fi; "
-    'printf \'%s\\n\' "$marker" "$tag"'
+    f"{_PRINT_MARKER_AND_TAG_COMMAND}"
+)
+# The same two lines, read from what the workspace already holds, for a probe that rides
+# along another exec.
+GIT_CURRENT_VERSION_WITHOUT_FETCH_COMMAND: Final[str] = (
+    f"{_GIT_READ_MARKER_AND_TAG_COMMAND}; {_PRINT_MARKER_AND_TAG_COMMAND}"
 )
 _GIT_MERGES_FORMAT: str = f"%H{_GIT_LOG_FIELD_SEPARATOR}%cI{_GIT_LOG_FIELD_SEPARATOR}%s"
 _GIT_MERGES_ARGS: tuple[str, ...] = ("git", "log", "--merges", "--first-parent", f"--format={_GIT_MERGES_FORMAT}")
