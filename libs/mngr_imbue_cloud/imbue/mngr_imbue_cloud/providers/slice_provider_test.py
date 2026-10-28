@@ -166,7 +166,7 @@ class _RecordingOuter(MutableModel):
         return CommandResult(stdout="", stderr="", success=True)
 
 
-def test_build_screen_unit_derived_image_renders_marker_and_build_command() -> None:
+def test_build_screen_unit_derived_image_renders_dockerfile_and_build_command() -> None:
     provider = SliceVpsDockerProvider.model_construct()
     outer = _RecordingOuter()
     provider._build_screen_unit_derived_image(
