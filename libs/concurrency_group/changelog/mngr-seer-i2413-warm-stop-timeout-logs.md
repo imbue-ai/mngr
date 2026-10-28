@@ -1,1 +1,0 @@
-Added: `RunningProcess.get_reader_thread_stack()`, which returns the `module.function` names on the process's reader thread (no paths, arguments or locals), for diagnosing a `terminate()` that timed out.

@@ -1,1 +1,0 @@
-The trailing-comment ratchet (`PREVENT_TRAILING_COMMENTS`) no longer counts a bare `# noqa` or `# noqa: CODE[, CODE]` that ends its line. Like `# ty: ignore[...]`, a `noqa` directive has to trail the line it suppresses, so it was never the readability problem the rule targets. A `noqa` followed by an explanation still counts.

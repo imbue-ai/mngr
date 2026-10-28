@@ -4,6 +4,58 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+The Electron end-to-end runner's provider-chooser sign-in now presses the chooser's Try again when the chooser shows "Could not load providers", and logs the chooser's error text, before it clicks the Anthropic lane. Previously it waited for a lane that never rendered and timed out (`Frame.click: Timeout 20000ms exceeded. waiting for locator("[data-e2e=lane-anthropic]")`), which happened when the desktop app's connection to the new workspace dropped as the chooser opened (MIND-589). It relies on the `data-e2e="retry-providers"` hook from the paired default-workspace-template change, which also has the chooser ask for its provider list again by itself after a dropped connection.
+
+- The smoke journey turns the create form's sharing switch off when it creates its workspace, so its share step publishes from the Share tab. With sharing on by default under an account, the step's click unpublished the workspace and timed out waiting for the publish confirm.
+
+- The smoke journey sends its prompt by typing it into the desktop's launcher and pressing Enter, which delivers it to the workspace's main chat (the welcome chat) and launches that chat's agent. The 0.9 template's launcher no longer offers a "New Chat" row with nothing typed. `e2e_workspace_runner.py` gains `send_to_main_chat_from_launcher` and `find_chat_frame`.
+
+- `apps/minds/docs/testing-overview.md` section 1.10 names the start flow's "I have an account (log in)" aside and takes the dev-checkout build's Node version from `apps/minds/.nvmrc`.
+
+The desktop app moves to Electron 45.1.0. It bundles the Node.js 24.22.1 security release, which also runs latchkey, plus Chromium 156.0.8078.49 and Electron's own fixes, among them stricter handling of malformed asar archives and of File System Access writes to `.git/hooks`.
+
+The update modal's security-fix notice is drawn in the warning (orange) palette instead of the error (red) one, and its "See details" text explains the emSign/eMudhra certificate compromise in plainer terms.
+
+- Cut the Imbue Studio 0.9.3 release: the app version is 0.9.3 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.3`, carrying everything that landed on `main` since `minds-v0.9.2`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: the app moves to Electron 45.1.0, which bundles the Node.js 24.22.1 security release; an update running on a workspace from a 0.8.x template is no longer stopped partway when memory runs short; the update modal's security notice is drawn in orange with plainer details; and Claude agents no longer record parts of a transcript twice.
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+Test-only: `test_create_workspace_ignores_stale_ai_provider_field` no longer starts a real background create attempt. It cloned `https://example/repo` over the network, and a slow clone could outlive the test's concurrency-group teardown and fail it. It now uses the recording agent creator, like the other create-route happy-path tests.
+
+- Promote Imbue Studio 0.9.3 to the alpha channels: the desktop alpha channel serves ToDesktop build `26102809xlg8x5c` (mac and Linux, 100%; mac still needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created alpha workspaces pin to `minds-v0.9.3`. Beta stays on 0.8.7 and stable on 0.8.5.
+
+- Recorded the Imbue Studio 0.9.2 release in `docs/deploy/history/minds-v0.9.2.md` (the tag pair and build, every verification run including the pair run the launch-to-msg harness failed on per-window accounts and its fix, the staging rehearsal including an existing workspace's upgrade and a fast-path create, the bakes on both tiers, why the security floor and the services stayed put, and the alpha promotion) and the 0.9.1 release in `docs/deploy/history/minds-v0.9.1.md`, which was rehearsed and baked but never promoted, and reset `docs/deploy/next_deploy.md` after them. `docs/deploy/ops/app-release.md` now lets a tag run take its harness fix from a branch, as the pair run already could, and names the failure a moved route causes.
+
+- Recorded the Imbue Studio 0.9.3 release in `docs/deploy/history/minds-v0.9.3.md` (the tag pair and build, the pre-cut audit, both pair runs and the tag run, the latchkey 3.19.4 bump the cut picked up, the staging rehearsal including an existing workspace's upgrade and a fast-path create, the bakes on both tiers, why the security floor and the services stayed put, and the alpha promotion) and reset `docs/deploy/next_deploy.md` after it.
+
+When the bundled latchkey CLI fails at startup, Imbue Studio now logs which latchkey version the app bundle contains and whether the bundle's files still match what the build shipped (how many are missing, changed or unexpected, and the first few of each, as paths inside the bundle). To support this, the build writes a `manifest.json` of file hashes into the latchkey bundle (macOS native binaries are checked only for presence, since code signing rewrites them after the build), and its latchkey smoke test now prints the Node version it ran under. Startup still fails the same way; this only adds the facts needed to tell a bundle damaged after install from one that shipped broken.
+
+When a skill chat (such as a scheduled `/update-self` run) falls back to a bare `mngr create` and the workspace refuses it, the error log now also records the workspace's account store and template version:
+
+- whether the chat app's account index exists;
+
+- how many accounts it lists, and how many of those still have their folder on disk;
+
+- the template version its git names: the version its last `update-self` run recorded, else its nearest `minds-v*` release tag (read without fetching).
+
+These facts separate a workspace that has no usable account (so the refusal is correct) from one that has an account but never wrote its `.mngr/settings.local.toml`, which would be a bug in the template's settings writer. Only counts and the version are recorded, never an account's id, name or provider.
+
+- The desktop app's main process now logs a line before and after its macOS dock-click (`activate`) handler and before and after each window's focus relay. A native crash minidump uploaded at the next launch carries these as breadcrumbs, so a crash inside either handler shows a "start" line with no matching "end" line. The lines contain only booleans and the numeric window id.
+
+- The `[gpu] GPU process gone` log line now also records free system memory and the summed working set of every app process, as whole megabytes, to tell a GPU-process death under memory pressure from one with plenty free.
+
+- A failed stop or start step of a workspace host recovery now logs, just before its error record, where the step's address pointed and whether this device could still resolve it: whether the address was pinned, the class of provider instance it named (account, legacy email-slug name, connection, or a backend default, never the account-derived name itself) and its backend, whether discovery placed the machine from its live snapshot or a lifecycle-transition retention, whether the mngr settings the step loaded define that instance, whether the owning account is still signed in and how many are, the host's last discovered state, and how long ago its provider last completed a poll. This separates the causes behind `Unknown provider backend: imbue_cloud_...` recovery failures (signed-out account, settings drift, legacy instance name). The managed-provider-block write now also warns when blocks were due but no mngr profile existed yet to write them to.
+
+When the backend exits before it is ready, the "Failed to start" screen's details (and a report filed from that screen) now show the backend's last stderr lines, the exit code or signal, how long it ran, and how it was launched (dev or packaged, and the config source), instead of only the exit code. Lines carrying credentials are left out, and the home directory is shortened to `~`.
+
+Changed: the "Timed out stopping a warm mngr process" error now records whether the call had timed out, the wall-clock and monotonic seconds the stop waited, and the function names on the warm process's reader thread at that moment, so the next occurrence shows whether the machine slept during the stop, the killed child was never reaped, or the backend was starved.
+
+- Fixed: an update running on a workspace whose template predates the update agents' own memory protection (minds-v0.8.x) is no longer stopped partway when the workspace runs short of memory. While a run has no result, the workspace's update dispatcher now holds the run's lead and its worker at `oom_score_adj` 90, above the template's own services and below user services, terminals and every other chat and worker. To keep the template's chat prioritizer from moving the lead back to a chat's band, it moves the lead's `agent_id` in its agent-pid registry entry to `agent_id_held_by_update_dispatcher` while holding it. The commands those agents run stay at 900. Once the run has a result, the dispatcher puts the `agent_id` back and returns the lead to 560 and the worker to 600, so the template bands them again. An agent restarted mid-run is held again at the next tick. Each process is checked against its `/proc` thread group and `MNGR_AGENT_NAME` before anything is written, so a stale registry entry whose pid was reused is left alone.
+
+Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent waits on a background command, and the workspace no longer reminds that agent that it owes a result. Such a template cannot report background tasks itself, so the app and the workspace's update watchdog now read the records the update's own tooling leaves for those commands.
+
 ## 2026-10-26
 
 - Fixed: an account's home page with no workspaces of its own no longer stays on "Discovering workspaces..." forever while another account on the installation has workspaces. `GET /ui/api/create/landing-extras?account=` now reports `has_restorable_workspaces` for the window's account only, attributing a workspace not yet re-discovered this session by its record's association, as its row would be.

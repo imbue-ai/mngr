@@ -1,1 +1,0 @@
-`mngr latchkey forward` now logs, at debug level, how many hosts are being provisioned at once whenever it starts provisioning the Latchkey gateway on a remote agent's machine. This helps tell whether a provisioning failure only happens while other hosts are being provisioned concurrently.

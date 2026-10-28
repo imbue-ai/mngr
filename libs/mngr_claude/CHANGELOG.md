@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: Claude agents no longer record parts of a transcript twice (duplicate `event_id`s and repeated inference text); the raw-transcript streamer reconciles its offsets under the converter's lock and the converter keeps only the first record per source uuid.
 - Fixed: The claude common transcript dropped messages the user sent while a turn was running, so `mngr transcript` and the ATIF trajectory showed the agent replying to a message nobody had sent; each such message is now recorded as a user step in order.
 - Fixed: Claude agents no longer report RUNNING forever after a turn is interrupted directly in the terminal (Esc); the transcript streamer now clears the stranded active marker and emits an activity event.
 - Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer misreads a live code-guardian or fixme-fairy agent as REPLACED or DONE; the claude process name (`claude`) is now declared on the agent class and inherited by those types, instead of mngr core's own claude-only table.

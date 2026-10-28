@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
 ## 2026-10-26
 
 Codex agents now read their process presence from the host's shared lifecycle snapshot, so a listing reads tmux and `ps` once per host rather than once per agent. When that snapshot can't be read, a codex agent reads UNKNOWN rather than STOPPED.

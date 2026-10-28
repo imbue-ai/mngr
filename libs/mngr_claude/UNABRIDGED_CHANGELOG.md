@@ -4,6 +4,27 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Fixed claude agents recording parts of a transcript twice.
+
+The raw-transcript streamer runs both as a poll daemon and as a single pass at each
+turn end, and the two overlapped: each read the same per-session line offset and
+appended the same range of session lines. The common transcript built from that
+input then carried the affected turns twice -- duplicate `event_id`s, and an
+inference whose text appeared twice inside one step. When the two appends
+interleaved mid-line the raw transcript was left holding JSON that the converter
+drops as malformed, losing those records altogether.
+
+The streamer now emits and reconciles its offsets under the same lock the converter
+takes, re-reading the offset from disk inside it rather than trusting a cached copy.
+The converter keeps only the first record for a given source uuid, so an input that
+replays a line still converts once.
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+The Claude agent type declares its own paste placeholder (`[Pasted text `) and Enter-retry test, which `InteractiveTuiAgent` now requires of every TUI agent type. Sending behaves exactly as before.
+
 ## 2026-10-26
 
 Claude agents now declare their process name (`claude`) on the agent class instead of in a method override; mngr core's listing for remote hosts reads it from there instead of from its own claude-only table. Claude agents themselves read as before. The code-guardian and fixme-fairy agent types inherit the name, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) now finds their claude process instead of looking for `(`, the first word of their launch command, and no longer misreads a live one as REPLACED or DONE.

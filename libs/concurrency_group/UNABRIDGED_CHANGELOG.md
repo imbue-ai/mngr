@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Locked in a lower trailing-comment ratchet count: the project already had fewer trailing comments than its recorded count.
+
+Added: `RunningProcess.get_reader_thread_stack()`, which returns the `module.function` names on the process's reader thread (no paths, arguments or locals), for diagnosing a `terminate()` that timed out.
+
 ## 2026-10-26
 
 Stopping a subprocess no longer fails when the operating system refuses the stop signal. macOS can refuse a SIGTERM to our own child with "Operation not permitted" while that child is in the middle of exiting, and the refusal used to escape the shutdown as an exception: the wait for the child's exit and the SIGKILL fallback were skipped, and the error propagated to whoever was stopping the process (in Imbue Studio, it turned a routine pull timeout into a failed machine-record sync pass for every account). A refused signal is now logged with the pid and the shutdown waits for the exit as usual; a child that refuses both SIGTERM and SIGKILL and never exits is still reported through the existing "Process didn't die after kill()" error.

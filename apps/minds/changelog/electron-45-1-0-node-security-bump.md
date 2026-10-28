@@ -1,1 +1,0 @@
-The desktop app moves to Electron 45.1.0. It bundles the Node.js 24.22.1 security release, which also runs latchkey, plus Chromium 156.0.8078.49 and Electron's own fixes, among them stricter handling of malformed asar archives and of File System Access writes to `.git/hooks`.

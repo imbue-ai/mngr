@@ -1,3 +1,0 @@
-- The desktop app's main process now logs a line before and after its macOS dock-click (`activate`) handler and before and after each window's focus relay. A native crash minidump uploaded at the next launch carries these as breadcrumbs, so a crash inside either handler shows a "start" line with no matching "end" line. The lines contain only booleans and the numeric window id.
-
-- The `[gpu] GPU process gone` log line now also records free system memory and the summed working set of every app process, as whole megabytes, to tell a GPU-process death under memory pressure from one with plenty free.

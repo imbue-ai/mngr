@@ -1,1 +1,0 @@
-Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent waits on a background command, and the workspace no longer reminds that agent that it owes a result. Such a template cannot report background tasks itself, so the app and the workspace's update watchdog now read the records the update's own tooling leaves for those commands.

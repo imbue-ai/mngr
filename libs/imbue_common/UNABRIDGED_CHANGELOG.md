@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+The trailing-comment ratchet (`PREVENT_TRAILING_COMMENTS`) no longer counts a bare `# noqa` or `# noqa: CODE[, CODE]` that ends its line. Like `# ty: ignore[...]`, a `noqa` directive has to trail the line it suppresses, so it was never the readability problem the rule targets. A `noqa` followed by an explanation still counts.
+
 ## 2026-10-24
 
 The trailing-comments ratchet no longer counts Bandit's scoped `# nosec BNNN` suppression as a trailing comment. Bandit only honors the directive on the flagged line, as `ty` does with `# ty: ignore[...]`, which the ratchet already exempted. A bare `# nosec` (suppressing every check on the line) is still counted.

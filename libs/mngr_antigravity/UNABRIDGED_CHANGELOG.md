@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+The antigravity agent type declares its own paste placeholder (`[Pasted text `, which agy 1.4 shows as `[Pasted text #N +M lines]` or `[Pasted text #N K chars]`) and Enter-retry test, which `InteractiveTuiAgent` now requires of every TUI agent type. Sending behaves exactly as before.
+
 ## 2026-10-26
 
 Antigravity agents now declare their process name (`agy`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.

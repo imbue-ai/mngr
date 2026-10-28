@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
 ## 2026-10-26
 
 `mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it. Enough of those used to fill a tunnel's 200-slot pool, after which every HTTP request to that service failed with "Proxy connection pool exhausted" until the forward was restarted.

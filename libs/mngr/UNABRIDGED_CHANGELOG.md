@@ -4,6 +4,54 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+The agent release harness now reports the records behind its two duplicate-detection
+failures instead of only a count.
+
+The event-id uniqueness check names the repeated ids, and the exactly-once delivery
+check names each duplicated delivery's event_id and timestamp -- which separates a
+transcript that recorded one line twice (one id, twice) from a token that really was
+sent twice (two ids). Both failures previously had to be diagnosed by reading the
+transcript pipeline.
+
+Fixed: an agent's tmux pane no longer gets taken over by a message like
+`'bash .../commands/sigwinch_panes.sh ... agent fit 98 43' returned 1` (the pane sits in tmux view
+mode until Esc is pressed). The per-session `client-attached` / `client-resized` repaint hooks now
+start `sigwinch_panes.sh` with `if-shell -b` instead of `run-shell -b`. tmux shows a failed
+`run-shell -b` job's output and exit status in view mode on the most recently active pane, which is
+often a different agent's than the one whose hook fired. `if-shell -b` never displays either. The
+hook can fail without the script misbehaving: an older mngr checkout rewrites the shared script in
+place mid-run, or the tmux server is at its file-descriptor limit, so the job's process exits 1
+before the script starts. The second can happen when a burst of resize events (for example from
+dragging a terminal window) fires dozens of resize hooks, each holding a server fd during its delay,
+against a server running with the macOS default limit of 256. When the server has fewer than two
+free fds, it cannot create the job at all; tmux then shows "Failed to run command: ..." on a
+client's status line for `display-time` (750 ms by default), where it used to show nothing. tmux
+also waits for an `if-shell` job before its server exits, so after `tmux kill-server` within a few
+seconds of an attach or resize, the old server lingers until the script's delay ends and refuses new
+sessions until then.
+
+`sigwinch_panes.sh` now calls its entrypoint and `exit` on the same line, so a copy of the script
+that an older mngr rewrites in place while a run is in progress can no longer splice other bytes into
+that run. The updated script reaches a host the next time this mngr creates an agent there.
+
+Only agents started after this change get the new hook; existing sessions keep the old one until
+they are restarted, and until then a failure of an old session's hook can still take over any pane
+on that tmux server, a new agent's included.
+
+When pyinfra cannot find its `ssh` connector in `create_pyinfra_host`, the shared SSH host builder most providers use, mngr now raises `PyinfraConnectorUnavailableError` instead of letting a bare `KeyError` escape from pyinfra. The new error is both a `HostError` and a `KeyError`, so callers that handle mngr errors now catch it, and existing `KeyError` handlers keep catching it. Before raising, mngr logs an ERROR with a snapshot of the pyinfra install as the process sees it at that moment: where the imported package lives and whether it still exists, which pyinfra distribution metadata a lookup finds now and whether it sits next to the imported package, the connector entry points it lists (or why one failed to load), `sys.prefix`, the modification time of `site-packages`, and the process uptime.
+
+Every interactive TUI agent type now declares how its input box looks to `mngr message`, so a TUI that differs from Claude Code's gets the right send behaviour instead of Claude's.
+
+- `PASTE_PLACEHOLDER_PREFIXES` names the text the input box shows in place of a pasted message (for example `[Pasted text #N +M lines]`), so a paste counts as visible before its text is on screen; `()` declares a TUI that shows the pasted text. A concrete `InteractiveTuiAgent` subclass that does not declare it, or declares anything but a tuple of non-empty strings, fails when the class is defined.
+
+- Every concrete `InteractiveTuiAgent` subclass implements `_build_enter_retry_gate`, the pane test that decides whether a swallowed Enter is re-sent during the confirmation window. `tui_utils.build_unsubmitted_message_retry_gate` builds the test Claude Code and agy use: retry while the pane still shows the message's tail or a paste placeholder, which suits a TUI where an Enter on an empty input box does nothing. A TUI that keeps an accepted message on screen as a queued entry supplies its own, because there that test would press Enter again on a message the TUI already took.
+
+- For plugins that call the send helpers directly: `tui_utils.submit_message_and_confirm` and `build_confirmation_command` take `paste_placeholder_prefixes` and `enter_retry_gate` (None re-sends Enter at every retry offset without reading the pane).
+
+Behaviour for every existing agent type is unchanged.
+
 ## 2026-10-26
 
 Live agents no longer read as STOPPED or DONE when their host is too loaded to answer in time. Chats used to flip to paused and "come back" a few minutes later, and a message sent in that window could restart a running agent.

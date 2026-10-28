@@ -164,6 +164,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: The update modal's security-fix notice is now drawn in the warning (orange) palette with plainer "See details" text.
+- Changed: The "Failed to start" screen (and reports filed from it) now show the backend's last stderr lines, exit code or signal, run duration, and how it was launched, instead of only the exit code.
 - Changed: Redesigned the share panel into two-line person cards that show whether each person has opened your workspace and where their invitation stands, replacing the "(hasn't signed up yet)" / "Joined" text.
 - Changed: Reworked onboarding (second pass): the agent asks during workspace creation whether you know what to build and offers examples, with new copy and a workspace tour.
 - Changed: The workspace backup programs are now real modules instead of string literals (behavior unchanged).
@@ -378,6 +380,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: An update running on a workspace whose template predates minds-v0.8.x is no longer stopped partway when the workspace runs short of memory.
+- Fixed: Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent runs a background command.
 - Fixed: A folder sync whose workspace was not running now waits and starts once the workspace is running again, instead of staying stopped until "Try again".
 - Fixed: "Render frame was disposed before WebFrameMain could be accessed" error when a workspace app reopened a custom-scheme link (present since 0.8.6).
 - Fixed: Long file paths in file-sharing permission dialogs show the full path in a hover tooltip.
@@ -507,6 +511,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Security
 
+- Security: The desktop app's Electron 45 bundle moves to 45.1.0, adding Chromium 156 security fixes and stricter handling of malformed asar archives and File System Access writes to `.git/hooks`.
 - Security: Security update for the emSign/eMudhra CA compromise -- Electron 45, uv 0.13.4, certifi 2026.10.19 and Node 24.22.1 drop the compromised CA root, and workspaces below the new security floor are offered the fix (Electron 45 drops macOS 12 support).
 - Security: Redact secrets from persisted logs. The `mngr create` subprocess is now given a log-safe process `name` with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field or `ProcessError` messages. The `modal secret create` subprocess used by `minds env` deploy tooling is likewise named with its `KEY=VALUE` secret values masked so raw Vault secrets no longer reach the thread name or error messages. The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie — a reusable, session-lifetime bearer token — before writing backend stdout events to disk. The single-use one-time login code is left as-is (spent immediately at session start).
 - Security: The bundled lima download is SHA256-verified against a pinned hash, like every other bundled binary.

@@ -9,9 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Bump Latchkey to 3.19.4.
+- Changed: `mngr latchkey forward` logs far more diagnostic detail for transient wiring failures (provider instance/backend, connect errnos, host-sleep), gateway spawn/bind failures (exit code, port state, last output with secrets redacted), provisioning concurrency, and a startup install baseline; its Sentry events now carry a `process_started_at` tag.
 
 ### Fixed
 
+- Fixed: A device announcement that fails because pyinfra is missing its `ssh` connector no longer kills the setup thread; it is reported and retried on the next discovery cycle.
 - Fixed: `GET /permissions/self` no longer fails when the user's desktop is asleep, offline, or closed; the remote workspace gateway now answers it from the permissions file it enforces.
 
 ## [v0.2.0] - 2026-10-22

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+The warning logged when a container's live SSH port cannot be read, which keeps the recorded port, now also gives the recorded port, the container's status, and the container ports it publishes.
+
 ## 2026-10-20
 
 Configuring a host's sshd now logs, at info, the fingerprints of the keys that are about to replace the host's `authorized_keys` (the client key and any appended entries), along with the host id, provider and profile. A later key rejection can then be matched against the keys the host was last configured with.

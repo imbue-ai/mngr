@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+A wiring step's transient-failure report now also names the host's provider instance and backend, gives the errno behind each address of a refused or unreachable connect (paramiko otherwise prints these as `[Errno None]`), and says whether this machine slept during the streak. The streak's first info line carries the provider and errnos too. The discovery stream logs at debug when a host's SSH endpoint changes, with the old and new endpoint.
+
+`mngr latchkey forward` now logs a baseline at startup: the mngr install mode (package or editable) and the same pyinfra install snapshot that mngr logs if pyinfra later loses its `ssh` connector. Its Sentry events also carry a `process_started_at` tag, so an event shows how long the daemon had been running when it failed. A device announcement that fails because pyinfra is missing a connector now goes through the usual wiring-step failure reporting (logged as an error right away) and is tried again on the next discovery cycle. Before, it killed the setup thread.
+
+`mngr latchkey forward` now logs, at debug level, how many hosts are being provisioned at once whenever it starts provisioning the Latchkey gateway on a remote agent's machine. This helps tell whether a provisioning failure only happens while other hosts are being provisioned concurrently.
+
+When `mngr latchkey forward` fails to start or respawn the shared Latchkey gateway because the gateway never binds its port, the error now says what happened to the gateway: whether it had exited (and with which exit code) or was still starting when the 10s bind timeout ran out, whether the port could be bound once the attempt was cleaned up (`free` or an errno such as `EADDRINUSE`), and whether the attempt reused the dead gateway's port or took a fresh one. The gateway's last 20 output lines are now logged at WARNING when a spawn fails, with the gateway's listen password and encryption key redacted. Before, they were only logged at DEBUG to the local log. Each respawn also logs the exit code of the last gateway that was running and how many spawn attempts in a row have failed, a recovered gateway logs how many failures came before it, and every successful spawn logs how long the gateway took to bind.
+
 ## 2026-10-24
 
 Bump Latchkey to 3.19.4.

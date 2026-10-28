@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-27
+
+Locked in a lower trailing-comment ratchet count: the project already had fewer trailing comments than its recorded count.
+
 ## 2026-10-23
 
 Lima VMs upgrade `ca-certificates` at provisioning (one best-effort attempt, so an offline start is not held up) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.
