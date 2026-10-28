@@ -75,22 +75,21 @@ if [ -n "$conv_id" ]; then
 fi
 
 # Parse the model agy reports and mirror it to the uniform model_state.json the workspace's
-# model bar reads. VERIFIED against a live agy 1.1.19 payload, which carries an OBJECT:
+# model bar reads. VERIFIED against a live agy 1.4.7 payload, which carries an OBJECT:
 #
-#   "model":{"id":"Gemini 3.7 Flash (High)","display_name":"...","effort":"high"}
+#   "model":{"id":"Gemini 3.8 Flash (High)","display_name":"...","effort":"high"}
 #
-# so `id` is a DISPLAY NAME, not agy's `gemini-3.7-flash-high` slug. The consumer matches it
-# via the catalog's harness-reported id.
-#
-# `effort` is deliberately NOT written even though the payload carries it: agy has no separate
-# effort axis (the tier is already inside that display name), its catalog options declare no
-# efforts, and a consumer rejects an effort its matched option does not declare -- writing it
-# would make every model unrecognized.
+# so `id` is a DISPLAY NAME, not agy's `gemini-3.8-flash-high` slug, and it carries the effort
+# tier as a parenthesised suffix. A model whose effort cannot be adjusted reports no `effort`,
+# and its name is written as reported.
+# For one that can, the effort is written as its own axis and its suffix is dropped from the
+# name, so the model reads the same at every effort ("Gemini 3.8 Flash").
 #
 # Two passes because there is no jq here: isolate the model object (it has no nested braces),
-# then take its `id`. Falls back to a bare string value, so an agy that ever reports
+# then take its fields. Falls back to a bare string value, so an agy that ever reports
 # "model":"..." still works. Tolerant throughout: no match writes nothing and the bar shows no
 # model, which must never disturb the lifecycle work above.
+agy_effort=""
 agy_model_object=$(
     printf '%s' "$payload" \
         | grep -oE '"model"[[:space:]]*:[[:space:]]*\{[^}]*\}' \
@@ -103,6 +102,12 @@ if [ -n "$agy_model_object" ]; then
             | head -n 1 \
             | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
     )
+    agy_effort=$(
+        printf '%s' "$agy_model_object" \
+            | grep -oE '"effort"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -n 1 \
+            | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
+    )
 else
     agy_model=$(
         printf '%s' "$payload" \
@@ -111,8 +116,21 @@ else
             | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
     )
 fi
+if [ -n "$agy_model" ] && [ -n "$agy_effort" ]; then
+    # agy title-cases the tier in the name ("high" -> " (High)"), so compare case-insensitively.
+    effort_suffix=$(printf ' (%s)' "$agy_effort" | tr '[:upper:]' '[:lower:]')
+    model_tail=$(printf '%s' "${agy_model: -${#effort_suffix}}" | tr '[:upper:]' '[:lower:]')
+    if [ "$model_tail" = "$effort_suffix" ]; then
+        agy_model="${agy_model:0:$((${#agy_model} - ${#effort_suffix}))}"
+    fi
+fi
 if [ -n "$agy_model" ]; then
-    printf '{"model": "%s"}' "$agy_model" > "$model_state_file.tmp" 2>/dev/null \
+    if [ -n "$agy_effort" ]; then
+        printf -v model_state_json '{"model": "%s", "effort": "%s"}' "$agy_model" "$agy_effort"
+    else
+        printf -v model_state_json '{"model": "%s"}' "$agy_model"
+    fi
+    printf '%s' "$model_state_json" > "$model_state_file.tmp" 2>/dev/null \
         && mv -f "$model_state_file.tmp" "$model_state_file" 2>/dev/null
 fi
 
