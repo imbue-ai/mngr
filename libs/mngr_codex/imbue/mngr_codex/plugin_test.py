@@ -24,6 +24,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
@@ -59,7 +60,9 @@ from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_local_host_of_class
+from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 from imbue.mngr_codex.app_server_client import AppServerTransport
 from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
@@ -160,27 +163,37 @@ def test_get_install_command_pins_version() -> None:
     assert agent.get_install_command() == "npm i -g @openai/codex@0.139.0"
 
 
-def test_verify_pinned_codex_version_passes_on_match(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    # `sh -c 'echo codex-cli 0.139.0'` ignores the appended --version, so the probe
-    # parses 0.139.0 without a real codex binary.
-    agent = _make_codex_agent(
-        CodexAgent,
-        local_provider,
-        tmp_path,
-        CodexAgentConfig(version="0.139.0", command=CommandString("sh -c 'echo codex-cli 0.139.0'")),
-    )
+def test_verify_pinned_codex_version_passes_on_match(
+    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.139.0"))
     agent._verify_pinned_codex_version(agent.host)
 
 
-def test_verify_pinned_codex_version_raises_on_mismatch(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+def test_verify_pinned_codex_version_raises_on_mismatch(
+    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.140.0"))
+    with pytest.raises(AgentInstallationError, match="codex version mismatch"):
+        agent._verify_pinned_codex_version(agent.host)
+
+
+def test_verify_pinned_codex_version_warns_on_mismatch_under_warn(
+    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
     agent = _make_codex_agent(
         CodexAgent,
         local_provider,
         tmp_path,
-        CodexAgentConfig(version="0.140.0", command=CommandString("sh -c 'echo codex-cli 0.139.0'")),
+        CodexAgentConfig(version="0.140.0", version_mismatch=VersionMismatchPolicy.WARN),
     )
-    with pytest.raises(AgentInstallationError, match="version mismatch"):
+    with capture_loguru() as log_output:
         agent._verify_pinned_codex_version(agent.host)
+    assert "codex version mismatch" in log_output.getvalue()
+    assert "codex-cli 0.139.0" in log_output.getvalue()
 
 
 def test_reconcile_verifies_pin_and_skips_update_check_when_pinned() -> None:

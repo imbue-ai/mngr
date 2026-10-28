@@ -25,6 +25,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -86,6 +87,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_command_agent
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import poll_until_file_contains
+from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
@@ -117,7 +119,6 @@ from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
 from imbue.mngr_claude.plugin import _generate_claude_json
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
-from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _is_using_claude_oauth_subscription
@@ -4788,36 +4789,6 @@ def _make_command_tracking_host() -> tuple[OnlineHostInterface, list[str]]:
     return host, executed_commands
 
 
-def test_get_claude_version_returns_version_on_success() -> None:
-    """_get_claude_version should return the version string when claude --version succeeds."""
-    issued_commands: list[str] = []
-
-    def _execute(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
-        issued_commands.append(cmd)
-        return SimpleNamespace(success=True, stdout="2.1.50 (Claude Code)\n", stderr="")
-
-    host = cast(OnlineHostInterface, SimpleNamespace(execute_idempotent_command=_execute))
-
-    assert _get_claude_version(host) == "2.1.50"
-    # The version must be probed via `claude --version`; a bug invoking a
-    # different command (e.g. `claude --ver`) would otherwise go undetected.
-    assert issued_commands == ["claude --version"]
-
-
-def test_get_claude_version_returns_none_on_failure() -> None:
-    """_get_claude_version should return None when claude --version fails."""
-    issued_commands: list[str] = []
-
-    def _execute(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
-        issued_commands.append(cmd)
-        return SimpleNamespace(success=False, stdout="", stderr="command not found")
-
-    host = cast(OnlineHostInterface, SimpleNamespace(execute_idempotent_command=_execute))
-
-    assert _get_claude_version(host) is None
-    assert issued_commands == ["claude --version"]
-
-
 def test_provision_raises_on_version_mismatch(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -4870,7 +4841,61 @@ def test_provision_raises_on_version_mismatch(
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mngr_ctx=ctx)
         assert isinstance(exc_info.value.main_exception, AgentInstallationError)
-        assert "Claude version mismatch" in str(exc_info.value.main_exception)
+        assert "claude version mismatch" in str(exc_info.value.main_exception)
+
+
+def test_provision_verifies_pinned_version_even_with_check_installation_off(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "claude", "2.1.50 (Claude Code)")
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, version="99.99.99"),
+    )
+    _write_all_dialogs_dismissed(agent.work_dir)
+
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
+        agent.provision(
+            host=host, options=CreateAgentOptions(agent_type=AgentTypeName("claude")), mngr_ctx=temp_mngr_ctx
+        )
+    assert isinstance(exc_info.value.main_exception, AgentInstallationError)
+    assert "claude version mismatch" in str(exc_info.value.main_exception)
+
+
+def test_provision_warns_and_completes_on_version_mismatch_under_warn(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "claude", "2.1.50 (Claude Code)")
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False, version="99.99.99", version_mismatch=VersionMismatchPolicy.WARN
+        ),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+    _write_all_dialogs_dismissed(agent.work_dir)
+
+    with capture_loguru() as log_output:
+        agent.provision(
+            host=host, options=CreateAgentOptions(agent_type=AgentTypeName("claude")), mngr_ctx=temp_mngr_ctx
+        )
+
+    warning = log_output.getvalue()
+    assert "claude version mismatch" in warning
+    assert "2.1.50 (Claude Code)" in warning
+    assert "'99.99.99'" in warning
+    # Provisioning ran past the version check to completion.
+    assert "SessionStart" in json.loads((agent.get_claude_config_dir() / "settings.json").read_text())["hooks"]
 
 
 def _install_clause_tokens(install_command: str, marker: str) -> list[str]:

@@ -232,7 +232,7 @@ command. All real agents install through the shared `ensure_cli_installed` helpe
 longer carries a bespoke install block). Version management (pin vs auto-update) stays a
 *distinguishing* capability (`HasVersionManagementMixin`: claude, codex), since not every CLI
 exposes version control; it is a functional contract -- `reconcile_installed_version` enforces
-the agent's version intent against the already-present binary (claude verifies its pin, codex
+the agent's version intent against the installed binary (claude verifies its pin, codex
 runs its update policy), not just a descriptive label.
 
 ## Discoverability: making "you should implement this" obvious

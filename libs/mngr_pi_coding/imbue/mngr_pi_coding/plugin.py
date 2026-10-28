@@ -20,6 +20,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import describe_failed_send_command
+from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -400,7 +401,13 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=None,
         description="Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs "
         "`npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed "
-        "pi matches, erroring on a mismatch. When None (the default), installs the latest version.",
+        "pi matches (see `version_mismatch`), whether or not `check_installation` is set. When None (the "
+        "default), installs the latest version.",
+    )
+    version_mismatch: VersionMismatchPolicy = Field(
+        default=VersionMismatchPolicy.ERROR,
+        description="What provisioning does when the installed pi does not report the pinned `version`. "
+        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
@@ -986,13 +993,13 @@ class PiCodingAgent(
 
         if config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-            if config.version is not None:
-                verify_pinned_cli_version(
-                    host,
-                    command=str(config.command),
-                    binary_name=self.get_install_binary_name(),
-                    pinned_version=config.version,
-                )
+        if config.version is not None:
+            verify_pinned_cli_version(
+                host,
+                binary_name=self.get_install_binary_name(),
+                pinned_version=config.version,
+                mismatch_policy=config.version_mismatch,
+            )
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.

@@ -721,18 +721,21 @@ class HasVersionManagementMixin(ABC):
     two faces of version control -- not pinning is itself a choice to track
     upstream). CLIs that simply assume whatever binary is on PATH do not have
     this capability. The agent calls ``reconcile_installed_version`` during
-    provisioning (once the binary is present) to enforce that intent: a pinning
-    agent verifies the installed version and raises on mismatch; an update-policy
-    agent runs its (best-effort) update check.
+    provisioning to enforce that intent: a pinning agent verifies the installed
+    version and acts on a mismatch per its ``version_mismatch`` policy; an
+    update-policy agent runs its (best-effort) update check.
     """
 
     @abstractmethod
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        """Enforce this agent's version intent against the already-present binary.
+        """Enforce this agent's version intent against the installed binary.
 
-        Called during provisioning after the binary is known to be installed.
-        Pinning agents verify the installed version matches (raising on
-        mismatch); update-policy agents run their (best-effort) update check.
+        Called during provisioning after any install step, whether or not
+        ``check_installation`` ran, so the binary may be absent or unable to
+        report its version; implementations leave that case alone. Pinning
+        agents verify the installed version matches (raising or warning on a
+        mismatch, per their ``version_mismatch`` policy); update-policy agents
+        run their (best-effort) update check.
         """
         ...
 

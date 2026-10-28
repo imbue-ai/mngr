@@ -27,10 +27,11 @@ the template's own resolver (:func:`resolve_account_binding`) and splicing its
 answer in, as it did before the file existed. That path costs two more execs.
 
 The one setting the bare create adds, ``agent_types.claude.check_installation=false``,
-is the lever for a workspace whose claude binary no longer matches the template's pin:
-its in-container mngr refuses every claude create, including the update that would fix
-it, and only a create arriving from outside can wave the check. The script's create
-waves it on every create itself.
+is the lever for a workspace whose claude binary no longer matches the template's pin on
+a template from before ``version_mismatch = "WARN"``: its in-container mngr refuses every
+claude create, including the update that would fix it, and only a create arriving from
+outside can wave the check. A template with warn mode only logs the mismatch, and its
+mngr no longer ties the version check to ``check_installation``.
 """
 
 import secrets
@@ -133,6 +134,8 @@ AUTO_OPEN_CHAT_LABELS: Final[tuple[str, ...]] = ("assist", "auto_open")
 USER_CREATED_LABEL: Final[str] = "user_created=true"
 
 # Waves the claude version check for this create alone; see the module docstring.
+# CLEANUP: remove this setting (and its use in build_bare_create_command) once no supported
+# workspace is on a template from before version_mismatch = "WARN".
 SKIP_CLAUDE_INSTALLATION_CHECK_SETTING: Final[str] = "agent_types.claude.check_installation=false"
 
 # Opens the line the fallback echoes before it chooses between a bare create and the resolver:
