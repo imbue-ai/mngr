@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-lima"
-version = "0.2.1"
+version = "0.2.0"
 description = "Lima VM provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.3.1",
+    "imbue-mngr==0.3.0",
     "pyyaml>=6.0",
     "tenacity>=8.0",
 ]

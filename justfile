@@ -218,8 +218,5 @@ sync-create-progress-defaults *args:
 check-changelog:
     python -m scripts.check_changelog_entries
 
-# mngr-seer operator recipes.
-import 'apps/mngr_issue_generator/seer.just'
-
 # Ops recipes live in private.just, which is absent on the public mirror.
 import? 'private.just'

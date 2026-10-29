@@ -152,7 +152,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     if (!updates.hasReceivedUpdates) return;
     const seen = `${String(updates.isAutoUpdateEnabled)}|${updates.updateWindow}`;
     if (lastSeenAppUpdateSettings !== undefined && seen !== lastSeenAppUpdateSettings) {
-      void local.appSettings.load();
+      void local.appSettings.load(getAppContext().shell.accountId);
     }
     lastSeenAppUpdateSettings = seen;
   }
@@ -166,7 +166,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
 
   return {
     oninit() {
-      void local.appSettings.load();
+      void local.appSettings.load(getAppContext().shell.accountId);
     },
     view(vnode) {
       consumeOverrideParam();

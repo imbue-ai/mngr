@@ -3,7 +3,7 @@
 // that serves nothing, that the click never reaches the model at all.
 
 import m from "mithril";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   PeekedChannel,
   UpdateState,
@@ -32,8 +32,21 @@ import {
   unreadableChromeProfileOutcome,
   withMindsNative,
 } from "../../../testing";
+import type { AppContext } from "../../../app-context";
+import {
+  clearAppContextForTests,
+  registerAppContext,
+} from "../../../app-context";
+
+// The panels' account-keyed writes read the window's account off the shell.
+beforeEach(() => {
+  registerAppContext({
+    shell: { accountId: "user-7" },
+  } as unknown as AppContext);
+});
 
 afterEach(() => {
+  clearAppContextForTests();
   resetNotificationPrefsForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -752,7 +765,7 @@ describe("SettingsSections notifications panel", () => {
       (vnode) => attrsOf(vnode).id === "notification-style-os",
     );
     (attrsOf(osRadio as AnyVnode).onclick as () => void)();
-    expect(writtenBodies).toEqual([{ is_enabled: true, style: "os" }]);
+    expect(writtenBodies).toEqual([{ style: "os" }]);
     expect(requestPermission).not.toHaveBeenCalled();
   });
 
@@ -874,7 +887,7 @@ describe("SettingsSections notifications panel", () => {
     const model = await notificationsModel(() =>
       jsonResponse({ error: "nope" }, 500),
     );
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: false,
       style: "cards",
     });

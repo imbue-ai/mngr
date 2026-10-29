@@ -31,6 +31,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -104,8 +105,6 @@ from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
 from imbue.minds.desktop_client.local_prerequisites import SubprocessHostProbe
 from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
-from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
-from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
@@ -124,6 +123,11 @@ from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
+from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
+from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
+from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
+from imbue.minds.desktop_client.settings.resolve import resolve_update_window
+from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
@@ -173,19 +177,21 @@ from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
-from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import read_workspace_update_facts
 from imbue.minds.desktop_client.update_status import format_update_window
+from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -2250,7 +2256,13 @@ class _LegacyUiStateDeriver(MutableModel):
     workspace_update_service: WorkspaceUpdateService | None = Field(
         frozen=True, description="Update state source; None in a build with no mngr caller"
     )
-    minds_config: MindsConfig | None = Field(frozen=True, description="Where the update window is configured")
+    minds_config: MindsConfig | None = Field(frozen=True, description="Install-keyed settings store")
+    account_settings_store: AccountSettingsStore | None = Field(
+        frozen=True, description="Per-account settings records; None resolves the declared defaults"
+    )
+    workspace_facts_cache: WorkspaceFactsCache | None = Field(
+        frozen=True, description="Per-workspace facts cache (the skipped targets the updates frame reports)"
+    )
     connectivity_detector: ConnectivityDetector | None = Field(
         frozen=True, description="This device's own connectivity condition"
     )
@@ -2284,19 +2296,27 @@ class _LegacyUiStateDeriver(MutableModel):
         return _derive_ui_health_states(self.system_interface_health_tracker)
 
     def derive_workspace_updates(self) -> UiWorkspaceUpdatesMessage:
-        window = self.minds_config.get_update_window() if self.minds_config is not None else DEFAULT_UPDATE_WINDOW
+        # The device's values are the frame's base; the publisher's account
+        # projection swaps in each account's own resolved pair.
+        settings_context = load_settings_context(self.minds_config, self.account_settings_store, LOCAL_PROFILE_USER_ID)
+        window = resolve_update_window(settings_context)
         if self.workspace_update_service is None:
             return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
-        return build_workspace_updates_message(self.workspace_update_service, window, self.minds_config)
+        return build_workspace_updates_message(
+            self.workspace_update_service, window, settings_context, self.workspace_facts_cache
+        )
+
+    def derive_account_update_settings(self, account_id: str) -> tuple[str, bool]:
+        """One account's resolved (formatted update window, auto-update toggle), for the frame projection."""
+        settings_context = load_settings_context(self.minds_config, self.account_settings_store, account_id)
+        return (
+            format_update_window(resolve_update_window(settings_context)),
+            resolve_auto_update_workspaces(settings_context),
+        )
 
     def resolve_workspace_account_id(self, agent_id: str) -> str:
         """The account a workspace's frames go to: its association, else the device."""
         return get_owning_account_id_for_workspace(session_store=self.session_store, workspace_any_id=agent_id)
-
-
-def _read_default_update_window() -> tuple[int, int]:
-    """The update window for a build with no settings storage to read one from."""
-    return DEFAULT_UPDATE_WINDOW
 
 
 class _UpdateRunHostLifecycle(MutableModel):
@@ -2416,12 +2436,52 @@ def _arm_for_auto_update(app: Flask, agent_id: AgentId) -> None:
         service.arm_for_auto_update(agent_id)
 
 
-def _read_auto_update_policy(minds_config: MindsConfig | None, agent_id: AgentId) -> AutoUpdatePolicy:
+def _read_update_facts_through_cache(
+    mngr_caller: MngrCaller,
+    backend_resolver: BackendResolverInterface,
+    settings_source: UpdateSettingsSource,
+    facts_cache: WorkspaceFactsCache,
+    agent_id: AgentId,
+    is_sign_in_checked: bool,
+) -> UpdateWorkspaceFacts | None:
+    """The sweep's one read, with the facts cache's write-through riding it and its answer adopted.
+
+    The queued skip and dismissals travel as the read's flags (the program merges them into the
+    workspace's own files), and the merged answer is folded back into the cache before the
+    sweep acts on the row -- so a dismissal made on another computer suppresses the record in
+    the same pass that read it.
+    """
+    facts = read_workspace_update_facts(
+        mngr_caller,
+        build_agent_address(agent_id, backend_resolver),
+        settings_source.settings_for(agent_id),
+        is_sign_in_checked=is_sign_in_checked,
+        fact_write_arguments=facts_cache.pending_update_fact_arguments(agent_id),
+    )
+    if facts is not None:
+        facts_cache.adopt_update_facts(agent_id, facts.skipped_target, facts.dismissals)
+    return facts
+
+
+def _read_auto_update_policy(
+    minds_config: MindsConfig | None,
+    account_settings_store: AccountSettingsStore | None,
+    session_store: MultiAccountSessionStore | None,
+    facts_cache: WorkspaceFactsCache,
+    agent_id: AgentId,
+) -> AutoUpdatePolicy:
     if minds_config is None:
         return AutoUpdatePolicy(is_enabled=False, skipped_target_ref="")
+    # The toggle is the workspace's owning account's choice; the skipped
+    # target is the workspace's own fact, served from the install's cache.
+    settings_context = load_settings_context(
+        minds_config,
+        account_settings_store,
+        get_owning_account_id_for_workspace(session_store=session_store, workspace_any_id=str(agent_id)),
+    )
     return AutoUpdatePolicy(
-        is_enabled=minds_config.get_auto_update_workspaces(),
-        skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or "",
+        is_enabled=resolve_auto_update_workspaces(settings_context),
+        skipped_target_ref=facts_cache.get_skipped_target_ref(agent_id),
     )
 
 
@@ -2445,6 +2505,9 @@ def _build_workspace_update_service(
     mngr_caller: MngrCaller | None,
     paths: InstallationPaths | None,
     minds_config: MindsConfig | None,
+    account_settings_store: AccountSettingsStore | None,
+    facts_cache: WorkspaceFactsCache | None,
+    session_store: MultiAccountSessionStore | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     root_concurrency_group: ConcurrencyGroup | None,
     dispatch_recovery: Callable[[AgentId], None] | None,
@@ -2461,15 +2524,14 @@ def _build_workspace_update_service(
     if (
         mngr_caller is None
         or paths is None
+        or facts_cache is None
         or system_interface_health_tracker is None
         or root_concurrency_group is None
         or dispatch_recovery is None
     ):
         return None
     _drop_retired_update_schedules(paths.data_dir)
-    state_store = WorkspaceUpdateStateStore(
-        dismissal_store=UpdateDismissalStore(records_dir=paths.data_dir / "update_dismissals"),
-    )
+    state_store = WorkspaceUpdateStateStore(facts_cache=facts_cache)
     apply_window = UpdateApplyWindowManager(
         tracker=system_interface_health_tracker,
         store=state_store,
@@ -2480,8 +2542,14 @@ def _build_workspace_update_service(
     )
     settings_source = UpdateSettingsSource(
         read_ceiling=default_workspace_template_ref,
-        read_update_window=(
-            minds_config.get_update_window if minds_config is not None else _read_default_update_window
+        # Re-resolved on every read so a Settings change applies without a
+        # restart, for the workspace's owning account, whose window it is.
+        read_update_window=lambda agent_id: resolve_update_window(
+            load_settings_context(
+                minds_config,
+                account_settings_store,
+                get_owning_account_id_for_workspace(session_store=session_store, workspace_any_id=str(agent_id)),
+            )
         ),
         # The same reader the workspace's bootstrap asks for at boot.
         read_zone=read_host_timezone,
@@ -2493,13 +2561,12 @@ def _build_workspace_update_service(
         mngr_caller=mngr_caller,
         concurrency_group=root_concurrency_group,
         read_supported_version=default_workspace_template_ref,
-        read_update_facts=lambda agent_id, is_sign_in_checked: read_workspace_update_facts(
-            mngr_caller,
-            build_agent_address(agent_id, backend_resolver),
-            settings_source.settings_for(agent_id),
-            is_sign_in_checked=is_sign_in_checked,
+        read_update_facts=lambda agent_id, is_sign_in_checked: _read_update_facts_through_cache(
+            mngr_caller, backend_resolver, settings_source, facts_cache, agent_id, is_sign_in_checked
         ),
-        read_auto_update_policy=lambda agent_id: _read_auto_update_policy(minds_config, agent_id),
+        read_auto_update_policy=lambda agent_id: _read_auto_update_policy(
+            minds_config, account_settings_store, session_store, facts_cache, agent_id
+        ),
         arm_for_auto_update=lambda agent_id: _arm_for_auto_update(app, agent_id),
     )
     host_lifecycle = _UpdateRunHostLifecycle(
@@ -2517,7 +2584,7 @@ def _build_workspace_update_service(
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
         settings_source=settings_source,
-        minds_config=minds_config,
+        facts_cache=facts_cache,
         start_workspace=host_lifecycle.start_and_wait,
     )
 
@@ -2532,6 +2599,8 @@ def _create_ui_state_publisher(
     discovery_health_watchdog: DiscoveryHealthWatchdog | None,
     workspace_update_service: WorkspaceUpdateService | None,
     minds_config: MindsConfig | None,
+    account_settings_store: AccountSettingsStore | None,
+    workspace_facts_cache: WorkspaceFactsCache | None,
     connectivity_detector: ConnectivityDetector | None,
     machine_stop_kind_tracker: MachineStopKindTracker | None,
 ) -> UiStatePublisher:
@@ -2545,6 +2614,8 @@ def _create_ui_state_publisher(
         discovery_health_watchdog=discovery_health_watchdog,
         workspace_update_service=workspace_update_service,
         minds_config=minds_config,
+        account_settings_store=account_settings_store,
+        workspace_facts_cache=workspace_facts_cache,
         connectivity_detector=connectivity_detector,
         machine_stop_kind_tracker=machine_stop_kind_tracker,
     )
@@ -2558,6 +2629,7 @@ def _create_ui_state_publisher(
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
         derive_workspace_updates=deriver.derive_workspace_updates,
+        derive_account_update_settings=deriver.derive_account_update_settings,
         resolve_workspace_account_id=deriver.resolve_workspace_account_id,
     )
 
@@ -2628,6 +2700,9 @@ def create_desktop_client(
     forward_identity: ForwardIdentityPublisher | None = None,
     connection_store: ConnectionStore | None = None,
     provider_materializer: ProviderSettingsMaterializer | None = None,
+    account_settings_store: AccountSettingsStore | None = None,
+    workspace_facts_cache: WorkspaceFactsCache | None = None,
+    workspace_profile_writer: WorkspaceProfileWriter | None = None,
 ) -> Flask:
     """Create the bare-origin Imbue Studio Flask application.
 
@@ -2725,12 +2800,19 @@ def create_desktop_client(
         if system_interface_health_tracker is not None and root_concurrency_group is not None
         else None
     )
+    # The per-workspace facts cache (spec section 7.4); run.py builds and migrates it before
+    # the app exists, and a test-built app over a data dir gets its own.
+    if workspace_facts_cache is None and paths is not None:
+        workspace_facts_cache = WorkspaceFactsCache(records_dir=paths.data_dir / "workspace_facts_cache")
     workspace_update_service = _build_workspace_update_service(
         app=app,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
         paths=paths,
         minds_config=minds_config,
+        account_settings_store=account_settings_store,
+        facts_cache=workspace_facts_cache,
+        session_store=session_store,
         system_interface_health_tracker=system_interface_health_tracker,
         root_concurrency_group=root_concurrency_group,
         dispatch_recovery=(
@@ -2751,6 +2833,8 @@ def create_desktop_client(
         discovery_health_watchdog=discovery_health_watchdog,
         workspace_update_service=workspace_update_service,
         minds_config=minds_config,
+        account_settings_store=account_settings_store,
+        workspace_facts_cache=workspace_facts_cache,
         connectivity_detector=connectivity_detector,
         machine_stop_kind_tracker=machine_stop_kind_tracker,
     )
@@ -2763,7 +2847,9 @@ def create_desktop_client(
     # applies without a restart; without a MindsConfig the defaults apply.
     notification_feed = NotificationFeed(
         notification_dispatcher=notification_dispatcher,
-        get_dispatch_preferences=_NotificationDispatchPreferencesReader(minds_config=minds_config),
+        get_dispatch_preferences=_NotificationDispatchPreferencesReader(
+            minds_config=minds_config, account_settings_store=account_settings_store, session_store=session_store
+        ),
         is_main_window_focused=_FocusedMainWindowReader(broadcaster=ui_channel_broadcaster),
         is_screen_locked=_ScreenLockedReader(broadcaster=ui_channel_broadcaster),
         cleared_request_ids_path=None if paths is None else paths.data_dir / "cleared_notification_requests.json",
@@ -2847,6 +2933,9 @@ def create_desktop_client(
         folder_sync_manager=folder_sync_manager,
         connection_store=connection_store,
         provider_materializer=provider_materializer,
+        account_settings_store=account_settings_store,
+        workspace_facts_cache=workspace_facts_cache,
+        workspace_profile_writer=workspace_profile_writer,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
         machine_stop_kind_tracker=machine_stop_kind_tracker,
@@ -3057,20 +3146,32 @@ def create_desktop_client(
 class _NotificationDispatchPreferencesReader(FrozenModel):
     """Live reader of the stored notification preferences for the feed's OS dispatch.
 
-    Reads MindsConfig on every call so a Settings change applies without an
-    app restart; without a MindsConfig (minimal test apps) the defaults apply.
+    Reads the stores on every call so a Settings change applies without an app
+    restart; without them (minimal test apps) the defaults apply. The master
+    toggle is account-keyed, so each entry resolves it for its own account:
+    the one it names, else its workspace's owning account, else the device.
     """
 
-    minds_config: MindsConfig | None = Field(frozen=True, description="Preference store; None means defaults.")
+    minds_config: MindsConfig | None = Field(frozen=True, description="Install-keyed store; None means defaults.")
+    account_settings_store: AccountSettingsStore | None = Field(
+        frozen=True, description="Per-account settings records; None means defaults."
+    )
+    session_store: MultiAccountSessionStore | None = Field(
+        frozen=True, description="Resolves a workspace's owning account; None reads every workspace as the device's."
+    )
 
-    def __call__(self) -> NotificationDispatchPreferences:
-        if self.minds_config is None:
-            return NotificationDispatchPreferences(is_enabled=True, style=DEFAULT_NOTIFICATION_STYLE)
-        # One atomic read (not two separate locked getters): a concurrent
-        # set_notification_prefs() write landing between two separate calls could
-        # otherwise produce an (is_enabled, style) pair never actually persisted together.
-        is_enabled, style = self.minds_config.get_notification_prefs()
-        return NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
+    def __call__(self, account_id: str, workspace_agent_id: str) -> NotificationDispatchPreferences:
+        if account_id:
+            entry_account_id = account_id
+        else:
+            entry_account_id = get_owning_account_id_for_workspace(
+                session_store=self.session_store, workspace_any_id=workspace_agent_id
+            )
+        settings_context = load_settings_context(self.minds_config, self.account_settings_store, entry_account_id)
+        return NotificationDispatchPreferences(
+            is_enabled=resolve_notifications_enabled(settings_context),
+            style=resolve_notification_style(settings_context),
+        )
 
 
 class _BackupSetupFailureReporter(FrozenModel):

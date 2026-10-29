@@ -21,8 +21,9 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
+from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
@@ -34,6 +35,7 @@ from imbue.minds.desktop_client.update_service import UpdateSchedule
 from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_status import format_update_window
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
@@ -86,11 +88,16 @@ class UiBulkUpdateRequest(FrozenModel):
 
 
 def build_workspace_updates_message(
-    service: WorkspaceUpdateService, update_window: tuple[int, int], minds_config: MindsConfig | None
+    service: WorkspaceUpdateService,
+    update_window: tuple[int, int],
+    settings_context: SettingsResolutionContext,
+    # The per-workspace skipped targets are facts about one workspace, not declared settings:
+    # they live in the workspace itself, served from the install's cache while it is stopped.
+    facts_cache: WorkspaceFactsCache | None,
 ) -> UiWorkspaceUpdatesMessage:
     """The store's composed state, plus the per-frame facts it does not hold."""
     ceiling_ref = service.settings_source.read_ceiling()
-    is_auto_update_enabled = minds_config.get_auto_update_workspaces() if minds_config is not None else False
+    is_auto_update_enabled = resolve_auto_update_workspaces(settings_context)
     return UiWorkspaceUpdatesMessage(
         updates={
             agent_id_str: state.model_copy_update(
@@ -98,7 +105,8 @@ def build_workspace_updates_message(
                 to_update(state.field_ref().is_backup_configured, service.is_backup_configured(AgentId(agent_id_str))),
                 to_update(
                     state.field_ref().is_update_skipped,
-                    minds_config is not None and minds_config.get_skipped_update_target(agent_id_str) == ceiling_ref,
+                    facts_cache is not None
+                    and facts_cache.get_skipped_target_ref(AgentId(agent_id_str)) == ceiling_ref,
                 ),
             )
             for agent_id_str, state in service.state_store.snapshot().items()

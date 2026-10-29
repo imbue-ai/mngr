@@ -9,9 +9,10 @@ workspace root. Each mode is idempotent and prints one marker-wrapped JSON answe
 - ``now``: the same installs and checks (cron is not needed), then create the update chat with
   the auto-open label and return once its create has finished;
 - ``cancel``: delete the schedule file;
-- ``read``: the schedule file, the run record and the last dispatch, the detection sweep's one
-  read; given the app's current values, an armed file is first refreshed with them, and asked,
-  it says whether an account is signed in;
+- ``read``: the schedule file, the run record, the last dispatch, and the per-workspace facts
+  (the skipped target and the dismissals), the detection sweep's one read; given the app's
+  current values, an armed file is first refreshed with them, queued fact writes are merged
+  into their files, and asked, it says whether an account is signed in;
 - ``tick``: the dispatcher's own minute (``update_dispatcher``), run by cron from the installed copy;
 - ``busy``: the chats the workspace's background-task marker files hold live tasks for, which the app's run
   probe reads from the installed copy in a template without the background-task CLI.
@@ -57,6 +58,9 @@ from imbue.minds.workspace_programs.update_dispatcher import write_json_atomical
 from imbue.minds.workspace_programs.update_dispatcher import write_log_line
 from imbue.minds.workspace_programs.update_protocol import BUSY_CHAT_IDS_FIELD
 from imbue.minds.workspace_programs.update_protocol import BUSY_MODE
+from imbue.minds.workspace_programs.update_protocol import DISMISSALS_FILE_PATH
+from imbue.minds.workspace_programs.update_protocol import DISMISS_NOTE_AT_FLAG
+from imbue.minds.workspace_programs.update_protocol import DISMISS_OUTCOME_AT_FLAG
 from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
 from imbue.minds.workspace_programs.update_protocol import DURABLE_CRON_PATH
 from imbue.minds.workspace_programs.update_protocol import LAST_DISPATCH_FILE_PATH
@@ -68,7 +72,10 @@ from imbue.minds.workspace_programs.update_protocol import OUTCOME_NO_CRON
 from imbue.minds.workspace_programs.update_protocol import OUTCOME_TOO_OLD_TO_UPDATE
 from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
 from imbue.minds.workspace_programs.update_protocol import SCHEDULE_FILE_PATH
+from imbue.minds.workspace_programs.update_protocol import SKIPPED_TARGET_FILE_PATH
 from imbue.minds.workspace_programs.update_protocol import SKIP_NEEDS_SIGN_IN
+from imbue.minds.workspace_programs.update_protocol import SKIP_TARGET_AT_FLAG
+from imbue.minds.workspace_programs.update_protocol import SKIP_TARGET_FLAG
 from imbue.minds.workspace_programs.update_protocol import STARTED_BY_IMMEDIATE
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_CHECK_SIGN_IN_FLAG
 
@@ -255,12 +262,62 @@ def mode_cancel(context: ProgramContext) -> None:
     emit_update_answer({"mode": "cancel", "is_cancelled": True})
 
 
+def _float_arg(context: ProgramContext, flag: str) -> float | None:
+    raw = _arg(context, flag)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        write_log_line("ignored a non-numeric %s value: %r" % (flag, raw))
+        return None
+
+
+def _merge_skipped_target(context: ProgramContext) -> dict[str, object] | None:
+    """Apply a queued skip to the skipped-target file (latest ``skipped_at`` wins) and answer the file."""
+    existing = read_json_object(SKIPPED_TARGET_FILE_PATH)
+    queued_target = _arg(context, SKIP_TARGET_FLAG)
+    if not queued_target:
+        return existing
+    queued_at = _float_arg(context, SKIP_TARGET_AT_FLAG) or 0.0
+    existing_at = existing.get("skipped_at") if existing is not None else None
+    is_existing_newer = isinstance(existing_at, (int, float)) and float(existing_at) > queued_at
+    if existing is not None and is_existing_newer:
+        return existing
+    merged: dict[str, object] = {"schema": UPDATE_PROGRAM_SCHEMA, "target_ref": queued_target, "skipped_at": queued_at}
+    write_json_atomically(SKIPPED_TARGET_FILE_PATH, merged)
+    write_log_line("recorded the skipped update target %s" % queued_target)
+    return merged
+
+
+def _merge_dismissals(context: ProgramContext) -> dict[str, object] | None:
+    """Apply queued dismissals to the dismissals file (the later run's start wins) and answer the file."""
+    existing = read_json_object(DISMISSALS_FILE_PATH) or {}
+    merged = dict(existing)
+    for flag, key in (
+        (DISMISS_NOTE_AT_FLAG, "note_run_started_at"),
+        (DISMISS_OUTCOME_AT_FLAG, "outcome_run_started_at"),
+    ):
+        queued_at = _float_arg(context, flag)
+        if queued_at is None:
+            continue
+        existing_at = merged.get(key)
+        if not isinstance(existing_at, (int, float)) or float(existing_at) < queued_at:
+            merged[key] = queued_at
+    if merged != existing:
+        merged["schema"] = UPDATE_PROGRAM_SCHEMA
+        write_json_atomically(DISMISSALS_FILE_PATH, merged)
+        write_log_line("recorded update-row dismissals")
+    return merged if merged else None
+
+
 def mode_read(context: ProgramContext) -> None:
-    """The schedule, the run record and the last dispatch in one answer.
+    """The schedule, the run record, the last dispatch, and the per-workspace facts in one answer.
 
     With app fields given, an armed schedule is first rewritten with them and the dispatcher brought
     current. Whether an account is signed in rides along when the app asks, or the schedule's skip says
-    none was.
+    none was. Queued fact writes (a skip, dismissals) are merged into their files before the answer,
+    so the one read is also the write-through.
     """
     schedule = read_json_object(SCHEDULE_FILE_PATH)
     if schedule is not None and _arg(context, "--ceiling"):
@@ -283,6 +340,8 @@ def mode_read(context: ProgramContext) -> None:
             "run": read_json_object(RUN_RECORD_PATH),
             "last_dispatch": read_json_object(LAST_DISPATCH_FILE_PATH),
             "is_signed_in": is_signed_in,
+            "skipped_target": _merge_skipped_target(context),
+            "dismissals": _merge_dismissals(context),
         }
     )
 

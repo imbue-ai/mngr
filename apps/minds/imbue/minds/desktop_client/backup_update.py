@@ -56,6 +56,7 @@ from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
@@ -156,6 +157,7 @@ def run_backup_update_sequence(
     agent_id: AgentId,
     paths: InstallationPaths,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
@@ -171,6 +173,7 @@ def run_backup_update_sequence(
             agent_id=agent_id,
             paths=paths,
             resolver=resolver,
+            facts_cache=facts_cache,
             registry=registry,
             parent_cg=parent_cg,
             is_stop_chats=is_stop_chats,
@@ -186,6 +189,7 @@ def _run_update_phases(
     agent_id: AgentId,
     paths: InstallationPaths,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
@@ -221,6 +225,7 @@ def _run_update_phases(
         agent_id=agent_id,
         paths=paths,
         resolver=resolver,
+        facts_cache=facts_cache,
         registry=registry,
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,
@@ -273,6 +278,7 @@ def _apply_update_and_verify(
     agent_id: AgentId,
     paths: InstallationPaths,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
@@ -343,7 +349,9 @@ def _apply_update_and_verify(
 
     # Verify convergence with a fresh check.
     registry.append_log(agent_id, "Verifying the backup service...")
-    check = check_backup_service_for_workspace(paths, agent_id, resolver=resolver, parent_cg=parent_cg)
+    check = check_backup_service_for_workspace(
+        paths, agent_id, resolver=resolver, facts_cache=facts_cache, parent_cg=parent_cg
+    )
     failing = tuple(problem for problem in check.problems if problem in _PROBLEMS_THAT_FAIL_UPDATE)
     if check.state == BackupServiceCheckState.PROBLEMS and failing:
         problem_names = ", ".join(problem.value for problem in failing)
@@ -414,6 +422,7 @@ def run_backup_restore_sequence(
     agent_id: AgentId,
     paths: InstallationPaths,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     snapshot_id: str,
@@ -434,6 +443,7 @@ def run_backup_restore_sequence(
             agent_id=agent_id,
             paths=paths,
             resolver=resolver,
+            facts_cache=facts_cache,
             registry=registry,
             parent_cg=parent_cg,
             snapshot_id=snapshot_id,
@@ -609,6 +619,7 @@ def _run_restore_phases(
     agent_id: AgentId,
     paths: InstallationPaths,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     snapshot_id: str,
@@ -762,6 +773,7 @@ def _run_restore_phases(
         agent_id=agent_id,
         paths=paths,
         resolver=resolver,
+        facts_cache=facts_cache,
         registry=registry,
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,

@@ -3,6 +3,7 @@
 // app-wide values.
 
 import m from "mithril";
+import { getAppContext } from "../../../app-context";
 import type { SettingsModel } from "../../../models/settings";
 import { renderSwitch } from "../../components/Switch";
 import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
@@ -58,7 +59,11 @@ export function workspaceUpdateSettings(
           describedBy: `auto-update-note-${scope}`,
           isWaiting: model.isAutoUpdateBusy,
           isDisabled: model.isAutoUpdateBusy,
-          onFlip: (isOn) => void model.setAutoUpdateEnabled(isOn),
+          onFlip: (isOn) =>
+            void model.setAutoUpdateEnabled(
+              getAppContext().shell.accountId,
+              isOn,
+            ),
         }),
       ],
     ),
@@ -73,7 +78,8 @@ export function workspaceUpdateSettings(
       idSuffix: scope,
       startHour,
       endHour,
-      onChange: (start, end) => void model.setUpdateWindow(start, end),
+      onChange: (start, end) =>
+        void model.setUpdateWindow(getAppContext().shell.accountId, start, end),
       class: "py-3 border-b border-subtle",
     }),
     m(

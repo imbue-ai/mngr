@@ -93,6 +93,12 @@ class MindsConfigError(MindError):
     ...
 
 
+class SettingValueError(MindError, ValueError):
+    """Raised when a declared setting resolves to a value of the wrong shape."""
+
+    ...
+
+
 class NaiveTimestampError(MindError, ValueError):
     """Raised when a timezone-aware datetime is required but a naive one was passed."""
 
@@ -116,8 +122,8 @@ class PendingCreateAttemptStoreError(MindError):
     ...
 
 
-class UpdateDismissalStoreError(MindError):
-    """Raised when an update-row dismissal cannot be written."""
+class WorkspaceFactsCacheError(MindError):
+    """Raised when a per-workspace facts cache record cannot be written."""
 
     ...
 
@@ -232,6 +238,32 @@ class WorkspaceRecordTooNewError(WorkspaceSyncError):
     ...
 
 
+class AccountDocumentTooNewError(WorkspaceSyncError):
+    """Raised when a state-changing operation targets an account document written by a newer app version.
+
+    The document stays readable; the remedy is updating the app. Each document
+    kind raises its own subclass so route-level handlers keep their messages.
+    """
+
+    ...
+
+
+class AccountDocumentRemovedElsewhereError(WorkspaceSyncError):
+    """Raised when a push would rebase an active account document onto a tombstone another device wrote.
+
+    The removal wins: resurrecting the document would bring it back on every
+    device after one of them deliberately removed it.
+    """
+
+    ...
+
+
+class SettingsRecordTooNewError(AccountDocumentTooNewError):
+    """Raised when a write targets an account settings record whose settings_format postdates this app."""
+
+    ...
+
+
 class ConnectionRequiresMasterPasswordError(WorkspaceSyncError):
     """Raised when a connection would be added to an account that cannot encrypt it here.
 
@@ -249,13 +281,13 @@ class ConnectionNotFoundError(WorkspaceSyncError):
     ...
 
 
-class ConnectionTooNewError(WorkspaceSyncError):
+class ConnectionTooNewError(AccountDocumentTooNewError):
     """Raised when a state-changing operation targets a connection written by a newer app version."""
 
     ...
 
 
-class ConnectionRemovedElsewhereError(WorkspaceSyncError):
+class ConnectionRemovedElsewhereError(AccountDocumentRemovedElsewhereError):
     """Raised when a push would rebase an active connection onto a tombstone another device wrote.
 
     The removal wins: resurrecting the document would bring the connection

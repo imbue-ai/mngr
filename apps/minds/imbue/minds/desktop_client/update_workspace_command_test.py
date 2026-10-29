@@ -525,7 +525,9 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
         is_backup_configured=False,
     )
 
-    answer = _run_mode(staged, "read", build_read_arguments(moved, is_sign_in_checked=False), capsys)
+    answer = _run_mode(
+        staged, "read", build_read_arguments(moved, is_sign_in_checked=False, fact_write_arguments=()), capsys
+    )
 
     facts = parse_update_workspace_facts(answer)
     assert facts.schedule is not None
@@ -545,7 +547,9 @@ def test_reading_a_workspace_with_nothing_armed_writes_nothing(
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
 
-    answer = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+    answer = _run_mode(
+        staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False, fact_write_arguments=()), capsys
+    )
 
     facts = parse_update_workspace_facts(answer)
     assert (facts.schedule, facts.run_status, facts.last_dispatch) == (None, None, None)
@@ -558,11 +562,87 @@ def test_a_read_asked_about_the_account_says_whether_one_is_signed_in_with_nothi
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch, is_signed_in=is_signed_in)
 
-    asked = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=True), capsys)
-    unasked = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+    asked = _run_mode(
+        staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=True, fact_write_arguments=()), capsys
+    )
+    unasked = _run_mode(
+        staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False, fact_write_arguments=()), capsys
+    )
 
     assert parse_update_workspace_facts(asked).is_signed_in is is_signed_in
     assert parse_update_workspace_facts(unasked).is_signed_in is None
+
+
+def test_a_read_carrying_queued_facts_writes_them_beside_the_schedule_and_answers_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one read is also the write-through: a queued skip and dismissals land in the workspace's own files."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    fact_arguments = [
+        "--skip-target",
+        "minds-v0.9.0",
+        "--skip-target-at",
+        str(_NOW),
+        "--dismiss-note-at",
+        str(_NOW - 100.0),
+        "--dismiss-outcome-at",
+        str(_NOW - 50.0),
+    ]
+
+    answer = _run_mode(
+        staged,
+        "read",
+        build_read_arguments(_SETTINGS, is_sign_in_checked=False, fact_write_arguments=fact_arguments),
+        capsys,
+    )
+
+    facts = parse_update_workspace_facts(answer)
+    assert facts.skipped_target is not None
+    assert facts.skipped_target.target_ref == "minds-v0.9.0"
+    assert facts.dismissals is not None
+    assert facts.dismissals.note_run_started_at == datetime.fromtimestamp(_NOW - 100.0, tz=timezone.utc)
+    assert facts.dismissals.outcome_run_started_at == datetime.fromtimestamp(_NOW - 50.0, tz=timezone.utc)
+    assert staged.read_state("skipped-target.json") == {
+        "schema": 1,
+        "target_ref": "minds-v0.9.0",
+        "skipped_at": _NOW,
+    }
+    dismissals_file = staged.read_state("dismissals.json")
+    assert dismissals_file is not None
+    assert dismissals_file["note_run_started_at"] == _NOW - 100.0
+
+
+def test_a_skip_already_in_the_workspace_wins_over_an_older_queued_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Another computer's later skip stands; the dismissal merge keeps the later run's start per key."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("skipped-target.json", {"schema": 1, "target_ref": "minds-v0.9.5", "skipped_at": _NOW + 500.0})
+    staged.write_state("dismissals.json", {"schema": 1, "note_run_started_at": _NOW + 500.0})
+    fact_arguments = [
+        "--skip-target",
+        "minds-v0.9.0",
+        "--skip-target-at",
+        str(_NOW),
+        "--dismiss-note-at",
+        str(_NOW - 100.0),
+        "--dismiss-outcome-at",
+        str(_NOW - 50.0),
+    ]
+
+    answer = _run_mode(
+        staged,
+        "read",
+        build_read_arguments(_SETTINGS, is_sign_in_checked=False, fact_write_arguments=fact_arguments),
+        capsys,
+    )
+
+    facts = parse_update_workspace_facts(answer)
+    assert facts.skipped_target is not None and facts.skipped_target.target_ref == "minds-v0.9.5"
+    assert facts.dismissals is not None
+    # The note dismissal kept the file's newer run; the outcome one took the queued value.
+    assert facts.dismissals.note_run_started_at == datetime.fromtimestamp(_NOW + 500.0, tz=timezone.utc)
+    assert facts.dismissals.outcome_run_started_at == datetime.fromtimestamp(_NOW - 50.0, tz=timezone.utc)
 
 
 def test_cancelling_deletes_the_schedule_and_says_whether_one_was_there(

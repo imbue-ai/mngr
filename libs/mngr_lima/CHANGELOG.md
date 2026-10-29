@@ -6,8 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.1] - 2026-10-28
-
 ### Security
 
 - Security: Lima VMs upgrade `ca-certificates` at provisioning, dropping the compromised `emSign ECC Root CA - G3` root on VMs built from older images.

@@ -6,8 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.1.22] - 2026-10-28
-
 ### Added
 
 - Added: `smoke` pytest marker registered in the shared markers list, so any project can mark tests that run after a deploy or release.

@@ -190,18 +190,31 @@ def project_health(health: tuple[UiHealthMessage, ...], scope: AccountWorkspaceS
 
 @pure
 def project_workspace_updates(
-    message: UiWorkspaceUpdatesMessage, scope: AccountWorkspaceScope
+    message: UiWorkspaceUpdatesMessage,
+    scope: AccountWorkspaceScope,
+    # The account's own resolved settings: its windows must see its update
+    # window and auto-update choice, not another account's.
+    update_window: str,
+    is_auto_update_enabled: bool,
 ) -> UiWorkspaceUpdatesMessage:
     return message.model_copy_update(
         to_update(
             message.field_ref().updates,
             {agent_id: update for agent_id, update in message.updates.items() if scope.includes(agent_id)},
         ),
+        to_update(message.field_ref().update_window, update_window),
+        to_update(message.field_ref().is_auto_update_enabled, is_auto_update_enabled),
     )
 
 
 @pure
-def project_snapshot(snapshot: UiSnapshot, account_id: str) -> UiSnapshot:
+def project_snapshot(
+    snapshot: UiSnapshot,
+    account_id: str,
+    # The account's resolved update settings, for the updates frame's fields.
+    update_window: str,
+    is_auto_update_enabled: bool,
+) -> UiSnapshot:
     """The install's snapshot as one account's window receives it."""
     scope = account_workspace_scope(snapshot.workspaces, account_id)
     return UiSnapshot(
@@ -212,7 +225,9 @@ def project_snapshot(snapshot: UiSnapshot, account_id: str) -> UiSnapshot:
         notifications=project_notifications(snapshot.notifications, scope),
         health=project_health(snapshot.health, scope),
         discovery_health=snapshot.discovery_health,
-        workspace_updates=project_workspace_updates(snapshot.workspace_updates, scope),
+        workspace_updates=project_workspace_updates(
+            snapshot.workspace_updates, scope, update_window, is_auto_update_enabled
+        ),
         environment=snapshot.environment,
     )
 

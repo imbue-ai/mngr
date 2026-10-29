@@ -268,6 +268,7 @@ from imbue.minds.desktop_client.workspace_create import is_cloud_account_owned_b
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -560,10 +561,14 @@ def _handle_timezone() -> TimezoneResponse:
     """Return the host machine's IANA timezone (empty when undeterminable).
 
     Lets a workspace agent resolve "the user's local time" (e.g. the scheduler's
-    "3 AM" runs) by pulling the timezone from the desktop client on demand,
-    instead of the desktop client pushing it into each workspace at create time.
+    "3 AM" runs) by pulling the timezone from the desktop client on demand.
     Baseline-granted at the latchkey gateway (like the API schema document), so
     every agent can read it without a per-agent grant.
+
+    CLEANUP: the creating client now writes ``data/.state/user_timezone`` into each
+    workspace once at create (spec section 8.4), and new templates no longer fetch this
+    route at boot; remove it (and its baseline latchkey grant) once no supported template
+    fetches it.
     """
     return TimezoneResponse(timezone=read_host_timezone())
 
@@ -697,6 +702,13 @@ def _list_workspace_snapshots_safely(
     )
 
 
+def _require_workspace_facts_cache(state: DesktopClientState) -> WorkspaceFactsCache | Response:
+    """The per-workspace facts cache, or a 501 for a build without one (no data dir)."""
+    if state.workspace_facts_cache is None:
+        return _json_error("Backups are not configured", 501)
+    return state.workspace_facts_cache
+
+
 def _check_backup_service_safely(
     paths: InstallationPaths,
     parsed_id: AgentId,
@@ -704,12 +716,13 @@ def _check_backup_service_safely(
     # concurrency-group thread, where the Flask app-context state proxy
     # (get_state) is unavailable.
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     parent_cg: ConcurrencyGroup | None,
 ) -> "backup_verification.BackupServiceCheck":
     """Run the backup-service check, degrading a crash to UNKNOWN (no badge)."""
     try:
         return backup_verification.check_backup_service_for_workspace(
-            paths, parsed_id, resolver=resolver, parent_cg=parent_cg
+            paths, parsed_id, resolver=resolver, facts_cache=facts_cache, parent_cg=parent_cg
         )
     except BackupProvisioningError as e:
         # A real error (e.g. the adoption write to the canonical env store
@@ -810,12 +823,15 @@ def _handle_workspace_backup_check(agent_id: str) -> WorkspaceBackupCheckRespons
         return _json_error("Backups are not configured", 501)
     _materialize_env_from_record_if_missing(paths, parsed_id)
 
+    facts_cache = _require_workspace_facts_cache(state)
+    if isinstance(facts_cache, Response):
+        return facts_cache
     check_results: list[backup_verification.BackupServiceCheck] = []
     resolver = state.backend_resolver
     parent_cg = state.root_concurrency_group
 
     def _run_check_into_results() -> None:
-        check_results.append(_check_backup_service_safely(paths, parsed_id, resolver, parent_cg))
+        check_results.append(_check_backup_service_safely(paths, parsed_id, resolver, facts_cache, parent_cg))
 
     cg_name = f"backup-detail-{parsed_id}"
     cg = (
@@ -868,7 +884,7 @@ def _handle_workspace_backup_check(agent_id: str) -> WorkspaceBackupCheckRespons
         minimum_version=checked.minimum_version,
         update_target_version=backup_verification.update_target_backup_tag(),
         check_detail=checked.detail,
-        is_verification_enabled=is_backup_verification_enabled(paths, parsed_id),
+        is_verification_enabled=is_backup_verification_enabled(facts_cache, parsed_id),
     )
 
 
@@ -2137,6 +2153,9 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
         return context
     parsed_id, paths, parent_cg = context
     state = get_state()
+    facts_cache = _require_workspace_facts_cache(state)
+    if isinstance(facts_cache, Response):
+        return facts_cache
     version_ref = _resolve_workspace_version_ref(parsed_id)
     # The worker refuses this too (the restore chains the same update, and that
     # dispatch is legitimate); refusing here as well means a machine that cannot
@@ -2152,6 +2171,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
         worker_kwargs={
             "paths": paths,
             "resolver": state.backend_resolver,
+            "facts_cache": facts_cache,
             "is_stop_chats": _is_stop_chats_requested(),
             "workspace_version_ref": version_ref,
         },
@@ -2208,6 +2228,9 @@ def _handle_workspace_backup_restore(
     if not has_canonical_env(paths, parsed_id):
         return _json_error(f"Backups are not configured for {agent_id}", 409)
     state = get_state()
+    facts_cache = _require_workspace_facts_cache(state)
+    if isinstance(facts_cache, Response):
+        return facts_cache
     body = request.get_json(silent=True, force=True) or {}
     return _dispatch_backup_worker(
         parsed_id=parsed_id,
@@ -2218,6 +2241,7 @@ def _handle_workspace_backup_restore(
         worker_kwargs={
             "paths": paths,
             "resolver": state.backend_resolver,
+            "facts_cache": facts_cache,
             "snapshot_id": snapshot_id,
             "is_stop_chats": bool(body.get("stop_chats", False)),
             "is_update_after": bool(body.get("update_after", True)),
@@ -2391,7 +2415,18 @@ def _handle_backup_verification_toggle(agent_id: str) -> EmptyResponse | Respons
     body = request.get_json(silent=True, force=True) or {}
     if "enabled" not in body:
         return _json_error("'enabled' is required", 400)
-    set_backup_verification_enabled(paths, parsed_id, bool(body.get("enabled")))
+    facts_cache = _require_workspace_facts_cache(state)
+    if isinstance(facts_cache, Response):
+        return facts_cache
+    # Cached at once (every reader answers from it), written into the workspace's own
+    # backup.toml now when it is reachable, else queued for the sync scheduler's next pass.
+    set_backup_verification_enabled(
+        facts_cache,
+        parsed_id,
+        bool(body.get("enabled")),
+        mngr_caller=state.mngr_caller,
+        backend_resolver=state.backend_resolver,
+    )
     return EmptyResponse()
 
 
@@ -2951,6 +2986,13 @@ def _handle_patch_workspace(agent_id: str) -> Response:
                 applied["account_email"] = account.email
         except workspace_settings.WorkspaceAssociationError as exc:
             return _json_error(str(exc), exc.status_code)
+        # The workspace now belongs to another account, so its profile snapshot is stale;
+        # the next sync pass (kicked here) re-materializes it with the new account's values
+        # (spec section 8.2) without holding this request on an exec.
+        if state.workspace_profile_writer is not None:
+            state.workspace_profile_writer.mark_profile_stale(parsed_id)
+            if state.sync_scheduler is not None:
+                state.sync_scheduler.kick()
 
     return _json_response(applied)
 

@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-forward"
-version = "0.2.1"
+version = "0.2.0"
 description = "Auth + subdomain-forwarding plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.3.1",
-    "imbue-common==0.1.22",
-    "concurrency-group==0.1.22",
+    "imbue-mngr==0.3.0",
+    "imbue-common==0.1.21",
+    "concurrency-group==0.1.21",
     "click",
     "click-option-group",
     "fastapi>=0.115",

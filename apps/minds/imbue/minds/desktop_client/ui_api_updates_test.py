@@ -16,11 +16,14 @@ from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import CANCELLED_UPDATE_COMMAND_RESULT
@@ -245,7 +248,9 @@ def _post(client: FlaskClient, path: str, body: dict[str, Any] | None = None) ->
 def _published(app: Flask, agent_id: AgentId) -> UiWorkspaceUpdate:
     """The machine's row as the next ``workspace_updates`` frame carries it, which every surface reads."""
     service = _service(app)
-    return build_workspace_updates_message(service, (2, 5), service.minds_config).updates[str(agent_id)]
+    return build_workspace_updates_message(
+        service, (2, 5), load_settings_context(None, None, LOCAL_PROFILE_USER_ID), service.facts_cache
+    ).updates[str(agent_id)]
 
 
 @pytest.mark.witnesses("workspace-updates.unknown-workspace-is-dispatchable")
@@ -627,7 +632,9 @@ def test_the_frame_says_whether_each_machine_has_backups(
     _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
-    message = build_workspace_updates_message(_service(app), (2, 5), None)
+    message = build_workspace_updates_message(
+        _service(app), (2, 5), load_settings_context(None, None, LOCAL_PROFILE_USER_ID), None
+    )
 
     assert message.updates[str(agent_id)].is_backup_configured is False
 
@@ -773,16 +780,16 @@ def test_a_cancel_or_skip_that_cannot_reach_the_workspace_says_so_and_leaves_the
 def test_skipping_an_update_cancels_its_schedule_and_marks_the_row_skipped_for_this_release(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
     caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller, minds_config=minds_config)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
     _post(client, f"/ui/api/updates/{agent_id}/schedule")
 
     response = _post(client, f"/ui/api/updates/{agent_id}/skip")
 
     assert response.status_code == 200
-    assert minds_config.get_skipped_update_target(str(agent_id)) == _CEILING
+    skip_record = _service(app).facts_cache.read(agent_id)
+    assert (skip_record.skipped_target_ref, skip_record.is_skip_dirty) == (_CEILING, True)
     published = _published(app, agent_id)
     assert published.is_scheduled is False
     assert published.is_update_skipped is True
@@ -794,9 +801,8 @@ def test_skipping_a_release_whose_run_awaits_a_decision_clears_the_decision_and_
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The decision's Dismiss is a skip: the row stops asking, and no fresh run sets the kept work aside."""
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
     caller = ScriptedMngrCaller(results=(CANCELLED_UPDATE_COMMAND_RESULT,))
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller, minds_config=minds_config)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
     _end_run_needing_decision(app, agent_id)
 
@@ -806,7 +812,7 @@ def test_skipping_a_release_whose_run_awaits_a_decision_clears_the_decision_and_
     published = _published(app, agent_id)
     assert (published.is_decision_pending, published.verdict, published.is_update_skipped) == (False, None, True)
     policy = AutoUpdatePolicy(
-        is_enabled=True, skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or ""
+        is_enabled=True, skipped_target_ref=_service(app).facts_cache.get_skipped_target_ref(agent_id)
     )
     assert should_auto_arm(_service(app).state_store.get(agent_id), policy, _CEILING, None) is False
 
@@ -824,15 +830,14 @@ def test_the_frame_says_a_machine_is_skipped_only_for_the_release_the_app_is_on_
     is_update_skipped: bool,
 ) -> None:
     """Once the app moves to a newer release, a skip of the old one no longer holds the machine back."""
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     if skipped_target is not None:
-        minds_config.set_skipped_update_target(str(agent_id), skipped_target)
-    _client, app = _build_client(
-        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
-    )
+        _service(app).facts_cache.record_skip(agent_id, skipped_target)
     _mark_out_of_date(app, agent_id)
 
-    frame = build_workspace_updates_message(_service(app), (2, 5), minds_config)
+    frame = build_workspace_updates_message(
+        _service(app), (2, 5), load_settings_context(None, None, LOCAL_PROFILE_USER_ID), _service(app).facts_cache
+    )
 
     assert frame.updates[str(agent_id)].is_update_skipped is is_update_skipped
 
@@ -841,14 +846,16 @@ def test_the_frame_says_a_machine_is_skipped_only_for_the_release_the_app_is_on_
 def test_the_frame_carries_the_auto_update_setting(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, is_auto_update_enabled: bool | None
 ) -> None:
-    minds_config: MindsConfig | None = None
+    settings_store: AccountSettingsStore | None = None
     if is_auto_update_enabled is not None:
-        minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-        minds_config.set_auto_update_workspaces(is_auto_update_enabled)
+        settings_store = AccountSettingsStore(data_dir=tmp_path / "minds-config")
+        settings_store.apply_settings_values(LOCAL_PROFILE_USER_ID, {"auto_update_workspaces": is_auto_update_enabled})
     _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
-    frame = build_workspace_updates_message(_service(app), (2, 5), minds_config)
+    frame = build_workspace_updates_message(
+        _service(app), (2, 5), load_settings_context(None, settings_store, LOCAL_PROFILE_USER_ID), None
+    )
 
     assert frame.is_auto_update_enabled is bool(is_auto_update_enabled)
 
@@ -1396,7 +1403,9 @@ def test_the_updates_frame_carries_which_side_had_no_version(
         is_readable=True,
     )
 
-    frame = build_workspace_updates_message(service, (2, 5), None)
+    frame = build_workspace_updates_message(
+        service, (2, 5), load_settings_context(None, None, LOCAL_PROFILE_USER_ID), None
+    )
 
     published = frame.updates[str(agent_id)]
     assert published.unknown_reason is UpdateUnknownReason.NO_APP_VERSION

@@ -9,6 +9,8 @@
 
 import m from "mithril";
 import { electronBridge } from "../electron-bridge";
+import { putAccountSettings } from "./accountSettings";
+import type { AccountSettingsWrite } from "./accountSettings";
 import type { SettingsOverview } from "./settings";
 
 export type AutoUpdatePromptDecision = "accepted" | "declined";
@@ -63,6 +65,9 @@ export class AutoUpdatePromptModel {
   private shownTrigger: AutoUpdatePromptTrigger | null = null;
   private isPutAway = false;
   private loading: Promise<void> | null = null;
+  /** The window's account, whose record holds the answer; remembered from
+   * load() so a failed read's retry stays on it. */
+  private accountId = "local";
 
   private readonly fetchImpl: FetchLike;
   private readonly readIsFirstLaunchAfterAppUpdate: () => Promise<boolean>;
@@ -84,7 +89,8 @@ export class AutoUpdatePromptModel {
    * that may already have been declined is not worth making blind. The next
    * call (the window's next navigation) reads again, so a backend that was not
    * up yet costs the window its prompt only until then. */
-  load(): Promise<void> {
+  load(accountId?: string): Promise<void> {
+    if (accountId !== undefined) this.accountId = accountId;
     this.loading ??= this.readInputs();
     return this.loading;
   }
@@ -113,9 +119,14 @@ export class AutoUpdatePromptModel {
 
   private async readSettings(): Promise<PromptSettings | undefined> {
     try {
-      const response = await this.fetchImpl("/ui/api/settings", {
-        credentials: "same-origin",
-      });
+      // The window's account's record: the answer is saved there, so the
+      // read must resolve the same record or a saved answer would be re-asked.
+      const response = await this.fetchImpl(
+        `/ui/api/settings?account=${encodeURIComponent(this.accountId)}`,
+        {
+          credentials: "same-origin",
+        },
+      );
       if (!response.ok) {
         console.warn(
           `Could not read the auto-update prompt's answer: HTTP ${response.status}`,
@@ -169,32 +180,24 @@ export class AutoUpdatePromptModel {
     this.endHour = endHour;
   }
 
-  /** Record the answer, with the picked window when it turns auto-update on.
+  /** Record the answer through the window's account's settings PUT, with the
+   * picked window (and auto-update turned on) when it was accepted.
    * A refused write keeps the prompt up with the reason. */
-  async choose(decision: AutoUpdatePromptDecision): Promise<void> {
+  async choose(decision: AutoUpdatePromptDecision, accountId: string): Promise<void> {
     this.isBusy = true;
     this.error = "";
     this.redraw();
     try {
-      const response = await this.fetchImpl(
-        "/ui/api/settings/auto-update-prompt",
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            decision === "accepted"
-              ? {
-                  decision,
-                  window: {
-                    start_hour: this.startHour,
-                    end_hour: this.endHour,
-                  },
-                }
-              : { decision },
-          ),
-        },
-      );
+      const write: AccountSettingsWrite =
+        decision === "accepted"
+          ? {
+              auto_update_prompt_decision: decision,
+              auto_update_workspaces: true,
+              update_window_start_hour: this.startHour,
+              update_window_end_hour: this.endHour,
+            }
+          : { auto_update_prompt_decision: decision };
+      const response = await putAccountSettings(this.fetchImpl, accountId, write);
       if (response.ok) {
         this.decision = decision;
         this.shownTrigger = null;

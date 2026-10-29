@@ -292,13 +292,17 @@ describe("first notification choice", () => {
     async (style) => {
       const writes: unknown[] = [];
       const { controller } = seeded({
-        fetchImpl: async (_url, init) => {
+        fetchImpl: async (url, init) => {
           if (init?.method === "POST") {
-            writes.push(JSON.parse(String(init.body)));
+            writes.push(`POST ${String(init.body)}`);
             expect((init.headers as Record<string, string>)["If-Match"]).toBe(
               "before",
             );
             return jsonResponse({ version: "after" });
+          }
+          if (init?.method === "PUT") {
+            writes.push(`PUT ${url} ${String(init.body)}`);
+            return jsonResponse({});
           }
           return jsonResponse({});
         },
@@ -312,10 +316,16 @@ describe("first notification choice", () => {
         has_chosen: false,
         version: "before",
       });
-      await controller.chooseNotificationStyle(style);
-      expect(writes).toEqual([
-        { is_enabled: style !== null, style: style ?? "both" },
-      ]);
+      await controller.chooseNotificationStyle(style, "user-7");
+      const expectedWrites: string[] = [
+        `POST {"style":"${style ?? "both"}"}`,
+      ];
+      // The bell-alone answer also turns the account's master toggle off.
+      if (style === null)
+        expectedWrites.push(
+          'PUT /ui/api/settings/user-7 {"notifications_enabled":false}',
+        );
+      expect(writes).toEqual(expectedWrites);
       expect(controller.shouldChooseNotificationStyle).toBe(false);
       expect(currentNotificationPrefs().has_chosen).toBe(true);
       expect(controller.isSavingChoice).toBe(false);
@@ -334,9 +344,55 @@ describe("first notification choice", () => {
       ...DEFAULT_NOTIFICATION_PREFS,
       has_chosen: false,
     });
-    await controller.chooseNotificationStyle("cards");
+    await controller.chooseNotificationStyle("cards", "user-7");
     expect(controller.shouldChooseNotificationStyle).toBe(true);
     expect(controller.choiceError).toContain("Could not save");
+  });
+
+  it("recovers when the style saved but the master toggle did not", async () => {
+    // The style POST lands (changing the record's version) and the enabled
+    // PUT fails: the card must stay up with the new version adopted, so the
+    // retry's POST matches instead of 412-ing against this click's own write.
+    const styleVersions: (string | undefined)[] = [];
+    let isPutServerUp = false;
+    const { controller } = makeController({
+      fetchImpl: async (_url, init) => {
+        if (init?.method === "POST") {
+          styleVersions.push(
+            (init.headers as Record<string, string>)["If-Match"],
+          );
+          return jsonResponse({ version: `after-${styleVersions.length}` });
+        }
+        if (init?.method === "PUT") {
+          return isPutServerUp ? jsonResponse({}) : jsonResponse({}, 500);
+        }
+        return jsonResponse({});
+      },
+    });
+    controller.seedFromSnapshot({
+      entries: [agentMessage("first")],
+      unresolvedCount: 1,
+    });
+    applyNotificationPrefs({
+      ...DEFAULT_NOTIFICATION_PREFS,
+      has_chosen: false,
+      version: "before",
+    });
+
+    await controller.chooseNotificationStyle(null, "user-7");
+    expect(controller.shouldChooseNotificationStyle).toBe(true);
+    expect(controller.choiceError).toContain("Could not save");
+    expect(currentNotificationPrefs().version).toBe("after-1");
+
+    isPutServerUp = true;
+    await controller.chooseNotificationStyle(null, "user-7");
+    expect(styleVersions).toEqual(["before", "after-1"]);
+    expect(controller.shouldChooseNotificationStyle).toBe(false);
+    expect(controller.choiceError).toBe("");
+    expect(currentNotificationPrefs()).toMatchObject({
+      is_enabled: false,
+      has_chosen: true,
+    });
   });
 
   it("accepts a choice already saved in another window on a version conflict", async () => {
@@ -361,7 +417,7 @@ describe("first notification choice", () => {
       ...DEFAULT_NOTIFICATION_PREFS,
       has_chosen: false,
     });
-    await controller.chooseNotificationStyle("cards");
+    await controller.chooseNotificationStyle("cards", "user-7");
     expect(controller.shouldChooseNotificationStyle).toBe(false);
     expect(currentNotificationPrefs().style).toBe("os");
   });
@@ -699,6 +755,21 @@ describe("notification prefs plumbing", () => {
     const bare = makeController({ fetchImpl: async () => jsonResponse({}) });
     await bare.controller.loadPrefs();
     expect(currentNotificationPrefs()).toEqual(DEFAULT_NOTIFICATION_PREFS);
+  });
+
+  it("loads the prefs of the window's account, whose record holds the master toggle", async () => {
+    const urls: string[] = [];
+    const { controller } = makeController({
+      accountId: () => "user-7",
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        return jsonResponse({});
+      },
+    });
+
+    await controller.loadPrefs();
+
+    expect(urls).toEqual(["/ui/api/settings?account=user-7"]);
   });
 
   it("discards a load response that a newer write outran", async () => {

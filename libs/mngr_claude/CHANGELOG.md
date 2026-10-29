@@ -6,16 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.3.1] - 2026-10-28
-
-### Added
-
-- Added: `version_mismatch` setting on the claude agent type: `ERROR` (default) fails `mngr create` when the installed claude does not report the pinned `version`; `WARN` logs a warning and creates on the installed binary.
-
-### Changed
-
-- Changed: The pinned-version check now runs whenever `version` is set, even with `check_installation = false` (which now only skips install-if-missing), and uses the shared verifier (token match of the `claude --version` banner; an empty probe is skipped).
-
 ### Fixed
 
 - Fixed: Claude agents no longer record parts of a transcript twice (duplicate `event_id`s and repeated inference text); the raw-transcript streamer reconciles its offsets under the converter's lock and the converter keeps only the first record per source uuid.

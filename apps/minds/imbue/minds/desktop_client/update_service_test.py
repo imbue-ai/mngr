@@ -18,7 +18,6 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import CANCELLED_UPDATE_COMMAND_RESULT
 from imbue.minds.desktop_client.testing import CREATED_UPDATE_COMMAND_RESULT
@@ -48,6 +47,7 @@ from imbue.minds.desktop_client.update_service import build_sign_in_chat_open_sc
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
@@ -85,7 +85,7 @@ def _build_service(
     started: list[AgentId] | None = None,
     start_failure_reason: str | None = None,
     backend_resolver: MngrCliBackendResolver | None = None,
-    minds_config: MindsConfig | None = None,
+    facts_cache: WorkspaceFactsCache | None = None,
 ) -> WorkspaceUpdateService:
     """A service whose app values are fixed: ceiling ``_CEILING``, window 11 PM-3 AM, Los Angeles time."""
     store = store if store is not None else make_update_state_store(tmp_path)
@@ -115,11 +115,13 @@ def _build_service(
         backend_resolver=backend_resolver,
         settings_source=UpdateSettingsSource(
             read_ceiling=lambda: _CEILING,
-            read_update_window=lambda: (23, 3),
+            read_update_window=lambda _agent_id: (23, 3),
             read_zone=lambda: "America/Los_Angeles",
             paths=None,
         ),
-        minds_config=minds_config,
+        facts_cache=facts_cache
+        if facts_cache is not None
+        else WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
         start_workspace=_record_start(started if started is not None else [], failure_reason=start_failure_reason),
     )
 
@@ -1254,17 +1256,18 @@ def test_skipping_an_update_remembers_the_apps_ceiling_for_that_workspace_and_ca
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     """The sweep re-arms nothing for this release; a relaunched app reads the same skip."""
-    config_dir = tmp_path / "minds-config"
     caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
-    service = _build_service(
-        tmp_path, root_concurrency_group, caller=caller, minds_config=MindsConfig(data_dir=config_dir)
-    )
+    facts_cache = WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache")
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller, facts_cache=facts_cache)
     agent_id = AgentId.generate()
     service.schedule_update(agent_id, override_ref="", is_auto_armed=False)
 
     assert service.skip_update(agent_id) is None
 
-    assert MindsConfig(data_dir=config_dir).get_skipped_update_target(str(agent_id)) == _CEILING
+    relaunched_cache = WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache")
+    relaunched_record = relaunched_cache.read(agent_id)
+    assert relaunched_record.skipped_target_ref == _CEILING
+    assert relaunched_record.is_skip_dirty is True
     assert service.state_store.get(agent_id).is_scheduled is False
     assert update_program_invocation(caller.calls[1])[0] == "cancel"
 

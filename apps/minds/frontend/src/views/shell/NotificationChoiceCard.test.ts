@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppContext } from "../../app-context";
+import {
+  clearAppContextForTests,
+  registerAppContext,
+} from "../../app-context";
 import { NotificationsUiController } from "../../models/notificationsUi";
 import {
   allText,
@@ -10,6 +15,17 @@ import {
 import { NotificationChoiceCard } from "./NotificationChoiceCard";
 
 describe("notification choice card", () => {
+  // The card's buttons save under the window's account, read off the shell.
+  beforeEach(() => {
+    registerAppContext({
+      shell: { accountId: "user-7" },
+    } as unknown as AppContext);
+  });
+
+  afterEach(() => {
+    clearAppContextForTests();
+  });
+
   it("explains the default and saves the choice behind each button", () => {
     const controller = new NotificationsUiController({
       isFeedOverlayOpen: () => false,
@@ -35,7 +51,7 @@ describe("notification choice card", () => {
       );
       expect(control).toBeDefined();
       (attrsOf(control!).onclick as () => void)();
-      expect(choose).toHaveBeenLastCalledWith(style);
+      expect(choose).toHaveBeenLastCalledWith(style, "user-7");
     }
   });
 

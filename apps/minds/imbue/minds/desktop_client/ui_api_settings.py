@@ -2,16 +2,27 @@
 
 JSON twins of the data that used to be server-rendered into the Settings,
 Accounts, and AI-keys pages, plus the settings writes the SPA performs
-directly (the error-reporting opt-out and the notification preferences).
-Mutating flows the legacy POST routes already implement (permission revokes,
-connector add/disconnect, plan switch, trim, logout, key mint,
+directly. Mutating flows the legacy POST routes already implement (permission
+revokes, connector add/disconnect, plan switch, trim, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
-The error-reporting and notification-prefs writes are records Imbue Studio owns,
-so each carries the optimistic-concurrency contract: ``GET /ui/api/settings``
-returns a per-record ``version`` derived from that record's stored values,
-and the write requires that version in ``If-Match`` (412 on mismatch, 428
-when absent) so a stale window can never silently clobber a newer change.
+The account-keyed settings (the update window, the auto-update toggle and its
+one-time offer's answer, the master notifications toggle) are edited through
+one route pair, ``GET``/``PUT /ui/api/settings/<account_id>`` (spec section
+7.3). Each account id reads and writes its own replica of the synced
+``settings`` document (phase 3A of ``specs/user-profile-state/spec.md``);
+the PUT marks the replica dirty and kicks the sync scheduler, whose next
+pass pushes it. The overview takes the window's account as a query
+parameter, so the page and the per-account record can never disagree.
+
+The error-reporting and notification-style writes are consent-adjacent
+records, so each carries the optimistic-concurrency contract:
+``GET /ui/api/settings`` returns a per-record ``version`` derived from that
+record's stored values, and the write requires that version in ``If-Match``
+(412 on mismatch, 428 when absent) so a stale window can never silently
+clobber a newer change. The account-keyed PUT is partial and unguarded, like
+the plain-preference writes it replaces: each field is independent, so the
+last write to a field is simply the newest choice.
 """
 
 import hashlib
@@ -21,6 +32,7 @@ from typing import Callable
 from typing import TypeVar
 
 from flask import Blueprint
+from flask import Flask
 from flask import Response
 from flask import request
 from loguru import logger
@@ -31,18 +43,28 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
-from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
-from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.session_store import AccountSession
+from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
+from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
+from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
+from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
+from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
+from imbue.minds.desktop_client.settings.resolve import resolve_report_unexpected_errors
+from imbue.minds.desktop_client.settings.resolve import resolve_sign_in_browser
+from imbue.minds.desktop_client.settings.resolve import resolve_update_window
+from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.errors import SettingsRecordTooNewError
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -52,18 +74,22 @@ _WriteT = TypeVar("_WriteT", bound=FrozenModel)
 
 
 class UiNotificationPrefs(FrozenModel):
-    """The notification-prefs record on the settings overview."""
+    """The notification-prefs record on the settings overview.
+
+    ``is_enabled`` is the account-keyed master toggle, written through the
+    account-settings PUT; it rides here so one read serves the panel. The
+    ``version`` guards only the install-keyed style write.
+    """
 
     is_enabled: bool = Field(description="Master notifications toggle (gates every OS nudge the app sends)")
     style: NotificationStyle = Field(description="Delivery style for every feed entry")
     has_chosen: bool = Field(description="Whether notification preferences have been explicitly saved")
-    version: str = Field(description="If-Match version for the notification-prefs write")
+    version: str = Field(description="If-Match version for the notification-style write")
 
 
-class UiNotificationPrefsWrite(FrozenModel):
-    """Body of the notification-prefs write."""
+class UiNotificationStyleWrite(FrozenModel):
+    """Body of the notification-style write; the master toggle goes through the account-settings PUT."""
 
-    is_enabled: bool = Field(description="New master-toggle value")
     style: NotificationStyle = Field(description="New delivery style")
 
 
@@ -162,26 +188,36 @@ class UiSignInBrowserWrite(FrozenModel):
     browser_id: str | None = Field(description="An installed browser's id, or None for the default browser")
 
 
-class UiUpdateWindowWrite(FrozenModel):
-    """Body of the scheduled-update window write."""
+class UiAccountSettings(FrozenModel):
+    """The account-keyed settings record, as the GET answers and the PUT echoes it."""
 
-    start_hour: int = Field(ge=0, le=23, description="Local hour the window opens")
-    end_hour: int = Field(ge=0, le=23, description="Local hour the window closes")
-
-
-class UiAutoUpdateWrite(FrozenModel):
-    """Body of the auto-update toggle write."""
-
-    is_enabled: bool = Field(description="Whether Imbue Studio arms every behind workspace's update itself")
-
-
-class UiAutoUpdatePromptWrite(FrozenModel):
-    """Body of the auto-update offer's answer; accepting it also turns auto-update on."""
-
-    decision: AutoUpdatePromptDecision = Field(description="How the user answered the offer")
-    window: UiUpdateWindowWrite | None = Field(
-        default=None, description="The update window chosen in the offer; only an acceptance carries one"
+    settings_format: int = Field(description="The record's shape version")
+    update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
+    update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
+    auto_update_workspaces: bool = Field(
+        description="Whether Imbue Studio arms every behind workspace's update itself"
     )
+    auto_update_prompt_decision: AutoUpdatePromptDecision | None = Field(
+        description="How the one-time auto-update offer was answered; None while it never was"
+    )
+    notifications_enabled: bool = Field(description="Master notifications toggle")
+
+
+class UiAccountSettingsWrite(FrozenModel):
+    """Body of the account-settings PUT: any subset of the record's fields, each applied as given.
+
+    The window hours come as a pair or not at all -- half a window is not a
+    preference anyone holds. ``auto_update_prompt_decision`` can only be set
+    (never cleared), so an absent field and a null field read the same.
+    """
+
+    update_window_start_hour: int | None = Field(default=None, ge=0, le=23, description="Local hour the window opens")
+    update_window_end_hour: int | None = Field(default=None, ge=0, le=23, description="Local hour the window closes")
+    auto_update_workspaces: bool | None = Field(default=None, description="New auto-update toggle value")
+    auto_update_prompt_decision: AutoUpdatePromptDecision | None = Field(
+        default=None, description="How the one-time offer was answered"
+    )
+    notifications_enabled: bool | None = Field(default=None, description="New master notifications toggle value")
 
 
 class UiNotificationChannels(FrozenModel):
@@ -277,32 +313,44 @@ def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def compute_notification_prefs_version(is_enabled: bool, style: str, has_chosen: bool) -> str:
-    """The If-Match version of the notification-prefs record: a hash of its stored values.
+def compute_notification_style_version(style: str, has_chosen: bool) -> str:
+    """The If-Match version of the notification-style record: a hash of its stored values.
 
     A per-record version (rather than folding these values into the
     error-reporting version) keeps each record's writes from 412-ing pages
     that only touched the other record.
     """
-    canonical = json.dumps({"is_enabled": is_enabled, "style": style, "has_chosen": has_chosen}, sort_keys=True)
+    canonical = json.dumps({"style": style, "has_chosen": has_chosen}, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def _current_notification_prefs() -> UiNotificationPrefs:
-    """The stored notification-prefs record (defaults when no MindsConfig is wired)."""
+def _is_notification_choice_recorded() -> bool:
+    """Whether notification preferences have ever been chosen on this install.
+
+    A saved delivery style in ``config.toml``, or a master toggle in any
+    account's settings record (the device's included), counts. Install-wide
+    on purpose: the one-time first-choice card asks once per install, as it
+    did when one install-wide copy backed every account.
+    """
     minds_config = get_state().minds_config
     if minds_config is None:
-        is_enabled = True
-        style: NotificationStyle = DEFAULT_NOTIFICATION_STYLE
         # No settings storage: there is nowhere to save a choice.
-        has_chosen = True
-    else:
-        is_enabled, style, has_chosen = minds_config.get_notification_prefs_with_choice()
+        return True
+    if minds_config.get_notification_style_with_choice()[1]:
+        return True
+    settings_store = get_state().account_settings_store
+    return settings_store is not None and settings_store.is_notifications_enabled_chosen_anywhere()
+
+
+def _current_notification_prefs(context: SettingsResolutionContext) -> UiNotificationPrefs:
+    """The notification-prefs record (defaults when no MindsConfig is wired)."""
+    has_chosen = _is_notification_choice_recorded()
+    style = resolve_notification_style(context)
     return UiNotificationPrefs(
-        is_enabled=is_enabled,
+        is_enabled=resolve_notifications_enabled(context),
         style=style,
         has_chosen=has_chosen,
-        version=compute_notification_prefs_version(is_enabled, style, has_chosen),
+        version=compute_notification_style_version(style, has_chosen),
     )
 
 
@@ -324,25 +372,32 @@ def _is_any_account_master_password_set() -> bool:
 
 
 def _handle_settings_overview() -> Response:
-    """GET /ui/api/settings: the app-level settings page's full data payload."""
+    """GET /ui/api/settings?account=<id>: the app-level settings page's full data payload.
+
+    Every declared setting's value comes through the resolution path, with the
+    account-keyed ones resolved for the window's account (the ``account``
+    query parameter; the device's when absent), so this page and the
+    per-account record can never disagree.
+    """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    minds_config = get_state().minds_config
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else True
-    update_window = minds_config.get_update_window() if minds_config is not None else DEFAULT_UPDATE_WINDOW
+    account_id = request.args.get("account", LOCAL_PROFILE_USER_ID)
+    if not is_valid_account_id(account_id):
+        return _error_response("The account parameter must name an account id", 400)
+    context = load_settings_context(get_state().minds_config, get_state().account_settings_store, account_id)
+    report_unexpected_errors = resolve_report_unexpected_errors(context)
+    update_window = resolve_update_window(context)
     browsers = get_state().sign_in_browsers.list_browsers()
-    stored_browser_id = minds_config.get_sign_in_browser_id() if minds_config is not None else None
+    stored_browser_id = resolve_sign_in_browser(context)
     overview = UiSettingsOverview(
         is_master_password_set=_is_any_account_master_password_set(),
         report_unexpected_errors=report_unexpected_errors,
         version=compute_error_reporting_version(report_unexpected_errors),
-        notification_prefs=_current_notification_prefs(),
+        notification_prefs=_current_notification_prefs(context),
         update_window_start_hour=update_window[0],
         update_window_end_hour=update_window[1],
-        is_auto_update_enabled=minds_config.get_auto_update_workspaces() if minds_config is not None else False,
-        auto_update_prompt_decision=(
-            minds_config.get_auto_update_prompt_decision() if minds_config is not None else None
-        ),
+        is_auto_update_enabled=resolve_auto_update_workspaces(context),
+        auto_update_prompt_decision=resolve_auto_update_prompt_decision(context),
         sign_in_browsers=tuple(
             UiSignInBrowserOption(browser_id=browser.browser_id, label=browser.label) for browser in browsers
         ),
@@ -417,23 +472,30 @@ def _handle_error_reporting_write() -> Response:
     )
 
 
-def _apply_notification_prefs_write(
-    minds_config: MindsConfig, write: UiNotificationPrefsWrite, expected_version: str
+def _apply_notification_style_write(
+    minds_config: MindsConfig, write: UiNotificationStyleWrite, expected_version: str
 ) -> str | None:
     # Compare-and-swap under one MindsConfig lock hold, same rationale as
     # _apply_error_reporting_write above: the version check and the write must not be two
     # separate locked calls, or a concurrent writer starting from the same version could
     # slip in between them and silently clobber this write.
-    return minds_config.set_notification_prefs_if_version_matches(
+    settings_store = get_state().account_settings_store
+    return minds_config.set_notification_style_if_version_matches(
         expected_version=expected_version,
-        compute_version=compute_notification_prefs_version,
-        is_enabled=write.is_enabled,
+        compute_version=compute_notification_style_version,
         style=write.style,
+        # The served version folds in a master-toggle choice recorded in the
+        # settings records, so the check must see the same has_chosen.
+        is_chosen_elsewhere=(settings_store is not None and settings_store.is_notifications_enabled_chosen_anywhere()),
     )
 
 
-def _handle_notification_prefs_write() -> Response:
-    """POST /ui/api/settings/notifications: If-Match-guarded notification-prefs write."""
+def _handle_notification_style_write() -> Response:
+    """POST /ui/api/settings/notifications: If-Match-guarded notification-style write.
+
+    The master toggle is account-keyed and goes through the account-settings
+    PUT; this writes the install-keyed delivery style alone.
+    """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
     minds_config = get_state().minds_config
@@ -441,8 +503,8 @@ def _handle_notification_prefs_write() -> Response:
         return _error_response("Settings storage is not configured", 503)
     return _handle_if_match_write(
         minds_config=minds_config,
-        write_model_type=UiNotificationPrefsWrite,
-        apply_versioned_write=_apply_notification_prefs_write,
+        write_model_type=UiNotificationStyleWrite,
+        apply_versioned_write=_apply_notification_style_write,
     )
 
 
@@ -564,30 +626,73 @@ def _empty_update_window_response() -> Response:
     return _error_response("The update window needs a start and end that differ", 400)
 
 
-def _handle_update_window_write() -> Response:
-    """POST /ui/api/settings/update-window: set the local hours scheduled updates run in.
+def _resolved_account_settings(account_id: str) -> UiAccountSettings:
+    """The account's record as the routes serve it, through the resolution path."""
+    context = load_settings_context(get_state().minds_config, get_state().account_settings_store, account_id)
+    update_window = resolve_update_window(context)
+    return UiAccountSettings(
+        settings_format=context.account.settings_format,
+        update_window_start_hour=update_window[0],
+        update_window_end_hour=update_window[1],
+        auto_update_workspaces=resolve_auto_update_workspaces(context),
+        auto_update_prompt_decision=resolve_auto_update_prompt_decision(context),
+        notifications_enabled=resolve_notifications_enabled(context),
+    )
 
-    No If-Match guard: a plain preference with no consent semantics.
+
+def _handle_account_settings(account_id: str) -> Response:
+    """GET/PUT /ui/api/settings/<account_id>: the account's settings record (spec section 7.3).
+
+    Each account id reads and writes its own replica of the synced ``settings``
+    document; the PUT marks it dirty and kicks the sync scheduler, whose next
+    pass pushes it. The PUT is partial (any subset of the record's fields) and
+    unguarded, like the plain-preference writes it replaced: each field is
+    independent, so the last write to a field is simply the newest choice.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    minds_config = get_state().minds_config
-    if minds_config is None:
+    if not is_valid_account_id(account_id):
+        return _error_response("The path must name an account id", 400)
+    if request.method != "PUT":
+        return _json_response(_resolved_account_settings(account_id))
+    settings_store = get_state().account_settings_store
+    if settings_store is None:
         return _error_response("Settings storage is not configured", 503)
-    write = _read_json_write(UiUpdateWindowWrite)
+    write = _read_json_write(UiAccountSettingsWrite)
     if isinstance(write, Response):
         return write
-    if write.start_hour == write.end_hour:
+    if (write.update_window_start_hour is None) != (write.update_window_end_hour is None):
+        return _error_response("The update window needs both its start and end hours", 400)
+    if write.update_window_start_hour is not None and write.update_window_start_hour == write.update_window_end_hour:
         return _empty_update_window_response()
-    minds_config.set_update_window(write.start_hour, write.end_hour)
-    # Every armed workspace's file carries the window; the sweep rewrites them.
-    _request_update_sweep()
-    return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
+    try:
+        # Only the explicitly-sent fields land: a key never chosen stays
+        # absent from the record, which is what "never chosen" means to it.
+        settings_store.apply_settings_values(account_id, write.model_dump(mode="json", exclude_none=True))
+    except SettingsRecordTooNewError:
+        return _error_response(
+            f"These settings were saved by a newer version of Imbue Studio "
+            f"(format {settings_store.get_stored_settings_format(account_id)}) and can only be changed there",
+            409,
+        )
+    sync_scheduler = get_state().sync_scheduler
+    if sync_scheduler is not None:
+        sync_scheduler.kick()
+    # Every armed workspace's file carries the window, and the updates frame
+    # carries the auto-update fields; the sweep rewrites both.
+    if write.update_window_start_hour is not None or write.auto_update_workspaces is not None:
+        apply_account_settings_change_side_effects()
+    return _json_response(_resolved_account_settings(account_id))
 
 
-def _request_update_sweep() -> None:
-    """Re-read every workspace's updates, and re-send the updates frame, whose auto-update fields just moved."""
-    state = get_state()
+def apply_account_settings_change_side_effects(app: Flask | None = None) -> None:
+    """Re-resolve every surface an account-settings change moves: the armed windows and the updates frame.
+
+    Called by the PUT (in request context) and, with the app passed
+    explicitly, by the sync scheduler when a pull lands another device's
+    change.
+    """
+    state = get_state(app)
     if state.workspace_update_service is not None:
         state.workspace_update_service.detector.request_pass()
     if state.ui_publisher is not None:
@@ -603,51 +708,6 @@ def _read_json_write(model: type[_WriteT]) -> _WriteT | Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed {} body: {}", model.__name__, e)
         return _error_response("Invalid JSON body", 400)
-
-
-def _handle_auto_update_write() -> Response:
-    """POST /ui/api/settings/auto-update: turn automatic workspace updates on or off.
-
-    Turning it off leaves the schedules already armed in place.
-    """
-    if not is_ui_request_authenticated():
-        return _unauthenticated_response()
-    minds_config = get_state().minds_config
-    if minds_config is None:
-        return _error_response("Settings storage is not configured", 503)
-    write = _read_json_write(UiAutoUpdateWrite)
-    if isinstance(write, Response):
-        return write
-    minds_config.set_auto_update_workspaces(write.is_enabled)
-    _request_update_sweep()
-    return _json_response(UiAutoUpdateWrite(is_enabled=write.is_enabled))
-
-
-def _handle_auto_update_prompt_write() -> Response:
-    """POST /ui/api/settings/auto-update-prompt: record the answer to the one-time offer, so it never returns.
-
-    Accepting it can carry the update window chosen in the offer, saved with the answer.
-    """
-    if not is_ui_request_authenticated():
-        return _unauthenticated_response()
-    minds_config = get_state().minds_config
-    if minds_config is None:
-        return _error_response("Settings storage is not configured", 503)
-    write = _read_json_write(UiAutoUpdatePromptWrite)
-    if isinstance(write, Response):
-        return write
-    window = write.window
-    if window is not None:
-        if write.decision is not AutoUpdatePromptDecision.ACCEPTED:
-            return _error_response("Only turning auto-update on sets an update window", 400)
-        if window.start_hour == window.end_hour:
-            return _empty_update_window_response()
-        minds_config.set_update_window(window.start_hour, window.end_hour)
-    minds_config.set_auto_update_prompt_decision(write.decision)
-    if write.decision is AutoUpdatePromptDecision.ACCEPTED:
-        minds_config.set_auto_update_workspaces(True)
-        _request_update_sweep()
-    return _json_response(UiAutoUpdatePromptWrite(decision=write.decision, window=window))
 
 
 def _handle_sign_in_browser_write() -> Response:
@@ -815,14 +875,13 @@ def _handle_ai_keys_context() -> Response:
 def register_settings_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule("/api/settings", view_func=_handle_settings_overview)
+    # Werkzeug ranks static segments over the <account_id> converter, so the
+    # named sub-routes below stay reachable; no real account id collides with
+    # them (SuperTokens ids are UUIDs, and the device's is "local").
+    blueprint.add_url_rule("/api/settings/<account_id>", view_func=_handle_account_settings, methods=["GET", "PUT"])
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
-    blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_style_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
-    blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
-    blueprint.add_url_rule("/api/settings/auto-update", view_func=_handle_auto_update_write, methods=["POST"])
-    blueprint.add_url_rule(
-        "/api/settings/auto-update-prompt", view_func=_handle_auto_update_prompt_write, methods=["POST"]
-    )
     blueprint.add_url_rule("/api/settings/sign-in-browser", view_func=_handle_sign_in_browser_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/browser-import", view_func=_handle_browser_import_status)
     blueprint.add_url_rule(

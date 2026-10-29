@@ -182,7 +182,7 @@ export function Shell(): m.Component<ShellAttrs> {
   function loadAutoUpdatePrompt({ shell, routePath }: ShellAttrs): void {
     if (routePath === promptLoadedForRoutePath) return;
     promptLoadedForRoutePath = routePath;
-    void shell.autoUpdatePrompt.load();
+    void shell.autoUpdatePrompt.load(shell.accountId);
   }
 
   // Escape is handled by the app's single in-document listener (index.ts),

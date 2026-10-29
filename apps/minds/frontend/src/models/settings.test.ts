@@ -191,7 +191,7 @@ describe("SettingsModel", () => {
     );
     await model.load();
 
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: true,
       style: "os",
     });
@@ -200,7 +200,7 @@ describe("SettingsModel", () => {
       {
         url: "/ui/api/settings/notifications",
         ifMatch: "np-1",
-        body: { is_enabled: true, style: "os" },
+        body: { style: "os" },
       },
     ]);
     expect(model.notificationPrefs()).toEqual({
@@ -232,7 +232,7 @@ describe("SettingsModel", () => {
       version: "np-9",
     };
 
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: true,
       style: "both",
     });
@@ -259,14 +259,14 @@ describe("SettingsModel", () => {
     );
     await model.load();
 
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: false,
       style: "both",
     });
     expect(model.notificationPrefsError).toContain("network error");
 
     isServerUp = true;
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: false,
       style: "both",
     });
@@ -292,7 +292,7 @@ describe("SettingsModel", () => {
     );
     await model.load();
 
-    await model.setNotificationPrefs({
+    await model.setNotificationPrefs("user-7", {
       is_enabled: false,
       style: "both",
     });

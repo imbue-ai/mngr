@@ -4,12 +4,6 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-28
-
-New `version_mismatch` setting on the opencode agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.
-
-Behavior change: the pinned-version check now runs whenever `version` is set, even with `check_installation = false`, which now only controls install-if-missing. The version is now probed with the binary itself rather than the configured launch `command`, so a wrapper command no longer makes the check skip.
-
 ## 2026-10-26
 
 OpenCode agents now declare their process name (`opencode`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.

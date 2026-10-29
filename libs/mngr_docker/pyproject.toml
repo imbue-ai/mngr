@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-docker"
-version = "0.1.1"
+version = "0.1.0"
 description = "Docker provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.3.1",
+    "imbue-mngr==0.3.0",
     # pinning docker because the guard registration module
     # (register_guards.py) monkeypatches its internal methods for test
     # resource guards; new versions may move or rename them.

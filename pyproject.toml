@@ -22,7 +22,7 @@ dependencies = [
 # surface. scripts/release.py advances it to 2 weeks before each release, and
 # only ever forward. This only buys a detection delay; it can't catch a
 # compromise that stays undetected past the window.
-exclude-newer = "2026-10-14T00:00:00Z"
+exclude-newer = "2026-10-08T00:00:00Z"
 # uv below 0.13.4 bundles a root store that still trusts emSign ECC Root CA -
 # G3, which the eMudhra intermediates with recoverable private keys chain to,
 # so an older uv can be MITM'd while fetching packages. Older uv also writes an

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import m from "mithril";
+import type { AppContext } from "../app-context";
+import { clearAppContextForTests, registerAppContext } from "../app-context";
 import {
   attrsOf,
   byId,
@@ -13,6 +15,15 @@ import { AutoUpdatePromptModal } from "../views/components/AutoUpdatePromptModal
 import { DialogCloseButton } from "../views/components/Modal";
 import { AutoUpdatePromptModel } from "./autoUpdatePrompt";
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
+
+// The modal's answer buttons read the window's account off the shell.
+beforeEach(() => {
+  registerAppContext({ shell: { accountId: "user-7" } } as unknown as AppContext);
+});
+
+afterEach(() => {
+  clearAppContextForTests();
+});
 
 interface Backend {
   model: AutoUpdatePromptModel;
@@ -33,7 +44,7 @@ function backend(
     requests.push(
       `${init?.method ?? "GET"} ${url}${init?.body ? ` ${String(init.body)}` : ""}`,
     );
-    if (url === "/ui/api/settings")
+    if (url.split("?")[0] === "/ui/api/settings")
       return Promise.resolve(
         jsonResponse(
           settingsOverview({
@@ -125,7 +136,7 @@ describe("answering the auto-update prompt", () => {
     await settle();
 
     expect(requests).toContain(
-      'POST /ui/api/settings/auto-update-prompt {"decision":"declined"}',
+      'PUT /ui/api/settings/user-7 {"auto_update_prompt_decision":"declined"}',
     );
     expect(model.triggerFor(false, true)).toBeNull();
   });
@@ -151,7 +162,9 @@ describe("answering the auto-update prompt", () => {
     await settle();
 
     expect(requests).toContain(
-      'POST /ui/api/settings/auto-update-prompt {"decision":"accepted","window":{"start_hour":23,"end_hour":5}}',
+      'PUT /ui/api/settings/user-7 ' +
+        '{"auto_update_prompt_decision":"accepted","auto_update_workspaces":true,' +
+        '"update_window_start_hour":23,"update_window_end_hour":5}',
     );
     expect(model.triggerFor(false, true)).toBeNull();
   });
@@ -161,9 +174,18 @@ describe("answering the auto-update prompt", () => {
       jsonResponse({ error: "The settings file is read-only." }, 500),
     );
     await model.load();
-    await model.choose("declined");
+    await model.choose("declined", "user-7");
     expect(model.error).toBe("The settings file is read-only.");
     expect(model.triggerFor(false, false)).toBe("app-updated");
+  });
+
+  it("reads the recorded answer from the window's account's record", async () => {
+    const { model, requests } = backend("declined", true);
+
+    await model.load("user-7");
+
+    expect(requests).toEqual(["GET /ui/api/settings?account=user-7"]);
+    expect(model.triggerFor(false, true)).toBeNull();
   });
 
   it("puts a prompt closed without an answer away for the session only, recording nothing", async () => {
@@ -180,6 +202,6 @@ describe("answering the auto-update prompt", () => {
     (attrsOf(close).onClose as () => void)();
 
     expect(model.triggerFor(false, true)).toBeNull();
-    expect(requests).toEqual(["GET /ui/api/settings"]);
+    expect(requests).toEqual(["GET /ui/api/settings?account=local"]);
   });
 });

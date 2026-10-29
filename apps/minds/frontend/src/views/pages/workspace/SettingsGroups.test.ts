@@ -1162,13 +1162,13 @@ describe("the Updates settings group's app-wide update settings", () => {
     const bodies: Record<string, string> = {};
     const { draw, init } = harness((url, init) => {
       if (init?.body !== undefined) bodies[url] = String(init.body);
-      if (url === "/ui/api/settings") {
+      if (url.split("?")[0] === "/ui/api/settings") {
         return Promise.resolve(
           jsonResponse(settingsOverview({ is_auto_update_enabled: false })),
         );
       }
-      if (url === "/ui/api/settings/auto-update") {
-        return Promise.resolve(jsonResponse({ is_enabled: true }));
+      if (url.startsWith("/ui/api/settings/") && init?.method === "PUT") {
+        return Promise.resolve(jsonResponse({ auto_update_workspaces: true }));
       }
       return Promise.resolve(jsonResponse({}));
     });
@@ -1184,8 +1184,12 @@ describe("the Updates settings group's app-wide update settings", () => {
     (attrsOf(toggle as AnyVnode).onclick as () => void)();
     await settleDispatch();
 
-    expect(JSON.parse(bodies["/ui/api/settings/auto-update"])).toEqual({
-      is_enabled: true,
+    const putUrl = Object.keys(bodies).find((url) =>
+      url.startsWith("/ui/api/settings/"),
+    );
+    expect(putUrl).toBeDefined();
+    expect(JSON.parse(bodies[putUrl as string])).toEqual({
+      auto_update_workspaces: true,
     });
     const flipped = collectVnodes(draw(UNBACKED)).find(
       (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
@@ -1201,7 +1205,7 @@ describe("the Updates settings group's app-wide settings changed elsewhere", () 
     const { draw, init } = harness((url) =>
       Promise.resolve(
         jsonResponse(
-          url === "/ui/api/settings"
+          url.split("?")[0] === "/ui/api/settings"
             ? settingsOverview({ is_auto_update_enabled: isEnabled })
             : {},
         ),
@@ -1492,7 +1496,7 @@ describe("the Updates settings group over a run under way", () => {
 describe("the Updates settings group of a stopped workspace", () => {
   it("offers nothing to do in it until it starts and claims no version state, but keeps the app-wide settings", async () => {
     const { draw, init } = harness((url) =>
-      Promise.resolve(jsonResponse(url === "/ui/api/settings" ? settingsOverview() : {})),
+      Promise.resolve(jsonResponse(url.split("?")[0] === "/ui/api/settings" ? settingsOverview() : {})),
     );
     init();
     await settleDispatch();

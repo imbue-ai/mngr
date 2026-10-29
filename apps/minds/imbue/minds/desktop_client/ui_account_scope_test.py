@@ -137,7 +137,7 @@ def _install_snapshot() -> UiSnapshot:
     "Mithril LandingPage's (frontend/src/views/pages/LandingPage.test.ts)",
 )
 def test_project_snapshot_keeps_one_accounts_rows_and_what_is_about_them() -> None:
-    projected = project_snapshot(_install_snapshot(), ALICE)
+    projected = project_snapshot(_install_snapshot(), ALICE, "2:00 AM-5:00 AM", False)
 
     assert projected.workspaces.account_id == ALICE
     assert [entry.id for entry in projected.workspaces.workspaces] == ["agent-a1"]
@@ -169,7 +169,7 @@ def test_project_snapshot_keeps_one_accounts_rows_and_what_is_about_them() -> No
 
 @pytest.mark.witnesses("account-windows.device-window-lists-unassociated")
 def test_project_snapshot_for_the_device_lists_the_unassociated_rows_and_the_device_section_alone() -> None:
-    projected = project_snapshot(_install_snapshot(), LOCAL_PROFILE_USER_ID)
+    projected = project_snapshot(_install_snapshot(), LOCAL_PROFILE_USER_ID, "2:00 AM-5:00 AM", False)
 
     assert [entry.id for entry in projected.workspaces.workspaces] == ["agent-d1"]
     assert projected.workspaces.remote_workspace_states == {}
@@ -180,8 +180,18 @@ def test_project_snapshot_for_the_device_lists_the_unassociated_rows_and_the_dev
     assert projected.health == ()
 
 
+def test_project_snapshot_puts_the_accounts_own_update_settings_on_the_updates_frame() -> None:
+    """The install frame is built from the device's values; the projection must swap in the account's own."""
+    projected = project_snapshot(_install_snapshot(), ALICE, "11:00 PM-3:00 AM", True)
+
+    assert projected.workspace_updates.update_window == "11:00 PM-3:00 AM"
+    assert projected.workspace_updates.is_auto_update_enabled is True
+    # The swap does not disturb the scope filter on the rows themselves.
+    assert list(projected.workspace_updates.updates) == ["agent-a1"]
+
+
 def test_project_snapshot_for_a_signed_out_account_with_no_section_synthesizes_an_empty_one() -> None:
-    projected = project_snapshot(_install_snapshot(), "user-gone")
+    projected = project_snapshot(_install_snapshot(), "user-gone", "2:00 AM-5:00 AM", False)
 
     (own, device) = projected.providers.accounts
     assert (own.user_id, own.state, own.connections) == ("user-gone", AccountPanelState.SIGNED_OUT, ())

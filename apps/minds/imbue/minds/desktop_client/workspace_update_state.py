@@ -35,8 +35,6 @@ from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
-from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_dismissal_store import is_run_dismissed
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
@@ -52,6 +50,8 @@ from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_status import describe_skip_reason
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_facts_cache import is_run_dismissed
 from imbue.minds.desktop_client.workspace_version import read_workspace_current_version
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -335,8 +335,10 @@ class WorkspaceUpdateStateStore(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    dismissal_store: UpdateDismissalStore = Field(
-        frozen=True, description="What the user dismissed, so a re-read run record does not restore it"
+    facts_cache: WorkspaceFactsCache = Field(
+        frozen=True,
+        description="The per-workspace facts cache holding what the user dismissed, so a re-read run "
+        "record does not restore it (the workspace's own dismissals file converges through it)",
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -689,12 +691,12 @@ class WorkspaceUpdateStateStore(MutableModel):
         # read that decides is under it, since a dismissal writes the store and
         # clears the row together, and an older store beside the cleared row would
         # restore what was just dismissed.
-        self.dismissal_store.load()
+        self.facts_cache.load()
         with self._lock:
             facts = self._run_by_agent.get(aid_str, _RunFacts())
             if facts.activity in IN_FLIGHT_ACTIVITIES:
                 return
-            dismissals = self.dismissal_store.read(agent_id)
+            dismissals = self.facts_cache.read(agent_id)
             is_same_run = status.started_at is not None and status.started_at == facts.record.started_at
             is_outcome_dismissed = is_run_dismissed(dismissals.outcome_run_started_at, status.started_at)
             # A landed run's note is dismissed on its own, so a relaunch still earns it under a dismissed badge.
@@ -765,7 +767,7 @@ class WorkspaceUpdateStateStore(MutableModel):
             if facts is None or not facts.success_note_version:
                 return
             if facts.success_note_run_started_at is not None:
-                self.dismissal_store.dismiss_note(agent_id, facts.success_note_run_started_at)
+                self.facts_cache.dismiss_note(agent_id, facts.success_note_run_started_at)
             else:
                 logger.warning(
                     "Clearing {}'s update note without remembering it: the run that earned it has no readable "
@@ -799,7 +801,7 @@ class WorkspaceUpdateStateStore(MutableModel):
             record = facts.record
             if is_run_outcome_showing:
                 if record.started_at is not None:
-                    self.dismissal_store.dismiss_outcome(agent_id, record.started_at)
+                    self.facts_cache.dismiss_outcome(agent_id, record.started_at)
                 else:
                     logger.warning(
                         "Clearing {}'s update outcome without remembering it: the run has no readable start to key "

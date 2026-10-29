@@ -25,6 +25,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -64,8 +65,10 @@ from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
@@ -185,6 +188,21 @@ class DesktopClientState(MutableModel):
     )
     connection_store: ConnectionStore | None = Field(
         default=None, frozen=True, description="Per-account cloud connection replicas + the local profile"
+    )
+    account_settings_store: AccountSettingsStore | None = Field(
+        default=None,
+        frozen=True,
+        description="Per-account replicas of the synced settings document (the device's included)",
+    )
+    workspace_facts_cache: WorkspaceFactsCache | None = Field(
+        default=None,
+        frozen=True,
+        description="Cache of the per-workspace facts that live in each workspace (spec section 7.4)",
+    )
+    workspace_profile_writer: WorkspaceProfileWriter | None = Field(
+        default=None,
+        frozen=True,
+        description="Materializes the profile snapshot into workspaces; None in a build with no mngr caller",
     )
     provider_materializer: ProviderSettingsMaterializer | None = Field(
         default=None,

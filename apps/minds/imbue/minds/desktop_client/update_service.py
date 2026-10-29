@@ -8,6 +8,7 @@ an in-flight run: it moves the row and lands the verdict.
 import shlex
 import threading
 from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -32,7 +33,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -56,6 +56,7 @@ from imbue.minds.desktop_client.update_workspace_command import read_update_fact
 from imbue.minds.desktop_client.update_workspace_command import resolve_update_window_zone
 from imbue.minds.desktop_client.update_workspace_command import start_update_now
 from imbue.minds.desktop_client.update_workspace_command import utc_update_window
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
@@ -208,7 +209,9 @@ class UpdateSettingsSource(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     read_ceiling: Callable[[], str] = Field(frozen=True, description="The app's template ceiling")
-    read_update_window: Callable[[], tuple[int, int]] = Field(frozen=True, description="The configured window")
+    read_update_window: Callable[[AgentId], tuple[int, int]] = Field(
+        frozen=True, description="The workspace's configured window (its owning account's, since accounts differ)"
+    )
     read_zone: Callable[[], str] = Field(frozen=True, description="The app host's IANA time zone, '' if unknown")
     paths: InstallationPaths | None = Field(
         frozen=True, description="Workspace data paths; None when backups are not configurable at all"
@@ -222,7 +225,7 @@ class UpdateSettingsSource(MutableModel):
         return self.paths is not None and has_canonical_env(self.paths, agent_id)
 
     def settings_for(self, agent_id: AgentId) -> UpdateWorkspaceSettings:
-        start_hour, end_hour = self.read_update_window()
+        start_hour, end_hour = self.read_update_window(agent_id)
         zone = resolve_update_window_zone(self.read_zone())
         return UpdateWorkspaceSettings(
             ceiling_ref=self.read_ceiling(),
@@ -232,10 +235,24 @@ class UpdateSettingsSource(MutableModel):
 
 
 def read_workspace_update_facts(
-    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool
+    mngr_caller: MngrCaller,
+    workspace_address: str,
+    settings: UpdateWorkspaceSettings,
+    *,
+    is_sign_in_checked: bool,
+    fact_write_arguments: Sequence[str],
 ) -> UpdateWorkspaceFacts | None:
-    """The detection sweep's one read of a workspace's updates; None when it did not answer."""
-    call = read_update_facts(mngr_caller, workspace_address, settings, is_sign_in_checked=is_sign_in_checked)
+    """The detection sweep's one read of a workspace's updates; None when it did not answer.
+
+    ``fact_write_arguments`` rides the read as the facts cache's write-through (spec 7.4).
+    """
+    call = read_update_facts(
+        mngr_caller,
+        workspace_address,
+        settings,
+        is_sign_in_checked=is_sign_in_checked,
+        fact_write_arguments=fact_write_arguments,
+    )
     if call.reach is not UpdateCommandReach.ANSWERED or call.payload is None:
         return None
     return parse_update_workspace_facts(call.payload)
@@ -294,8 +311,9 @@ class WorkspaceUpdateService(MutableModel):
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs every in-workspace command.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Places each workspace's host.")
     settings_source: UpdateSettingsSource = Field(frozen=True, description="The app's current update values.")
-    minds_config: MindsConfig | None = Field(
-        frozen=True, description="Where a skipped release is recorded; None in a build with no settings storage"
+    facts_cache: WorkspaceFactsCache = Field(
+        frozen=True,
+        description="Where a skipped release is recorded (queued for the workspace's own skipped-target file)",
     )
     start_workspace: Callable[[AgentId], MindHostActionOutcome] = Field(
         frozen=True,
@@ -519,14 +537,17 @@ class WorkspaceUpdateService(MutableModel):
         """Skip the current release for this workspace: remember it, cancel its schedule, and clear a decision.
 
         A decision its last run is waiting on is dismissed with it, since the user chose not to take
-        this release. The sweep re-arms the workspace once the app's ceiling moves to a newer release.
+        this release. The skip is a per-workspace fact kept in the workspace itself (cached here
+        while it is stopped); the sweep re-arms the workspace once the app's ceiling moves to a
+        newer release.
         """
         refusal = self.cancel_schedule(agent_id)
         # Only once the cancel landed: a workspace still armed would run the update it was told to skip.
         if refusal is not None:
             return refusal
-        if self.minds_config is not None:
-            self.minds_config.set_skipped_update_target(str(agent_id), self.settings_source.read_ceiling())
+        # Queued on the cache and written into the workspace's own skipped-target file by the
+        # sweep's next read, which the cancel above already requested.
+        self.facts_cache.record_skip(agent_id, self.settings_source.read_ceiling())
         if self.state_store.get(agent_id).is_decision_pending:
             self.state_store.dismiss_run_outcome(agent_id)
         return None

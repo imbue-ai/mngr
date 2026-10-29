@@ -6,15 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.3.1] - 2026-10-28
-
-### Added
-
-- Added: `VersionMismatchPolicy` (`ERROR`/`WARN`) and a `mismatch_policy` argument on `verify_pinned_cli_version`, letting an agent type choose whether a CLI that does not report its pinned version fails provisioning or only logs a warning.
-
 ### Changed
 
-- Changed: The shared version probe runs `<binary> --version` instead of the agent's launch command, so a wrapper command no longer causes the check to be skipped.
 - Changed: `run_interactive_subprocess` and `popen_interactive_subprocess` now take an argv list only (the `shell` argument is removed); the one deliberate shell invocation (the `--help` pager) moved to the new `popen_interactive_shell_command`.
 - Changed: Commands now treat an agent whose state can't be read (UNKNOWN) conservatively: `mngr message` and chat sends fail with a `state_unknown` error instead of delivering or reviving, `mngr destroy` without `--force` refuses, and `mngr archive` treats it as running; `mngr exec`, `connect`, `capture` and `create --reuse` proceed as before.
 - Changed: `create_pyinfra_host` now raises `PyinfraConnectorUnavailableError` (both a `HostError` and a `KeyError`), logging a pyinfra install snapshot, instead of letting a bare `KeyError` escape when the `ssh` connector is missing.

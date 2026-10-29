@@ -3,6 +3,7 @@
 // (models/autoUpdatePrompt.ts); this only says it and takes the answer.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import type { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import { Button } from "./Button";
 import { DialogCloseButton, Modal } from "./Modal";
@@ -66,7 +67,11 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
                   variant: "primary",
                   id: "auto-update-prompt-accept",
                   disabled: model.isBusy,
-                  onclick: () => void model.choose("accepted"),
+                  onclick: () =>
+                    void model.choose(
+                      "accepted",
+                      getAppContext().shell.accountId,
+                    ),
                 },
                 model.isBusy
                   ? m(Spinner, { size: "sm" })
@@ -78,7 +83,11 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
                   variant: "secondary",
                   id: "auto-update-prompt-decline",
                   disabled: model.isBusy,
-                  onclick: () => void model.choose("declined"),
+                  onclick: () =>
+                    void model.choose(
+                      "declined",
+                      getAppContext().shell.accountId,
+                    ),
                 },
                 "Not now",
               ),

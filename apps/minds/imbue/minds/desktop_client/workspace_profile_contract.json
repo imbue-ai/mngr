@@ -1,0 +1,12 @@
+{
+  "snapshot_format": 1,
+  "snapshot_relative_path": "data/.state/profile/account.json",
+  "header_keys": [
+    "account_id",
+    "owner_user_id",
+    "snapshot_format",
+    "written_at",
+    "written_by"
+  ],
+  "setting_keys": []
+}

@@ -1,9 +1,9 @@
 """Release tests: the GitHub doc URLs that imbue_mngr_doc_url builds actually resolve.
 
-They hit github.com and PyPI over the network, so they run in the release lane, not
-on the per-PR merge gate: a third-party outage should not block merges. They fail
-closed, so a red run means either a service is down or a link is genuinely dead --
-check which before merging past. They guard the version-pinning ref policy in doc_links
+They hit github.com over the network, so they run in the release lane, not on the
+per-PR merge gate: a third-party outage should not block merges. They fail closed,
+so a red run means either github.com is down or a link is genuinely dead -- check
+which before merging past. They guard the version-pinning ref policy in doc_links
 against silent breakage (a wrong tag format, or the repo being renamed/made private)
 that would turn every terminal help-topic link into a dead 404. The deterministic
 half of that policy, the URL shape, is covered without the network on every PR in
@@ -11,7 +11,6 @@ doc_links_test.py.
 """
 
 import subprocess
-from importlib.metadata import version
 
 import pytest
 
@@ -39,22 +38,10 @@ def _http_status(url: str) -> int:
     return int(result.stdout.strip())
 
 
-def _is_published_on_pypi(mngr_version: str) -> bool:
-    status = _http_status(f"https://pypi.org/pypi/imbue-mngr/{mngr_version}/json")
-    assert status in (200, 404), f"PyPI answered {status} for imbue-mngr {mngr_version}"
-    return status == 200
-
-
 @pytest.mark.release
-@pytest.mark.timeout(2 * _NETWORK_TEST_TIMEOUT_SECONDS)
+@pytest.mark.timeout(_NETWORK_TEST_TIMEOUT_SECONDS)
 def test_release_pinned_doc_url_resolves() -> None:
-    """The version-pinned URL imbue_mngr_doc_url builds resolves (no 404) once that version is on PyPI.
-
-    The release pipeline (publish.yml) runs this suite before it publishes the version and tags it.
-    """
-    mngr_version = version("imbue-mngr")
-    if not _is_published_on_pypi(mngr_version):
-        pytest.skip(f"imbue-mngr {mngr_version} is not on PyPI yet, so v{mngr_version} is not tagged yet")
+    """The version-pinned URL imbue_mngr_doc_url builds resolves (no 404)."""
     url = imbue_mngr_doc_url(_STABLE_DOC)
     assert _http_status(url) == 200, f"version-pinned doc URL 404s: {url}"
 

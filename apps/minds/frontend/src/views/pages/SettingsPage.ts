@@ -4,6 +4,7 @@
 // static/app_settings.js.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import { SettingsModel } from "../../models/settings";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
@@ -39,7 +40,7 @@ export function SettingsPage(): m.Component {
   return {
     oninit(): void {
       selectRequestedSection();
-      void model.load();
+      void model.load(getAppContext().shell.accountId);
       // Desktop-only, and independent of the /ui/api settings payload: the
       // update state comes from the Electron main process, not the backend.
       void model.loadUpdateState();

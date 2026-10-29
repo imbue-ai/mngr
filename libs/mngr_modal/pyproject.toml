@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-modal"
-version = "0.3.1"
+version = "0.3.0"
 description = "Modal provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.3.1",
+    "imbue-mngr==0.3.0",
     "modal==1.5.4",
-    "modal-proxy==0.2.1",
+    "modal-proxy==0.2.0",
     "dockerfile-parse>=2.0.0",
 ]
 

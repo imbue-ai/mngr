@@ -55,6 +55,7 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import resolve_client_config_path
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.api_key_store import generate_api_key
@@ -77,6 +78,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
+from imbue.minds.desktop_client.backup_verification_store import flush_pending_backup_verification_writes
 from imbue.minds.desktop_client.connections.account_lifecycle import list_signed_in_accounts_from_session_store
 from imbue.minds.desktop_client.connections.account_lifecycle import sign_out_dead_account
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
@@ -96,6 +98,7 @@ from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
 from imbue.minds.desktop_client.full_disk_access_probe import start_full_disk_access_probe
+from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -126,6 +129,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.settings.migration import migrate_account_keyed_settings
 from imbue.minds.desktop_client.shared_workspaces import clear_materials_of_shares_retired_elsewhere
 from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
 from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
@@ -134,16 +138,21 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.ui_api_settings import apply_account_settings_change_side_effects
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_facts_migration import migrate_per_workspace_facts
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
 from imbue.minds.desktop_client.workspace_recovery import WorkspaceSshEndpointSource
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
@@ -156,6 +165,7 @@ from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_forward.tls import local_ca_cert_path
@@ -566,6 +576,26 @@ def run(
     # Before anything reads the replicas: a registration the previous process
     # died inside would otherwise be materialized and offered, never synced.
     connection_store.discard_unregistered_connections()
+    account_settings_store = AccountSettingsStore(data_dir=paths.data_dir, cli=imbue_cloud_cli)
+    # CLEANUP: remove this call (with settings/migration.py and its MindsConfig
+    # helpers) once every supported install has started a phase-3A build.
+    # Before anything resolves a setting: the moved config.toml values become
+    # the device record and a seed per signed-in account (read from the
+    # plugin's on-disk index, not the session store, which would wait on the
+    # warm mngr process this early in startup).
+    # An unreadable index (None) defers the migration to the next start.
+    indexed_accounts = read_signed_in_accounts_from_index_or_none(MindsRoot(root_name))
+    migrate_account_keyed_settings(
+        minds_config,
+        account_settings_store,
+        None if indexed_accounts is None else [account.user_id for account in indexed_accounts],
+    )
+    workspace_facts_cache = WorkspaceFactsCache(records_dir=paths.data_dir / "workspace_facts_cache")
+    # CLEANUP: remove this call (with workspace_facts_migration.py and its MindsConfig
+    # helpers) once every supported install has started a phase-3B build. Before anything
+    # reads a per-workspace fact: the pre-3B stores become dirty cache records, written into
+    # each workspace the next time it runs.
+    migrate_per_workspace_facts(minds_config, workspace_facts_cache, paths)
     workspace_record_store = WorkspaceRecordStore(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
@@ -810,6 +840,18 @@ def run(
     # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
     # page's route (it hands the conversation over, and waits on the seed while the page is open).
     welcome_chat_seeder = WelcomeChatSeeder(mngr_caller=mngr_caller, backend_resolver=backend_resolver)
+    # Materializes the workspace profile snapshot (spec section 8): on create (below, riding
+    # the creator's done hook right after the welcome chat is seeded, with the device's zone
+    # for the once-at-create timezone file), on each sync pass (the scheduler below), and on
+    # association change (the PATCH route marks the hash stale and kicks the scheduler).
+    workspace_profile_writer = WorkspaceProfileWriter(
+        mngr_caller=mngr_caller,
+        backend_resolver=backend_resolver,
+        session_store=session_store,
+        device_id=str(device_id),
+        hashes_dir=paths.data_dir / "workspace_profile_hashes",
+    )
+
     # The proxy signs its TLS leaves with the local CA it keeps under this host
     # dir, which is the one it was spawned with; every probe of it pins that CA.
     forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
@@ -830,7 +872,9 @@ def run(
         # workspace list re-renders its creating/interrupted/failed rows
         # without waiting for a discovery tick.
         on_create_attempts_changed=backend_resolver.notify_change,
-        on_create_attempt_done=welcome_chat_seeder.seed_held,
+        on_create_attempt_done=lambda create_attempt_id, workspace_agent_id: _finish_create_attempt(
+            welcome_chat_seeder, workspace_profile_writer, create_attempt_id, workspace_agent_id
+        ),
         backup_quota_evictor_factory=lambda account_email: _resolve_backup_quota_evictor(
             session_store, workspace_record_store, paths, imbue_cloud_cli, account_email
         ),
@@ -855,6 +899,11 @@ def run(
         on_discovery_bounce_needed=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
         backup_reaper=backup_reaper,
         connection_store=connection_store,
+        settings_store=account_settings_store,
+        workspace_profile_writer=workspace_profile_writer,
+        flush_workspace_fact_writes=lambda: flush_pending_backup_verification_writes(
+            workspace_facts_cache, mngr_caller=mngr_caller, backend_resolver=backend_resolver
+        ),
         provider_materializer=provider_materializer,
         imbue_cloud_cli=imbue_cloud_cli,
         agent_creator=agent_creator,
@@ -980,7 +1029,15 @@ def run(
         forward_identity=forward_identity,
         connection_store=connection_store,
         provider_materializer=provider_materializer,
+        account_settings_store=account_settings_store,
+        workspace_facts_cache=workspace_facts_cache,
+        workspace_profile_writer=workspace_profile_writer,
     )
+
+    # A settings pull that landed another device's change applies it like a
+    # local edit; bound only now because the surfaces it touches (the update
+    # detector, the channel publisher) live on the app built above.
+    sync_scheduler.on_account_settings_changed = lambda: apply_account_settings_change_side_effects(app)
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot
     # freshness, runs the producer bounce -> restart remediations on a stall, and
@@ -1087,6 +1144,21 @@ def run(
             serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
     finally:
         remove_app_record(record_path)
+
+
+def _finish_create_attempt(
+    welcome_chat_seeder: WelcomeChatSeeder,
+    workspace_profile_writer: WorkspaceProfileWriter,
+    create_attempt_id: CreateAttemptId,
+    workspace_agent_id: AgentId,
+) -> None:
+    """The creator's done hook: seed the held welcome chat, then materialize the profile snapshot.
+
+    The snapshot write rides right after the seed (spec section 8.2) and carries the device's
+    zone for the once-at-create timezone file (spec section 8.4).
+    """
+    welcome_chat_seeder.seed_held(create_attempt_id, workspace_agent_id)
+    workspace_profile_writer.write_profile_for_create(workspace_agent_id, read_host_timezone())
 
 
 def _clear_shares_retired_elsewhere(

@@ -4,22 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-28
-
-The `agent_types.claude.check_installation=false` setting that the bare-`mngr create` fallback adds to assist and update chats is now marked for removal. It only still matters for workspaces on templates from before `version_mismatch = "WARN"`: on newer templates a drifted claude only logs a warning, and mngr no longer ties the version check to `check_installation`.
-
-- Cut the Imbue Studio 0.9.4 release: the app version is 0.9.4 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.4`, carrying everything that landed on `main` since `minds-v0.9.3`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: a pinned harness version that does not match the installed one warns instead of failing the create; Antigravity records reasoning effort and confirms slash commands promptly; and the data-encryption key is cleared from the browser after logout.
-
-- Promote Imbue Studio 0.9.4 to the alpha channels: the desktop alpha channel serves ToDesktop build `2610286tjy4mwq2` (mac and Linux, 100%; mac still needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created alpha workspaces pin to `minds-v0.9.4`. Beta stays on 0.8.7 and stable on 0.8.5.
-
-- Corrected the Imbue Studio 0.9.3 release record (`docs/deploy/history/minds-v0.9.3.md`) from a fact-check: what #2418 and #958 change, when `main` moved and Update now ran, what the services and wire-compat checks found, the template PR's state, when the installers were checked, and every check left undone; and `docs/deploy/next_deploy.md`'s services line, Codex line and 0.8.x-upgrade check, which now also covers #2418's busy-marker fallback and datalib v0.46.0.
-
-`docs/testing-overview.md` and `docs/deploy/ops/app-release.md` no longer say the mngr Release Tests workflow runs on `v*` tag pushes: the mngr release pipeline now runs it before publishing.
-
-`test_materialize_names_a_detached_tree_by_its_commit` is marked flaky: it hit its 10s timeout on a local `git checkout --detach` in one offload run and passes in under a second locally.
-
-A native crash of the desktop app's main process now carries three crashpad annotations on its Sentry minidump event: the last navigation milestone of any window or frame (start, redirect, commit or fail, whether it was the main frame or a subframe, and the kind of target -- backend page, workspace redirect hop, workspace origin, internal or external -- never the URL), a once-a-minute snapshot of the app's process memory and the system's free memory, and the name of the last main-process event handled (window focus, blur or show, notification show or click, an updater status change, sleep, wake, screen lock or unlock, or quit). Each records the app's uptime when it was written. This is diagnostics for an unsymbolicated `EXC_BREAKPOINT` crash of the main process.
-
 ## 2026-10-27
 
 The Electron end-to-end runner's provider-chooser sign-in now presses the chooser's Try again when the chooser shows "Could not load providers", and logs the chooser's error text, before it clicks the Anthropic lane. Previously it waited for a lane that never rendered and timed out (`Frame.click: Timeout 20000ms exceeded. waiting for locator("[data-e2e=lane-anthropic]")`), which happened when the desktop app's connection to the new workspace dropped as the chooser opened (MIND-589). It relies on the `data-e2e="retry-providers"` hook from the paired default-workspace-template change, which also has the chooser ask for its provider list again by itself after a dropped connection.

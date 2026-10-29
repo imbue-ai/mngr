@@ -4,10 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-28
-
-When `latchkey auth re-encrypt` fails during a credential export, the error now carries the facts that explain a signal exit such as `-15`: whether its 5s timeout had passed, how long the run took, how many services were requested, and whether a destination key and an account were given. These are counts and flags only, never the service names or the account. The message therefore shows whether this process's own timeout or something outside the process killed the CLI.
-
 ## 2026-10-27
 
 A wiring step's transient-failure report now also names the host's provider instance and backend, gives the errno behind each address of a refused or unreachable connect (paramiko otherwise prints these as `[Errno None]`), and says whether this machine slept during the streak. The streak's first info line carries the provider and errnos too. The discovery stream logs at debug when a host's SSH endpoint changes, with the old and new endpoint.

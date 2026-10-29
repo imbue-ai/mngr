@@ -21,8 +21,6 @@ from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
-from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalRecord
-from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
@@ -34,6 +32,8 @@ from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsRecord
 from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import ORIGINAL_MINDS_VERSION_LABEL
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
@@ -1013,8 +1013,8 @@ def test_dismissing_an_earlier_runs_note_during_a_newer_run_keeps_the_newer_runs
 _PARK_SECONDS: Final[float] = 1.0
 
 
-class _ParkableDismissalStore(UpdateDismissalStore):
-    """A dismissal store whose read can be parked once, holding a sweep where it consults the dismissals."""
+class _ParkableFactsCache(WorkspaceFactsCache):
+    """A facts cache whose read can be parked once, holding a sweep where it consults the dismissals."""
 
     _is_park_armed: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_parked: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -1029,7 +1029,7 @@ class _ParkableDismissalStore(UpdateDismissalStore):
     def end_park(self) -> None:
         self._is_park_over.set()
 
-    def read(self, agent_id: AgentId) -> UpdateDismissalRecord:
+    def read(self, agent_id: AgentId) -> WorkspaceFactsRecord:
         record = super().read(agent_id)
         if self._is_park_armed.is_set():
             self._is_park_armed.clear()
@@ -1047,8 +1047,8 @@ def test_a_dismissal_landing_while_a_sweep_reads_the_dismissals_is_not_undone(
     store before the write and reached the row after it would put the badge straight back.
     """
     agent_id = AgentId.generate()
-    dismissal_store = _ParkableDismissalStore(records_dir=tmp_path / "update_dismissals")
-    store = make_update_state_store(tmp_path, dismissal_store=dismissal_store)
+    facts_cache = _ParkableFactsCache(records_dir=tmp_path / "workspace_facts_cache")
+    store = make_update_state_store(tmp_path, facts_cache=facts_cache)
     record = _run_record(verdict=UpdateVerdict.STUCK)
     store.observe_run_record(agent_id, record)
     is_dismissed = threading.Event()
@@ -1057,14 +1057,14 @@ def test_a_dismissal_landing_while_a_sweep_reads_the_dismissals_is_not_undone(
         store.dismiss_run_outcome(agent_id)
         is_dismissed.set()
 
-    dismissal_store.arm_park()
+    facts_cache.arm_park()
     with root_concurrency_group.make_concurrency_group("dismissal-race") as race:
         race.start_new_thread(target=store.observe_run_record, args=(agent_id, record), name="sweep")
-        dismissal_store.wait_until_parked()
+        facts_cache.wait_until_parked()
         race.start_new_thread(target=dismiss, name="dismiss")
         # Held off by the sweep's lock hold, this waits out; unlocked, it lands here.
         is_dismissed.wait(timeout=_PARK_SECONDS)
-        dismissal_store.end_park()
+        facts_cache.end_park()
 
     assert store.get(agent_id).verdict is None
 
