@@ -5,6 +5,7 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 
@@ -197,7 +198,7 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --pass-host-env MODAL_TOKEN_ID --pass-host-env MODAL_TOKEN_SECRET --type command --no-ensure-clean --no-connect -- sleep 100964",
             comment="set host-level environment variables",
-            timeout=240.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Locate the agent's modal host. Scoping the list to the modal provider keeps
@@ -207,7 +208,7 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="locate the modal host to exec against",
-        timeout=120.0,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     modal_agents = json.loads(list_result.stdout)["agents"]
@@ -226,7 +227,7 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     host_env_check = e2e.run(
         f'mngr exec my-task@{host_name}.modal \'test -n "$MODAL_TOKEN_ID" && test -n "$MODAL_TOKEN_SECRET" && echo HOST_ENV_PRESENT\'',
         comment="confirm host-level env vars are visible to agents on the host",
-        timeout=120.0,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(host_env_check).to_succeed()
     expect(host_env_check.stdout).to_contain("HOST_ENV_PRESENT")

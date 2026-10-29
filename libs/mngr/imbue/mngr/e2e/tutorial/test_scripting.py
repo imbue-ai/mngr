@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
@@ -134,7 +135,7 @@ def test_create_reuse_and_message(e2e: E2eSession) -> None:
             "mngr create worker --reuse --provider modal --no-connect --no-ensure-clean --type command -- sleep 101200"
             ' && mngr message worker -m "Process the queue"',
             comment="idempotent create + message",
-            timeout=180.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 

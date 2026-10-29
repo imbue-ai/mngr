@@ -17,15 +17,9 @@ from tenacity import stop_after_attempt
 from tenacity import wait_fixed
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.expect import expect
-
-_REMOTE_TIMEOUT = 120.0
-# test_create_modal_build_args uses a custom image (-b image=python:3.12) that
-# has to pull the image and apt-install openssh/tmux/rsync/jq/xxd at runtime,
-# which pushes the total past the default _REMOTE_TIMEOUT. Bumping just this
-# test's wait rather than all of them keeps the common case tight.
-_REMOTE_TIMEOUT_CUSTOM_IMAGE = 240.0
 
 
 def _exec_until_reachable(
@@ -48,7 +42,7 @@ def _exec_until_reachable(
 
     def _run_once() -> CommandResult:
         run_comment = comment if next(attempt_counter) == 0 else f"{comment} (retry)"
-        return e2e.run(command, comment=run_comment, timeout=_REMOTE_TIMEOUT)
+        return e2e.run(command, comment=run_comment, timeout=REMOTE_COMMAND_TIMEOUT_SECONDS)
 
     def _return_last_result(retry_state: RetryCallState) -> CommandResult:
         # On exhaustion, surface the last result rather than raising so the
@@ -93,7 +87,7 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100207",
         comment="you can also launch your default agent remotely in Modal",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
     # Verify the agent was actually created on the Modal provider (not just that
@@ -102,6 +96,7 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="confirm the agent is running on the modal provider",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     modal_agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
@@ -162,7 +157,7 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="confirm the agent is running on the modal provider",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     modal_agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
@@ -192,7 +187,7 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
     result = e2e.run(
         "EDITOR=true mngr create my-task --provider modal --edit-message --no-connect --no-ensure-clean",
         comment="you can also edit the message *while the agent is starting up*",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
     # Verify the --edit-message path actually ran rather than just trusting the
@@ -209,7 +204,7 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="confirm the agent was created on the modal provider",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     modal_agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
@@ -247,7 +242,7 @@ def test_create_modal_rsync(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr create my-task --provider modal --rsync --rsync-args "--exclude=node_modules" --no-connect --no-ensure-clean',
         comment="you can use rsync to transfer extra data as well",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -258,7 +253,7 @@ def test_create_modal_rsync(e2e: E2eSession) -> None:
     verify = e2e.run(
         "mngr exec my-task 'cat data/extra.txt; test ! -e node_modules && echo NODE_MODULES_EXCLUDED'",
         comment="verify rsync transferred the extra data and excluded node_modules",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(verify).to_succeed()
     expect(verify.stdout).to_contain("rsync-extra-data-marker")
@@ -283,7 +278,7 @@ def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr create my-task --provider modal --no-connect --no-ensure-clean -- --dangerously-skip-permissions --append-system-prompt "Don\'t ask me any questions!"',
         comment="one of the coolest features of mngr is the ability to create agents on remote hosts",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -294,6 +289,7 @@ def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the passthrough agent args reached the agent",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     matching = [agent for agent in json.loads(list_result.stdout)["agents"] if agent["name"] == "my-task"]
@@ -322,7 +318,7 @@ def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --idle-timeout 60 --no-connect --no-ensure-clean",
         comment="mngr makes it really easy to deal with this by automatically shutting down hosts when their agents are idle",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -332,7 +328,7 @@ def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="that command shuts down the Modal host (and agent) after 1 minute of inactivity",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
@@ -364,7 +360,7 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr create my-task --provider modal --idle-mode "ssh" --type command --no-connect --no-ensure-clean -- sleep 100981',
         comment="You can customize what inactivity means by using the --idle-mode flag",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -380,7 +376,7 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="that command will only consider agents as idle when you are not connected to them",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -415,7 +411,7 @@ def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task@my-dev-box --type claude --no-ensure-clean",
         comment="you can specify which existing host to run on using the address syntax",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_fail()
     # The error should mention the host not being found
@@ -451,7 +447,7 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --type claude -b cpu=4 -b memory=16 -b image=python:3.12 --no-connect --no-ensure-clean",
         comment="build arguments let you customize that new remote host",
-        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -462,7 +458,7 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
     version_result = e2e.run(
         "mngr exec my-task 'python --version'",
         comment="verify the custom python:3.12 base image is in use on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(version_result).to_succeed()
     expect(version_result.stdout + version_result.stderr).to_match(r"Python 3\.12\.")
@@ -476,7 +472,7 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
         "mngr list --provider modal --include 'name == \"my-task\"' "
         "--format 'RES:{name}|{host.resource.cpu.count}|{host.resource.memory_gb}'",
         comment="confirm the host was created with the requested cpu and memory build args",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(resource_result).to_succeed()
     expect(resource_result.stdout).to_contain("RES:my-task|4|16.0")
@@ -520,7 +516,7 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
         "mngr create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context"
         " --type command --no-connect --no-ensure-clean -- sleep 100300",
         comment="the most important build args for Modal are --file and --context-dir",
-        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -531,7 +527,7 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
     exec_result = e2e.run(
         "mngr exec my-task 'cat /opt/marker.txt'",
         comment="confirm the custom Dockerfile + context-dir build is in use on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(exec_result).to_succeed()
     expect(exec_result.stdout).to_contain("dockerfile-context-marker")
@@ -559,7 +555,7 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task@my-modal-box.modal --new-host --type command --no-connect --no-ensure-clean -- sleep 100980",
         comment="you can name the host using the address syntax",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
     # Verify the address syntax was actually honored: the agent must land on a
@@ -571,7 +567,11 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
     # `mngr list` also queries the AWS provider, which is enabled but has no
     # credentials in the isolated e2e profile, so it exits non-zero for reasons
     # unrelated to the host-naming feature under test.
-    listing = e2e.run("mngr list --addrs --provider modal", comment="verify the named host was created")
+    listing = e2e.run(
+        "mngr list --addrs --provider modal",
+        comment="verify the named host was created",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(listing).to_succeed()
     expect(listing.stdout).to_contain("my-task@my-modal-box.modal")
 
@@ -595,7 +595,7 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal -b volume=my-data:/data --type command --no-connect --no-ensure-clean -- sleep 100985",
         comment="you can mount persistent Modal volumes",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -606,7 +606,7 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
     verify = e2e.run(
         "mngr exec my-task 'echo mngr-volume-probe > /data/probe.txt && cat /data/probe.txt'",
         comment="verify the volume is mounted and writable at /data",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(verify).to_succeed()
     expect(verify.stdout).to_contain("mngr-volume-probe")
@@ -632,7 +632,7 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task@.modal:/workspace --type command --no-connect --no-ensure-clean -- sleep 100200",
         comment="you can specify the target path where the agent's work directory will be mounted",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -644,7 +644,9 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
     # `mngr list` exit non-zero, which is unrelated to the target-path behavior
     # under test.
     list_result = e2e.run(
-        "mngr list --provider modal --format json", comment="inspect the agent's recorded work directory"
+        "mngr list --provider modal --format json",
+        comment="inspect the agent's recorded work directory",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents_by_name = {a["name"]: a for a in json.loads(list_result.stdout)["agents"]}
@@ -705,7 +707,7 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
         ' --extra-provision-command "echo provision-marker-67890 > /tmp/mngr_provision_marker"'
         " --type command --no-connect --no-ensure-clean -- sleep 100678",
         comment="you can upload files and run custom commands during host provisioning",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -714,7 +716,7 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     uploaded = e2e.run(
         "mngr exec my-task 'cat /root/.ssh/config'",
         comment="verify the uploaded file landed on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(uploaded).to_succeed()
     expect(uploaded.stdout).to_contain("upload-sentinel-12345")
@@ -724,7 +726,7 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     provisioned = e2e.run(
         "mngr exec my-task 'cat /tmp/mngr_provision_marker'",
         comment="verify the extra-provision-command ran on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(provisioned).to_succeed()
     expect(provisioned.stdout).to_contain("provision-marker-67890")
@@ -750,7 +752,7 @@ def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --no-start-on-boot --type command --no-connect --no-ensure-clean -- sleep 100099",
         comment="by default, agents are started when a host is booted; this can be disabled",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -760,7 +762,7 @@ def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the agent was created with start-on-boot disabled",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
@@ -800,7 +802,7 @@ def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
     result = e2e.run(
         "MY_VAR=hello mngr create my-task --provider modal --pass-host-env MY_VAR --type command --no-connect --no-ensure-clean -- sleep 100982",
         comment="you can also set host-level environment variables",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -809,7 +811,7 @@ def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
     env_result = e2e.run(
         "mngr exec my-task -- 'echo MY_VAR=$MY_VAR'",
         comment="confirm the forwarded host env var is set on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(env_result).to_succeed()
     expect(env_result.stdout).to_contain("MY_VAR=hello")
@@ -842,13 +844,14 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
     first = e2e.run(
         create_command,
         comment="another handy trick is to make the create command idempotent (first run creates)",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(first).to_succeed()
 
     after_first = e2e.run(
         "mngr list --provider modal --format json",
         comment="record the agent and host after the first create",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(after_first).to_succeed()
     agents_after_first = [a for a in json.loads(after_first.stdout)["agents"] if a["name"] == "sisyphus"]
@@ -864,13 +867,14 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
     second = e2e.run(
         create_command,
         comment="if that agent already exists, it will be reused instead of creating a new one (second run reuses)",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(second).to_succeed()
 
     after_second = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the second create reused the existing agent rather than duplicating it",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(after_second).to_succeed()
     agents_after_second = [a for a in json.loads(after_second.stdout)["agents"] if a["name"] == "sisyphus"]
@@ -908,7 +912,7 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100205",
         comment="basic Modal agent",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
     # Verify the agent actually landed on a running Modal host, rather than only
@@ -923,7 +927,7 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the agent is running on Modal",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents_by_name = {a["name"]: a for a in json.loads(list_result.stdout)["agents"]}
@@ -957,7 +961,7 @@ def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal -b cpu=4 -b memory=16 --no-connect --no-ensure-clean",
         comment="specify CPU and memory resources (gpu omitted to avoid quota issues)",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -971,7 +975,7 @@ def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
         "mngr list --provider modal --include 'name == \"my-task\"' "
         "--format 'RES:{name}|{host.resource.cpu.count}|{host.resource.memory_gb}'",
         comment="confirm the host was created with the requested cpu and memory",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(listing).to_succeed()
     expect(listing.stdout).to_contain("RES:my-task|4|16.0")
@@ -1000,7 +1004,7 @@ def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal -b image=python:3.12 --no-connect --no-ensure-clean",
             comment="use a custom Docker image as the base",
-            timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the custom image was actually used as the base (not just that the
@@ -1009,7 +1013,7 @@ def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
     version_result = e2e.run(
         'mngr exec my-task "python --version"',
         comment="confirm the host runs the custom base image's Python 3.12",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(version_result).to_succeed()
     expect(version_result.stdout + version_result.stderr).to_contain("Python 3.12")
@@ -1045,7 +1049,7 @@ def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal -b file=./Dockerfile.agent --type command --no-connect --no-ensure-clean -- sleep 100437",
             comment="use a custom Dockerfile",
-            timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the host really runs the custom image by reading back the marker
@@ -1054,7 +1058,7 @@ def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
     exec_result = e2e.run(
         "mngr exec my-task 'cat /opt/dockerfile-marker.txt'",
         comment="confirm the custom Dockerfile image is in use",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(exec_result).to_succeed()
     expect(exec_result.stdout).to_contain("dockerfile-only-marker")
@@ -1076,7 +1080,7 @@ def test_create_modal_volume_simple(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal -b volume=my-data:/data --no-connect --no-ensure-clean",
             comment="mount a persistent volume",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the volume is actually mounted and usable at the requested path,
@@ -1093,7 +1097,7 @@ def test_create_modal_volume_simple(e2e: E2eSession) -> None:
         ' resolved="$(readlink -f /data)";'
         ' [ "$resolved" != "/data" ] && echo IS_MOUNT\'',
         comment="verify the persistent volume is mounted and writable at /data",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(probe).to_succeed()
     expect(probe.stdout).to_contain("PROBE_OK")
@@ -1116,7 +1120,7 @@ def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --idle-timeout 120 --no-connect --no-ensure-clean",
             comment="set an idle timeout to avoid runaway costs",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the timeout actually took effect on the host, not just that the
@@ -1126,6 +1130,7 @@ def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
     listing = e2e.run(
         "mngr list --provider modal --format '{name}={idle_timeout_seconds}'",
         comment="confirm the requested idle timeout was applied to the host",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(listing).to_succeed()
     expect(listing.stdout).to_contain("my-task=120")
@@ -1151,13 +1156,14 @@ def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100991",
             comment="create the modal agent first",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     expect(
         e2e.run(
             'mngr snapshot create my-task --name "checkpoint-1"',
             comment="create a snapshot for checkpointing",
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the snapshot actually exists and carries the requested name,
@@ -1165,6 +1171,7 @@ def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr snapshot list my-task --format json",
         comment="verify the checkpoint snapshot was created",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     snapshots = json.loads(list_result.stdout)["snapshots"]
@@ -1197,10 +1204,12 @@ def test_list_provider_modal(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100994",
             comment="create a Modal agent to list",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
-    result = e2e.run("mngr list --provider modal", comment="list all Modal agents", timeout=_REMOTE_TIMEOUT)
+    result = e2e.run(
+        "mngr list --provider modal", comment="list all Modal agents", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
     expect(result).to_succeed()
     # The created agent must appear in the Modal listing...
     expect(result.stdout).to_contain("my-task")
@@ -1232,7 +1241,7 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create doomed-agent --provider modal --type command --no-connect --no-ensure-clean -- sleep 100605",
             comment="create a Modal agent to be cleaned up",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Confirm the agent is present among Modal agents before destroying it. The
@@ -1247,7 +1256,7 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
     before = e2e.run(
         "mngr list --provider modal",
         comment="list Modal agents before destroying",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(before).to_succeed()
     expect(before.stdout).to_contain("doomed-agent")
@@ -1258,14 +1267,14 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
         e2e.run(
             "mngr list --include 'host.provider == \"modal\"' --ids | mngr destroy -f -",
             comment="destroy all Modal agents via filter+stdin",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # The agent should no longer appear among active Modal agents.
     after = e2e.run(
         "mngr list --provider modal",
         comment="list Modal agents after destroying",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(after).to_succeed()
     expect(after.stdout).not_to_contain("doomed-agent")
@@ -1286,12 +1295,12 @@ def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
     # This test does two remote round-trips (create + list) and the create's
     # final "initial snapshot" step is slow and variable in the Modal-in-Modal
     # offload environment, so give create a more generous timeout than the
-    # default _REMOTE_TIMEOUT to avoid flaky timeouts.
+    # default REMOTE_COMMAND_TIMEOUT_SECONDS to avoid flaky timeouts.
     expect(
         e2e.run(
             "mngr create my-task --provider modal --idle-timeout 60 --no-connect --no-ensure-clean",
             comment="set an idle timeout (in seconds)",
-            timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -1301,7 +1310,7 @@ def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="the agent's host will stop after this much inactivity",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -1338,7 +1347,7 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
             "mngr create my-task --provider modal --idle-mode ssh --idle-timeout 300 --no-connect --no-ensure-clean"
             " --type command -- sleep 100981",
             comment="control what counts as activity with --idle-mode",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -1350,7 +1359,7 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="idle when no SSH sessions are connected",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -1392,7 +1401,7 @@ def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --idle-mode run --idle-timeout 60 --no-connect --no-ensure-clean -- sleep 100980",
             comment="run mode stops the host when the script finishes",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -1406,7 +1415,7 @@ def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="confirm the command agent was created with run idle mode",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -1464,14 +1473,14 @@ def test_create_modal_multiple_agents_one_host(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create agent-1@shared-host.modal --provider modal --new-host --type command --no-connect --no-ensure-clean -- sleep 100990",
             comment="create first agent on a named host",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     expect(
         e2e.run(
             "mngr create agent-2@shared-host.modal --type command --no-connect --no-ensure-clean -- sleep 100991",
             comment="create additional agents on the same host",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     shared_host_list = e2e.run(
@@ -1532,7 +1541,7 @@ def test_create_modal_upload_only(e2e: E2eSession) -> None:
             "mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config"
             " --type command --no-connect --no-ensure-clean -- sleep 100631",
             comment="upload a file to the agent's host",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the file was actually uploaded to the requested target path on the
@@ -1578,7 +1587,7 @@ def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
             f' --extra-provision-command "echo provisioned > {marker_path}"'
             " --type command --no-connect --no-ensure-clean -- sleep 100156",
             comment="run a setup command during host provisioning (substituted for a quick marker)",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -1587,7 +1596,7 @@ def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
     marker_result = e2e.run(
         f"mngr exec my-task 'cat {marker_path}'",
         comment="confirm the extra provision command ran on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(marker_result).to_succeed()
     expect(marker_result.stdout).to_contain("provisioned")
@@ -1620,7 +1629,7 @@ def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
             f' --extra-provision-command "id -u > {marker_path}"'
             " --type command --no-connect --no-ensure-clean -- sleep 100985",
             comment="run a command as root during provisioning (substituted to record the effective uid)",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Exit code 0 alone would not prove the provision command actually ran with
@@ -1628,7 +1637,7 @@ def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
     marker_result = e2e.run(
         f"mngr exec my-task 'cat {marker_path}'",
         comment="confirm the extra provision command ran as root (uid 0) on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(marker_result).to_succeed()
     # `mngr exec` appends its own status line (e.g. "Command succeeded ...") after
@@ -1664,7 +1673,7 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
             f" --extra-provision-command \"echo 'export PATH=/opt/bin:\\$PATH' >> {marker_path}\""
             " --type command --no-connect --no-ensure-clean -- sleep 100985",
             comment="append to a file on the host (targeting a throwaway path instead of bashrc)",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the provision command actually ran on the host and appended the
@@ -1672,7 +1681,7 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
     marker_result = e2e.run(
         f"mngr exec my-task 'cat {marker_path}'",
         comment="confirm the extra provision command appended to the file on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(marker_result).to_succeed()
     assert "export PATH=/opt/bin:$PATH" in marker_result.stdout, (
@@ -1715,7 +1724,7 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
             ' --extra-provision-command "echo provision-step >> /tmp/provision_order.log"'
             " --no-connect --no-ensure-clean -- sleep 600",
             comment="combine upload + repeated extra-provision (substituted for speed)",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Verify the upload actually landed on the host with the expected content,
@@ -1723,7 +1732,7 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     upload_check = e2e.run(
         'mngr exec my-task "cat /workspace/requirements.txt"',
         comment="verify the uploaded file is present on the host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(upload_check).to_succeed()
     expect(upload_check.stdout).to_contain("requests==2.32.0")
@@ -1733,7 +1742,7 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     provision_check = e2e.run(
         'mngr exec my-task "cat /tmp/provision_order.log"',
         comment="verify both provision commands ran, in the order given",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(provision_check).to_succeed()
     expect(provision_check.stdout).to_contain("build-step")

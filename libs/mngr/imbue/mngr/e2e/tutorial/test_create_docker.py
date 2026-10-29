@@ -9,9 +9,9 @@ tutorial_matcher script.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
-_REMOTE_TIMEOUT = 120.0
 # Building a custom image (pull debian:bookworm-slim + apt-get install) is far
 # slower than launching a pre-built default image, so give it a wider budget.
 _BUILD_TIMEOUT = 480.0
@@ -45,7 +45,7 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
         "mngr create my-task --provider docker --type command"
         ' -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean -- sleep 100605',
         comment="some providers (like docker), take start args as well as build args",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -79,7 +79,7 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider docker --type command --no-connect --no-ensure-clean -- sleep 100073",
             comment="local Docker container with default image",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -93,6 +93,7 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
     docker_agents = e2e.run(
         "mngr list --provider docker",
         comment="confirm the agent is running on the docker provider",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(docker_agents).to_succeed()
     expect(docker_agents.stdout).to_contain("my-task")
@@ -159,7 +160,7 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
     marker_result = e2e.run(
         'mngr exec my-task "cat /dockerfile-marker.txt"',
         comment="verify the custom Dockerfile was used to build the image",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(marker_result).to_succeed()
     expect(marker_result.stdout).to_contain("custom-dockerfile-marker")
@@ -195,7 +196,7 @@ def test_create_docker_volume_start_arg(e2e: E2eSession) -> None:
             'mngr create my-task --provider docker -s "-v /tmp/mngr-test-data:/container/data"'
             " --type command --no-connect --no-ensure-clean -- sleep 100080",
             comment="include additional volumes",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -231,7 +232,7 @@ def test_create_docker_cpus_start_arg(e2e: E2eSession) -> None:
             "mngr create my-task --provider docker -s --cpus=2 --type command "
             "--no-connect --no-ensure-clean -- sleep 100100",
             comment="set resource limits via start args",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -270,10 +271,12 @@ def test_list_provider_docker(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider docker --type command --no-connect --no-ensure-clean -- sleep 100200",
             comment="create a Docker agent so the listing is non-empty",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
-    result = e2e.run("mngr list --provider docker", comment="list Docker agents")
+    result = e2e.run(
+        "mngr list --provider docker", comment="list Docker agents", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
     expect(result).to_succeed()
     # The agent we just created must appear in the docker-provider listing.
     expect(result.stdout).to_contain("my-task")
@@ -305,7 +308,7 @@ def test_create_docker_start_args_overview(e2e: E2eSession) -> None:
         e2e.run(
             'mngr create my-task --provider docker --type command -s "--hostname=mngr-overview-test" --no-connect --no-ensure-clean -- sleep 100205',
             comment="docker takes start args as well as build args",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -340,13 +343,17 @@ def test_destroy_all_docker_agents(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider docker --type command --no-connect --no-ensure-clean -- sleep 100250",
             comment="create a Docker agent to be destroyed",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
     # Confirm the agent is present and matched by the docker provider filter
     # before we destroy it.
-    list_before = e2e.run("mngr list --provider docker", comment="list Docker agents before destroy")
+    list_before = e2e.run(
+        "mngr list --provider docker",
+        comment="list Docker agents before destroy",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(list_before).to_succeed()
     expect(list_before.stdout).to_contain("my-task")
 
@@ -360,6 +367,10 @@ def test_destroy_all_docker_agents(e2e: E2eSession) -> None:
     ).to_succeed()
 
     # Verify the concrete effect: the agent is gone from the docker listing.
-    list_after = e2e.run("mngr list --provider docker", comment="list Docker agents after destroy")
+    list_after = e2e.run(
+        "mngr list --provider docker",
+        comment="list Docker agents after destroy",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(list_after).to_succeed()
     expect(list_after.stdout).not_to_contain("my-task")

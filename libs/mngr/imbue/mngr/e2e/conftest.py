@@ -25,6 +25,7 @@ import pytest
 import tomlkit
 from loguru import logger
 
+from imbue.imbue_common.conftest_hooks import RELEASE_TEST_TIMEOUT_SECONDS
 from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
@@ -49,6 +50,16 @@ _PTY_CONNECT_LAUNCHER = "import pty, sys; raise SystemExit(pty.spawn(['sh', '-c'
 # What a command bounded by ``time_bounded`` reports when it runs to its deadline:
 # the alarm kills it, and a shell reports a signal death as 128 + the signal.
 BOUND_EXPIRED_EXIT_CODE: Final[int] = 128 + int(signal.SIGALRM)
+
+# Budget for a command that reaches a remote provider. Provisioning a container,
+# snapshotting a host and listing a provider are network round-trips, so they get
+# this instead of the local-command default on ``run``. A release test's whole
+# duration -- setup, every command it runs, and fixture teardown -- is capped by
+# RELEASE_TEST_TIMEOUT_SECONDS, so the slowest single command gets that cap minus
+# a reserve for the rest of the test. A command that needs more than the cap
+# allows belongs to a test that declares its own `pytest.mark.timeout`.
+_REMAINDER_OF_TEST_RESERVE_SECONDS: Final[float] = 60.0
+REMOTE_COMMAND_TIMEOUT_SECONDS: Final[float] = RELEASE_TEST_TIMEOUT_SECONDS - _REMAINDER_OF_TEST_RESERVE_SECONDS
 
 
 def require_binary(binary: str, install_hint: str) -> None:

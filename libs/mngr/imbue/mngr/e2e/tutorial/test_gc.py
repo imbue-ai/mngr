@@ -6,14 +6,10 @@ Each test corresponds 1:1 to a tutorial script block.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
-
-# Creating a Modal-backed agent has to provision a fresh Modal environment and
-# container, so give it the same generous budget the other Modal create tests
-# use (see test_create_modal.py).
-_REMOTE_TIMEOUT = 120.0
 
 
 @pytest.mark.release
@@ -39,14 +35,13 @@ def test_gc_default(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100731",
             comment="create a Modal agent so gc has a real provider environment to inspect",
-            timeout=120.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
-    # gc scans every provider over the network (including the Modal environment
-    # bootstrapped above), which takes longer than the default 30s run budget;
-    # give it the same headroom the other gc tests in this file use.
-    result = e2e.run("mngr gc", comment="garbage collect all unused resources", timeout=90.0)
+    # gc scans every provider over the network, the Modal environment
+    # bootstrapped above included.
+    result = e2e.run("mngr gc", comment="garbage collect all unused resources", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS)
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Garbage Collection Results")
 
@@ -56,9 +51,12 @@ def test_gc_default(e2e: E2eSession) -> None:
     # other enabled provider and exits non-zero (exit 6) on any that are
     # unreachable in this environment (e.g. AWS without credentials) -- which
     # would fail this to_succeed() check yet is unrelated to whether the agent
-    # survived gc. Like gc, this list queries Modal over the network, so give it
-    # headroom past the default 30s run budget.
-    list_after = e2e.run("mngr list --provider modal", comment="verify the active agent survived gc", timeout=60.0)
+    # survived gc.
+    list_after = e2e.run(
+        "mngr list --provider modal",
+        comment="verify the active agent survived gc",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("my-task")
 
@@ -87,11 +85,13 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create dry-run-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100732",
             comment="create a Modal agent so gc has a real provider environment to inspect",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
-    result = e2e.run("mngr gc --dry-run", comment="dry-run before actually running gc")
+    result = e2e.run(
+        "mngr gc --dry-run", comment="dry-run before actually running gc", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
     expect(result).to_succeed()
     # A dry run must announce itself as a dry run, not a real cleanup.
     expect(result.stdout).to_contain("Garbage Collection (Dry Run)")
@@ -103,7 +103,11 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
     # non-zero when any enabled provider is unauthenticated (e.g. an AWS backend
     # without credentials in the test environment) -- a condition orthogonal to
     # whether the dry run preserved the Modal agent.
-    list_after = e2e.run("mngr list --provider modal", comment="verify the dry run destroyed nothing")
+    list_after = e2e.run(
+        "mngr list --provider modal",
+        comment="verify the dry run destroyed nothing",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("dry-run-task")
 
@@ -134,14 +138,14 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create gc-modal-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100200",
             comment="create a Modal agent so gc has a real provider to clean",
-            timeout=_REMOTE_TIMEOUT,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # garbage collect for a specific provider only (repeatable if you want multiple providers)
     result = e2e.run(
         "mngr gc --provider modal",
         comment="garbage collect for a specific provider only",
-        timeout=90.0,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
     # The running agent's machine is active, so gc must not tear it down: it
@@ -153,7 +157,9 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
     # --provider modal inherently confirms the surviving agent still lives on
     # the Modal-backed host.
     list_after = e2e.run(
-        "mngr list --provider modal --format json", comment="confirm the Modal agent survived gc", timeout=60.0
+        "mngr list --provider modal --format json",
+        comment="confirm the Modal agent survived gc",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("gc-modal-task")

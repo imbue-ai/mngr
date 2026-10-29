@@ -14,6 +14,7 @@ import pytest
 
 from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
@@ -262,7 +263,7 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 101026",
             comment="create modal my-task to destroy",
-            timeout=180.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
@@ -272,7 +273,11 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
     # modal destroy/recreate cycle, so an unrelated provider that happens to be
     # unreachable in the test environment (e.g. a Docker daemon that is not
     # running) must not make these observation commands exit non-zero.
-    before = e2e.run("mngr list --provider modal --format json", comment="confirm my-task exists before destroy")
+    before = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm my-task exists before destroy",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(before).to_succeed()
     agents_before = [a for a in json.loads(before.stdout)["agents"] if a["name"] == "my-task"]
     assert len(agents_before) == 1, f"expected exactly one my-task before destroy, got {agents_before}"
@@ -286,7 +291,9 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
 
     # After destroy the agent (and its now-empty host) must be gone.
     after_destroy = e2e.run(
-        "mngr list --provider modal --format json", comment="confirm my-task is gone after destroy"
+        "mngr list --provider modal --format json",
+        comment="confirm my-task is gone after destroy",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(after_destroy).to_succeed()
     names_after_destroy = [a["name"] for a in json.loads(after_destroy.stdout)["agents"]]
@@ -296,13 +303,17 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 101026",
             comment="recreate",
-            timeout=180.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 
     # The recreate must bring my-task back, and on a brand-new host (the old one
     # was destroyed), not by silently resurrecting the destroyed host.
-    after = e2e.run("mngr list --provider modal --format json", comment="confirm my-task is back after recreate")
+    after = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm my-task is back after recreate",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(after).to_succeed()
     agents_after = [a for a in json.loads(after.stdout)["agents"] if a["name"] == "my-task"]
     assert len(agents_after) == 1, f"expected exactly one my-task after recreate, got {agents_after}"
@@ -329,7 +340,6 @@ def test_troubleshoot_gc_dry_run_then_gc(e2e: E2eSession) -> None:
     Scope: both `mngr gc --dry-run` and `mngr gc` succeed, walking every
     configured provider (including Modal) to clean up orphaned resources.
     """
-    # gc walks every configured provider (including Modal), which can take well
-    # over a minute, so each command gets a generous per-run timeout.
-    expect(e2e.run("mngr gc --dry-run", comment="dry-run gc", timeout=60.0)).to_succeed()
-    expect(e2e.run("mngr gc", comment="run gc", timeout=60.0)).to_succeed()
+    # gc walks every configured provider, Modal included.
+    expect(e2e.run("mngr gc --dry-run", comment="dry-run gc", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS)).to_succeed()
+    expect(e2e.run("mngr gc", comment="run gc", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS)).to_succeed()
