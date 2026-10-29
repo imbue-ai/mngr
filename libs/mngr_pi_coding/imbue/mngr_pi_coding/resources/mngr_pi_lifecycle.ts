@@ -46,6 +46,15 @@
 //      `thinking_level_select` as the user switches. The system interface reads
 //      this file for the model bar.
 //
+//   5. Reply draft. pi records an assistant message only on `message_end`, while
+//      its TUI shows the reply as it streams. On `message_update` this extension
+//      writes the text of the assistant message being streamed so far to
+//      `$MNGR_AGENT_STATE_DIR/pi_reply_draft`, which the Imbue Studio chat shows
+//      until the finished message reaches the session file. pi turns every
+//      provider's stream into the same `message_update` events, so this works for
+//      any model pi runs. The finished text stays there until the next message
+//      replaces it or the turn ends (`agent_end` removes it).
+//
 // Design rules:
 //   * Every handler body is wrapped so a bug here can never disrupt pi's loop.
 //   * All filesystem work is synchronous (node's *Sync calls), so ordering is
@@ -115,6 +124,11 @@ type AgentMessage =
   | { role: string; timestamp?: number; [key: string]: unknown };
 
 interface MessageEndEvent {
+  message: AgentMessage;
+}
+// The message as streamed so far (pi also passes the provider event it came from,
+// which the draft does not need).
+interface MessageUpdateEvent {
   message: AgentMessage;
 }
 
@@ -197,6 +211,13 @@ const SESSION_FILE_NAME = "pi_session_file";
 // Kept in sync with the shared reader on the system-interface side
 // (harnesses/model.py).
 const MODEL_STATE_NAME = "model_state.json";
+// The text of the assistant message being streamed, for the chat to show before
+// message_end records it. Kept in sync with the pi watcher in the workspace
+// template (harnesses/pi_coding/watcher.py).
+const REPLY_DRAFT_NAME = "pi_reply_draft";
+// message_update fires per token; the draft is rewritten at most this often
+// while a message streams (message_end always writes the finished text).
+const REPLY_DRAFT_MIN_WRITE_INTERVAL_MS = 100;
 // mngr appends one JSON-encoded message string per line here; we inject each new
 // line into the live session via pi.sendUserMessage (no tmux keystrokes). Kept
 // in sync with _INBOX_FILE_NAME in plugin.py.
@@ -425,6 +446,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const sentinelPath = join(stateDir, SESSION_STARTED_SENTINEL_NAME);
   const sessionFilePath = join(stateDir, SESSION_FILE_NAME);
   const modelStatePath = join(stateDir, MODEL_STATE_NAME);
+  const replyDraftPath = join(stateDir, REPLY_DRAFT_NAME);
   const rawPath = join(stateDir, "logs", `${agentType}_transcript`, "events.jsonl");
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
   const commonEmitter = `${agentType}/common_transcript`;
@@ -510,6 +532,29 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     const tmpPath = modelStatePath + ".tmp";
     writeFileSync(tmpPath, JSON.stringify({ model: `${provider}/${modelId}`, effort: thinking || null, fast: false }));
     renameSync(tmpPath, modelStatePath);
+  };
+
+  // Record the text of the assistant message pi is streaming (see job 5 above).
+  // Atomic (fixed tmp name + rename) so the chat never reads a torn write.
+  // Thinking and tool calls are not part of the draft: the chat shows those from
+  // the finished message.
+  let replyDraftWrittenAt = 0;
+  const recordReplyDraft = (message: AgentMessage | undefined, isFinished: boolean): void => {
+    if (message?.role !== "assistant") {
+      return;
+    }
+    const now = Date.now();
+    if (!isFinished && now - replyDraftWrittenAt < REPLY_DRAFT_MIN_WRITE_INTERVAL_MS) {
+      return;
+    }
+    const text = textFromContent((message as AssistantMessage).content);
+    if (!text) {
+      return;
+    }
+    const tmpPath = replyDraftPath + ".tmp";
+    writeFileSync(tmpPath, text);
+    renameSync(tmpPath, replyDraftPath);
+    replyDraftWrittenAt = now;
   };
 
   // Input injection. mngr delivers messages by appending one JSON-encoded string
@@ -829,6 +874,8 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       // model_state.json) must already be on disk when that signal fires.
       recordSessionFile(ctx);
       recordModelState(ctx);
+      // A draft left by a process that died mid-reply belongs to no turn.
+      rmSync(replyDraftPath, { force: true });
       mkdirSync(dirname(sentinelPath), { recursive: true });
       writeFileSync(sentinelPath, "1");
     });
@@ -867,6 +914,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   pi.on("agent_end", (_event, _ctx) => {
     safe("agent_end", () => {
       rmSync(markerPath, { force: true });
+      rmSync(replyDraftPath, { force: true });
     });
   });
 
@@ -879,7 +927,16 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     });
   });
 
+  pi.on("message_update", (event: MessageUpdateEvent, _ctx) => {
+    safe("message_update", () => {
+      recordReplyDraft(event?.message, false);
+    });
+  });
+
   pi.on("message_end", (event: MessageEndEvent, _ctx) => {
+    safe("message_end", () => {
+      recordReplyDraft(event?.message, true);
+    });
     safe("message_end", () => {
       const message = event?.message;
       if (message == null || typeof message.role !== "string") {
