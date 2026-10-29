@@ -1,0 +1,1 @@
+The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection to an agent host loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake). The failure is now retried on a rebuilt connection and, if it persists, recorded as a transient wiring-step failure for the next discovery cycle to retry.

@@ -2511,6 +2511,7 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
     ("error", "is_transient"),
     [
         pytest.param(ConnectionResetError(54, "Connection reset by peer"), True, id="connection-reset"),
+        pytest.param(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), True, id="local-address-lost"),
         pytest.param(paramiko.SSHException("No existing session"), True, id="no-existing-session"),
         pytest.param(paramiko.AuthenticationException("Authentication timeout."), True, id="auth-timeout"),
         pytest.param(EOFError(), True, id="eof"),
