@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Final
 
-import httpx
+import httpx2
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -63,15 +63,15 @@ def test_consumer_signals_once_per_request_and_dedupes_redeliveries() -> None:
         with lock:
             signal_count += 1
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         # Every reconnect re-emits the full pending set, as the gateway does.
         nonlocal connections
         connections += 1
         del request
-        return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
+        return httpx2.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
 
     client = LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(_handler),
+        transport=httpx2.MockTransport(_handler),
         base_url="http://gateway.invalid:1989",
         password="p",
         admin_jwt="jwt",
@@ -122,12 +122,12 @@ def test_consumer_survives_a_signal_error_and_keeps_processing() -> None:
         if len(seen) == 1:
             raise RuntimeError("first signal exploded")
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
+        return httpx2.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
 
     client = LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(_handler),
+        transport=httpx2.MockTransport(_handler),
         base_url="http://gateway.invalid:1989",
         password="p",
         admin_jwt="jwt",
@@ -167,16 +167,16 @@ def test_consumer_signals_a_request_that_stopped_being_pending_and_forgets_havin
         with lock:
             signal_count += 1
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal connections
         del request
         with lock:
             connections += 1
             content = first_connection if connections == 1 else reconnect
-        return httpx.Response(200, content=content, headers={"Content-Type": "application/x-ndjson"})
+        return httpx2.Response(200, content=content, headers={"Content-Type": "application/x-ndjson"})
 
     client = LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(_handler),
+        transport=httpx2.MockTransport(_handler),
         base_url="http://gateway.invalid:1989",
         password="p",
         admin_jwt="jwt",

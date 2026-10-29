@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from pydantic import AnyUrl
 
@@ -51,7 +51,7 @@ def _feed_base_url_or_skip(backend: SmokeBackend) -> AnyUrl:
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_connector_and_llm_proxy_answer_liveness_and_version(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """The two Modal apps the desktop talks to are up, and the connector names the deploy it is serving."""
     connector = origin_of(backend.connector_url)
@@ -76,7 +76,7 @@ def test_connector_and_llm_proxy_answer_liveness_and_version(
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_accounts_surface_serves_its_pages_and_public_config(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """The hosted sign-in bundle is built and served on the accounts origin, with the tier's own config behind it."""
     accounts = origin_of(backend.accounts_origin)
@@ -102,7 +102,7 @@ def test_accounts_surface_serves_its_pages_and_public_config(
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_web_chrome_origin_serves_the_chrome_and_the_open_page(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """The web chrome's origin serves the SPA shell and the published-template trampoline, which other hosts refuse."""
     if backend.chrome_origin is None:
@@ -127,7 +127,7 @@ def test_web_chrome_origin_serves_the_chrome_and_the_open_page(
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_legacy_chrome_origins_redirect_to_the_chrome_origin(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """Every former chrome host still resolves, redirects pages permanently, and keeps serving the probes."""
     if not backend.legacy_chrome_origins:
@@ -147,7 +147,7 @@ def test_legacy_chrome_origins_redirect_to_the_chrome_origin(
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_mac_download_redirect_serves_a_downloadable_installer(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """The marketing site's download button lands on an installer the CDN actually serves.
 
@@ -168,7 +168,7 @@ def test_mac_download_redirect_serves_a_downloadable_installer(
 @pytest.mark.timeout(_FEED_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("channel", RELEASE_CHANNELS)
 def test_channel_publishes_a_manifest_per_platform_whose_installers_download(
-    backend: SmokeBackend, smoke_http_client: httpx.Client, channel: ReleaseChannelName
+    backend: SmokeBackend, smoke_http_client: httpx2.Client, channel: ReleaseChannelName
 ) -> None:
     """The channel's mac and linux manifests parse, name a release version, and list installers the CDN serves."""
     feed_base_url = _feed_base_url_or_skip(backend)
@@ -184,7 +184,7 @@ def test_channel_publishes_a_manifest_per_platform_whose_installers_download(
 @pytest.mark.timeout(_FEED_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("channel", RELEASE_CHANNELS)
 def test_web_channel_pins_a_template_release_tag(
-    backend: SmokeBackend, smoke_http_client: httpx.Client, channel: ReleaseChannelName
+    backend: SmokeBackend, smoke_http_client: httpx2.Client, channel: ReleaseChannelName
 ) -> None:
     """Browser creates on the channel lease pool hosts baked at exactly one release tag, and its version matches."""
     feed_base_url = _feed_base_url_or_skip(backend)
@@ -196,7 +196,7 @@ def test_web_channel_pins_a_template_release_tag(
 
 @pytest.mark.timeout(_FEED_TEST_TIMEOUT_SECONDS)
 def test_feed_serves_the_channels_this_checkout_declares(
-    backend: SmokeBackend, smoke_http_client: httpx.Client
+    backend: SmokeBackend, smoke_http_client: httpx2.Client
 ) -> None:
     """The publish landed: every entry of ``release-channels.toml`` is what the feed serves.
 

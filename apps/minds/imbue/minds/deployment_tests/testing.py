@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Final
 from typing import NoReturn
 
-import httpx
+import httpx2
 import pytest
 import tomlkit
 from loguru import logger
@@ -176,9 +176,9 @@ def list_leased_host_db_ids_or_none(connector_url: str, user: VerifiedUserHandle
     instead of raising.
     """
     try:
-        with httpx.Client(timeout=POOL_HTTP_TIMEOUT_SECONDS) as client:
+        with httpx2.Client(timeout=POOL_HTTP_TIMEOUT_SECONDS) as client:
             listing = client.get(f"{connector_url}/hosts", headers=_auth_header(user))
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         logger.warning("/hosts listing failed (treated as unreadable): {}", exc)
         return None
     if listing.status_code != 200:

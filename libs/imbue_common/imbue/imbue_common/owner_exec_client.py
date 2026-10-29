@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 
-import httpx
+import httpx2
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -35,7 +35,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 
-# --- profile constants (mirror internal/profile in the owner-exec repo) ---
+# Profile constants (mirror internal/profile in the owner-exec repo)
 
 SIGNATURE_LABEL = "sig1"
 REQUEST_TAG = "imbue-owner-exec"
@@ -111,7 +111,7 @@ class GrantsDocument(FrozenModel):
     revision: str = Field(description="Opaque CAS token (sha256 of the bytes; '' when absent)")
 
 
-# --- structured-field helpers (the small subset the profile needs) ---
+# Structured-field helpers (the small subset the profile needs)
 
 
 def _sf_string(value: str) -> str:
@@ -130,7 +130,7 @@ def _validate_content_digest(header_value: str, body: bytes) -> bool:
     return secrets.compare_digest(header_value.strip(), expected)
 
 
-# --- key helpers ---
+# Key helpers
 
 
 def load_ed25519_private_key(private_key_text: str) -> Ed25519PrivateKey:
@@ -178,7 +178,7 @@ def public_key_line_for(public_key: Ed25519PublicKey) -> str:
     return public_key.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
 
 
-# --- signature bases ---
+# Signature bases
 
 
 def _request_signature_base(
@@ -253,7 +253,7 @@ def _stream_trailer_base(stream_sha256: bytes, request_signature_b64: str, key_i
     return "\n".join(lines).encode("utf-8")
 
 
-# --- signature-input / signature header parsing (strict) ---
+# Signature-input / signature header parsing (strict)
 
 
 def _parse_signature_dict_member(header_value: str) -> bytes:
@@ -550,7 +550,7 @@ def _keyid_matches(signature_input: str, key_id: str) -> bool:
     return f'keyid="{key_id}"' in signature_input
 
 
-# --- the client ---
+# The client
 
 
 class OwnerExecClient(FrozenModel):
@@ -600,14 +600,14 @@ class OwnerExecClient(FrozenModel):
         self, method: str, path: str, body: bytes, headers: Mapping[str, str]
     ) -> tuple[int, bytes, dict[str, str]]:
         try:
-            response = httpx.request(
+            response = httpx2.request(
                 method,
                 f"{self.base_url}{path}",
                 content=body if method != "GET" else None,
                 headers=dict(headers),
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise OwnerExecRequestError(f"owner-exec {method} {path} failed: {e}") from e
         return response.status_code, response.content, dict(response.headers)
 
@@ -718,15 +718,15 @@ class OwnerExecClient(FrozenModel):
     # The streaming HTTP seam for /run (overridden in tests): yields NDJSON
     # lines, raising OwnerExecRequestError on a transport failure or non-200.
     def _iter_stream(self, path: str, body: bytes, headers: Mapping[str, str], read_timeout: float) -> Iterator[str]:
-        stream_timeout = httpx.Timeout(_REQUEST_TIMEOUT_SECONDS, read=read_timeout)
+        stream_timeout = httpx2.Timeout(_REQUEST_TIMEOUT_SECONDS, read=read_timeout)
         try:
-            with httpx.stream(
+            with httpx2.stream(
                 "POST", f"{self.base_url}{path}", content=body, headers=dict(headers), timeout=stream_timeout
             ) as response:
                 if response.status_code != 200:
                     raise OwnerExecRequestError(f"run failed: HTTP {response.status_code}")
                 yield from response.iter_lines()
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise OwnerExecRequestError(f"run stream failed: {e}") from e
 
     def is_alive(self) -> bool:
@@ -737,7 +737,7 @@ class OwnerExecClient(FrozenModel):
     # a transport failure.
     def _alive_status(self) -> int | None:
         try:
-            response = httpx.get(f"{self.base_url}/_alive", timeout=_ALIVE_TIMEOUT_SECONDS)
-        except httpx.HTTPError:
+            response = httpx2.get(f"{self.base_url}/_alive", timeout=_ALIVE_TIMEOUT_SECONDS)
+        except httpx2.HTTPError:
             return None
         return response.status_code

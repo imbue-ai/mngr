@@ -14,7 +14,7 @@ dependencies = [
     "starlette",
     "hypercorn>=0.17",
     "websockets>=13",
-    "httpx2>=2.12.0",
+    "httpx2>=2.13.1",
     "itsdangerous>=2.1",
     "jinja2>=3.1",
     "cryptography>=42.0",

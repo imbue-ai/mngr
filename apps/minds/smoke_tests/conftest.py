@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 
 from imbue.minds.deployment_tests._mailtm import MailtmInbox
@@ -180,9 +180,9 @@ def run_manifest(request: pytest.FixtureRequest, smoke_run_id: SmokeRunId) -> Pa
 
 
 @pytest.fixture(scope="session")
-def smoke_http_client() -> Iterator[httpx.Client]:
+def smoke_http_client() -> Iterator[httpx2.Client]:
     """A client for the read-only probes: labelled as the smoke suite, and never following a redirect it asserts on."""
-    with httpx.Client(
+    with httpx2.Client(
         timeout=_SMOKE_HTTP_TIMEOUT_SECONDS, headers={"User-Agent": SMOKE_USER_AGENT}, follow_redirects=False
     ) as client:
         yield client

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
 
-import httpx
+import httpx2
 import pytest
 
 from imbue.minds.desktop_client.mock_provider_relay_test import RecordingSignInCallbackForwarder
@@ -230,8 +230,8 @@ def _armed_relay(
         relay.stop()
 
 
-def _get(relay: ProviderSignInRelay, path_and_query: str) -> httpx.Response:
-    return httpx.get(f"http://127.0.0.1:{relay.callback.port}{path_and_query}", timeout=10.0, follow_redirects=False)
+def _get(relay: ProviderSignInRelay, path_and_query: str) -> httpx2.Response:
+    return httpx2.get(f"http://127.0.0.1:{relay.callback.port}{path_and_query}", timeout=10.0, follow_redirects=False)
 
 
 def test_relay_refuses_everything_but_the_callback_and_forwards_nothing() -> None:
@@ -240,7 +240,7 @@ def test_relay_refuses_everything_but_the_callback_and_forwards_nothing() -> Non
     with _armed_relay(forwarder, handled) as relay:
         wrong_path = _get(relay, f"/auth/callback?code=c-1&state={_STATE}")
         stale = _get(relay, "/callback?code=c-1&state=state-forged-0a")
-        posted = httpx.post(f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}", timeout=10.0)
+        posted = httpx2.post(f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}", timeout=10.0)
 
     assert [wrong_path.status_code, stale.status_code, posted.status_code] == [404, 400, 405]
     assert "This sign-in page is out of date" in stale.text
@@ -252,7 +252,7 @@ def test_relay_answers_a_post_carrying_a_body_with_its_page_rather_than_a_reset(
     forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
     with _armed_relay(forwarder, threading.Event()) as relay:
         answers = [
-            httpx.post(
+            httpx2.post(
                 f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}",
                 content=b"code=c-1&" + b"x" * 32 * 1024,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -307,7 +307,7 @@ def test_relay_escapes_the_workspaces_reason_for_a_failure() -> None:
 def test_relay_passes_the_callback_on_once_even_when_the_browser_sends_it_again() -> None:
     forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN, is_holding=True)
     with _armed_relay(forwarder, threading.Event()) as relay:
-        first: list[httpx.Response] = []
+        first: list[httpx2.Response] = []
         in_flight = threading.Thread(target=lambda: first.append(_get(relay, f"/callback?code=c-1&state={_STATE}")))
         in_flight.start()
         try:

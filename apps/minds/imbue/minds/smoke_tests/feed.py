@@ -12,7 +12,7 @@ import re
 from collections.abc import Sequence
 from typing import Final
 
-import httpx
+import httpx2
 from pydantic import AnyUrl
 
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -142,7 +142,7 @@ def mac_arm64_zip_artifact_of(manifest: UpdateManifest) -> ManifestArtifact:
 
 
 def fetch_update_manifest(
-    client: httpx.Client, feed_base_url: AnyUrl, channel: ReleaseChannelName, platform: ReleasePlatformName
+    client: httpx2.Client, feed_base_url: AnyUrl, channel: ReleaseChannelName, platform: ReleasePlatformName
 ) -> UpdateManifest:
     url = channel_manifest_url(feed_base_url, channel, platform)
     response = client.get(url)
@@ -151,7 +151,7 @@ def fetch_update_manifest(
     return parse_update_manifest(response.text)
 
 
-def fetch_web_channel_pin(client: httpx.Client, feed_base_url: AnyUrl, channel: ReleaseChannelName) -> WebChannelPin:
+def fetch_web_channel_pin(client: httpx2.Client, feed_base_url: AnyUrl, channel: ReleaseChannelName) -> WebChannelPin:
     url = f"{origin_of(feed_base_url)}/{channel}-web.json"
     response = client.get(url)
     if response.status_code != 200:
@@ -159,7 +159,7 @@ def fetch_web_channel_pin(client: httpx.Client, feed_base_url: AnyUrl, channel: 
     return parse_web_channel_pin(response.text)
 
 
-def probe_artifact_status(client: httpx.Client, url: AnyUrl) -> int:
+def probe_artifact_status(client: httpx2.Client, url: AnyUrl) -> int:
     """Ask for the first byte of an installer and return the status, so a 300 MB artifact is checked without a download."""
     with client.stream("GET", str(url), headers={"Range": "bytes=0-0"}) as response:
         return response.status_code

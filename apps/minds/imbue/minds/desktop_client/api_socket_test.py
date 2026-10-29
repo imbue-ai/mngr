@@ -5,7 +5,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from imbue.minds.desktop_client.api_socket import API_SOCKET_ENV_VAR
@@ -182,7 +182,7 @@ def test_local_socket_server_marks_requests_trusted_and_locks_the_socket_file(sh
     with serve_wsgi_server_in_thread(server, "api-socket-test"):
         restrict_socket_file(path)
         assert (path.stat().st_mode & 0o777) == 0o600
-        with httpx.Client(transport=httpx.HTTPTransport(uds=str(path)), timeout=5.0) as client:
+        with httpx2.Client(transport=httpx2.HTTPTransport(uds=str(path)), timeout=5.0) as client:
             response = client.get("http://localhost/api/v1/app/version", headers={"X-Imbue-Studio-Agent": "tester"})
         assert response.status_code == 200
         assert seen[0][LOCAL_TRUSTED_ENVIRON_KEY] is True
@@ -195,7 +195,7 @@ def test_local_socket_server_closes_connections_from_other_uids(short_tmp_path: 
     # Our own uid is the only one that can connect in a test, so the allowed uid is set to someone else.
     server = create_local_socket_server(path, _marker_app(seen), numthreads=2, allowed_uid=os.getuid() + 1)
     with serve_wsgi_server_in_thread(server, "api-socket-test"):
-        with httpx.Client(transport=httpx.HTTPTransport(uds=str(path)), timeout=5.0) as client:
-            with pytest.raises(httpx.HTTPError):
+        with httpx2.Client(transport=httpx2.HTTPTransport(uds=str(path)), timeout=5.0) as client:
+            with pytest.raises(httpx2.HTTPError):
                 client.get("http://localhost/api/v1/app/version")
         assert seen == []

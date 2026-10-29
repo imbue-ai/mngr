@@ -205,6 +205,16 @@ PREVENT_PANDAS_IMPORT = RegexRatchetRule(
     pattern_string=r"\bimport\s+pandas\b|\bfrom\s+pandas\b",
 )
 
+PREVENT_HTTPX_IMPORT = RegexRatchetRule(
+    rule_name="httpx imports",
+    rule_description=(
+        "httpx is unmaintained. Use httpx2, its maintained fork with the same API; import httpx only to catch "
+        "errors raised by a third-party SDK that is still built on it"
+    ),
+    pattern_string=r"^\s*(?:import|from)\s+httpx\b",
+    is_multiline=True,
+)
+
 PREVENT_DATACLASSES_IMPORT = RegexRatchetRule(
     rule_name="dataclasses imports",
     rule_description="dataclasses are banned per style guide. Use pydantic models instead",

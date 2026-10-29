@@ -43,7 +43,7 @@ def local_connector_stub() -> Iterator[tuple[str, list[str]]]:
     """A loopback HTTP server standing in for the connector's public profile route; yields ``(base_url, served_paths)``.
 
     Lets a CLI test run the real command end to end (URL resolution, the
-    httpx call, JSON output) without patching any module attribute.
+    httpx2 call, JSON output) without patching any module attribute.
     """
     served_paths: list[str] = []
     handler_class = type("_ScopedProfileStubHandler", (_PublicProfileStubHandler,), {"served_paths": served_paths})

@@ -1,6 +1,6 @@
 """Unit tests for :class:`LatchkeyGatewayClient`.
 
-A :class:`httpx.MockTransport` is injected via the ``transport`` field
+A :class:`httpx2.MockTransport` is injected via the ``transport`` field
 so each test can stub the gateway's HTTP layer without any real I/O.
 """
 
@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from pydantic import JsonValue
 
@@ -46,7 +46,7 @@ def _pending_only(
     return pending
 
 
-def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
+def _build_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> LatchkeyGatewayClient:
     """Build a pre-initialized :class:`LatchkeyGatewayClient` whose transport is the handler.
 
     The credential attrs are private and populated in production by
@@ -58,7 +58,7 @@ def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> Latchke
         base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
     )
     return client
 
@@ -67,13 +67,13 @@ def test_set_permission_rule_sends_expected_headers_body_and_url() -> None:
     """``set_permission_rule`` POSTs with admin headers and the right query params."""
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
         captured["override"] = request.headers.get("X-Latchkey-Gateway-Permissions-Override")
         captured["body"] = json.loads(request.content)
-        return httpx.Response(201, json={"slack-api": ["any"]})
+        return httpx2.Response(201, json={"slack-api": ["any"]})
 
     client = _build_client(_handler)
     client.set_permission_rule(
@@ -100,9 +100,9 @@ def test_set_permission_rule_sends_the_supplied_schemas() -> None:
     """
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["body"] = json.loads(request.content)
-        return httpx.Response(201, json={})
+        return httpx2.Response(201, json={})
 
     rule_key, permissions, schemas = build_account_grant("slack-api", "a@b", ("slack-read-all",))
     client = _build_client(_handler)
@@ -117,9 +117,9 @@ def test_set_permission_rule_sends_the_supplied_schemas() -> None:
 
 
 def test_set_permission_rule_raises_on_non_2xx() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(403, json={"error": "outside root"})
+        return httpx2.Response(403, json={"error": "outside root"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:
@@ -135,10 +135,10 @@ def test_set_permission_rule_raises_on_non_2xx() -> None:
 def test_get_permission_rules_flattens_and_merges() -> None:
     """``get_permission_rules`` returns every scope's granted permissions, merging duplicates."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert request.method == "GET"
         assert "/permissions" in str(request.url)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "rules": [
@@ -156,9 +156,9 @@ def test_get_permission_rules_flattens_and_merges() -> None:
 
 
 def test_get_permission_rules_treats_404_as_empty() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(404, json={"error": "missing"})
+        return httpx2.Response(404, json={"error": "missing"})
 
     client = _build_client(_handler)
     assert client.get_permission_rules(Path("/perms/missing.json")) == {}
@@ -167,10 +167,10 @@ def test_get_permission_rules_treats_404_as_empty() -> None:
 def test_delete_permission_rule_sends_expected_url_and_tolerates_404() -> None:
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["url"] = str(request.url)
-        return httpx.Response(404, json={"error": "gone"})
+        return httpx2.Response(404, json={"error": "gone"})
 
     client = _build_client(_handler)
     # 404 must not raise -- the intent ("scope must not be granted") is satisfied.
@@ -182,9 +182,9 @@ def test_delete_permission_rule_sends_expected_url_and_tolerates_404() -> None:
 
 
 def test_delete_permission_rule_raises_on_other_4xx() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(403, json={"error": "outside root"})
+        return httpx2.Response(403, json={"error": "outside root"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:
@@ -195,10 +195,10 @@ def test_delete_permission_rule_raises_on_other_4xx() -> None:
 def test_delete_permission_request_tolerates_404() -> None:
     """Deletes that race a concurrent grant/deny succeed silently."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert request.method == "DELETE"
         assert request.url.path == "/permission-requests/evt-abc"
-        return httpx.Response(404, json={"error": "gone"})
+        return httpx2.Response(404, json={"error": "gone"})
 
     client = _build_client(_handler)
     # No assertion -- this must not raise.
@@ -206,9 +206,9 @@ def test_delete_permission_request_tolerates_404() -> None:
 
 
 def test_delete_permission_request_raises_on_other_4xx() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(401, json={"error": "no auth"})
+        return httpx2.Response(401, json={"error": "no auth"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:
@@ -252,11 +252,11 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert request.headers["X-Latchkey-Gateway-Password"] == "hunter2"
         assert request.headers["X-Latchkey-Gateway-Permissions-Override"] == "admin-jwt-token"
         assert "follow=true" in str(request.url)
-        return httpx.Response(200, content=body, headers={"Content-Type": "application/x-ndjson"})
+        return httpx2.Response(200, content=body, headers={"Content-Type": "application/x-ndjson"})
 
     client = _build_client(_handler)
     items = _pending_only(list(client.iter_permission_requests()))
@@ -304,9 +304,9 @@ def test_iter_permission_requests_parses_whether_a_predefined_request_asks_for_a
     }
     body = "".join(json.dumps(item) + "\n" for item in (with_proxy, without_proxy)).encode("utf-8")
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, content=body)
+        return httpx2.Response(200, content=body)
 
     items = _pending_only(list(_build_client(_handler).iter_permission_requests()))
 
@@ -353,9 +353,9 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     }
     payload = b'not valid json\n{"agent_id": "a1"}\n' + json.dumps(valid_record).encode("utf-8") + b"\n"
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, content=payload)
+        return httpx2.Response(200, content=payload)
 
     client = _build_client(_handler)
     items = _pending_only(list(client.iter_permission_requests()))
@@ -386,9 +386,9 @@ def test_iter_permission_requests_yields_a_deletion_for_a_request_that_stopped_b
         + b"\n"
     )
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, content=payload)
+        return httpx2.Response(200, content=payload)
 
     items = list(_build_client(_handler).iter_permission_requests())
 
@@ -411,9 +411,9 @@ def test_list_permission_requests_lists_only_pending_requests() -> None:
     }
     payload = json.dumps(record).encode("utf-8") + b"\n" + b'{"event": "deleted", "request_id": "other"}\n'
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, content=payload)
+        return httpx2.Response(200, content=payload)
 
     listed = _build_client(_handler).list_permission_requests()
 
@@ -427,11 +427,11 @@ def _filed_elsewhere_body() -> dict[str, JsonValue]:
 def test_filing_a_request_as_filed_elsewhere_posts_the_body_under_the_machines_id_against_the_target() -> None:
     posted: list[dict[str, JsonValue]] = []
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert request.method == "POST"
         assert str(request.url) == "http://gateway.invalid:1989/permission-requests"
         posted.append(json.loads(request.content))
-        return httpx.Response(201, json={"request_id": "machine-id-41"})
+        return httpx2.Response(201, json={"request_id": "machine-id-41"})
 
     _build_client(_handler).file_permission_request_as_filed_elsewhere(
         _filed_elsewhere_body(), "machine-id-41", Path("/perms/hosts/h/latchkey_permissions.json")
@@ -447,9 +447,9 @@ def test_filing_a_request_as_filed_elsewhere_posts_the_body_under_the_machines_i
 
 
 def test_filing_a_request_already_pending_under_its_id_is_success() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(409, json={"error": "Permission request 'machine-id-41' is already pending."})
+        return httpx2.Response(409, json={"error": "Permission request 'machine-id-41' is already pending."})
 
     _build_client(_handler).file_permission_request_as_filed_elsewhere(
         _filed_elsewhere_body(), "machine-id-41", Path("/perms/latchkey_permissions.json")
@@ -460,17 +460,17 @@ def test_filing_a_request_the_gateway_refuses_raises_the_refusal_apart_from_othe
     """Only a 400 says the body is one no desktop will take; a gateway that will not let this caller name the
     target (a 403) or that failed (a 500) says nothing about the body, so the request is left for a retry."""
 
-    def _refusing(request: httpx.Request) -> httpx.Response:
+    def _refusing(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(400, json={"error": "Invalid request body: field 'type' must be one of ..."})
+        return httpx2.Response(400, json={"error": "Invalid request body: field 'type' must be one of ..."})
 
-    def _forbidding(request: httpx.Request) -> httpx.Response:
+    def _forbidding(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(403, json={"error": "only the desktop client may file a permission request ..."})
+        return httpx2.Response(403, json={"error": "only the desktop client may file a permission request ..."})
 
-    def _failing(request: httpx.Request) -> httpx.Response:
+    def _failing(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(500, json={"error": "Internal error"})
+        return httpx2.Response(500, json={"error": "Internal error"})
 
     with pytest.raises(PermissionRequestRefusedError, match="refused permission request machine-id-41 with 400"):
         _build_client(_refusing).file_permission_request_as_filed_elsewhere(
@@ -488,10 +488,10 @@ def test_approve_permission_request_posts_through_gateway() -> None:
     """``approve_permission_request`` POSTs to /permission-requests/approve/<id> and tolerates the gateway's 200."""
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(200, json={"request_id": "evt-abc", "target": "/tmp/p.json", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "target": "/tmp/p.json", "applied": {}})
 
     client = _build_client(_handler)
     # Must not raise.
@@ -503,9 +503,9 @@ def test_approve_permission_request_sends_no_body_without_override() -> None:
     """Without an override path the approve POST carries an empty body (gateway uses the precomputed effect)."""
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc"})
+        return httpx2.Response(200, json={"request_id": "evt-abc"})
 
     client = _build_client(_handler)
     client.approve_permission_request("evt-abc")
@@ -516,10 +516,10 @@ def test_approve_permission_request_sends_override_body() -> None:
     """An override body is sent verbatim as JSON so the gateway recomputes the effect."""
     captured: dict[str, object] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         captured["content"] = request.content
         captured["content_type"] = request.headers.get("content-type")
-        return httpx.Response(200, json={"request_id": "evt-abc"})
+        return httpx2.Response(200, json={"request_id": "evt-abc"})
 
     client = _build_client(_handler)
     # File-sharing override.
@@ -544,9 +544,9 @@ def test_approve_permission_request_sends_override_body() -> None:
 def test_approve_permission_request_raises_on_4xx() -> None:
     """Unlike ``delete``, ``approve`` does *not* swallow 404 / 4xx: a missing grant is a hard error."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(404, json={"error": "not found"})
+        return httpx2.Response(404, json={"error": "not found"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:
@@ -558,11 +558,11 @@ def test_get_permissions_config_returns_rules_and_schemas() -> None:
     """The reader hands back the whole file: readers need the schemas, not just the rules."""
     rule_key, permissions, schemas = build_account_grant("slack-api", "a@b", ("slack-read-all",))
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert request.method == "GET"
         assert request.url.path == "/permissions"
         assert "path=" in str(request.url)
-        return httpx.Response(200, json={"rules": [{rule_key: list(permissions)}], "schemas": schemas})
+        return httpx2.Response(200, json={"rules": [{rule_key: list(permissions)}], "schemas": schemas})
 
     client = _build_client(_handler)
     config = client.get_permissions_config(Path("/perms/host-1/latchkey_permissions.json"))
@@ -574,9 +574,9 @@ def test_get_permissions_config_returns_rules_and_schemas() -> None:
 def test_get_permissions_config_returns_empty_on_404() -> None:
     """A missing permissions file is treated as the deny-all default, not an error."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(404, json={"error": "not found"})
+        return httpx2.Response(404, json={"error": "not found"})
 
     client = _build_client(_handler)
     config = client.get_permissions_config(Path("/perms/host-1/latchkey_permissions.json"))
@@ -586,9 +586,9 @@ def test_get_permissions_config_returns_empty_on_404() -> None:
 
 
 def test_get_permissions_config_raises_on_other_4xx() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(403, json={"error": "outside root"})
+        return httpx2.Response(403, json={"error": "outside root"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
@@ -596,9 +596,9 @@ def test_get_permissions_config_raises_on_other_4xx() -> None:
 
 
 def test_get_permissions_config_raises_on_a_malformed_file() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, json={"rules": "not-a-list"})
+        return httpx2.Response(200, json={"rules": "not-a-list"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
@@ -606,9 +606,9 @@ def test_get_permissions_config_raises_on_a_malformed_file() -> None:
 
 
 def test_iter_permission_requests_raises_on_http_error() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(500, content=b"explode")
+        return httpx2.Response(500, content=b"explode")
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
@@ -626,9 +626,9 @@ def test_invalidate_initialization_clears_cached_state() -> None:
     test pins the contract that invalidation actually clears state.
     """
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, json={})
+        return httpx2.Response(200, json={})
 
     client = _build_client(_handler)
     # First call works against the cached credentials.
@@ -645,11 +645,11 @@ def test_invalidate_initialization_clears_cached_state() -> None:
 @pytest.mark.parametrize(
     "transport_error",
     [
-        httpx.ConnectError("connection refused"),
-        httpx.ConnectTimeout("connect timeout"),
+        httpx2.ConnectError("connection refused"),
+        httpx2.ConnectTimeout("connect timeout"),
     ],
 )
-def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: httpx.HTTPError) -> None:
+def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: httpx2.HTTPError) -> None:
     """Connect-level transport failures clear the cached gateway URL.
 
     This is the load-bearing self-heal that lets the desktop client
@@ -658,7 +658,7 @@ def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: ht
     cached the previous one).
     """
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
         raise transport_error
 
@@ -683,10 +683,10 @@ def test_non_connect_transport_errors_do_not_invalidate() -> None:
 
     call_count = {"value": 0}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
         call_count["value"] += 1
-        raise httpx.ReadError("server hung up mid-response")
+        raise httpx2.ReadError("server hung up mid-response")
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
@@ -709,9 +709,9 @@ def test_iter_permission_requests_invalidates_on_connect_error() -> None:
     from the supervisor record instead of pounding the stale port.
     """
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        raise httpx.ConnectError("connection refused")
+        raise httpx2.ConnectError("connection refused")
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):

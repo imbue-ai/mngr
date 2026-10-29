@@ -24,7 +24,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
+import httpx2
 import pytest
 from pydantic import PrivateAttr
 
@@ -1596,14 +1596,14 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     answering on the inner port, with no assumption about which routes it
     implements.
     """
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, text="ok")
+        return httpx2.Response(200, text="ok")
 
     workspace_id = AgentId.generate()
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
             probe_client=client, mngr_forward_port=18999, workspace_id=str(workspace_id)
         )
@@ -1628,11 +1628,11 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
     records a probe failure, driving the agent toward STUCK.
     """
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(503, text="Service Unavailable")
+        return httpx2.Response(503, text="Service Unavailable")
 
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
             probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
@@ -1645,10 +1645,10 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
 @pytest.mark.parametrize(
     "raised, expected_summary",
     [
-        (httpx.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
-        # httpx raises its timeouts and read errors with an empty message, so
+        (httpx2.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
+        # httpx2 raises its timeouts and read errors with an empty message, so
         # the class name is the whole of what there is to report.
-        (httpx.ReadTimeout(""), "ReadTimeout"),
+        (httpx2.ReadTimeout(""), "ReadTimeout"),
     ],
     ids=("refused", "timed-out"),
 )
@@ -1661,10 +1661,10 @@ def test_probe_workspace_through_plugin_names_the_transport_failure(raised: Exce
     a different component.
     """
 
-    def _fail(request: httpx.Request) -> httpx.Response:
+    def _fail(request: httpx2.Request) -> httpx2.Response:
         raise raised
 
-    with httpx.Client(transport=httpx.MockTransport(_fail)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_fail)) as client:
         outcome = probe_workspace_through_plugin(
             probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
@@ -1702,13 +1702,13 @@ def test_probe_workspace_uses_https_scheme() -> None:
     make every readiness probe fail the TLS handshake (or hit a closed http
     port).
     """
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, text="ok")
+        return httpx2.Response(200, text="ok")
 
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         probe_workspace_through_plugin(
             probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )

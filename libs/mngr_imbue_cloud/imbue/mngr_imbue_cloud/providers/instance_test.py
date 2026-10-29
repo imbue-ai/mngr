@@ -19,7 +19,7 @@ from typing import Final
 from typing import cast
 
 import gevent
-import httpx
+import httpx2
 import pytest
 from gevent.hub import Hub
 from loguru import logger
@@ -621,8 +621,8 @@ def _make_discovery_provider(list_hosts_error: Exception) -> _DiscoveryProvider:
 
 
 def test_list_leased_hosts_maps_transport_failure_to_provider_unavailable() -> None:
-    """A connection-level httpx failure becomes ProviderUnavailableError (the retry-not-restart signal)."""
-    provider = _make_discovery_provider(httpx.ConnectError("Connection refused"))
+    """A connection-level httpx2 failure becomes ProviderUnavailableError (the retry-not-restart signal)."""
+    provider = _make_discovery_provider(httpx2.ConnectError("Connection refused"))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         provider._list_leased_hosts_cached()
@@ -659,11 +659,11 @@ def test_discover_hosts_raises_the_auth_error_unwrapped_on_a_refused_refresh(
     """
     request_paths: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         request_paths.append(request.url.path)
-        return httpx.Response(200, json={"status": "ERROR", "message": "refresh token revoked"})
+        return httpx2.Response(200, json={"status": "ERROR", "message": "refresh token revoked"})
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
     store = ImbueCloudSessionStore(sessions_dir=tmp_path / "sessions")
     store.save(
         AuthSession(
@@ -741,7 +741,7 @@ def _make_workspaces_discovery_provider(list_workspaces_error: Exception) -> _Wo
 
 
 def test_list_workspaces_cached_maps_transport_failure_to_provider_unavailable() -> None:
-    provider = _make_workspaces_discovery_provider(httpx.ReadTimeout("timed out"))
+    provider = _make_workspaces_discovery_provider(httpx2.ReadTimeout("timed out"))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         provider._list_workspaces_cached()

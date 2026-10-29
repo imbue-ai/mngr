@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Final
 from typing import IO
 
-import httpx
+import httpx2
 from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
@@ -543,11 +543,11 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     last_error: str | None = None
     while time.monotonic() < deadline:
         try:
-            response = httpx.get(f"http://127.0.0.1:{debug_port}/json/version", timeout=2.0)
+            response = httpx2.get(f"http://127.0.0.1:{debug_port}/json/version", timeout=2.0)
             if response.status_code == 200:
                 return
             last_error = f"status={response.status_code}"
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx2.HTTPError, OSError) as exc:
             last_error = repr(exc)
         threading.Event().wait(timeout=0.5)
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")

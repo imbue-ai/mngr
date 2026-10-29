@@ -126,6 +126,10 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_httpx_import() -> None:
+    rc.check_httpx_import(_DIR, snapshot(0))
+
+
 # ratchet_group("Hardcoded paths")
 
 

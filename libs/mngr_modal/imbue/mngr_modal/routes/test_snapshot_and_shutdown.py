@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import modal
 import pytest
 from loguru import logger
@@ -204,8 +204,8 @@ def _await_endpoint_serving(url: str) -> None:
     inside one test's own timeout.
     """
     try:
-        response = httpx.post(url, json={}, timeout=45)
-    except httpx.TransportError as e:
+        response = httpx2.post(url, json={}, timeout=45)
+    except httpx2.TransportError as e:
         raise EndpointNotServingError(f"Nothing answered {url}: {e!r}") from e
     if response.text.startswith(_MODAL_FRONTEND_ANSWER_PREFIX):
         raise EndpointNotServingError(
@@ -328,7 +328,7 @@ def test_snapshot_and_shutdown_success(
         _write_host_record_to_volume(app_name, host_id, environment_name)
 
         # Call the snapshot_and_shutdown endpoint
-        response = httpx.post(
+        response = httpx2.post(
             function_url,
             json={
                 "sandbox_id": sandbox_id,
@@ -378,7 +378,7 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
     """Test that missing sandbox_id returns 400 error."""
     _, function_url, _ = deployed_snapshot_function
 
-    response = httpx.post(
+    response = httpx2.post(
         function_url,
         json={"host_id": "some-host-id"},
         timeout=60,
@@ -398,7 +398,7 @@ def test_snapshot_and_shutdown_missing_host_id(
     """Test that missing host_id returns 400 error."""
     _, function_url, _ = deployed_snapshot_function
 
-    response = httpx.post(
+    response = httpx2.post(
         function_url,
         json={"sandbox_id": "some-sandbox-id"},
         timeout=60,
@@ -422,7 +422,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
     # Write a host record so we can verify the sandbox lookup fails
     _write_host_record_to_volume(app_name, host_id, environment_name)
 
-    response = httpx.post(
+    response = httpx2.post(
         function_url,
         json={
             "sandbox_id": "sb-nonexistent-id-12345",
@@ -449,7 +449,7 @@ def test_snapshot_and_shutdown_nonexistent_host_record(
     sandbox, sandbox_id = _create_test_sandbox(app_name, environment_name)
 
     try:
-        response = httpx.post(
+        response = httpx2.post(
             function_url,
             json={
                 "sandbox_id": sandbox_id,

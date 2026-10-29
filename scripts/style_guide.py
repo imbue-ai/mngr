@@ -48,7 +48,7 @@ import click
 from inline_snapshot import snapshot
 import hashlib
 import json
-import httpx
+import httpx2
 import pytest
 from imbue.imbue_common.pytest_utils import inline_snapshot_is_updating
 
@@ -1161,7 +1161,7 @@ def test_sync_todo_list_to_remote_server_handles_response_correctly(
 
     if is_updating:
         # Make a live HTTP request when updating snapshots
-        response = httpx.post(
+        response = httpx2.post(
             "https://api.example.com/v1/sync",
             headers={"Authorization": "Bearer test_api_key"},
             json={"todos": [{"id": "1", "title": "Test todo"}]},
@@ -1238,7 +1238,7 @@ def sync_todo_list_to_remote_server(
     url = f"{server_url}/api/v1/sync"
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = todo_list.model_dump()
-    response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+    response = httpx2.post(url, json=payload, headers=headers, timeout=30.0)
     response.raise_for_status()
     return SyncResponse.model_validate(response.json())
 

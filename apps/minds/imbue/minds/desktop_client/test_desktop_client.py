@@ -8,7 +8,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from flask import Response
 from flask.testing import FlaskClient
@@ -118,7 +118,7 @@ from imbue.mngr.utils.polling import wait_for
 def _create_test_desktop_client(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx.Client | None,
+    http_client: httpx2.Client | None,
     agent_creator: AgentCreator | None = None,
     minds_config: MindsConfig | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:

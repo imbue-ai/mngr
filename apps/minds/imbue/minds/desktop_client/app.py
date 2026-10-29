@@ -13,7 +13,7 @@ from typing import Final
 from typing import assert_never
 from urllib.parse import quote
 
-import httpx
+import httpx2
 from flask import Flask
 from flask import Response
 from flask import abort
@@ -2591,7 +2591,7 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx.Client | None,
+    http_client: httpx2.Client | None,
     agent_creator: AgentCreator | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,

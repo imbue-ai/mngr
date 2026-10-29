@@ -60,7 +60,7 @@ from typing import Any
 from typing import Final
 
 import certifi
-import httpx
+import httpx2
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -88,7 +88,7 @@ _TARGET_KEY_BY_PLATFORM_AND_MACHINE: Final[dict[tuple[str, str], str]] = {
     ("linux", "aarch64"): "linux-arm64",
 }
 
-# Stall timeout per download attempt (httpx applies it to each connect/read
+# Stall timeout per download attempt (httpx2 applies it to each connect/read
 # operation, not the whole body), and a hard timeout per git invocation.
 _DOWNLOAD_TIMEOUT_SECONDS: Final[float] = 180.0
 _GIT_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -116,14 +116,14 @@ class _StaticFileRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 
 @retry(
-    retry=retry_if_exception_type(httpx.HTTPError),
+    retry=retry_if_exception_type(httpx2.HTTPError),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
 )
 def _download_release_asset(asset_url: str) -> bytes:
     """Download a GitHub release asset (following the redirect to its CDN), retrying transport/HTTP errors."""
-    response = httpx.get(asset_url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+    response = httpx2.get(asset_url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.content
 

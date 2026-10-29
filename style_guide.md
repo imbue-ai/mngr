@@ -1841,7 +1841,7 @@ Never make live network requests from integration tests *unless* you are updatin
 ```python
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from pathlib import Path
@@ -1865,7 +1865,7 @@ def test_sync_todo_list_to_remote_server_handles_response_correctly(
 
     if is_updating:
         # Make a live HTTP request when updating snapshots
-        response = httpx.post(
+        response = httpx2.post(
             "https://api.example.com/v1/sync",
             headers={"Authorization": "Bearer test_api_key"},
             json={"todos": [{"id": "1", "title": "Test todo"}]},
@@ -1996,12 +1996,12 @@ If you need to add a repo-wide ratchet that scans the entire codebase, add it to
 
 # Web requests
 
-Always use `httpx` for making web requests
+Always use `httpx2` for making web requests (not `httpx`, which is unmaintained; `httpx2` is its maintained fork with the same API)
 
 Always use synchronous python code for making requests
 
 ```python
-import httpx
+import httpx2
 
 
 class TodoSyncError(TodoAppError):
@@ -2026,7 +2026,7 @@ def sync_todo_list_to_remote_server(
     url = f"{server_url}/api/v1/sync"
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = todo_list.model_dump()
-    response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+    response = httpx2.post(url, json=payload, headers=headers, timeout=30.0)
     response.raise_for_status()
     return SyncResponse.model_validate(response.json())
 ```

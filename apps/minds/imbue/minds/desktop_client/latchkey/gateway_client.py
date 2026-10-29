@@ -41,7 +41,7 @@ from typing import Any
 from typing import Final
 from typing import Self
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import Field
 from pydantic import JsonValue
@@ -78,7 +78,7 @@ _HEADER_PERMISSIONS_OVERRIDE: Final[str] = "X-Latchkey-Gateway-Permissions-Overr
 # 127.0.0.1 gateway (negligible network cost) and bounds shutdown delay
 # to one read-timeout interval. The consumer's reconnect loop treats a
 # ReadTimeout-driven close as "no work to do", not as an error.
-_FOLLOW_READ_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=10.0, read=2.0, write=10.0, pool=10.0)
+_FOLLOW_READ_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(connect=10.0, read=2.0, write=10.0, pool=10.0)
 
 # Short timeout for one-shot POST / DELETE / GET calls.
 _ONE_SHOT_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -429,7 +429,7 @@ _HTTP_STATUS_BAD_REQUEST: Final[int] = 400
 class LatchkeyGatewayClient(MutableModel):
     """Synchronous client for the latchkey gateway's HTTP extensions.
 
-    The client owns a single :class:`httpx.Client` used for everything
+    The client owns a single :class:`httpx2.Client` used for everything
     except the long-lived follow-stream (which gets its own short-lived
     client per connect attempt so a stream restart cannot poison the
     pool used by the request thread).
@@ -437,17 +437,17 @@ class LatchkeyGatewayClient(MutableModel):
 
     _latchkey: Latchkey | None = PrivateAttr(default=None)
 
-    _transport: httpx.BaseTransport | None = PrivateAttr(default=None)
-    # Built once and handed to every per-call client: httpx otherwise builds a
-    # context per client, parsing the whole certifi bundle each time.
-    _ssl_context: ssl.SSLContext = PrivateAttr(default_factory=httpx.create_ssl_context)
+    _transport: httpx2.BaseTransport | None = PrivateAttr(default=None)
+    # Built once and handed to every per-call client: httpx2 otherwise builds a
+    # context per client, loading its CA roots each time.
+    _ssl_context: ssl.SSLContext = PrivateAttr(default_factory=httpx2.create_ssl_context)
     _base_url: str | None = PrivateAttr(default=None)
     _password: str | None = PrivateAttr(default=None)
     _admin_jwt: str | None = PrivateAttr(default=None)
 
     _init_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    # ``httpx.BaseTransport`` is not pydantic-native; allow it through.
+    # ``httpx2.BaseTransport`` is not pydantic-native; allow it through.
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
     def ensure_initialized(self) -> None:
@@ -507,7 +507,7 @@ class LatchkeyGatewayClient(MutableModel):
 
     @classmethod
     def from_credentials(
-        cls, base_url: str, password: str, admin_jwt: str, transport: httpx.BaseTransport | None = None
+        cls, base_url: str, password: str, admin_jwt: str, transport: httpx2.BaseTransport | None = None
     ) -> "LatchkeyGatewayClient":
         client = cls()
         client._base_url = base_url
@@ -574,17 +574,17 @@ class LatchkeyGatewayClient(MutableModel):
             _HEADER_PERMISSIONS_OVERRIDE: self._admin_jwt,
         }
 
-    def _one_shot_client(self) -> httpx.Client:
-        """Return a per-call :class:`httpx.Client` honouring the optional test transport."""
+    def _one_shot_client(self) -> httpx2.Client:
+        """Return a per-call :class:`httpx2.Client` honouring the optional test transport."""
         if self._transport is not None:
-            return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self._transport)
-        return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, verify=self._ssl_context)
+            return httpx2.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self._transport)
+        return httpx2.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, verify=self._ssl_context)
 
-    def _wrap_transport_error(self, e: httpx.HTTPError, context: str) -> LatchkeyGatewayClientError:
-        """Turn an :mod:`httpx` exception into our error type, invalidating cached init on connect-level failures.
+    def _wrap_transport_error(self, e: httpx2.HTTPError, context: str) -> LatchkeyGatewayClientError:
+        """Turn an :mod:`httpx2` exception into our error type, invalidating cached init on connect-level failures.
 
-        Connect-level errors (:class:`httpx.ConnectError`,
-        :class:`httpx.ConnectTimeout`) strongly suggest the cached
+        Connect-level errors (:class:`httpx2.ConnectError`,
+        :class:`httpx2.ConnectTimeout`) strongly suggest the cached
         gateway URL is pointing at a port that nothing is listening on
         anymore -- typically because the supervisor restarted on a new
         port mid-session or because startup raced the supervisor and
@@ -597,15 +597,15 @@ class LatchkeyGatewayClient(MutableModel):
         usually indicate a problem at the gateway end rather than a
         stale local cache, and re-resolving the URL would not help.
         """
-        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        if isinstance(e, (httpx2.ConnectError, httpx2.ConnectTimeout)):
             self.invalidate_initialization()
         return LatchkeyGatewayClientError(f"{context}: {e}")
 
-    def _stream_client(self) -> httpx.Client:
-        """Return a per-stream :class:`httpx.Client` honouring the optional test transport."""
+    def _stream_client(self) -> httpx2.Client:
+        """Return a per-stream :class:`httpx2.Client` honouring the optional test transport."""
         if self._transport is not None:
-            return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self._transport)
-        return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, verify=self._ssl_context)
+            return httpx2.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self._transport)
+        return httpx2.Client(timeout=_FOLLOW_READ_TIMEOUT, verify=self._ssl_context)
 
     def iter_permission_requests(self) -> Iterator[StreamedPermissionRequest | PermissionRequestDeleted]:
         """Yield every existing + future pending permission request, and every request that stops being pending.
@@ -619,7 +619,7 @@ class LatchkeyGatewayClient(MutableModel):
         error) when the gateway closes the connection or a network error
         terminates the stream.
 
-        ``httpx.ReadTimeout`` is treated specially: the stream uses a
+        ``httpx2.ReadTimeout`` is treated specially: the stream uses a
         finite per-read timeout (see ``_FOLLOW_READ_TIMEOUT``) so the
         consumer thread can unblock on shutdown, and a timeout therefore
         means "no events arrived in the polling window" -- not an
@@ -638,12 +638,12 @@ class LatchkeyGatewayClient(MutableModel):
                         parsed = _parse_permission_request_line(raw_line)
                         if parsed is not None:
                             yield parsed
-        except httpx.ReadTimeout:
+        except httpx2.ReadTimeout:
             # Idle window -- not an error. Return so the caller's
             # reconnect loop can check its stop event and either exit or
             # reconnect promptly without backoff.
             return
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, "GET /permission-requests stream failed") from e
 
     def list_permission_requests(self) -> tuple[StreamedPermissionRequest, ...]:
@@ -664,7 +664,7 @@ class LatchkeyGatewayClient(MutableModel):
                         parsed = _parse_permission_request_line(raw_line)
                         if isinstance(parsed, StreamedPermissionRequest):
                             requests.append(parsed)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, "GET /permission-requests failed") from e
         return tuple(requests)
 
@@ -681,7 +681,7 @@ class LatchkeyGatewayClient(MutableModel):
         try:
             with self._one_shot_client() as client:
                 response = client.delete(url, headers=self._build_headers())
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"DELETE {url} failed") from e
         if response.status_code == 404:
             logger.debug("DELETE {} returned 404; request already gone", url)
@@ -770,7 +770,7 @@ class LatchkeyGatewayClient(MutableModel):
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def _post_permission_request(self, body: Mapping[str, JsonValue]) -> tuple[str, httpx.Response]:
+    def _post_permission_request(self, body: Mapping[str, JsonValue]) -> tuple[str, httpx2.Response]:
         """``POST /permission-requests`` with ``body``, returning the URL posted to and the gateway's answer.
 
         Raises:
@@ -781,7 +781,7 @@ class LatchkeyGatewayClient(MutableModel):
         try:
             with self._one_shot_client() as client:
                 response = client.post(url, headers=self._build_headers(), json=dict(body))
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"POST {url} failed") from e
         return url, response
 
@@ -818,7 +818,7 @@ class LatchkeyGatewayClient(MutableModel):
         try:
             with self._one_shot_client() as client:
                 response = client.post(url, headers=self._build_headers(), json=json_body)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"POST {url} failed") from e
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
@@ -844,7 +844,7 @@ class LatchkeyGatewayClient(MutableModel):
         try:
             with self._one_shot_client() as client:
                 response = client.get(url, params=params, headers=self._build_headers())
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"GET {url} failed") from e
         if response.status_code == 404:
             return LatchkeyPermissionsConfig()
@@ -922,7 +922,7 @@ class LatchkeyGatewayClient(MutableModel):
                     json=body,
                     headers=self._build_headers(),
                 )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"POST {url} failed") from e
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
@@ -953,7 +953,7 @@ class LatchkeyGatewayClient(MutableModel):
         try:
             with self._one_shot_client() as client:
                 response = client.delete(url, params=params, headers=self._build_headers())
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise self._wrap_transport_error(e, f"DELETE {url} failed") from e
         if response.status_code == 404:
             logger.debug("DELETE {} rule_key={} returned 404; rule already gone", url, rule_key)

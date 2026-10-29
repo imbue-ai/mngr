@@ -31,7 +31,7 @@ from typing import assert_never
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -147,8 +147,10 @@ _WORKSPACE_PROBE_PATH: Final[str] = "/"
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
-def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float, ca_cert_path: Path) -> httpx.Client:
-    """Construct a reusable httpx.Client preconfigured for workspace probes.
+def make_workspace_probe_client(
+    preauth_cookie: str, probe_timeout_seconds: float, ca_cert_path: Path
+) -> httpx2.Client:
+    """Construct a reusable httpx2.Client preconfigured for workspace probes.
 
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration.
@@ -161,7 +163,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     ``127.0.0.1``, which the leaf names among its SANs, so hostname
     verification stays on; the workspace vhost rides the ``Host`` header.
     """
-    return httpx.Client(
+    return httpx2.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
@@ -170,7 +172,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
 
 
 def probe_workspace_through_plugin(
-    probe_client: httpx.Client, mngr_forward_port: int, workspace_id: str
+    probe_client: httpx2.Client, mngr_forward_port: int, workspace_id: str
 ) -> WorkspaceProbeOutcome:
     """Issue a single probe through the plugin to the workspace's inner web server.
 
@@ -198,8 +200,8 @@ def probe_workspace_through_plugin(
     probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     try:
         response = probe_client.get(probe_url, headers={"Host": f"{workspace_id}.localhost"})
-    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
-        # httpx leaves ReadError and every TimeoutException without a message,
+    except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError, httpx2.TimeoutException) as e:
+        # httpx2 leaves ReadError and every TimeoutException without a message,
         # so the class name is all there is to report for those.
         message = str(e)
         failure = f"{type(e).__name__}: {message}" if message else type(e).__name__

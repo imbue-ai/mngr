@@ -3,7 +3,7 @@ import socket
 from pathlib import Path
 from urllib.parse import urlencode
 
-import httpx
+import httpx2
 from flask import Flask
 from flask.testing import FlaskClient
 
@@ -63,7 +63,7 @@ def test_provider_relay_listens_on_the_callback_port_and_opens_the_page_in_the_c
 
     try:
         status, body = _arm(client, url)
-        refused = httpx.get(f"http://127.0.0.1:{callback_port}/callback?state=state-forged-11", timeout=10.0)
+        refused = httpx2.get(f"http://127.0.0.1:{callback_port}/callback?state=state-forged-11", timeout=10.0)
     finally:
         get_state(app).provider_relay_registry.stop_all()
 
@@ -84,7 +84,7 @@ def test_a_relayed_callback_ends_on_the_signed_in_page_and_raises_the_app(tmp_pa
         callback_port = find_free_port()
         try:
             _arm(client, _sign_in_url(callback_port))
-            page = httpx.get(f"http://127.0.0.1:{callback_port}/callback?code=c-81&state={_STATE}", timeout=30.0)
+            page = httpx2.get(f"http://127.0.0.1:{callback_port}/callback?code=c-81&state={_STATE}", timeout=30.0)
         finally:
             get_state(app).provider_relay_registry.stop_all()
             broadcaster.unregister(frames)

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.pending_requests import GatewayPendingRequests
@@ -27,15 +27,15 @@ def _streamed_record(request_id: str, agent_id: str = "agent-abc") -> dict[str, 
 def _gateway_with(records: list[dict[str, object]], outage: list[bool] | None = None) -> LatchkeyGatewayClient:
     """A stub gateway serving ``records``; flip ``outage[0]`` to make it 502."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         del request
         if outage is not None and outage[0]:
-            return httpx.Response(502, content=b"gateway down")
+            return httpx2.Response(502, content=b"gateway down")
         payload = b"".join(json.dumps(r).encode() + b"\n" for r in records)
-        return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
+        return httpx2.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
 
     return LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(_handler),
+        transport=httpx2.MockTransport(_handler),
         base_url="http://gateway.invalid:1989",
         password="p",
         admin_jwt="jwt",

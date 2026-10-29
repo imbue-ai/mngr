@@ -17,7 +17,7 @@ from datetime import datetime
 from datetime import timezone
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
@@ -193,7 +193,7 @@ def signin_and_mint_litellm_key(
     (which runs the plan quota gate) for the key + proxy base URL.
     """
     base = connector_url.rstrip("/")
-    with httpx.Client(timeout=timeout_seconds) as client:
+    with httpx2.Client(timeout=timeout_seconds) as client:
         signin = client.post(f"{base}/auth/signin", json={"email": email, "password": password})
         signin.raise_for_status()
         signin_json = signin.json()
@@ -253,7 +253,7 @@ def create_verified_user_via_admin_api(
     """
     headers = {"api-key": api_key.get_secret_value(), "rid": "emailpassword"}
     base = str(connection_uri.get_secret_value()).rstrip("/")
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
         signup = client.post(
             f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/signup",
             headers=headers,
@@ -365,12 +365,12 @@ def _wait_for_url_alive(
     deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
     last_status: int | None = None
     last_body_excerpt: str = ""
-    with httpx.Client(timeout=10.0) as client:
+    with httpx2.Client(timeout=10.0) as client:
         while datetime.now(timezone.utc).timestamp() < deadline:
             try:
                 response = client.get(url)
-            except httpx.HTTPError as exc:
-                last_body_excerpt = f"httpx error: {exc}"
+            except httpx2.HTTPError as exc:
+                last_body_excerpt = f"httpx2 error: {exc}"
                 last_status = None
             else:
                 last_status = response.status_code
@@ -400,7 +400,7 @@ def delete_user_via_admin_api(
     """
     base = str(connection_uri.get_secret_value()).rstrip("/")
     headers = {"api-key": api_key.get_secret_value()}
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
         resp = client.post(f"{base}/user/remove", headers=headers, json={"userId": str(user_id)})
         resp.raise_for_status()
 
@@ -429,7 +429,7 @@ def iter_supertokens_users(*, connection_uri: SecretStr, api_key: SecretStr) -> 
     # a single condition variable.
     pagination_token: str | None = None
     has_unfetched_pages = True
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
         while has_unfetched_pages:
             params: dict[str, str] = {"limit": str(_SUPERTOKENS_USER_PAGE_LIMIT)}
             if pagination_token:
@@ -479,7 +479,7 @@ def sweep_stale_users(
         try:
             delete_user_via_admin_api(connection_uri=connection_uri, api_key=api_key, user_id=user.user_id)
             deleted += 1
-        except (MindError, httpx.HTTPError) as exc:
+        except (MindError, httpx2.HTTPError) as exc:
             logger.warning("Stale-user sweep: failed to delete {!r} ({})", str(user.user_id), exc)
     return deleted
 
@@ -530,7 +530,7 @@ def neon_project_exists(*, name: DevEnvName, org_id: str, api_token: SecretStr) 
     project_name = f"minds-{name}"
     url = f"https://console.neon.tech/api/v2/projects?org_id={org_id}&limit=400"
     headers = {"Authorization": f"Bearer {api_token.get_secret_value()}"}
-    with httpx.Client(timeout=_NEON_PROBE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_NEON_PROBE_TIMEOUT_SECONDS) as client:
         resp = client.get(url, headers=headers)
         resp.raise_for_status()
     payload = resp.json()
@@ -549,7 +549,7 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     """
     url = f"{core_base_url.rstrip('/')}/appid-{name}/recipe/multitenancy/tenant/list"
     headers = {"api-key": api_key.get_secret_value(), "cdi-version": "5.1", "Accept": "application/json"}
-    with httpx.Client(timeout=_SUPERTOKENS_PROBE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_PROBE_TIMEOUT_SECONDS) as client:
         resp = client.get(url, headers=headers)
     if resp.status_code == 200:
         return True

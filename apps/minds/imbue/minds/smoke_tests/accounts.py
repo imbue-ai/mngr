@@ -16,7 +16,7 @@ from typing import Any
 from typing import Final
 from urllib.parse import quote
 
-import httpx
+import httpx2
 import psycopg2
 from pydantic import AnyUrl
 from pydantic import SecretStr
@@ -112,7 +112,7 @@ def create_test_account(
     address is already taken, which is the signal the persistent-account
     command treats as "already created".
     """
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.post(
             f"{origin_of(connector_url)}/admin/test-signup",
             headers=smoke_headers(admin_api_key),
@@ -140,7 +140,7 @@ def resolve_account_user_id_or_none(
     *, connector_url: AnyUrl, admin_api_key: SecretStr, email: str
 ) -> NonEmptyStr | None:
     """The user id the connector resolves ``email`` to, or None when no such account exists."""
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.get(
             f"{origin_of(connector_url)}/admin/accounts/{quote(email, safe='@')}",
             headers=smoke_headers(admin_api_key),
@@ -161,7 +161,7 @@ def sign_in(*, connector_url: AnyUrl, credentials: SmokeAccountCredentials) -> S
     credentials, which is also how a deleted account answers -- the signal a
     teardown reads as "this account is already gone".
     """
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.post(
             f"{origin_of(connector_url)}/auth/signin",
             headers=smoke_headers(None),
@@ -201,7 +201,7 @@ def leased_host_db_id_for_host_id(listing: Sequence[Mapping[str, Any]], host_id:
 
 def list_leased_hosts(*, connector_url: AnyUrl, bearer: SecretStr) -> list[dict[str, Any]]:
     """Every workspace the signed-in account currently leases, as the connector lists it."""
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.get(f"{origin_of(connector_url)}/hosts", headers=smoke_headers(bearer))
     if response.status_code != 200:
         raise SmokeAccountError(f"GET /hosts answered {response.status_code}: {response.text[:300]!r}")
@@ -230,7 +230,7 @@ def list_active_share_host_ids(*, connector_url: AnyUrl, bearer: SecretStr) -> l
     How teardown finds a share to turn off when the run recorded no manifest
     (a test process that died before writing one still shared a workspace).
     """
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.get(f"{origin_of(connector_url)}/shares", headers=smoke_headers(bearer))
     if response.status_code != 200:
         raise SmokeAccountError(f"GET /shares answered {response.status_code}: {response.text[:300]!r}")
@@ -244,7 +244,7 @@ def release_host(*, connector_url: AnyUrl, bearer: SecretStr, host_db_id: str) -
     is a success here -- teardown runs over whatever the test may already have
     cleaned up.
     """
-    with httpx.Client(timeout=_RELEASE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_RELEASE_TIMEOUT_SECONDS) as client:
         response = client.post(f"{origin_of(connector_url)}/hosts/{host_db_id}/release", headers=smoke_headers(bearer))
     if response.status_code != 200:
         raise SmokeAccountError(
@@ -260,7 +260,7 @@ def release_host_as_admin(*, connector_url: AnyUrl, admin_api_key: SecretStr, ho
     password any more, and the deletion tool refuses an account that still
     holds a pool row.
     """
-    with httpx.Client(timeout=_RELEASE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_RELEASE_TIMEOUT_SECONDS) as client:
         response = client.post(
             f"{origin_of(connector_url)}/admin/workspaces/{host_db_id}/release",
             headers=smoke_headers(admin_api_key),
@@ -279,7 +279,7 @@ def disable_share(*, connector_url: AnyUrl, bearer: SecretStr, host_id: str) -> 
     nothing left for teardown to do. One that is already off still has its row,
     so turning it off again is the connector's own idempotent path.
     """
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.delete(f"{origin_of(connector_url)}/shares/{host_id}", headers=smoke_headers(bearer))
     if response.status_code == 404:
         return False
@@ -319,7 +319,7 @@ ACCOUNT_DELETION_TOKEN_HEADER: Final[str] = "X-Imbue-Deletion-Token"
 
 def mint_account_deletion_token(*, connector_url: AnyUrl, bearer: SecretStr) -> SecretStr:
     """Mint the short-lived token ``DELETE /account`` requires, as the signed-in account."""
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.post(f"{origin_of(connector_url)}/account/deletion-token", headers=smoke_headers(bearer))
     if response.status_code != 200:
         raise SmokeAccountError(
@@ -339,7 +339,7 @@ def delete_own_account(*, connector_url: AnyUrl, bearer: SecretStr, deletion_tok
     the grace period; :func:`admin_finalize_account` is what removes it.
     """
     headers = {**smoke_headers(bearer), ACCOUNT_DELETION_TOKEN_HEADER: deletion_token.get_secret_value()}
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.delete(f"{origin_of(connector_url)}/account", headers=headers)
     if response.status_code != 200:
         raise SmokeAccountError(f"DELETE /account answered {response.status_code}: {response.text[:300]!r}")
@@ -348,7 +348,7 @@ def delete_own_account(*, connector_url: AnyUrl, bearer: SecretStr, deletion_tok
 
 def admin_delete_account(*, connector_url: AnyUrl, admin_api_key: SecretStr, email: str) -> Mapping[str, Any]:
     """The operator delete step, for an account the suite holds no password for."""
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.post(
             f"{origin_of(connector_url)}/admin/accounts/{quote(email, safe='@')}/delete",
             headers=smoke_headers(admin_api_key),
@@ -364,7 +364,7 @@ def admin_finalize_account(
     *, connector_url: AnyUrl, admin_api_key: SecretStr, email: str
 ) -> SmokeAccountDeletionReport:
     """End an already-deleted account's grace period now, so it is really gone."""
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = client.post(
             f"{origin_of(connector_url)}/admin/accounts/{quote(email, safe='@')}/finalize",
             headers=smoke_headers(admin_api_key),

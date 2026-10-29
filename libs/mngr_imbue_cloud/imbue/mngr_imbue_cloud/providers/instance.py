@@ -43,7 +43,7 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
-import httpx
+import httpx2
 import paramiko
 from loguru import logger
 from pydantic import ConfigDict
@@ -846,7 +846,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         except WorkspacesEndpointUnavailableError:
             logger.debug("imbue_cloud[{}]: connector has no /workspaces; using leased-only listing", self.name)
             self._workspaces_cache = None
-        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
+        except (httpx2.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",
@@ -906,7 +906,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # Narrow the propagated type by cause so consumers can tell "the
         # connector is unreachable" apart from "auth/account problem": a
         # transport-level failure (connection refused, DNS, timeout -- the
-        # flaky-wifi / connector-down case, whether raised raw by httpx or as
+        # flaky-wifi / connector-down case, whether raised raw by httpx2 or as
         # the client's typed unreachable error, which also covers the
         # connector's own auth-upstream-down 503) becomes
         # ProviderUnavailableError, which recovery UIs treat as "don't bother
@@ -919,7 +919,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         try:
             token = self._get_access_token(account)
             self._leased_hosts_cache = self.client.list_hosts(token)
-        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
+        except (httpx2.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",

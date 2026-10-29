@@ -80,6 +80,22 @@ function latchkeyCaBundleEnv(caBundlePath) {
 }
 
 /**
+ * On macOS, the CA bundle the backend's Python HTTP clients verify against.
+ * httpx2 verifies against the OS trust store unless ``SSL_CERT_FILE`` names a
+ * file, and macOS's store trusts the compromised emSign chain until Apple's
+ * 2026-10-19 update is installed, so the backend stays on the bundle the app
+ * pins, like git and latchkey's curls. The variable reaches the backend's
+ * whole process tree (uv, mngr and other Python children, and curl, which
+ * reads it as its --cacert) and replaces any value the app was launched with.
+ * Not set on Linux: curl would read it there too, moving latchkey's curls off
+ * the host store they deliberately use.
+ * CLEANUP: drop once every macOS version the app supports ships Apple's fix.
+ */
+function pythonCaBundleEnv(caBundlePath) {
+  return process.platform === 'darwin' ? { SSL_CERT_FILE: caBundlePath } : {};
+}
+
+/**
  * The three platform-canonical roots, as the env vars the Python backend reads
  * ahead of its own resolver.
  *
@@ -382,6 +398,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
           ...latchkeyCaBundleEnv(caBundlePath),
+          ...pythonCaBundleEnv(caBundlePath),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -461,6 +478,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
           ...latchkeyCaBundleEnv(caBundlePath),
+          ...pythonCaBundleEnv(caBundlePath),
           // How an agent brings this install up in the background when it
           // finds it stopped; the backend records it in the tier's app.json.
           ...backgroundLaunchEnv({

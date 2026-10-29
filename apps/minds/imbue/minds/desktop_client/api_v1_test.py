@@ -17,7 +17,7 @@ from typing import Final
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2
 import pytest
 from flask import Flask
 from flask.testing import FlaskClient
@@ -2119,7 +2119,7 @@ def _build_client(
     mngr_host_dir: Path | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    http_client: httpx.Client | None = None,
+    http_client: httpx2.Client | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     client_env_config: ClientEnvConfig | None = None,
     connection_store: ConnectionStore | None = None,
@@ -2546,7 +2546,7 @@ def _sharing_client(
     email: str = "owner@example.com",
     service_logs: dict[str, str] | None = None,
     mngr_binary: str = "mngr",
-    http_client: httpx.Client | None = None,
+    http_client: httpx2.Client | None = None,
     agent_labels: dict[str, str] | None = None,
 ) -> FlaskClient:
     resolver = make_resolver_with_data(make_agents_json(agent_id, labels=agent_labels), service_logs=service_logs)
@@ -3410,11 +3410,11 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     cli = _fake_sharing_cli(share=_active_share())
     probed_hosts: list[str] = []
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         probed_hosts.append(request.url.host)
-        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     # The shell's label must be known for readiness -- the probe hits the shell's
     # label origin, not the bare machine domain (which does not route on a share).
     client = _sharing_client(
@@ -3450,10 +3450,10 @@ def test_machine_sharing_readiness_polls_reuse_the_cached_share_lookup(tmp_path:
     agent_id = AgentId()
     cli = _fake_sharing_cli(share=_active_share())
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3483,7 +3483,7 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         to_update(bare_share.field_ref().last_tunnel_login_at, "2026-08-13 12:00:00+00:00"),
     )
     cli = _fake_sharing_cli(share=share)
-    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx.Client())
+    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx2.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
@@ -3514,10 +3514,10 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
     caller = _GatewayStatusCaller(status_json=status_json)
     cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route to host")
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route to host")
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler))
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler))
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3544,7 +3544,7 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
 
 def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
     agent_id = AgentId()
-    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx.Client())
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx2.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 

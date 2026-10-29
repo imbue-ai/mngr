@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 import tomlkit
 from loguru import logger
@@ -913,7 +913,7 @@ def _ensure_restic_on_sandbox_host(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         return
     except ResticNotInstalledError:
         logger.info("No restic on the sandbox host; downloading the pinned release for this test")
-    response = httpx.get(_RESTIC_DOWNLOAD_URL, follow_redirects=True, timeout=180.0)
+    response = httpx2.get(_RESTIC_DOWNLOAD_URL, follow_redirects=True, timeout=180.0)
     response.raise_for_status()
     digest = hashlib.sha256(response.content).hexdigest()
     assert digest == _RESTIC_DOWNLOAD_SHA256, f"restic download checksum mismatch: {digest}"

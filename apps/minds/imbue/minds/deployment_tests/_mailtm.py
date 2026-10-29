@@ -21,7 +21,7 @@ from datetime import timezone
 from typing import Final
 from uuid import uuid4
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import PrivateAttr
 from pydantic import SecretStr
@@ -112,7 +112,7 @@ class MailtmInbox(MutableModel):
 
     def _wait_for_message_body(self, *, timeout_seconds: float, subject_substring: str) -> str:
         deadline = time.monotonic() + timeout_seconds
-        last_error: httpx.HTTPError | None = None
+        last_error: httpx2.HTTPError | None = None
         while time.monotonic() < deadline:
             try:
                 message = self._poll_for_new_message(subject_substring=subject_substring)
@@ -123,7 +123,7 @@ class MailtmInbox(MutableModel):
                     # iteration to retry instead of being silently filtered out.
                     self._seen_message_ids.add(message.id)
                     return body
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 last_error = exc
             # Polling a remote HTTP API (mail.tm) for inbound email; time.sleep is
             # the right primitive for this case (no event-driven alternative
@@ -137,7 +137,7 @@ class MailtmInbox(MutableModel):
 
     def _poll_for_new_message(self, *, subject_substring: str) -> _MailtmMessage | None:
         """Return one unseen inbox message matching the filters, or ``None``."""
-        with httpx.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
+        with httpx2.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
             response = client.get(
                 "/messages",
                 headers={"Authorization": f"Bearer {self.jwt.get_secret_value()}"},
@@ -163,7 +163,7 @@ class MailtmInbox(MutableModel):
         return None
 
     def _fetch_message_body(self, message_id: str) -> str:
-        with httpx.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
+        with httpx2.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
             response = client.get(
                 f"/messages/{message_id}",
                 headers={"Authorization": f"Bearer {self.jwt.get_secret_value()}"},
@@ -225,7 +225,7 @@ def create_mailtm_account(*, local_part: str) -> MailtmAccount:
     created address is logged before the JWT is minted, so a mailbox whose
     token mint failed still leaves a trail in the run's log.
     """
-    with httpx.Client(base_url=_MAILTM_API_BASE, timeout=_ACCOUNT_API_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(base_url=_MAILTM_API_BASE, timeout=_ACCOUNT_API_TIMEOUT_SECONDS) as client:
         domains_response = client.get("/domains")
         domains_response.raise_for_status()
         domains = domains_response.json().get("hydra:member", [])
@@ -252,7 +252,7 @@ def delete_mailtm_account(*, account_id: MailtmAccountId, jwt: SecretStr) -> boo
     actually-expired JWT therefore reads the same way, at the cost of leaving
     one disposable mailbox for mail.tm to expire on its own.
     """
-    with httpx.Client(base_url=_MAILTM_API_BASE, timeout=_ACCOUNT_API_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(base_url=_MAILTM_API_BASE, timeout=_ACCOUNT_API_TIMEOUT_SECONDS) as client:
         response = client.delete(
             f"/accounts/{account_id}",
             headers={"Authorization": f"Bearer {jwt.get_secret_value()}"},

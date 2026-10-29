@@ -139,6 +139,10 @@ def test_prevent_async_await() -> None:
     rc.check_async_await(_DIR, snapshot(0))
 
 
+def test_prevent_httpx_import() -> None:
+    rc.check_httpx_import(_DIR, snapshot(0))
+
+
 # ratchet_group("Hardcoded paths")
 
 

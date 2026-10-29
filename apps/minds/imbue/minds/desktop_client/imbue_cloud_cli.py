@@ -631,7 +631,7 @@ class ImbueCloudCli(MutableModel):
             auth_exc.stderr = result.stderr
             raise auth_exc
         # Log the full subprocess output server-side -- it may be a multi-line
-        # Python traceback (e.g. an httpx transport error inside the connector
+        # Python traceback (e.g. an httpx2 transport error inside the connector
         # subprocess) -- but keep the exception *message* clean and
         # traceback-free, so routes that surface ``str(exc)`` to an API caller
         # never leak it. The full detail stays on ``.stderr`` for any caller that

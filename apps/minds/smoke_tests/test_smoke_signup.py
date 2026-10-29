@@ -8,7 +8,7 @@ mailbox), and see the download page list installers.
 
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from loguru import logger
 
@@ -28,7 +28,7 @@ _VERIFICATION_EMAIL_WAIT_SECONDS: Final[float] = 90.0
 _VERIFICATION_RESEND_ROUNDS: Final[int] = 4
 
 
-def _resend_verification_email(client: httpx.Client, accounts_origin: str) -> None:
+def _resend_verification_email(client: httpx2.Client, accounts_origin: str) -> None:
     resend = client.post(f"{accounts_origin}/accounts/api/send-verification")
     assert resend.status_code == 200, resend.text
 
@@ -38,7 +38,7 @@ def test_the_throwaway_account_verifies_its_email_and_is_offered_the_installers(
     backend: SmokeBackend, throwaway_account: ThrowawayAccount, throwaway_inbox: MailtmInbox
 ) -> None:
     accounts_origin = origin_of(backend.accounts_origin)
-    with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS, headers={"User-Agent": SMOKE_USER_AGENT}) as client:
+    with httpx2.Client(timeout=_REQUEST_TIMEOUT_SECONDS, headers={"User-Agent": SMOKE_USER_AGENT}) as client:
         signin = client.post(
             f"{accounts_origin}/accounts/api/signin",
             json={"email": str(throwaway_account.email), "password": throwaway_account.password.get_secret_value()},

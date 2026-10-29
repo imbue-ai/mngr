@@ -25,6 +25,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GETATTR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GLOBAL_KEYWORD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_CLAUDE_DIR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_GUARDED_BINARY
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HTTPX_IMPORT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IF_ELIF_WITHOUT_ELSE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORTLIB_IMPORT_MODULE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORT_DATETIME
@@ -206,6 +207,10 @@ def check_async_await(
 
 def check_pandas_import(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_PANDAS_IMPORT, source_dir, max_count)
+
+
+def check_httpx_import(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_HTTPX_IMPORT, source_dir, max_count)
 
 
 def check_dataclasses_import(source_dir: Path, max_count: int) -> None:

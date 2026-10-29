@@ -23,7 +23,7 @@ from math import sin
 from math import sqrt
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import PrivateAttr
 
@@ -242,12 +242,12 @@ def fetch_geo_coordinates(http_timeout_seconds: float) -> tuple[float, float] | 
     body, or missing/unusable coordinates.
     """
     try:
-        response = httpx.get(
+        response = httpx2.get(
             _IFCONFIG_URL,
             timeout=http_timeout_seconds,
             headers={"Accept": "application/json"},
         )
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         logger.debug("Failed to fetch IP geolocation from {}: {}", _IFCONFIG_URL, exc)
         return None
     if response.status_code != 200:

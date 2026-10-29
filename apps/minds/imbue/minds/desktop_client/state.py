@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 from flask import Flask
 from flask import current_app
 from pydantic import ConfigDict
@@ -86,7 +86,7 @@ class DesktopClientState(MutableModel):
 
     auth_store: AuthStoreInterface = Field(frozen=True, description="Cookie/session auth store")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Agent/host discovery resolver")
-    http_client: httpx.Client | None = Field(
+    http_client: httpx2.Client | None = Field(
         default=None,
         description=(
             "HTTP client for the share-URL readiness probe (its only consumer), created by the "

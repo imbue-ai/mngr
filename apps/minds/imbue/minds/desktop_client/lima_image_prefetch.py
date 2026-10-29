@@ -471,7 +471,7 @@ def make_lima_image_prefetcher(
     data_dir: Path,
     concurrency_group: ConcurrencyGroup,
 ) -> LimaImagePrefetcher:
-    """Build a prefetcher wired to the real desync/minisign/httpx implementations."""
+    """Build a prefetcher wired to the real desync/minisign/httpx2 implementations."""
     cache_dir = lima_image_cache_dir(data_dir)
     return LimaImagePrefetcher(
         source=source,

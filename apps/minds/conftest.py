@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
+import httpx2
 import pytest
 from loguru import logger
 from pydantic import AnyUrl
@@ -352,5 +352,5 @@ def sync_e2e_account(sync_e2e_env: SyncE2EEnv) -> Iterator[SyncE2EAccount]:
             api_key=sync_e2e_env.supertokens_api_key,
             user_id=NonEmptyStr(str(user_id)),
         )
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.warning("Could not delete sync e2e account {}: {}", email, e)

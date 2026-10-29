@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
-import httpx
+import httpx2
 import pytest
 from simple_websocket import Client as WebSocketClient
 from simple_websocket import ConnectionClosed
@@ -233,7 +233,7 @@ def _connect_ws(port: int, cookie: str) -> WebSocketClient:
 
 def test_unauthenticated_ws_upgrade_gets_plain_401_and_server_keeps_serving(tmp_path: Path) -> None:
     with _serve_ws_capable_app(tmp_path) as (port, _cookie, _state):
-        response = httpx.get(
+        response = httpx2.get(
             f"http://127.0.0.1:{port}/ui/ws",
             headers={
                 "Upgrade": "websocket",
@@ -247,7 +247,7 @@ def test_unauthenticated_ws_upgrade_gets_plain_401_and_server_keeps_serving(tmp_
         # The socket was never hijacked: the server still serves normal HTTP.
         # /login is the unauthenticated liveness probe now that every hub
         # route 302s unauthenticated navigations to it.
-        followup = httpx.get(f"http://127.0.0.1:{port}/login", timeout=5.0)
+        followup = httpx2.get(f"http://127.0.0.1:{port}/login", timeout=5.0)
         assert followup.status_code == 200
 
 
@@ -455,7 +455,7 @@ def test_client_disconnect_leaves_server_healthy_and_releases_the_connection(tmp
 
         assert state.ui_channel_broadcaster.wait_for_connection_count(0, timeout_seconds=5.0)
         # The server survived the close and still serves HTTP on a fresh connection.
-        response = httpx.get(f"http://127.0.0.1:{port}/login", timeout=5.0)
+        response = httpx2.get(f"http://127.0.0.1:{port}/login", timeout=5.0)
         assert response.status_code == 200
 
 

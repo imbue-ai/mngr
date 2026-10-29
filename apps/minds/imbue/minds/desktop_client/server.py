@@ -42,7 +42,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Final
 
-import httpx
+import httpx2
 from cheroot import wsgi
 from flask import Flask
 from loguru import logger
@@ -75,7 +75,7 @@ def _share_probe_ssl_context() -> ssl.SSLContext:
     can at most fake "ready"; the user's browser still fully verifies the
     real link.
     """
-    # CLEANUP: drop this context (httpx's default verifies the hostname) once no supported workspace
+    # CLEANUP: drop this context (httpx2's default verifies the hostname) once no supported workspace
     # predates the default-workspace-template release that mints hyphenated service labels.
     context = ssl.create_default_context()
     context.check_hostname = False
@@ -127,7 +127,7 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
     which case the runtime neither creates nor closes it.
     """
     if not is_externally_managed_client:
-        state.http_client = httpx.Client(
+        state.http_client = httpx2.Client(
             follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=_share_probe_ssl_context()
         )
     # Kick off the one-shot IP-geolocation lookup in the background so the create

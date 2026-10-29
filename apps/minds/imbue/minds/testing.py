@@ -12,7 +12,7 @@ from types import ModuleType
 from typing import Any
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from loguru import logger
 from pydantic import Field
@@ -53,9 +53,9 @@ def fetch_default_workspace_template_file(repo_relative_path: str) -> str | None
     """
     url = f"https://api.github.com/repos/{DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}/contents/{repo_relative_path}"
     try:
-        response = httpx.get(url, headers=_github_api_headers(), timeout=30.0, follow_redirects=True)
+        response = httpx2.get(url, headers=_github_api_headers(), timeout=30.0, follow_redirects=True)
         response.raise_for_status()
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.warning("Failed to fetch {}: {}", url, e)
         return None
     try:

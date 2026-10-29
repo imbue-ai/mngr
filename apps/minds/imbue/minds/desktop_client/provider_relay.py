@@ -37,7 +37,7 @@ from urllib.parse import SplitResult
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -584,7 +584,7 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
         ) as client:
             try:
                 response = client.post(url, headers={"Host": host}, json={"path_and_query": path_and_query})
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 raise SignInForwardError(f"the workspace could not be reached ({type(e).__name__})") from e
         if response.status_code == 409:
             raise SignInCallbackRefusedError(f"the workspace answered 409: {response.text[:_MAX_DETAIL_CHARS]}")

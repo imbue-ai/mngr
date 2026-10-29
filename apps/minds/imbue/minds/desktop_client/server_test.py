@@ -15,7 +15,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
+import httpx2
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -184,7 +184,7 @@ def test_shutdown_does_not_wait_out_a_slow_latchkey_forward_stop(tmp_path: Path)
 
 def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path) -> None:
     """An injected HTTP client (e.g. from a test) is neither replaced nor closed by the runtime."""
-    injected = httpx.Client()
+    injected = httpx2.Client()
     state = DesktopClientState(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=MngrCliBackendResolver(),
@@ -252,7 +252,7 @@ def test_server_keeps_connections_alive(tmp_path: Path) -> None:
         # /login would 307 away): it is always a direct 200 with no built SPA
         # bundle required, so this stays a pure keep-alive assertion
         # independent of whether the frontend has been built.
-        with httpx.Client(timeout=10.0, follow_redirects=False) as client:
+        with httpx2.Client(timeout=10.0, follow_redirects=False) as client:
             first = client.get(f"http://127.0.0.1:{port}/login")
             assert first.status_code == 200
             assert first.http_version == "HTTP/1.1"
@@ -269,9 +269,9 @@ def test_the_same_request_is_served_over_the_socket_and_refused_over_tcp_without
     """The two listeners serve one app: the socket admits the user, TCP still demands a credential."""
     socket_path = short_tmp_path / "api.sock"
     with _serve_in_background(tmp_path, api_socket_path=socket_path) as (port, _auth_store, _state):
-        with httpx.Client(timeout=10.0) as tcp_client:
+        with httpx2.Client(timeout=10.0) as tcp_client:
             assert tcp_client.get(f"http://127.0.0.1:{port}/api/v1/app/version").status_code == 401
-        with httpx.Client(transport=httpx.HTTPTransport(uds=str(socket_path)), timeout=10.0) as socket_client:
+        with httpx2.Client(transport=httpx2.HTTPTransport(uds=str(socket_path)), timeout=10.0) as socket_client:
             response = socket_client.get("http://localhost/api/v1/app/version")
         assert response.status_code == 200
         assert "workspace_template_ref" in response.json()

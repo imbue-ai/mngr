@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import Field
 
@@ -106,7 +106,7 @@ _XDG_CACHE_HOME_ENV_VAR: Final[str] = "XDG_CACHE_HOME"
 # directory's own cleanup is the only thing that has to remove it.
 _ARCHIVE_STEM: Final[str] = "archive"
 # A ``.deb`` is a few hundred megabytes.
-_DOWNLOAD_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+_DOWNLOAD_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 _EXTRACT_TIMEOUT_SECONDS: Final[float] = 600.0
 _FEED_TIMEOUT_SECONDS: Final[float] = 60.0
 # GitHub-hosted runners give Chromium a /dev/shm too small for a renderer.
@@ -365,7 +365,7 @@ def published_channel_studio_binary(channel: ReleaseChannelName, backend: SmokeB
             f"`{layout.extractor}` is not on PATH; it unpacks the published {layout.archive_suffix}."
         )
 
-    with httpx.Client(timeout=_FEED_TIMEOUT_SECONDS, headers=smoke_headers(None)) as client:
+    with httpx2.Client(timeout=_FEED_TIMEOUT_SECONDS, headers=smoke_headers(None)) as client:
         manifest = fetch_update_manifest(client, backend.update_feed_base_url, channel, layout.platform)
     artifact = _archive_artifact_of(layout, manifest)
     build_dir = cached_build_dir(
@@ -391,7 +391,7 @@ def _download_and_extract(artifact: ManifestArtifact, destination: Path, layout:
     """
     archive_path = destination / f"{_ARCHIVE_STEM}{layout.archive_suffix}"
     logger.info("Downloading the published build {} to {}", artifact.url, archive_path)
-    with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, headers=smoke_headers(None), follow_redirects=True) as client:
+    with httpx2.Client(timeout=_DOWNLOAD_TIMEOUT, headers=smoke_headers(None), follow_redirects=True) as client:
         with client.stream("GET", str(artifact.url)) as response:
             if response.status_code != 200:
                 raise SmokeConfigError(f"{artifact.url} answered {response.status_code}; cannot download the build.")
