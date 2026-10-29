@@ -1,0 +1,1 @@
+The snapshot-resume release test for bug-report secret withholding now expects the template's per-file rule (default-workspace-template#939). A chat that carries a secret is withheld and named in `collection-notes.txt`. The clean chat and the logs still attach. Before, the test expected every chat to be withheld.

@@ -1664,22 +1664,20 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
 # covers residual load variance on the shared 4-core box (same rationale as the
 # full-collection test above).
 @pytest.mark.flaky
-def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
+def test_bug_report_diagnostics_withhold_only_the_chat_that_carries_a_secret(
     running_workspace: RunningWorkspaceContainer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
 ) -> None:
-    """One secret in one chat withholds ALL chats, while the clean logs still attach.
+    """One secret in one chat withholds that chat alone, and the notes name it.
 
-    The ``secrets_found`` is the collector's own verdict, produced by the
-    template's real scan gate against a planted rule-matching key -- the live
-    proof that a leaked key in a conversation never reaches Sentry. A partial
-    set of conversations would be indistinguishable from a complete one, so the
-    clean chat is withheld along with the poisoned one, and neither may appear
-    in the staged archive -- whose members are read DECODED for exactly that
-    assertion. The finding names a chat, not the logs, so the logs member still
-    attaches: one secret costs the chats, not the whole report.
+    The finding is the collector's own verdict, produced by the template's real
+    scan gate against a planted rule-matching key -- the live proof that a
+    leaked key in a conversation never reaches Sentry. The clean chat and the
+    logs still attach, and the notes name the withheld chat, so the chats that
+    arrived never read as the complete set. The staged archive's members are
+    read DECODED, so the key's absence is checked on the content itself.
     """
     _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
     staging_dir = tmp_path / "bug-report-staging"
@@ -1707,8 +1705,8 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
         }
     )
     # Two distinct chats are the whole point here -- the clean one is the proof
-    # that a finding in the other withholds it too -- and each has to belong to
-    # an agent mngr lists, since that is what the collector asks.
+    # that a finding in the other costs that chat alone -- and each has to
+    # belong to an agent mngr lists, since that is what the collector asks.
     chat_agents = _chat_agents_in_container(running_workspace.container_name)
     assert len(chat_agents) >= 2, f"this test needs two chat agents to plant into; the workspace reports {chat_agents}"
     clean_agent_dir = f"{_IN_CONTAINER_MNGR_AGENTS_DIR}/{chat_agents[0][0]}"
@@ -1738,19 +1736,24 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
     assert result.staged_zip_path is not None
     member_text_by_name = _read_zip_members(result.staged_zip_path)
     assert _METADATA_MEMBER_NAME in member_text_by_name, sorted(member_text_by_name)
-    # The withheld chats announce themselves inside the archive itself.
-    notes_text = member_text_by_name.get("collection-notes.txt", "")
-    assert "recent chats" in notes_text and "secret scan" in notes_text, sorted(member_text_by_name)
-    assert not any(name.startswith(_CHAT_MEMBER_DIR_PREFIX) for name in member_text_by_name), (
-        f"a chat member survived a secret finding in another chat: {sorted(member_text_by_name)}"
+    collected_programs = _collected_log_program_names(member_text_by_name)
+    assert _SYSTEM_INTERFACE_PROGRAM_NAME in collected_programs, sorted(collected_programs)
+    clean_member_prefix = f"{_CHAT_MEMBER_DIR_PREFIX}{chat_agents[0][1]}-"
+    poisoned_member_prefix = f"{_CHAT_MEMBER_DIR_PREFIX}{chat_agents[1][1]}-"
+    # The withheld chat is named inside the archive itself.
+    notes_lines = member_text_by_name.get("collection-notes.txt", "").splitlines()
+    assert any(
+        line.startswith(f"recent chats: {poisoned_member_prefix}") and "secret scan" in line for line in notes_lines
+    ), notes_lines
+    assert not any(name.startswith(poisoned_member_prefix) for name in member_text_by_name), (
+        f"the chat carrying the key was attached: {sorted(member_text_by_name)}"
     )
-    # Decoded members: neither the poisoned chat's key nor the clean chat's
-    # content may be anywhere in what was staged.
+    assert any(
+        name.startswith(clean_member_prefix) and clean_marker in text for name, text in member_text_by_name.items()
+    ), f"the clean chat was withheld along with the poisoned one: {sorted(member_text_by_name)}"
+    # Decoded members: the poisoned chat's key may be nowhere in what was staged.
     assert not any(fake_api_key in text for text in member_text_by_name.values()), (
         "the planted key reached the staged archive"
-    )
-    assert not any(clean_marker in text for text in member_text_by_name.values()), (
-        "the clean chat shipped despite the withheld set"
     )
 
 
