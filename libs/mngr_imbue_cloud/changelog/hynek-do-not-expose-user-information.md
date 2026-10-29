@@ -1,0 +1,1 @@
+Removed the connector client's unused `auth_get_user` method along with the unauthenticated `GET /auth/users/{user_id}` connector route it bound to. Nothing in the plugin or the minds app ever called it; `GET /users/{user_id}` (signed-in callers only) remains the way to read a user's identity record by id.

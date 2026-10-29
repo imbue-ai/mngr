@@ -676,16 +676,6 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check(response, ImbueCloudAuthError)
 
-    def auth_get_user(self, user_id: str) -> dict[str, Any]:
-        response = self._send(
-            "GET",
-            self._url(f"/auth/users/{user_id}"),
-            exc_cls=ImbueCloudAuthError,
-            headers=_client_id_headers(),
-            timeout=self.timeout_seconds,
-        )
-        return self._check(response, ImbueCloudAuthError)
-
     # Hosts (lease pool)
 
     def lease_host(
