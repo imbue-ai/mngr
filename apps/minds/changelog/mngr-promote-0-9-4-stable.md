@@ -1,0 +1,1 @@
+- Start the Imbue Studio 0.9.4 stable rollout: the desktop stable channel offers ToDesktop build `2610286tjy4mwq2` to 20% of mac and Linux installs (mac needs macOS 13, `minimumSystemVersion: 22.0.0`, so macOS 12 installs stay on 0.8.5), and the stable download link serves 0.9.4 to every new download. Browser-created stable workspaces pin to `minds-v0.9.4`.

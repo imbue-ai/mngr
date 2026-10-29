@@ -41,11 +41,12 @@
 # LSMinimumSystemVersion); Squirrel.Mac installs an update without checking.
 
 [channels.stable]
-build_id = "2610066k8bzbhej"
-version = "0.8.5"
-fallback_branch = "minds-v0.8.5"
-rollout_percentage = 100
+build_id = "2610286tjy4mwq2"
+version = "0.9.4"
+fallback_branch = "minds-v0.9.4"
+rollout_percentage = 20
 platforms = ["mac", "linux"]
+mac_minimum_system_version = "22.0.0"
 
 [channels.beta]
 build_id = "2610286tjy4mwq2"
@@ -78,7 +79,7 @@ mac_minimum_system_version = "22.0.0"
 # stable). The publish refuses a tag that is not on the template remote.
 
 [web_channels.stable]
-template_ref = "minds-v0.8.5"
+template_ref = "minds-v0.9.4"
 
 [web_channels.beta]
 template_ref = "minds-v0.9.4"
