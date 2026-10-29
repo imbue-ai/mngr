@@ -134,8 +134,8 @@ class SSHTunnelPhase(UpperCaseStrEnum):
       (Not all of them precede a packet: the socket is built after the SSH
       connection is up. What they share is what they are raised *against*.)
     - ``HOST_CONNECT``: the SSH connection to the agent's host is what failed
-      (it was dialed and did not answer, or an established transport has since
-      gone inactive). Evidence about the host.
+      (it was dialed and did not answer, it answered and then hung up, or an
+      established transport has since gone inactive). Evidence about the host.
     """
 
     LOCAL_SETUP = auto()
@@ -644,7 +644,14 @@ class SSHTunnelManager(MutableModel):
             # transport (e.g. multiple Latchkey gateway tunnels to the same
             # agent host).
             handler = _ForwardedTunnelHandler(local_port=local_port, shutdown_event=self._shutdown_event)
-            assigned_remote_port = transport.request_port_forward("127.0.0.1", remote_port, handler=handler)
+            # A transport whose peer has just hung up raises a bare ``EOFError`` here.
+            try:
+                assigned_remote_port = transport.request_port_forward("127.0.0.1", remote_port, handler=handler)
+            except EOFError as e:
+                raise SSHTunnelError(
+                    f"SSH host {conn_key} closed the connection while setting up the reverse tunnel",
+                    SSHTunnelPhase.HOST_CONNECT,
+                ) from e
             logger.info(
                 "Reverse tunnel established: remote 127.0.0.1:{} -> local 127.0.0.1:{}",
                 assigned_remote_port,
@@ -894,7 +901,9 @@ class SSHTunnelManager(MutableModel):
                     transport = client.get_transport()
                     if transport is not None and transport.is_active():
                         transport.cancel_port_forward("127.0.0.1", info.remote_port)
-                except (paramiko.SSHException, OSError) as e:
+                # ``EOFError``: what paramiko raises from the cancel's write when
+                # the peer hung up under a transport still reporting active.
+                except (paramiko.SSHException, EOFError, OSError) as e:
                     logger.trace("Error cancelling reverse port forward during removal: {}", e)
 
         for client in orphaned_clients.values():
@@ -948,7 +957,7 @@ class SSHTunnelManager(MutableModel):
                 transport = client.get_transport()
                 if transport is not None:
                     transport.cancel_port_forward("127.0.0.1", tunnel_info.remote_port)
-            except (paramiko.SSHException, OSError) as e:
+            except (paramiko.SSHException, EOFError, OSError) as e:
                 logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
         self._reverse_tunnel_clients.clear()
@@ -1036,8 +1045,13 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     only during authentication, after the host has answered, where it is
     indistinguishable from the host rejecting us and would be read as the
     host's fault. A key that is present but no longer accepted (rotated
-    out) cannot be told from a rejection without asking the host, so it stays
-    ``CONNECT_ERROR``.
+    out) cannot be told from a rejection without asking the host, so it is
+    left as paramiko's ``AuthenticationException`` and never tagged
+    ``LOCAL_SETUP``.
+
+    A host that hangs up mid-handshake also raises ``SSHTunnelError`` tagged
+    ``HOST_CONNECT``: paramiko reports it as a bare ``EOFError``, which is
+    neither an ``SSHException`` nor an ``OSError``.
 
     The one exception to the key check is a credential-deferring host (no
     producer-owned key at all): its authentication material is the user's own
@@ -1098,6 +1112,12 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         if _was_rejected_during_authentication(client, e):
             _log_authentication_failure(ssh_info, e)
         raise
+    except EOFError as e:
+        client.close()
+        raise SSHTunnelError(
+            f"SSH host {ssh_info.host}:{ssh_info.port} closed the connection during the handshake",
+            SSHTunnelPhase.HOST_CONNECT,
+        ) from e
 
     # Send periodic keepalives so an idle reverse tunnel is not reaped for
     # inactivity, which would leave the remote sshd's forwarded listener bound
