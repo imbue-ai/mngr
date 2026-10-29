@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-10-28
 
+The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection to an agent host loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake). The failure is now retried on a rebuilt connection and, if it persists, recorded as a transient wiring-step failure for the next discovery cycle to retry.
+
+## 2026-10-28
+
 When `latchkey auth re-encrypt` fails during a credential export, the error now carries the facts that explain a signal exit such as `-15`: whether its 5s timeout had passed, how long the run took, how many services were requested, and whether a destination key and an account were given. These are counts and flags only, never the service names or the account. The message therefore shows whether this process's own timeout or something outside the process killed the CLI.
 
 ## 2026-10-27

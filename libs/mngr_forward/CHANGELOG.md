@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: An SSH host that closes the connection during the handshake or while a reverse tunnel is being set up now surfaces as an `SSHTunnelError` (`HOST_CONNECT`) instead of a bare paramiko `EOFError` that used to kill the reverse-tunnel health-check thread and abort the latchkey discovery cycle.
+- Fixed: Removing a reverse tunnel and `SSHTunnelManager.cleanup()` no longer raise when the host hangs up during the best-effort remote port-forward cancel.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Added

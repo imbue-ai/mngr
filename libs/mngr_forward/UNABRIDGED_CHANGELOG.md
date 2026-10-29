@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-28
+
+- An SSH host that closes the connection during the handshake, or while a reverse tunnel is being requested, now surfaces as an `SSHTunnelError` tagged `HOST_CONNECT` instead of a bare paramiko `EOFError`. Previously the `EOFError` escaped every caller's handler: it killed the reverse-tunnel health-check thread, so no tunnel in the process was repaired again until restart, and it aborted the latchkey discovery cycle that was wiring the tunnel.
+
+- Removing a reverse tunnel, and `SSHTunnelManager.cleanup()`, no longer raise when the host hangs up under the best-effort cancel of the remote port forward.
+
 ## 2026-10-27
 
 Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.

@@ -163,6 +163,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `GET /api/v1/agents/<agent_id>/folder-syncs` lets an agent in a workspace read this desktop's folder syncs with it (local and workspace paths, state, progress, direction, conflict rule).
 - Added: A workspace app can ask Imbue Studio to open the Permissions pane's Local files section (embed contract v11, `minds:open-local-files`).
 - Added: Released Imbue Studio 0.9.2 (a patch over 0.9.1, template `minds-v0.9.2`) and promoted it to the alpha desktop and workspace channels.
+- Added: Promoted Imbue Studio 0.9.4 to the beta desktop and browser channels (beta workspaces pin `minds-v0.9.4`, mac now requires macOS 13); stable stays 0.8.5.
 
 ### Changed
 
@@ -510,6 +511,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Adding a path that is already shared no longer re-grades it to read-only, which used to take away write access and turn a two-way sync one-way.
 - Fixed: The Permissions pane's once-a-second poll no longer shows a sync that failed to come back at launch as a plain "stopped" row while another sync is running; it reports the failure.
 - Fixed: Quitting Imbue Studio now reliably stops every folder sync, including one that was part-way to starting (which used to leave a `mngr pair` and its unison outliving the app).
+- Fixed: Creating a workspace from a remote repository with a branch it does not have (e.g. `main` on a `master`-default repo) no longer reports "This repository looks private"; the creating page explains the ref is missing (new `GIT_REF_NOT_FOUND` `error_kind`) and the failure is no longer sent to error tracking.
 
 ### Security
 

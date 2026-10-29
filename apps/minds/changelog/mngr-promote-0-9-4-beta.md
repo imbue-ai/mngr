@@ -1,1 +1,0 @@
-- Promote Imbue Studio 0.9.4 to the beta channels: the desktop beta channel serves ToDesktop build `2610286tjy4mwq2` (mac and Linux, 100%; mac now needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created beta workspaces pin to `minds-v0.9.4`. Stable stays on 0.8.5.

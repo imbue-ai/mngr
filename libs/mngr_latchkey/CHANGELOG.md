@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Changed

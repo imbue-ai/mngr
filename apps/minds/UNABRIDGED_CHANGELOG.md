@@ -6,6 +6,12 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-10-28
 
+- Promote Imbue Studio 0.9.4 to the beta channels: the desktop beta channel serves ToDesktop build `2610286tjy4mwq2` (mac and Linux, 100%; mac now needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created beta workspaces pin to `minds-v0.9.4`. Stable stays on 0.8.5.
+
+Fixed: creating a workspace from a remote repository with a Branch the repository does not have (for example `main` on a repo whose default branch is `master`) no longer says "This repository looks private". The creating page now explains that the repository has no branch or tag with that name and suggests clearing the Branch field or entering one that exists. The create-operation status API's `error_kind` field gained the value `GIT_REF_NOT_FOUND` for this case, and the failure is no longer reported to error tracking as an error. Other clone failures, and a missing ref on the default workspace template (a broken release, not user input), still report as errors.
+
+## 2026-10-28
+
 The `agent_types.claude.check_installation=false` setting that the bare-`mngr create` fallback adds to assist and update chats is now marked for removal. It only still matters for workspaces on templates from before `version_mismatch = "WARN"`: on newer templates a drifted claude only logs a warning, and mngr no longer ties the version check to `check_installation`.
 
 - Cut the Imbue Studio 0.9.4 release: the app version is 0.9.4 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.4`, carrying everything that landed on `main` since `minds-v0.9.3`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: a pinned harness version that does not match the installed one warns instead of failing the create; Antigravity records reasoning effort and confirms slash commands promptly; and the data-encryption key is cleared from the browser after logout.

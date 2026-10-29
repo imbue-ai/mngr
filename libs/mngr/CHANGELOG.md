@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: `mngr connect` (and `create`/`start --connect`) now recovers when its SSH session to a remote agent drops (e.g. after the laptop sleeps): it resets the terminal modes the session enabled, restores and restarts a host that paused while disconnected, and exits non-zero when the session cannot be reattached.
+- Fixed: An SSH connection whose local address vanished (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake) is now treated as a dead connection and retried on a rebuilt connection, surfacing as `HostConnectionError` instead of a raw `OSError`; this stops the latchkey forward daemon's gateway provisioning from crashing on it.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Added

@@ -6,6 +6,20 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-10-28
 
+`mngr connect` (and `mngr create`/`mngr start` with `--connect`) recovers when its SSH session to a remote agent drops, for example after the laptop sleeps.
+
+- The terminal modes the remote session switched on are switched off again, the same set tmux's client resets when it releases a terminal: the scroll region, mouse reporting, bracketed paste, focus reporting, keypad mode, the alternate screen, text attributes and a hidden cursor. Before, a dropped session could leave the shell receiving every mouse movement as typed text.
+
+- If the host paused while disconnected (idle timeout or lifetime cap), it is restored and the agent started again before reattaching, at the host's new address. `mngr connect --no-start` leaves a paused host alone. A host that was stopped, destroyed, failed or crashed is not restored; the command stops with an error instead.
+
+- A drop that spans a sleep reconnects at once without using a retry (`connect_retry_times`).
+
+- When the session cannot be reattached, the command now exits non-zero instead of returning as if the session had ended normally, and a remote exit status other than a lost connection or a Ctrl-q/Ctrl-t action is reported as an error rather than retried.
+
+An SSH connection whose local address vanished under it (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake) is now recognized as a dead connection: the operation disconnects and retries on a rebuilt connection, and a failure that outlives the retries surfaces as a `HostConnectionError` instead of a raw `OSError`. This stops the latchkey forward daemon's remote gateway provisioning from crashing on it.
+
+## 2026-10-28
+
 Added `VersionMismatchPolicy` (`ERROR` / `WARN`) and a `mismatch_policy` argument on the shared `verify_pinned_cli_version`, so an agent type can choose whether an installed CLI that does not report its pinned version fails provisioning or only logs a warning naming the harness, the installed version, and the pin.
 
 The version probe now runs `<binary> --version` (the binary `ensure_cli_installed` checks for) instead of the agent's launch `command`. A launch command can be a wrapper that only resolves inside the agent's environment, and a probe that fails is skipped silently, so a wrapped harness was never checked at all.
