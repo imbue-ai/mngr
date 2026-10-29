@@ -70,7 +70,7 @@ const UNISON_FSMONITOR_VERSION = '0.3.9';
 // in EXPECTED_SHA256 to match (the tarball filename is version-less, so the
 // old hash would otherwise be checked against the new bytes and fail).
 const CURL_SHIMS_REPO = 'imbue-ai/latchkey-curl-shims';
-const CURL_SHIMS_VERSION = 'v0.6.0';
+const CURL_SHIMS_VERSION = 'v0.7.1';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -115,10 +115,10 @@ const EXPECTED_SHA256 = {
   'unison-fsmonitor-macos-amd64.tar.gz':   '79197d15f3a39c25a76f2188e24c8d4163e4e2b1442ffd98b04ff3761bc76dcd',
   // From the `SHA256SUMS` of the latchkey-curl-shims release named by
   // CURL_SHIMS_VERSION.
-  'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      'c7ad059addf9d3b52005e20019818542fb0a0bd37e4d2f787aad92773aa58509',
-  'latchkey-curl-shims-x86_64-apple-darwin.tar.gz':       '2d12a2b6c03402900a7d842d3bd8df651c2d7ef5a5d605af84b1a3cdd85746be',
-  'latchkey-curl-shims-x86_64-unknown-linux-musl.tar.gz': 'bbe44c1d270d7ff91fef587b68cecb0a1d7ec1c644b7c79aa38271ebe730e443',
-  'latchkey-curl-shims-aarch64-unknown-linux-musl.tar.gz': '08597f008d4b98fd2a991775c7c0f06faf71d6b499a31ee281ac77a436a10730',
+  'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      '81070820a558ee352a309dc3251609da00dbd07bcad32925bf0e825c98b5d302',
+  'latchkey-curl-shims-x86_64-apple-darwin.tar.gz':       'd54b4d1c3ab04bed47e18259059133bd89ea58c2440159ea56e4ff89e57221e4',
+  'latchkey-curl-shims-x86_64-unknown-linux-musl.tar.gz': '4fe0d4d5efe8984823433210cfaa41d2a1174c6631a82391f2f8fc3a7e8a659f',
+  'latchkey-curl-shims-aarch64-unknown-linux-musl.tar.gz': '2c80c34094a23fff8c0460cfe24faabe098fb2dfe6f54fe5e206feece1d50080',
 };
 
 const MAX_REDIRECTS = 5;

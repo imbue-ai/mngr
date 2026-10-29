@@ -102,18 +102,19 @@ LATCHKEY_VERSION: Final[str] = "3.19.4"
 # latchkey-curl-shims release the machine fetches the curl router + the
 # Chrome-impersonating curl from (``latchkey-curl-shims-<triple>.tar.gz``). The
 # gateway runs the router as its ``LATCHKEY_CURL``: a request carrying the
-# ``X-Imbue-Impersonate`` marker header gets Chrome TLS impersonation, and every
-# other request passes through to the system curl. The statically linked musl
-# build is fetched, so it runs on any VPS image regardless of how old its glibc
-# is.
+# ``X-Imbue-Impersonate`` marker header gets Chrome TLS impersonation (the value
+# names the profile; ``1`` means the default) and its reply handed on compressed
+# for the caller's own ``--compressed`` to decode, and every other request passes
+# through to the system curl. The statically linked musl build is fetched, so it
+# runs on any VPS image regardless of how old its glibc is.
 CURL_SHIMS_REPO: Final[str] = "imbue-ai/latchkey-curl-shims"
-CURL_SHIMS_VERSION: Final[str] = "v0.6.0"
+CURL_SHIMS_VERSION: Final[str] = "v0.7.1"
 # sha256 of each tarball a machine can fetch, from the release's ``SHA256SUMS``.
 # Pinned here rather than downloaded beside the tarball, so a tarball replaced
 # on the release fails the install instead of verifying against its own sum.
 CURL_SHIMS_SHA256_BY_TRIPLE: Final[Mapping[str, str]] = {
-    "x86_64-unknown-linux-musl": "bbe44c1d270d7ff91fef587b68cecb0a1d7ec1c644b7c79aa38271ebe730e443",
-    "aarch64-unknown-linux-musl": "08597f008d4b98fd2a991775c7c0f06faf71d6b499a31ee281ac77a436a10730",
+    "x86_64-unknown-linux-musl": "4fe0d4d5efe8984823433210cfaa41d2a1174c6631a82391f2f8fc3a7e8a659f",
+    "aarch64-unknown-linux-musl": "2c80c34094a23fff8c0460cfe24faabe098fb2dfe6f54fe5e206feece1d50080",
 }
 # ``uname -m`` patterns, as ``case`` alternatives, and the build each selects.
 CURL_SHIMS_TRIPLE_BY_UNAME_PATTERN: Final[tuple[tuple[str, str], ...]] = (
