@@ -37,6 +37,7 @@ def test_verb_catalog_covers_expected_verbs() -> None:
         "minds-workspaces-backups-manage",
         "minds-workspaces-ssh",
         "minds-workspaces-update",
+        "minds-workspaces-account-settings",
         "minds-workspaces-recover",
     }
 
@@ -50,5 +51,6 @@ def test_targeted_verbs_are_the_mutating_and_ssh_verbs() -> None:
         "minds-workspaces-backups-manage",
         "minds-workspaces-ssh",
         "minds-workspaces-update",
+        "minds-workspaces-account-settings",
         "minds-workspaces-recover",
     }

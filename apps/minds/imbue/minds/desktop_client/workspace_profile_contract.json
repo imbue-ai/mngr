@@ -1,0 +1,50 @@
+{
+  "snapshot_format": 1,
+  "snapshot_relative_path": "data/.state/profile/account.json",
+  "header_keys": [
+    "account_id",
+    "owner_user_id",
+    "snapshot_format",
+    "written_at",
+    "written_by"
+  ],
+  "setting_keys": [
+    "keybindings"
+  ],
+  "chord_modifier_order": [
+    "ctrl",
+    "alt",
+    "shift",
+    "meta"
+  ],
+  "chord_named_keys": [
+    "enter",
+    "escape",
+    "tab",
+    "space",
+    "backspace",
+    "delete",
+    "insert",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "plus",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12"
+  ]
+}

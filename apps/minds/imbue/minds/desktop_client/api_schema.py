@@ -50,6 +50,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AccountKeybindingsPutRequest
+from imbue.minds.desktop_client.api_models import AccountKeybindingsResponse
 from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
 from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountsResponse
@@ -185,6 +187,9 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("GET", "/api/v1/workspaces/{agent_id}"): _RouteModels(response_model=WorkspaceSummary),
     ("PATCH", "/api/v1/workspaces/{agent_id}"): _RouteModels(request_model=PatchWorkspaceRequest),
+    ("PUT", "/api/v1/workspaces/{agent_id}/account-settings/keybindings"): _RouteModels(
+        request_model=AccountKeybindingsPutRequest, response_model=AccountKeybindingsResponse
+    ),
     ("GET", "/api/v1/workspaces/{agent_id}/version"): _RouteModels(response_model=WorkspaceVersionResponse),
     ("GET", "/api/v1/workspaces/{agent_id}/backups"): _RouteModels(response_model=WorkspaceBackupsResponse),
     ("GET", "/api/v1/workspaces/{agent_id}/backup-check"): _RouteModels(response_model=WorkspaceBackupCheckResponse),

@@ -145,8 +145,11 @@ def _quote_toml_key(key: str) -> str:
     return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _atomic_write_clause(relative_path: str, content: str, tmp_var: str) -> str:
+def atomic_write_clause(relative_path: str, content: str, tmp_var: str) -> str:
     """One shell clause atomically writing ``content`` (base64 in transit) to ``relative_path``.
+
+    Shared with the workspace profile writer (``workspace_profile_writer.py``), which
+    materializes the profile snapshot through the same exec shape.
 
     The tmp name comes from mktemp, never a fixed `<path>.tmp`: two
     concurrent writers sharing one tmp path interleave their bytes and the
@@ -169,7 +172,7 @@ def _locked_grants_write_clause(grants_toml_text: str) -> str:
     the duration of the atomic replace; the lock file itself is created on
     first use (``mkdir -p`` covers a first share).
     """
-    write_clause = _atomic_write_clause(_SHARE_GRANTS_FILE, grants_toml_text, "tmp_grants")
+    write_clause = atomic_write_clause(_SHARE_GRANTS_FILE, grants_toml_text, "tmp_grants")
     directory = _SHARE_GRANTS_LOCK_FILE.rpartition("/")[0]
     return f"mkdir -p {directory} && flock {_SHARE_GRANTS_LOCK_FILE} sh -c {shlex.quote(write_clause)}"
 
@@ -196,7 +199,7 @@ def provision_share_files_in_agent(
     if grants_toml_text is not None:
         clauses.append(_locked_grants_write_clause(grants_toml_text))
     if share_env_text is not None:
-        clauses.append(_atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
+        clauses.append(atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
     if not clauses:
         raise ShareInjectionError(f"Nothing to write into agent {agent_address}: no grants and no share.env given")
     result = mngr_caller.call(

@@ -111,11 +111,11 @@ from imbue.minds.desktop_client.update_apply_window import BUSY_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import WATCHDOG_INSTALLED_SENTINEL
-from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SOURCE
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SOURCE
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
@@ -535,6 +535,7 @@ def build_ui_state_publisher_for_test(
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
         derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
+        derive_account_update_settings=lambda _account_id: ("2:00 AM-5:00 AM", False),
         resolve_workspace_account_id=resolve_workspace_account_id,
         min_seconds_between_passes=min_seconds_between_passes,
     )
@@ -1076,16 +1077,16 @@ def exec_json_envelope(
 
 
 def make_update_state_store(
-    tmp_path: Path, *, dismissal_store: UpdateDismissalStore | None = None
+    tmp_path: Path, *, facts_cache: WorkspaceFactsCache | None = None
 ) -> WorkspaceUpdateStateStore:
-    """An update state store over the dismissal store under ``tmp_path``.
+    """An update state store over the facts cache under ``tmp_path``.
 
     A second call on the same ``tmp_path`` reads what the first one wrote, as a relaunched app would.
     """
     return WorkspaceUpdateStateStore(
-        dismissal_store=dismissal_store
-        if dismissal_store is not None
-        else UpdateDismissalStore(records_dir=tmp_path / "update_dismissals"),
+        facts_cache=facts_cache
+        if facts_cache is not None
+        else WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
     )
 
 

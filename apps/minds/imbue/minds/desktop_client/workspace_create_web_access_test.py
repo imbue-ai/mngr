@@ -227,7 +227,7 @@ def test_web_access_enabler_swallows_sharing_failures_and_tells_the_user(tmp_pat
     assert isinstance(cli, _RecordingCreateShareCli)
     feed = NotificationFeed(
         notification_dispatcher=None,
-        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
+        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
             is_enabled=True, style=NotificationStyle.BOTH
         ),
         is_main_window_focused=lambda: False,
@@ -277,7 +277,7 @@ def test_web_access_enabler_points_a_quota_refusal_at_the_shared_workspaces_page
     store, cli = _store_with_associated_workspace(tmp_path, cli=quota_refusing_cli, is_cloud_row=True)
     feed = NotificationFeed(
         notification_dispatcher=None,
-        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
+        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
             is_enabled=True, style=NotificationStyle.BOTH
         ),
         is_main_window_focused=lambda: False,

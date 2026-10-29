@@ -19,6 +19,7 @@ import type {
   UiNotificationsMessage,
 } from "../channel/messages";
 import { electronBridge } from "../electron-bridge";
+import { putAccountSettings } from "./accountSettings";
 import type { NotificationsStore } from "./notifications";
 import type { WorkspaceMessage } from "./workspaceMessage";
 import { workspaceMessageFromDestination } from "./workspaceMessage";
@@ -278,17 +279,15 @@ export interface FetchLike {
   (url: string, init?: RequestInit): Promise<Response>;
 }
 
-/** The one builder of the If-Match-guarded notification-prefs write, shared
+/** The one builder of the If-Match-guarded notification-style write, shared
  * by every writer so the endpoint and its version contract cannot drift
- * apart. Response handling stays with the caller -- each surface rebases
- * and surfaces failures its own way. */
-export function postNotificationPrefsWrite(
+ * apart. The master toggle is account-keyed and goes through the
+ * account-settings PUT instead. Response handling stays with the caller --
+ * each surface rebases and surfaces failures its own way. */
+export function postNotificationStyleWrite(
   fetchImpl: FetchLike,
   ifMatchVersion: string,
-  next: {
-    is_enabled: boolean;
-    style: NotificationStyle;
-  },
+  style: NotificationStyle,
 ): Promise<Response> {
   return fetchImpl("/ui/api/settings/notifications", {
     method: "POST",
@@ -297,7 +296,7 @@ export function postNotificationPrefsWrite(
       "Content-Type": "application/json",
       "If-Match": ifMatchVersion,
     },
-    body: JSON.stringify(next),
+    body: JSON.stringify({ style }),
   });
 }
 
@@ -325,6 +324,9 @@ export interface NotificationsUiHooks {
   relayShellEvent?: (event: { type: string } & Record<string, unknown>) => void;
   /** Injected in tests; defaults to the global fetch. */
   fetchImpl?: FetchLike;
+  /** The window's account, whose record holds the master toggle the prefs
+   * load resolves; absent reads the device's. */
+  accountId?: () => string;
   /** Injected in tests; defaults to m.redraw. */
   redraw?: () => void;
   /** Where clicks land; unwired surfaces navigate without shell knowledge. */
@@ -343,9 +345,12 @@ export class NotificationsUiController {
     );
   }
 
-  /** Null chooses the bell alone; every answer is saved through the settings API. */
+  /** Null chooses the bell alone; every answer is saved through the settings
+   * API: the style on its own If-Match-guarded record, and the master toggle
+   * through the window's account's settings PUT. */
   async chooseNotificationStyle(
     style: NotificationStyle | null,
+    accountId: string,
   ): Promise<void> {
     if (this.isSavingChoice) return;
     this.isSavingChoice = true;
@@ -354,10 +359,10 @@ export class NotificationsUiController {
     const current = currentNotificationPrefs();
     const next = { is_enabled: style !== null, style: style ?? current.style };
     try {
-      const response = await postNotificationPrefsWrite(
+      const response = await postNotificationStyleWrite(
         this.fetchImpl(),
         current.version,
-        next,
+        next.style,
       );
       if (response.status === 412) {
         await this.loadPrefs();
@@ -366,6 +371,25 @@ export class NotificationsUiController {
             "Settings changed in another window. Please choose again.";
       } else if (response.ok) {
         const result = (await response.json()) as { version: string };
+        if (next.is_enabled !== current.is_enabled) {
+          const enabledResponse = await putAccountSettings(
+            this.fetchImpl(),
+            accountId,
+            { notifications_enabled: next.is_enabled },
+          );
+          if (!enabledResponse.ok) {
+            // The style write landed and changed the record's version: adopt
+            // it (keeping the card up via has_chosen) so a retry's style POST
+            // matches instead of 412-ing against this click's own write.
+            applyNotificationPrefs({
+              ...current,
+              style: next.style,
+              version: result.version,
+            });
+            this.choiceError = "Could not save your choice. Please try again.";
+            return;
+          }
+        }
         applyNotificationPrefs({
           ...next,
           has_chosen: true,
@@ -641,9 +665,15 @@ export class NotificationsUiController {
   private async loadPrefsOnce(): Promise<void> {
     const generationAtStart = appliedPrefsGeneration;
     try {
-      const response = await this.fetchImpl()("/ui/api/settings", {
-        credentials: "same-origin",
-      });
+      // The window's account's record: the master toggle is account-keyed
+      // (and the chooser writes it there), so the gate must read the same one.
+      const accountId = this.hooks.accountId?.() ?? "local";
+      const response = await this.fetchImpl()(
+        `/ui/api/settings?account=${encodeURIComponent(accountId)}`,
+        {
+          credentials: "same-origin",
+        },
+      );
       if (!response.ok) return;
       const data = (await response.json()) as {
         notification_prefs?: NotificationPrefs;

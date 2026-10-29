@@ -146,6 +146,12 @@ class UiStatePublisher(MutableModel):
     derive_workspace_updates: Callable[[], UiWorkspaceUpdatesMessage] = Field(
         frozen=True, description="Current per-workspace update state"
     )
+    derive_account_update_settings: Callable[[str], tuple[str, bool]] = Field(
+        frozen=True,
+        description=(
+            "One account's resolved (update window, auto-update toggle), for the updates frame's account projection"
+        ),
+    )
     resolve_workspace_account_id: Callable[[str], str] = Field(
         frozen=True,
         description="The account id a workspace's health edge belongs to ('local' for one associated with none)",
@@ -211,7 +217,8 @@ class UiStatePublisher(MutableModel):
             workspace_updates=self.derive_workspace_updates(),
             environment=self.derive_environment(),
         )
-        return project_snapshot(install_snapshot, account_id)
+        update_window, is_auto_update_enabled = self.derive_account_update_settings(account_id)
+        return project_snapshot(install_snapshot, account_id, update_window, is_auto_update_enabled)
 
     def build_snapshot_frames(self, account_id: str) -> list[str]:
         """Serialize one account's connect sequence: hello, then one frame per snapshot type."""
@@ -263,7 +270,11 @@ class UiStatePublisher(MutableModel):
         if derived.notifications is not None:
             self._broadcast_if_changed(account_id, project_notifications(derived.notifications, scope))
         if derived.workspace_updates is not None:
-            self._broadcast_if_changed(account_id, project_workspace_updates(derived.workspace_updates, scope))
+            update_window, is_auto_update_enabled = self.derive_account_update_settings(account_id)
+            self._broadcast_if_changed(
+                account_id,
+                project_workspace_updates(derived.workspace_updates, scope, update_window, is_auto_update_enabled),
+            )
 
     def _broadcast_if_changed(self, scope: str, message: _UiDiffedMessage) -> None:
         """Send the frame to the scope's windows (every window for the install-wide scope) unless it is unchanged."""

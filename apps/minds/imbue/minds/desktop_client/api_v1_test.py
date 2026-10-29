@@ -49,9 +49,11 @@ from imbue.minds.desktop_client.api_v1 import _SSH_GRANT_WRITE_ATTEMPTS
 from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -62,7 +64,6 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
-from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
@@ -2127,6 +2128,8 @@ def _build_client(
     minds_config: MindsConfig | None = None,
     mngr_caller: MngrCaller | None = None,
     agent_creator: AgentCreator | None = None,
+    account_settings_store: AccountSettingsStore | None = None,
+    workspace_profile_writer: WorkspaceProfileWriter | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -2147,6 +2150,8 @@ def _build_client(
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_caller=mngr_caller if mngr_caller is not None else RecordingMngrCaller(),
         client_env_config=client_env_config,
+        account_settings_store=account_settings_store,
+        workspace_profile_writer=workspace_profile_writer,
     )
     return app.test_client()
 
@@ -2439,6 +2444,129 @@ def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) ->
 
     assert response.status_code == 403
     assert "account-owned provider" in json.loads(response.data)["error"]
+
+
+def _account_keybindings_url(agent_id: AgentId) -> str:
+    return f"/api/v1/workspaces/{agent_id}/account-settings/keybindings"
+
+
+_KEYBINDINGS_BODY = {"keybindings": {"chat": {"send-message": ["ctrl+enter"]}}}
+
+
+def test_put_account_keybindings_requires_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.put(_account_keybindings_url(agent_id), json=_KEYBINDINGS_BODY)
+
+    assert response.status_code == 401
+
+
+def test_put_account_keybindings_unknown_workspace_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.put(_account_keybindings_url(AgentId()), headers=_auth_header(), json=_KEYBINDINGS_BODY)
+
+    assert response.status_code == 404
+
+
+def test_put_account_keybindings_refuses_an_unassociated_workspace(tmp_path: Path) -> None:
+    # A workspace with no association has no account to write to (spec section 9.2);
+    # the device pseudo-account would never sync, so the write is refused outright.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
+    client = _build_client(
+        tmp_path, resolver, imbue_cloud_cli=cli, session_store=store, account_settings_store=settings_store
+    )
+
+    response = client.put(_account_keybindings_url(agent_id), headers=_auth_header(), json=_KEYBINDINGS_BODY)
+
+    assert response.status_code == 409
+    assert "not associated" in json.loads(response.data)["error"]
+
+
+def test_put_account_keybindings_refuses_a_non_canonical_chord(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    store = _associated_session_store(
+        tmp_path, cli, agent_id, user_id="33333333-3333-3333-3333-333333333333", email="owner@example.com"
+    )
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
+    client = _build_client(
+        tmp_path, resolver, imbue_cloud_cli=cli, session_store=store, account_settings_store=settings_store
+    )
+
+    response = client.put(
+        _account_keybindings_url(agent_id),
+        headers=_auth_header(),
+        json={"keybindings": {"chat": {"send-message": ["Ctrl+Enter"]}}},
+    )
+
+    assert response.status_code == 400
+    assert "not a canonical chord" in json.loads(response.data)["error"]
+
+
+def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_snapshot_stale(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    user_id = "44444444-4444-4444-4444-444444444444"
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
+    hashes_dir = tmp_path / "workspace_profile_hashes"
+    hashes_dir.mkdir(parents=True)
+    (hashes_dir / str(agent_id)).write_text("stale-hash")
+    profile_writer = WorkspaceProfileWriter(
+        mngr_caller=RecordingMngrCaller(),
+        backend_resolver=resolver,
+        session_store=store,
+        settings_store=settings_store,
+        device_id="device-under-test",
+        hashes_dir=hashes_dir,
+    )
+    client = _build_client(
+        tmp_path,
+        resolver,
+        imbue_cloud_cli=cli,
+        session_store=store,
+        account_settings_store=settings_store,
+        workspace_profile_writer=profile_writer,
+    )
+
+    response = client.put(_account_keybindings_url(agent_id), headers=_auth_header(), json=_KEYBINDINGS_BODY)
+
+    assert response.status_code == 200
+    answered = json.loads(response.data)
+    assert answered["account_id"] == user_id
+    assert answered["keybindings"] == {"chat": {"send-message": ["ctrl+enter"]}}
+    # The value landed on the owning account's replica, marked for the next push...
+    record = settings_store.get_record(user_id, "default")
+    assert record is not None and record.is_dirty
+    assert settings_store.read_settings(user_id).keybindings == {"chat": {"send-message": ("ctrl+enter",)}}
+    # ...and the workspace's snapshot hash was dropped, so the next sync pass rewrites it.
+    assert not (hashes_dir / str(agent_id)).exists()
+
+
+def test_put_account_keybindings_refuses_a_too_new_settings_record(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    user_id = "55555555-5555-5555-5555-555555555555"
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
+    settings_store.seed_if_absent(user_id, {"settings_format": 2})
+    client = _build_client(
+        tmp_path, resolver, imbue_cloud_cli=cli, session_store=store, account_settings_store=settings_store
+    )
+
+    response = client.put(_account_keybindings_url(agent_id), headers=_auth_header(), json=_KEYBINDINGS_BODY)
+
+    assert response.status_code == 409
+    assert "newer version" in json.loads(response.data)["error"]
 
 
 def test_dismiss_destroy_operation_is_idempotent_noop(tmp_path: Path) -> None:
@@ -4318,7 +4446,9 @@ def test_workspace_backup_check_reports_disabled_verification_without_exec(
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-    set_backup_verification_enabled(InstallationPaths(data_dir=tmp_path / "minds"), agent_id, False)
+    facts_cache = get_state(client.application).workspace_facts_cache
+    assert facts_cache is not None
+    facts_cache.set_backup_verification_enabled(agent_id, False)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
 
@@ -4800,16 +4930,17 @@ def test_backup_operation_status_surfaces_blocked_chats(tmp_path: Path) -> None:
 def test_backup_verification_toggle_round_trips(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
-    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    facts_cache = get_state(client.application).workspace_facts_cache
+    assert facts_cache is not None
     toggle_url = f"/api/v1/workspaces/{agent_id}/backup-service/verification"
 
     disabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": False})
     assert disabled.status_code == 200
-    assert is_backup_verification_enabled(paths, agent_id) is False
+    assert is_backup_verification_enabled(facts_cache, agent_id) is False
 
     enabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": True})
     assert enabled.status_code == 200
-    assert is_backup_verification_enabled(paths, agent_id) is True
+    assert is_backup_verification_enabled(facts_cache, agent_id) is True
 
 
 def test_backup_verification_toggle_requires_the_enabled_field(tmp_path: Path) -> None:

@@ -79,6 +79,7 @@ from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
 from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionResult
 from imbue.minds.desktop_client.workspace_diagnostics import collect_workspace_diagnostics
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -1244,6 +1245,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
         agent_id=agent_id,
         paths=paths,
         resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        facts_cache=WorkspaceFactsCache(records_dir=paths.data_dir / "workspace_facts_cache"),
         registry=registry,
         parent_cg=None,
         snapshot_id=snapshot_id,

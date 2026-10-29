@@ -21,13 +21,15 @@ import type {
   UpdateState,
   UpdateStatus,
 } from "../electron-bridge";
+import { putAccountSettings } from "./accountSettings";
+import type { AccountSettings } from "./accountSettings";
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
 import { BrowserImportModel } from "./browserImport";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   applyNotificationPrefs,
-  postNotificationPrefsWrite,
+  postNotificationStyleWrite,
 } from "./notificationsUi";
 
 export interface SettingsOverview {
@@ -195,12 +197,20 @@ export class SettingsModel {
     this.browserImport = new BrowserImportModel(fetchImpl, redraw);
   }
 
-  async load(): Promise<void> {
+  /** The account whose account-keyed values the overview resolves for;
+   * remembered from load() so internal rebase reloads stay on it. */
+  private accountId = "local";
+
+  async load(accountId?: string): Promise<void> {
+    if (accountId !== undefined) this.accountId = accountId;
     this.isLoadFailed = false;
     try {
-      const response = await this.fetchImpl("/ui/api/settings", {
-        credentials: "same-origin",
-      });
+      const response = await this.fetchImpl(
+        `/ui/api/settings?account=${encodeURIComponent(this.accountId)}`,
+        {
+          credentials: "same-origin",
+        },
+      );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       this.overview = (await response.json()) as SettingsOverview;
       // Keep the app-wide applied prefs (which gate notification arrivals)
@@ -313,18 +323,21 @@ export class SettingsModel {
     this.redraw();
   }
 
-  /** Persist the local-clock window scheduled machine updates run in. No
-   * If-Match: a plain preference, so two windows racing costs nothing. */
-  async setUpdateWindow(startHour: number, endHour: number): Promise<void> {
+  /** Persist the local-clock window scheduled machine updates run in,
+   * through the account-settings PUT. No If-Match: a plain preference, so
+   * two windows racing costs nothing. */
+  async setUpdateWindow(
+    accountId: string,
+    startHour: number,
+    endHour: number,
+  ): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
     this.updateWindowError = "";
     try {
-      const response = await this.fetchImpl("/ui/api/settings/update-window", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ start_hour: startHour, end_hour: endHour }),
+      const response = await putAccountSettings(this.fetchImpl, accountId, {
+        update_window_start_hour: startHour,
+        update_window_end_hour: endHour,
       });
       if (response.ok) {
         // Merge onto the current overview, not the pre-await snapshot: a
@@ -351,25 +364,23 @@ export class SettingsModel {
     this.redraw();
   }
 
-  /** Turn auto-update on or off for every workspace. A plain preference like
-   * the window: no If-Match. The switch shows what the backend confirmed. */
-  async setAutoUpdateEnabled(isEnabled: boolean): Promise<void> {
+  /** Turn auto-update on or off for every workspace, through the
+   * account-settings PUT. A plain preference like the window: no If-Match.
+   * The switch shows what the backend confirmed. */
+  async setAutoUpdateEnabled(accountId: string, isEnabled: boolean): Promise<void> {
     if (this.overview === null) return;
     this.autoUpdateError = "";
     this.isAutoUpdateBusy = true;
     this.redraw();
     try {
-      const response = await this.fetchImpl("/ui/api/settings/auto-update", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_enabled: isEnabled }),
+      const response = await putAccountSettings(this.fetchImpl, accountId, {
+        auto_update_workspaces: isEnabled,
       });
       if (response.ok) {
-        const result = (await response.json()) as { is_enabled: boolean };
+        const result = (await response.json()) as AccountSettings;
         const latest = this.overview;
         if (latest !== null) {
-          this.overview = { ...latest, is_auto_update_enabled: result.is_enabled };
+          this.overview = { ...latest, is_auto_update_enabled: result.auto_update_workspaces };
         }
       } else {
         const data = (await response.json().catch(() => ({}))) as {
@@ -387,62 +398,81 @@ export class SettingsModel {
     this.redraw();
   }
 
-  /** Write the notification prefs through the If-Match-guarded endpoint,
-   * mirroring `setReportUnexpectedErrors`: a 412 (another window changed them
+  /** Write the notification prefs: the install-keyed style through its
+   * If-Match-guarded endpoint, and the account-keyed master toggle through
+   * the account-settings PUT. A 412 on the style (another window changed it
    * first) rebases by reloading rather than clobbering, and a refusal leaves
-   * the model state standing with a stated reason. The If-Match token is the
-   * PREFS' own version (the write endpoint guards the prefs record). */
-  async setNotificationPrefs(next: {
-    is_enabled: boolean;
-    style: NotificationStyle;
-  }): Promise<void> {
+   * the model state standing with a stated reason. */
+  async setNotificationPrefs(
+    accountId: string,
+    next: {
+      is_enabled: boolean;
+      style: NotificationStyle;
+    },
+  ): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
     this.notificationPrefsError = "";
     const current = overview.notification_prefs ?? DEFAULT_NOTIFICATION_PREFS;
     try {
-      const response = await postNotificationPrefsWrite(
+      const styleResponse = await postNotificationStyleWrite(
         this.fetchImpl,
         current.version,
-        next,
+        next.style,
       );
-      if (response.status === 412) {
-        // Another window changed the prefs first: rebase on the newer state.
+      if (styleResponse.status === 412) {
+        // Another window changed the style first: rebase on the newer state.
         await this.load();
         return;
       }
-      if (response.ok) {
-        const result = (await response.json()) as { version: string };
-        const applied: NotificationPrefs = {
-          ...current,
-          ...next,
-          has_chosen: true,
-          version: result.version,
-        };
-        // Merge onto the CURRENT overview, not the pre-await `overview`
-        // snapshot: a concurrent write (e.g. setReportUnexpectedErrors) may
-        // have already landed its own field on `this.overview` while this
-        // request was in flight, and spreading the stale snapshot would
-        // clobber it.
-        const latest = this.overview;
-        if (latest === null) return;
-        this.overview = { ...latest, notification_prefs: applied };
-        applyNotificationPrefs(applied);
-      } else {
+      if (!styleResponse.ok) {
         // Persisted nothing; the unchanged model state stands, and the
         // snapped-back control needs a stated reason.
-        let message = `Could not update notifications (HTTP ${response.status}).`;
+        let message = `Could not update notifications (HTTP ${styleResponse.status}).`;
         try {
-          const data = (await response.json()) as { error?: string };
+          const data = (await styleResponse.json()) as { error?: string };
           if (data.error) message = data.error;
         } catch {
           // Non-JSON error body: keep the status-based message.
         }
         this.notificationPrefsError = message;
+        this.redraw();
+        return;
       }
+      const result = (await styleResponse.json()) as { version: string };
+      if (next.is_enabled !== current.is_enabled) {
+        const enabledResponse = await putAccountSettings(this.fetchImpl, accountId, {
+          notifications_enabled: next.is_enabled,
+        });
+        if (!enabledResponse.ok) {
+          const data = (await enabledResponse.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          this.notificationPrefsError =
+            data.error ??
+            `Could not update notifications (HTTP ${enabledResponse.status}).`;
+          // The style write landed; reload so the page shows the mixed outcome.
+          await this.load();
+          return;
+        }
+      }
+      const applied: NotificationPrefs = {
+        ...current,
+        ...next,
+        has_chosen: true,
+        version: result.version,
+      };
+      // Merge onto the CURRENT overview, not the pre-await `overview`
+      // snapshot: a concurrent write (e.g. setReportUnexpectedErrors) may
+      // have already landed its own field on `this.overview` while this
+      // request was in flight, and spreading the stale snapshot would
+      // clobber it.
+      const latest = this.overview;
+      if (latest === null) return;
+      this.overview = { ...latest, notification_prefs: applied };
+      applyNotificationPrefs(applied);
     } catch {
-      // Network failure: nothing was persisted; say so rather than snapping
-      // the control back silently.
+      // Network failure: say so rather than snapping the control back silently.
       this.notificationPrefsError =
         "Could not update notifications (network error).";
     }

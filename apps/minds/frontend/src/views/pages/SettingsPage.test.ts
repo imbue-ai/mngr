@@ -2,9 +2,12 @@
 // nav -- and the two must not fight.
 
 import m from "mithril";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import { createEmptyStores } from "../../models/boot";
 import type { SettingsModel } from "../../models/settings";
 import { settingsOverview, settle, withMindsNative, withReceiverGuardedGlobalFetch } from "../../testing";
+import { ShellState } from "../shell/shell-state";
 import { SettingsPage } from "./SettingsPage";
 import { SettingsSections } from "./settings/SettingsSections";
 
@@ -43,7 +46,15 @@ function shownModel(page: Page): SettingsModel {
 }
 
 describe("SettingsPage", () => {
-  afterEach(() => vi.restoreAllMocks());
+  // The page reads the window's account off the app context to load the overview.
+  beforeEach(() => {
+    const shell = new ShellState(createEmptyStores());
+    registerAppContext({ stores: shell.stores, shell });
+  });
+  afterEach(() => {
+    clearAppContextForTests();
+    vi.restoreAllMocks();
+  });
 
   it("opens the section the route asks for even when the page is already on screen", async () => {
     // The menu bar's "Check for Updates..." navigates a window that may already

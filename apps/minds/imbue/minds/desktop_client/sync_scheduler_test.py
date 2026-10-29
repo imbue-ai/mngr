@@ -4,7 +4,9 @@ The two-device fixtures mirror test_workspace_sync.py: device A pushes records
 into the shared in-memory fake connector; device B signs in fresh and pulls.
 """
 
+import base64
 import json
+import re
 import threading
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +14,9 @@ from uuid import uuid4
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
+from imbue.minds.desktop_client.account_settings_store import SETTINGS_DOCUMENT_KIND
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_fresh_device_scheduler
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -22,6 +27,8 @@ from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 
 
@@ -224,3 +231,124 @@ def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
         scheduler._pass_release.set()
         assert stop_returned.wait(timeout=5.0)
         stop_thread.join(timeout=5.0)
+
+
+def test_pass_pulls_and_pushes_the_settings_document_and_reports_a_pulled_change(tmp_path: Path) -> None:
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    # Another device already pushed its settings document.
+    pusher_store = AccountSettingsStore(data_dir=tmp_path / "pusher-settings", cli=cli)
+    pusher_store.apply_settings_values(user_id, {"auto_update_workspaces": True})
+    pusher_store.push_dirty(user_id, email)
+    record_store, session_store = make_sync_test_device(tmp_path, f"fresh-{uuid4().hex}", cli)
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "fresh-settings", cli=cli)
+    change_signals: list[bool] = []
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=make_resolver_with_data(agents_json=json.dumps({"agents": []})),
+        settings_store=settings_store,
+    )
+    scheduler.on_account_settings_changed = lambda: change_signals.append(True)
+
+    scheduler.run_one_pass()
+
+    # The pull landed the other device's document, with a local edit's side effects.
+    assert settings_store.read_settings(user_id).auto_update_workspaces is True
+    assert change_signals == [True]
+
+    # A local edit is pushed by the next pass; nothing pulled changed, so no new signal.
+    settings_store.apply_settings_values(user_id, {"notifications_enabled": False})
+    scheduler.run_one_pass()
+
+    pushed = cli.sync_documents_by_email[email][SETTINGS_DOCUMENT_KIND]["default"]["metadata"]
+    assert isinstance(pushed, dict)
+    assert pushed["notifications_enabled"] is False
+    assert change_signals == [True]
+
+
+def test_a_pulled_keybinding_is_materialized_into_the_workspace_snapshot_in_the_same_pass(tmp_path: Path) -> None:
+    """The write-back round trip's receiving half (spec section 14): another install saved a keybinding
+    through the route and pushed; this install's pass pulls it and rewrites the owned workspace's
+    snapshot with it."""
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    pusher_store = AccountSettingsStore(data_dir=tmp_path / "pusher-settings", cli=cli)
+    pusher_store.apply_settings_values(user_id, {"keybindings": {"chat": {"send-message": ["ctrl+enter"]}}})
+    pusher_store.push_dirty(user_id, email)
+
+    record_store, session_store = make_sync_test_device(tmp_path, f"puller-{uuid4().hex}", cli)
+    agent_id = AgentId.generate()
+    session_store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=f"host-{uuid4().hex}",
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "puller-settings", cli=cli)
+    caller = RecordingMngrCaller()
+    resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+    profile_writer = WorkspaceProfileWriter(
+        mngr_caller=caller,
+        backend_resolver=resolver,
+        session_store=session_store,
+        settings_store=settings_store,
+        device_id="device-1",
+        hashes_dir=tmp_path / "workspace_profile_hashes",
+    )
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=resolver,
+        settings_store=settings_store,
+        workspace_profile_writer=profile_writer,
+    )
+
+    scheduler.run_one_pass()
+
+    snapshot_writes = [call for call in caller.calls if call[0] == "exec"]
+    assert len(snapshot_writes) == 1
+    encoded_payloads = re.findall(r"printf '%s' ([A-Za-z0-9+/=]+) \| base64 -d", snapshot_writes[0][2])
+    document = json.loads(base64.b64decode(encoded_payloads[0]).decode("utf-8"))
+    assert document["account_id"] == user_id
+    assert document["keybindings"] == {"chat": {"send-message": ["ctrl+enter"]}}
+
+
+def test_pass_syncs_workspace_profiles_and_flushes_queued_fact_writes(tmp_path: Path) -> None:
+    """Each pass ends with the workspace-boundary steps: the profile rewrite and the fact flush."""
+    cli = make_fake_imbue_cloud_cli()
+    record_store, session_store = make_sync_test_device(tmp_path, f"boundary-{uuid4().hex}", cli)
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    profile_writer = WorkspaceProfileWriter(
+        mngr_caller=RecordingMngrCaller(),
+        backend_resolver=resolver,
+        session_store=session_store,
+        settings_store=None,
+        device_id="device-1",
+        hashes_dir=tmp_path / "workspace_profile_hashes",
+    )
+    sync_calls: list[bool] = []
+    flush_calls: list[bool] = []
+
+    class _CountingWriter(WorkspaceProfileWriter):
+        def sync_profiles(self) -> None:
+            sync_calls.append(True)
+
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=resolver,
+        workspace_profile_writer=_CountingWriter(**dict(profile_writer)),
+        flush_workspace_fact_writes=lambda: flush_calls.append(True),
+    )
+
+    scheduler.run_one_pass()
+
+    assert sync_calls == [True]
+    assert flush_calls == [True]

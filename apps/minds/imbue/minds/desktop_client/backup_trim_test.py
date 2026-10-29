@@ -186,7 +186,7 @@ def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupT
 def _make_feed() -> NotificationFeed:
     return NotificationFeed(
         notification_dispatcher=None,
-        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
+        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
             is_enabled=True, style=NotificationStyle.BOTH
         ),
         is_main_window_focused=lambda: False,

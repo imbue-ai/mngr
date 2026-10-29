@@ -4,7 +4,8 @@ Imbue Studio exposes a small cross-workspace management API
 (``/api/v1/workspaces/...``) that an agent in one workspace can call to act on
 *other* workspaces -- listing them, reading detail, creating, destroying,
 starting/stopping, exporting and managing backups, establishing SSH access,
-updating settings, and recovering (health check / restart). Those calls
+updating settings, saving account keybindings, and recovering (health check /
+restart). Those calls
 are reached through the gateway's bundled ``minds-api-proxy`` extension (so the
 detent envelope's domain is the synthetic ``latchkey-self.invalid`` gateway-self
 host) and granted by unioning one named permission per verb onto the domain-only
@@ -29,9 +30,9 @@ The verbs split on a target axis:
 * ``read`` and ``create`` are all-or-nothing (listing is not per-workspace and
   create takes no target).
 * ``destroy``, ``lifecycle``, ``backups-export``, ``backups-manage``, ``ssh``,
-  ``update``, and ``recover`` are target-scoped: each approval mints
-  a uniquely-named per-target verb schema, so granting access to another
-  workspace accumulates rather than replaces.
+  ``update``, ``account-settings``, and ``recover`` are target-scoped: each
+  approval mints a uniquely-named per-target verb schema, so granting access to
+  another workspace accumulates rather than replaces.
 """
 
 import json
@@ -65,8 +66,8 @@ class WorkspaceVerb(FrozenModel):
     ``minds-workspaces-destroy``) that the dialog offers as a checkbox.
     ``is_targeted`` is ``True`` for the verbs whose request path carries a target
     workspace id (destroy, lifecycle, backups-export, backups-manage, ssh,
-    update, recover): those are gated per-target. The non-targeted verbs
-    (read, create) are all-or-nothing.
+    update, account-settings, recover): those are gated per-target. The
+    non-targeted verbs (read, create) are all-or-nothing.
     """
 
     permission: str = Field(description="Detent permission-schema name for this verb.")

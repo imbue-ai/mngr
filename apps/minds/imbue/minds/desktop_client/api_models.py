@@ -440,6 +440,26 @@ class PatchWorkspaceRequest(ApiRequestModel):
     )
 
 
+class AccountKeybindingsPutRequest(ApiRequestModel):
+    """Body for saving a workspace's keybinding changes to its owning account."""
+
+    keybindings: dict[str, dict[str, tuple[str, ...]]] = Field(
+        description=(
+            "The account's full keybinding assignments, by app name then action id; "
+            "each chord in the canonical grammar (spec section 10.1). Replaces the stored value whole."
+        )
+    )
+
+
+class AccountKeybindingsResponse(FrozenModel):
+    """The applied keybindings of a workspace's owning account."""
+
+    account_id: str = Field(description="The owning account the value was applied to")
+    keybindings: dict[str, dict[str, tuple[str, ...]]] = Field(
+        description="The account's keybinding assignments as stored, by app name then action id"
+    )
+
+
 class RestartWorkspaceRequest(ApiRequestModel):
     """Body for recovering a workspace's host.
 
