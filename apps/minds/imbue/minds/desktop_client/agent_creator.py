@@ -100,6 +100,7 @@ from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_def
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
+from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -371,6 +372,12 @@ class CreateAttemptErrorKind(UpperCaseStrEnum):
     # git-credentials guidance for this kind.
     GIT_AUTH_REQUIRED = auto()
 
+    # The clone reached the remote, but it has no branch or tag with the name
+    # the create asked for (e.g. ``main`` on a repo whose default branch is
+    # ``master``). Not an access problem, so the creating page points at the
+    # Branch field instead of at credentials.
+    GIT_REF_NOT_FOUND = auto()
+
 
 class AgentCreateAttemptInfo(FrozenModel):
     """Snapshot of agent create attempt state, returned to callers for status polling.
@@ -540,15 +547,18 @@ def _is_remote_git_source(repo_source: str) -> bool:
 def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
     """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
-    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
-    REMOTE git source -- the likely cause is the same (private/nonexistent,
-    no usable credentials on this machine). Deliberately no matching of git's
-    error text (git has no structured error output, and substring matching is
-    brittle across git versions and locales): a remote clone that failed at
-    all is overwhelmingly an access problem, and the creating page's guidance
-    covers it while the raw git error stays visible right above for anything
-    rarer.
+    Recognizes cases for a failed clone (``GitCloneError``). Deliberately no
+    matching of git's error text (git has no structured error output, and
+    substring matching is brittle across git versions and locales). The one
+    case told apart is a missing ref, which :func:`clone_git_repo` establishes
+    from ``git ls-remote``'s exit code and raises as ``GitRefNotFoundError``,
+    whatever the source. Any other failed clone of a REMOTE source is
+    overwhelmingly an access problem (private/nonexistent, no usable
+    credentials on this machine), and the creating page's guidance covers it
+    while the raw git error stays visible right above for anything rarer.
 
+    - ``GitRefNotFoundError`` -> ``GIT_REF_NOT_FOUND`` (the remote answered
+      but has no such branch or tag; guidance points at the Branch field).
     - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
       the GitHub CLI, which only fits github.com https).
     - any other remote git source (a URL on another host, or an ssh remote)
@@ -558,6 +568,8 @@ def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateA
     """
     if not isinstance(error, GitCloneError):
         return None
+    if isinstance(error, GitRefNotFoundError):
+        return CreateAttemptErrorKind.GIT_REF_NOT_FOUND
     if _is_github_https_url(repo_source):
         return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
     if _is_remote_git_source(repo_source):
@@ -674,8 +686,10 @@ def clone_git_repo(
     bare repo, and git rejects pushes from a shallow source with "shallow
     update not allowed" (the pushed tip's parent is missing from the pack).
 
-    Raises GitCloneError if any step fails (including when ``branch`` does
-    not exist on the remote and is not a reachable commit).
+    Raises GitCloneError if any step fails. When the explicit-ref fetch fails
+    for a ``branch`` that is not a full commit SHA, a ``git ls-remote`` probe
+    (on the failure path only) tells a missing ref apart from every other
+    failure, and raises the ``GitRefNotFoundError`` subclass for it.
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=False)
@@ -723,7 +737,43 @@ def clone_git_repo(
                 break
     if failed is not None:
         step_name, output = failed
-        raise GitCloneError("git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output)))
+        message = "git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output))
+        if (
+            step_name == "fetch"
+            and branch is not None
+            and not _FULL_SHA_RE.match(str(branch))
+            and _is_ref_missing_on_remote(clone_dir, branch, git_env, parent_cg)
+        ):
+            raise GitRefNotFoundError(message)
+        raise GitCloneError(message)
+
+
+def _is_ref_missing_on_remote(
+    clone_dir: Path, branch: GitBranch, git_env: dict[str, str], parent_cg: ConcurrencyGroup | None
+) -> bool:
+    """Whether the ``origin`` remote of ``clone_dir`` answers but has no ref named ``branch``.
+
+    ``git ls-remote --exit-code`` exits 2 exactly when it talked to the
+    remote and no ref matched; an unreachable, private or nonexistent remote
+    exits 128 instead. Full commit SHAs must not be probed: ``ls-remote``
+    lists refs, never commits, so a valid SHA would read as missing.
+
+    ``ls-remote`` matches a pattern against the trailing path components of
+    each ref, so a bare ``main`` would also match ``refs/heads/release/main``.
+    A short name is therefore probed as the branch and tag that ``git fetch``
+    would resolve it to; an already-qualified ``refs/...`` name as itself.
+    """
+    ref = str(branch)
+    patterns = [ref] if ref.startswith("refs/") else [f"refs/heads/{ref}", f"refs/tags/{ref}"]
+    cg = _make_child_cg("git-ls-remote", parent_cg)
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "ls-remote", "--exit-code", "origin", *patterns],
+            cwd=clone_dir,
+            is_checked_after=False,
+            env=git_env,
+        )
+    return result.returncode == 2
 
 
 _FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
@@ -3148,6 +3198,17 @@ class AgentCreator(MutableModel):
                 # shows the person, not a fault for error reporting. The mngr
                 # transcript is still in the create log and the FAILED record.
                 logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
+            elif isinstance(e, GitRefNotFoundError) and not is_default_workspace_template_url(repo_source):
+                # The requested branch or tag does not exist on a remote that
+                # answered: a mistake in the create's input, which the creating
+                # page explains, not a fault for error reporting. The default
+                # template repo is excluded: its ref is the release's pinned tag,
+                # so a missing one there is a broken release and stays an error.
+                logger.info(
+                    "Failed create attempt {}: it named a branch or tag the repository does not have: {}",
+                    create_attempt_id,
+                    e,
+                )
             else:
                 logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))

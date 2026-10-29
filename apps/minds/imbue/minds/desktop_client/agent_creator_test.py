@@ -94,6 +94,7 @@ from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMP
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
+from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -349,6 +350,15 @@ def test_classify_create_attempt_error_flags_any_failed_github_clone() -> None:
         assert (
             classify_create_attempt_error(url, GitCloneError(message)) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
         ), message
+
+
+def test_classify_create_attempt_error_flags_a_missing_ref_on_any_remote() -> None:
+    """A clone that reached the remote but found no such branch or tag is not an
+    access problem, so it classifies as GIT_REF_NOT_FOUND ahead of the
+    host-based auth kinds."""
+    error = GitRefNotFoundError("git fetch failed:\nfatal: couldn't find remote ref main")
+    for source in ("https://github.com/acme/repo", "https://gitlab.example.com/acme/repo.git"):
+        assert classify_create_attempt_error(source, error) is CreateAttemptErrorKind.GIT_REF_NOT_FOUND, source
 
 
 def test_classify_create_attempt_error_flags_non_github_remotes_generically() -> None:
@@ -1213,13 +1223,40 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
 # load rather than anything about the branch it is checking. Passes alone.
 @pytest.mark.flaky
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
-    """Requesting a branch that does not exist fails at clone time (cleanly)."""
+    """Requesting a branch that does not exist on a reachable remote fails at
+    clone time with the ref-not-found error, not a generic clone failure."""
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
 
     dest = tmp_path / "clone"
-    with pytest.raises(GitCloneError):
+    with pytest.raises(GitRefNotFoundError):
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_raises_on_missing_branch_despite_a_ref_ending_in_its_name(tmp_path: Path) -> None:
+    """``ls-remote`` tail-matches patterns, so a bare ``main`` probe would match
+    ``refs/heads/release/main``; the probe is qualified so ``git fetch``'s
+    "couldn't find remote ref main" is still reported as a missing ref."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "release/main")
+    _git(origin, "branch", "-q", "-m", "main", "master")
+
+    with pytest.raises(GitRefNotFoundError):
+        clone_git_repo(GitUrl("file://{}".format(origin)), tmp_path / "clone", branch=GitBranch("main"))
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_does_not_call_a_missing_commit_sha_a_missing_ref(tmp_path: Path) -> None:
+    """A full SHA is never probed with ``ls-remote`` (which lists refs, not
+    commits), so an unknown SHA stays a plain clone failure."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    with pytest.raises(GitCloneError) as exc_info:
+        clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("0" * 40))
+    assert not isinstance(exc_info.value, GitRefNotFoundError)
 
 
 class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
@@ -1234,6 +1271,19 @@ class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
         del format, args
 
 
+@contextmanager
+def _serve_always_unauthorized_git_remote() -> Iterator[GitUrl]:
+    """Serve an ``_AlwaysUnauthorizedHandler`` remote on a daemon thread and yield its git URL."""
+    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 @pytest.mark.timeout(30)
 def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
     """A remote that answers with an auth challenge fails the clone quickly and
@@ -1245,19 +1295,22 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
     supplies rejected credentials: "Authentication failed"), so the assertion
     accepts either shape.
     """
-    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        url = GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
-        dest = tmp_path / "clone"
+    with _serve_always_unauthorized_git_remote() as url:
         with pytest.raises(GitCloneError) as exc_info:
-            clone_git_repo(url, dest)
-        message = str(exc_info.value)
-        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
+            clone_git_repo(url, tmp_path / "clone")
+    message = str(exc_info.value)
+    assert "terminal prompts disabled" in message or "Authentication failed" in message, message
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_with_a_branch_on_a_remote_that_requires_auth_is_not_a_missing_ref(tmp_path: Path) -> None:
+    """When the remote never answers with its refs, the ``ls-remote`` probe
+    fails too (exit 128, not 2), so the failure stays a plain clone error
+    and keeps the access guidance."""
+    with _serve_always_unauthorized_git_remote() as url:
+        with pytest.raises(GitCloneError) as exc_info:
+            clone_git_repo(url, tmp_path / "clone", branch=GitBranch("main"))
+    assert not isinstance(exc_info.value, GitRefNotFoundError)
 
 
 def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
@@ -1320,6 +1373,56 @@ def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> Non
 def _forward_ca_cert_path(tmp_path: Path) -> Path:
     """Where a test's plugin stand-in writes its CA certificate and the creator under test pins it."""
     return tmp_path / "forward-ca.pem"
+
+
+def _fail_a_create_on_a_missing_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_default_template: bool
+) -> list[str]:
+    """Run a create naming a ref its origin lacks, check it failed as GIT_REF_NOT_FOUND, and return its ERROR records.
+
+    With ``is_default_template``, the origin is configured as the default workspace template repo.
+    """
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, "exit 0")
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    origin_url = "file://{}".format(origin)
+    if is_default_template:
+        monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+        monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", origin_url)
+    creator = _make_test_creator(tmp_path)
+
+    with capture_error_logs() as error_records:
+        create_attempt_id = creator.start_create_attempt(
+            origin_url, host_name="missing-ref-2165", branch="nonexistent"
+        )
+        _wait_until_finished(creator, create_attempt_id)
+        creator.wait_for_all()
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    assert info.error_kind is CreateAttemptErrorKind.GIT_REF_NOT_FOUND
+    return error_records
+
+
+@pytest.mark.timeout(30)
+def test_a_create_naming_a_missing_branch_fails_as_ref_not_found_without_an_error_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch the repository does not have is a mistake in the create's input,
+    shown on the creating page: it classifies as GIT_REF_NOT_FOUND and files no
+    ERROR record (ERROR records become error-tracker events)."""
+    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=False)
+    assert error_records == []
+
+
+@pytest.mark.timeout(30)
+def test_a_missing_ref_on_the_default_template_repo_still_logs_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default template's ref is the release's pinned tag, not the person's
+    input, so a missing one is a broken release and must reach error reporting."""
+    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=True)
+    assert any("Failed to create agent for create attempt" in record for record in error_records)
 
 
 def _make_test_creator(

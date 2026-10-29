@@ -178,6 +178,12 @@ export function failureGuidance(errorKind: string): m.Children {
       "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
     ]);
   }
+  if (errorKind === "GIT_REF_NOT_FOUND") {
+    return m(Notice, { key: "creation-guidance", id: "git-ref-help", extra: "max-w-[calc(100%-100px)]" }, [
+      "This repository has no branch or tag with that name. Clear the Branch field to use the repository's ",
+      "default branch, or enter one that exists, then retry.",
+    ]);
+  }
   return null;
 }
 

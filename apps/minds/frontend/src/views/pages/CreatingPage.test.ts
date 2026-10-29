@@ -21,12 +21,15 @@ import { Button } from "../components/Button";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
 describe("failureGuidance", () => {
-  it("explains the two recognized authentication failures and nothing else", () => {
+  it("explains the recognized clone failures and nothing else", () => {
     expect(allText(failureGuidance("GITHUB_AUTH_REQUIRED"))).toContain(
       "Install the GitHub app",
     );
     expect(allText(failureGuidance("GIT_AUTH_REQUIRED"))).toContain(
       "rejected anonymous access",
+    );
+    expect(allText(failureGuidance("GIT_REF_NOT_FOUND"))).toContain(
+      "no branch or tag with that name",
     );
     expect(failureGuidance("")).toBeNull();
     expect(failureGuidance("SOMETHING_ELSE")).toBeNull();

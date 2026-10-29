@@ -26,6 +26,12 @@ class GitCloneError(MindError):
     ...
 
 
+class GitRefNotFoundError(GitCloneError):
+    """Raised when a clone's remote answered but has no branch or tag with the requested name."""
+
+    ...
+
+
 class GitOperationError(MindError):
     """Raised when a git operation (other than clone) fails."""
 
