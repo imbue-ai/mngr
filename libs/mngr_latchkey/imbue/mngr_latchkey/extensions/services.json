@@ -1589,6 +1589,570 @@
       ]
     }
   ],
+  "airtable-mcp": [
+    {
+      "scope": "airtable-mcp-api",
+      "display_name": "Airtable (MCP)",
+      "description": "Identifies requests to the Airtable hosted MCP server (mcp.airtable.com).",
+      "permissions": [
+        {
+          "name": "airtable-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Airtable content."
+        },
+        {
+          "name": "airtable-mcp-read-all",
+          "description": "Run any read-only Airtable MCP tool (browse workspaces and bases, inspect table and field layouts, list and search records, view interface pages and forms, inspect automations) plus the MCP session handshake."
+        },
+        {
+          "name": "airtable-mcp-write-all",
+          "description": "Run any Airtable MCP tool that creates, changes or deletes something (bases, tables, fields, records, interfaces and pages, form submissions, automations) plus the MCP session handshake."
+        },
+        {
+          "name": "airtable-mcp-read-bases",
+          "description": "Browse the workspaces and bases the user can access, find a base by name, and see which third-party accounts (such as Slack or Google) are connected."
+        },
+        {
+          "name": "airtable-mcp-write-bases",
+          "description": "Create a new base in a workspace."
+        },
+        {
+          "name": "airtable-mcp-read-tables",
+          "description": "See how a base is laid out: its tables, their fields and field settings, and the views in each table. Does not read the records themselves."
+        },
+        {
+          "name": "airtable-mcp-write-tables",
+          "description": "Add tables to a base, rename or describe tables, and add or edit fields. Does not delete tables."
+        },
+        {
+          "name": "airtable-mcp-delete-tables",
+          "description": "Delete a whole table from a base, including all of its records, fields and views."
+        },
+        {
+          "name": "airtable-mcp-read-records",
+          "description": "List, search and display the records in a table, including looking up records to link to."
+        },
+        {
+          "name": "airtable-mcp-write-records",
+          "description": "Add new records to a table, change fields on existing records, and undo a previous change. Does not delete records."
+        },
+        {
+          "name": "airtable-mcp-delete-records",
+          "description": "Delete records from a table."
+        },
+        {
+          "name": "airtable-mcp-read-interfaces",
+          "description": "View the interfaces and pages in a base, the records shown on an interface page, the layout of a form, and the configuration options available for page types and page elements."
+        },
+        {
+          "name": "airtable-mcp-write-interfaces",
+          "description": "Create new interfaces in a base and add pages (dashboards, visualizations, record detail pages) to them. Does not delete interfaces or pages."
+        },
+        {
+          "name": "airtable-mcp-delete-interfaces",
+          "description": "Delete an interface page, or an entire interface with all of its pages."
+        },
+        {
+          "name": "airtable-mcp-submit-forms",
+          "description": "Fill in and submit an Airtable form, which creates a record."
+        },
+        {
+          "name": "airtable-mcp-read-automations",
+          "description": "List the automations in a base, inspect their configuration, and look up the instructions and input options needed to build one. Does not change automations."
+        },
+        {
+          "name": "airtable-mcp-write-automations",
+          "description": "Create new draft automations, replace the configuration of existing ones, and re-run a webhook trigger test. Does not delete automations."
+        },
+        {
+          "name": "airtable-mcp-delete-automations",
+          "description": "Delete an automation that is turned off."
+        }
+      ]
+    }
+  ],
+  "anydo-mcp": [
+    {
+      "scope": "anydo-mcp-api",
+      "display_name": "Any.do (MCP)",
+      "description": "Identifies requests to the Any.do hosted MCP server (mcp.any.do).",
+      "permissions": [
+        {
+          "name": "anydo-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Any.do content."
+        },
+        {
+          "name": "anydo-mcp-read-all",
+          "description": "View anything in Any.do: tasks, subtasks, completed tasks, personal lists, team workspaces, boards, sections and members, connected calendars and their events, and the signed-in user's profile. Also allows the MCP session handshake."
+        },
+        {
+          "name": "anydo-mcp-write-all",
+          "description": "Make any change in Any.do: create and edit tasks, subtasks and lists, set reminders, create team tasks and boards, and create, edit or delete calendar events. Also allows the MCP session handshake."
+        },
+        {
+          "name": "anydo-mcp-read-tasks",
+          "description": "View tasks, subtasks, completed tasks and the personal lists they live in."
+        },
+        {
+          "name": "anydo-mcp-write-tasks",
+          "description": "Create personal tasks, subtasks and lists, and propose edits to existing tasks and subtasks (such as due dates, status or owners). Edits to existing tasks are staged for the user to confirm in Any.do."
+        },
+        {
+          "name": "anydo-mcp-set-reminders",
+          "description": "Set one-time or recurring reminders on tasks."
+        },
+        {
+          "name": "anydo-mcp-read-workspaces",
+          "description": "View team workspaces, their boards and sections, and workspace members."
+        },
+        {
+          "name": "anydo-mcp-write-workspaces",
+          "description": "Create tasks on team boards (with owners and sections) and create new boards."
+        },
+        {
+          "name": "anydo-mcp-read-calendar-events",
+          "description": "View connected calendars and the events on them."
+        },
+        {
+          "name": "anydo-mcp-write-calendar-events",
+          "description": "Create calendar events and propose edits to existing ones. Edits are staged for the user to confirm in Any.do."
+        },
+        {
+          "name": "anydo-mcp-delete-calendar-events",
+          "description": "Propose deleting calendar events. Deletions are staged for the user to confirm in Any.do."
+        },
+        {
+          "name": "anydo-mcp-read-account",
+          "description": "View the signed-in user's name, email address and timezone."
+        }
+      ]
+    }
+  ],
+  "atlassian-mcp": [
+    {
+      "scope": "atlassian-mcp-api",
+      "display_name": "Atlassian (MCP)",
+      "description": "Identifies requests to the Atlassian hosted MCP server (mcp.atlassian.com).",
+      "permissions": [
+        {
+          "name": "atlassian-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Atlassian content."
+        },
+        {
+          "name": "atlassian-mcp-read-all",
+          "description": "Run any read-only Atlassian MCP tool: view and search Jira, Confluence, Jira Service Management, Bitbucket, Assets, Loom, goals, projects, teams, focus areas, talent, capacity plans, code and the Teamwork Graph, plus the MCP session handshake."
+        },
+        {
+          "name": "atlassian-mcp-write-all",
+          "description": "Run any Atlassian MCP tool that creates, changes or deletes something in Jira, Confluence, Jira Service Management, Bitbucket, Loom, goals, projects, teams, focus areas, talent, capacity plans or the Teamwork Graph, plus the MCP session handshake."
+        },
+        {
+          "name": "atlassian-mcp-read-account-and-tool-catalog",
+          "description": "Identify the signed-in Atlassian user, list the Atlassian sites and apps they can access, look up content formatting guidance, and browse the catalog of additional Atlassian tools that are not shown by default and run the read-only ones found there. Needed before most other Atlassian tools can be used."
+        },
+        {
+          "name": "atlassian-mcp-write-tool-catalog",
+          "description": "Run additional Atlassian catalog tools that create, change or permanently delete things in any Atlassian product."
+        },
+        {
+          "name": "atlassian-mcp-read-jira",
+          "description": "View and search Jira work items, comments, worklogs, attachments, history, projects, boards, sprints, filters, dashboards, workflows, screens and users."
+        },
+        {
+          "name": "atlassian-mcp-write-jira",
+          "description": "Create and edit Jira work items, change their status or sprint, add comments, worklogs, links, attachments and watchers, manage versions, sprints and boards, and make administrative changes such as creating projects, changing project settings and editing screens. Does not delete anything."
+        },
+        {
+          "name": "atlassian-mcp-delete-jira",
+          "description": "Permanently delete Jira work items, comments and attachments."
+        },
+        {
+          "name": "atlassian-mcp-read-confluence-and-loom",
+          "description": "View and search Confluence pages, blog posts, live docs, whiteboards, databases and other content, including spaces, comments, versions, attachments, exports, tasks, templates, reactions and sharing settings; and browse Loom videos and folders, read video details and transcripts, and get video download links."
+        },
+        {
+          "name": "atlassian-mcp-write-confluence-and-loom",
+          "description": "Create, edit, copy, move, archive and restore Confluence content and spaces; add comments, labels, reactions, attachments, stars and watches; complete tasks; change who can see content, including public links; generate infographics and interactive visualizations; and upload, publish, edit, share, comment on and organize Loom videos."
+        },
+        {
+          "name": "atlassian-mcp-read-jsm",
+          "description": "View and search Jira Service Management customer requests, request types and their fields, resolver plans, agent availability, Operations alerts, on-call schedules and teams, and the objects, object types and schemas in Assets."
+        },
+        {
+          "name": "atlassian-mcp-write-jsm",
+          "description": "Create and transition Jira Service Management requests, approve or decline approvals and resolver plans, set agent availability, and acknowledge, close or escalate Operations alerts."
+        },
+        {
+          "name": "atlassian-mcp-read-bitbucket-and-code",
+          "description": "View Bitbucket workspaces, repositories, files, branches, commits, code insight reports, pull requests with their diffs, comments and tasks, pipelines with their logs, deployments and environments; and search and read source code in any repository connected to Atlassian: files, directory listings, symbol definitions and the code affected by a change."
+        },
+        {
+          "name": "atlassian-mcp-write-bitbucket",
+          "description": "Create branches and commits in Bitbucket, open, update, approve, request changes on and merge pull requests, add and resolve pull request comments and tasks, and run pipelines."
+        },
+        {
+          "name": "atlassian-mcp-read-teamwork",
+          "description": "View and search Atlassian Home goals, projects (cross-product project pages, not Jira projects), teams and focus areas with their progress updates; search across all Atlassian products and connected apps; and explore the Teamwork Graph: how people, work, documents and pull requests relate to each other, who works on what and with whom."
+        },
+        {
+          "name": "atlassian-mcp-write-teamwork",
+          "description": "Create Atlassian Home goals, projects (not Jira projects), teams and focus areas, update them, post progress and status updates, connect them to other work, and record new relationships in the Teamwork Graph."
+        },
+        {
+          "name": "atlassian-mcp-read-workforce-planning",
+          "description": "View and search positions, reporting lines, skills and headcount metrics in Atlassian Talent, and view capacity plan allocations and non-project work in Atlassian capacity planning."
+        },
+        {
+          "name": "atlassian-mcp-write-workforce-planning",
+          "description": "Create skills, assign or decline skills for workers and allocate positions to focus areas in Atlassian Talent, and update capacity plan allocations and create or update non-project work in Atlassian capacity planning."
+        }
+      ]
+    }
+  ],
+  "attio-mcp": [
+    {
+      "scope": "attio-mcp-api",
+      "display_name": "Attio (MCP)",
+      "description": "Identifies requests to the Attio hosted MCP server (mcp.attio.com).",
+      "permissions": [
+        {
+          "name": "attio-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Attio data."
+        },
+        {
+          "name": "attio-mcp-read-all",
+          "description": "View anything in the Attio workspace: records, activities, lists, comments, notes, tasks, meetings, call recordings, emails, workspace members, reports and read-only SQL queries, plus the MCP session handshake."
+        },
+        {
+          "name": "attio-mcp-write-all",
+          "description": "Create, update, merge or delete anything in the Attio workspace: records, activities, lists and list entries, comments, notes and tasks, plus the MCP session handshake."
+        },
+        {
+          "name": "attio-mcp-read-records",
+          "description": "Find and view people, companies, deals and other records, see which objects exist in the workspace, and see which fields they have."
+        },
+        {
+          "name": "attio-mcp-write-records",
+          "description": "Create new people, companies, deals and other records, update their fields, or merge duplicate records into one."
+        },
+        {
+          "name": "attio-mcp-read-activities",
+          "description": "View logged activities such as phone calls and site visits, and see which fields they have."
+        },
+        {
+          "name": "attio-mcp-write-activities",
+          "description": "Log new activities such as phone calls and site visits, or update existing ones."
+        },
+        {
+          "name": "attio-mcp-read-lists",
+          "description": "View lists and pipelines, their entries and their fields."
+        },
+        {
+          "name": "attio-mcp-write-lists",
+          "description": "Create lists, add records to lists, move or edit list entries, and change a list's name or permissions."
+        },
+        {
+          "name": "attio-mcp-read-comments",
+          "description": "View comments and comment threads on records and list entries."
+        },
+        {
+          "name": "attio-mcp-write-comments",
+          "description": "Post comments on records and list entries, or reply to a comment thread."
+        },
+        {
+          "name": "attio-mcp-delete-comments",
+          "description": "Delete comments (including all replies to a deleted comment)."
+        },
+        {
+          "name": "attio-mcp-read-notes",
+          "description": "Search notes and read their full contents."
+        },
+        {
+          "name": "attio-mcp-write-notes",
+          "description": "Create notes on records, or add to and rename existing notes."
+        },
+        {
+          "name": "attio-mcp-read-tasks",
+          "description": "View tasks, their deadlines, assignees and linked records."
+        },
+        {
+          "name": "attio-mcp-write-tasks",
+          "description": "Create tasks, or change their deadlines, status, assignees and linked records."
+        },
+        {
+          "name": "attio-mcp-delete-tasks",
+          "description": "Delete tasks from the workspace."
+        },
+        {
+          "name": "attio-mcp-read-meetings",
+          "description": "Search meetings and call recordings, and read call recording details and transcripts."
+        },
+        {
+          "name": "attio-mcp-read-emails",
+          "description": "Search synced emails and read their full contents."
+        },
+        {
+          "name": "attio-mcp-read-workspace",
+          "description": "View workspace members and teams, and see who the connected user is."
+        },
+        {
+          "name": "attio-mcp-run-reports",
+          "description": "Run aggregate reports and read-only SQL queries over workspace data, such as totals, averages and grouped breakdowns."
+        }
+      ]
+    }
+  ],
+  "beehiiv-mcp": [
+    {
+      "scope": "beehiiv-mcp-api",
+      "display_name": "beehiiv (MCP)",
+      "description": "Identifies requests to the beehiiv hosted MCP server (mcp.beehiiv.com).",
+      "permissions": [
+        {
+          "name": "beehiiv-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify beehiiv content."
+        },
+        {
+          "name": "beehiiv-mcp-read-all",
+          "description": "Look up newsletter data without changing anything: publications, posts and their content and stats, subscribers, segments, automations, podcasts, website analytics and monetization data, plus the MCP session handshake. beehiiv does not publicly document its MCP tool catalog, so this permission is based on tool-name conventions (tools whose names start with a read-style verb such as get or list)."
+        },
+        {
+          "name": "beehiiv-mcp-write-all",
+          "description": "Create, edit or manage newsletter data: post drafts and templates, subscriber tags and custom fields, segments, surveys and polls, signup forms, automations, products and tiers, website metadata and redirects, assets, plus the MCP session handshake. beehiiv does not publicly document its MCP tool catalog, so this permission is based on tool-name conventions (any tool whose name does not start with a read-style verb such as get or list)."
+        }
+      ]
+    }
+  ],
+  "buildkite-mcp": [
+    {
+      "scope": "buildkite-mcp-api",
+      "display_name": "Buildkite (MCP)",
+      "description": "Identifies requests to the Buildkite hosted MCP server (mcp.buildkite.com).",
+      "permissions": [
+        {
+          "name": "buildkite-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Buildkite data."
+        },
+        {
+          "name": "buildkite-mcp-read-all",
+          "description": "Run any read-only Buildkite MCP tool (account and token info, clusters, queues, secret metadata, cache registries, agents, pipelines, schedules, builds, jobs, logs, artifacts, annotations, Test Engine data, failure summaries, skill guides) plus the MCP session handshake. Also covers the read-only and single-toolset endpoint variants (/mcp/readonly, /mcp/x/<toolset>)."
+        },
+        {
+          "name": "buildkite-mcp-write-all",
+          "description": "Run any Buildkite MCP tool that changes something: create or update clusters, queues, secrets, cache registries, pipelines, webhooks and schedules; pause or resume queue dispatch; trigger, cancel, rebuild or retry builds and jobs; unblock jobs; create annotations. Includes the MCP session handshake."
+        },
+        {
+          "name": "buildkite-mcp-read-account",
+          "description": "Look up the authenticated user, their organization and the access token's scopes (current_user, user_token_organization, access_token)."
+        },
+        {
+          "name": "buildkite-mcp-read-clusters",
+          "description": "View clusters, cluster queues, secret metadata and cache registries (the list/get tools for clusters, cluster queues, cluster secrets and cache registries)."
+        },
+        {
+          "name": "buildkite-mcp-read-agents",
+          "description": "List Buildkite agents and inspect their connection state and details (list_agents, get_agent)."
+        },
+        {
+          "name": "buildkite-mcp-read-pipelines",
+          "description": "View pipelines and pipeline schedules, validate pipeline YAML, and inspect GitHub webhook processing status and repository connections."
+        },
+        {
+          "name": "buildkite-mcp-read-builds",
+          "description": "View builds, jobs, job environment variables, step uploads and annotations, get build failure summaries, compare builds, or wait for a build to finish."
+        },
+        {
+          "name": "buildkite-mcp-read-logs",
+          "description": "Search, tail and read job logs (search_logs, tail_logs, read_logs)."
+        },
+        {
+          "name": "buildkite-mcp-read-artifacts",
+          "description": "List and download build and job artifacts (list_artifacts_for_build, list_artifacts_for_job, get_artifact)."
+        },
+        {
+          "name": "buildkite-mcp-read-tests",
+          "description": "View Test Engine suites, tests, test runs, failed and slowest executions, execution traces and test workflows."
+        },
+        {
+          "name": "buildkite-mcp-read-skills",
+          "description": "Discover and load the server's built-in usage guides for Buildkite MCP tools (list_skills, load_skill)."
+        },
+        {
+          "name": "buildkite-mcp-write-clusters",
+          "description": "Create and update clusters, cluster queues, cluster secrets and cache registries, pause or resume queue dispatch, and set or delete the default cache registry."
+        },
+        {
+          "name": "buildkite-mcp-write-pipelines",
+          "description": "Create and update pipelines and pipeline schedules, create repository webhooks, and enable or disable GitHub webhook processing."
+        },
+        {
+          "name": "buildkite-mcp-write-builds",
+          "description": "Trigger, cancel and rebuild builds, and retry, cancel or unblock jobs (create_build, cancel_build, rebuild_build, retry_job, retry_failed_jobs, cancel_job, unblock_job)."
+        },
+        {
+          "name": "buildkite-mcp-write-annotations",
+          "description": "Create annotations on builds and jobs (create_annotation)."
+        }
+      ]
+    }
+  ],
+  "cal-com-mcp": [
+    {
+      "scope": "cal-com-mcp-api",
+      "display_name": "Cal.com (MCP)",
+      "description": "Identifies requests to the Cal.com hosted MCP server (mcp.cal.com).",
+      "permissions": [
+        {
+          "name": "cal-com-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Cal.com content."
+        },
+        {
+          "name": "cal-com-mcp-read-all",
+          "description": "View anything in Cal.com without changing it: your profile, event types, events, bookings and attendees, schedules, availability and connected calendars, teams, organization members and attributes, routing forms, documentation, and the list of available API operations. Includes the MCP session handshake."
+        },
+        {
+          "name": "cal-com-mcp-write-all",
+          "description": "Make any change in Cal.com: update your profile; create, edit, duplicate or delete event types and schedules; create, reschedule, cancel, confirm or add attendees to bookings; manage team and organization memberships and attributes; create and edit routing forms; and run any Cal.com API operation. Includes the MCP session handshake."
+        },
+        {
+          "name": "cal-com-mcp-read-docs",
+          "description": "Search the Cal.com documentation, build links to pages in the Cal.com web app, and browse the catalog of Cal.com API operations and the inputs they take, without running any of them."
+        },
+        {
+          "name": "cal-com-mcp-read-profile",
+          "description": "View your own Cal.com user profile."
+        },
+        {
+          "name": "cal-com-mcp-write-profile",
+          "description": "Update your own Cal.com user profile, such as your name, time zone or default settings."
+        },
+        {
+          "name": "cal-com-mcp-read-event-types",
+          "description": "View event types along with their settings, scheduling configuration, change history and CRM sync errors."
+        },
+        {
+          "name": "cal-com-mcp-write-event-types",
+          "description": "Create, edit, duplicate or delete event types."
+        },
+        {
+          "name": "cal-com-mcp-read-bookings",
+          "description": "View bookings, their attendees and routing details, including bookings of organization teams and users, as well as fixed-date events (RSVP pages) that you own or co-host."
+        },
+        {
+          "name": "cal-com-mcp-write-bookings",
+          "description": "Create, reschedule, cancel or confirm bookings, mark attendees as absent, and add attendees to bookings."
+        },
+        {
+          "name": "cal-com-mcp-read-schedules",
+          "description": "View availability schedules (including your default schedule), check available time slots and busy times, and view connected calendars and conferencing apps."
+        },
+        {
+          "name": "cal-com-mcp-write-schedules",
+          "description": "Create, edit or delete availability schedules."
+        },
+        {
+          "name": "cal-com-mcp-read-teams-and-organizations",
+          "description": "View the teams you belong to, organization teams and their memberships, organization memberships, organization attributes and the attributes assigned to users."
+        },
+        {
+          "name": "cal-com-mcp-write-teams-and-organizations",
+          "description": "Invite people to teams; add, change or remove team and organization memberships; and assign, update or unassign attributes on users."
+        },
+        {
+          "name": "cal-com-mcp-read-routing-forms",
+          "description": "View routing forms, their responses and change history, and calculate the time slots a routing form response leads to."
+        },
+        {
+          "name": "cal-com-mcp-write-routing-forms",
+          "description": "Create routing forms and edit their questions and routes."
+        },
+        {
+          "name": "cal-com-mcp-call-api-operations",
+          "description": "Run any Cal.com API operation, which can read or change anything the account has access to."
+        }
+      ]
+    }
+  ],
+  "canva-mcp": [
+    {
+      "scope": "canva-mcp-api",
+      "display_name": "Canva (MCP)",
+      "description": "Identifies requests to the Canva hosted MCP server (mcp.canva.com).",
+      "permissions": [
+        {
+          "name": "canva-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Canva content."
+        },
+        {
+          "name": "canva-mcp-read-all",
+          "description": "View anything in Canva without changing it: search and read designs, export designs, browse assets, folders, comments, brand templates and brand kits, and check the progress of background jobs. Also includes the MCP session handshake."
+        },
+        {
+          "name": "canva-mcp-write-all",
+          "description": "Create and change things in Canva: generate, create, copy, resize, import and edit designs, generate and edit images, upload assets, create folders and move items, post comments, and work with brand templates. Also includes the MCP session handshake."
+        },
+        {
+          "name": "canva-mcp-read-designs",
+          "description": "Find and view designs: search for designs, open a design's details, pages, text content, presenter notes and thumbnail, resolve shared Canva links, and check whether a design that is being created is ready."
+        },
+        {
+          "name": "canva-mcp-export-designs",
+          "description": "Export a design as a downloadable file (PDF, PNG, JPG, PPTX, GIF or MP4) and see which export formats a design supports. Does not change the design."
+        },
+        {
+          "name": "canva-mcp-create-designs",
+          "description": "Create new designs: generate designs with AI, start a blank design, copy, merge or resize existing designs, and import files from a URL as new designs."
+        },
+        {
+          "name": "canva-mcp-edit-designs",
+          "description": "Edit the content of existing designs: open an editing session, change text and elements, and save or discard the changes."
+        },
+        {
+          "name": "canva-mcp-read-assets",
+          "description": "View the images, videos and other media assets in the user's Canva library."
+        },
+        {
+          "name": "canva-mcp-write-assets",
+          "description": "Upload images, videos and other media into the user's Canva library, from a URL or via an upload link."
+        },
+        {
+          "name": "canva-mcp-read-images",
+          "description": "Check the progress and results of image generation and image layer separation jobs."
+        },
+        {
+          "name": "canva-mcp-write-images",
+          "description": "Generate images with AI, remove image backgrounds, and split images into separate layers."
+        },
+        {
+          "name": "canva-mcp-read-folders",
+          "description": "Browse and search folders and list the designs, images and folders inside them."
+        },
+        {
+          "name": "canva-mcp-write-folders",
+          "description": "Create folders and move designs, images and folders between folders."
+        },
+        {
+          "name": "canva-mcp-read-comments",
+          "description": "View the comments and replies on a design."
+        },
+        {
+          "name": "canva-mcp-write-comments",
+          "description": "Post comments on a design and reply to existing comments."
+        },
+        {
+          "name": "canva-mcp-read-brand-templates",
+          "description": "Search brand templates, list brand kits, and view the data fields a brand template or design can be filled with. Requires Canva Pro or above."
+        },
+        {
+          "name": "canva-mcp-write-brand-templates",
+          "description": "Create designs from brand templates, autofill templates with data, and create or publish brand templates. Requires Canva Pro or above."
+        },
+        {
+          "name": "canva-mcp-help",
+          "description": "Ask the Canva MCP server for guidance on how to use it. Does not read or modify any Canva content."
+        }
+      ]
+    }
+  ],
   "fastmail": [
     {
       "scope": "fastmail-api",
@@ -1681,6 +2245,92 @@
       ]
     }
   ],
+  "fathom-mcp": [
+    {
+      "scope": "fathom-mcp-api",
+      "display_name": "Fathom (MCP)",
+      "description": "Identifies requests to the Fathom hosted MCP server (api.fathom.ai, also reachable at fathom.video).",
+      "permissions": [
+        {
+          "name": "fathom-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Fathom content."
+        },
+        {
+          "name": "fathom-mcp-read-all",
+          "description": "Run any Fathom MCP tool (list and search recorded meetings, find the meetings a person took part in, read meeting transcripts and summaries, look up a recording from a link or call ID, see the connected account and its teams) plus the MCP session handshake. Fathom's hosted MCP server is read-only, so this covers every tool it offers; nothing can be created, changed or deleted."
+        },
+        {
+          "name": "fathom-mcp-read-meetings",
+          "description": "Browse and search recorded meetings: list meetings with filters, search them by keyword, find the meetings a person took part in, and look up a recording from a meeting link or call ID. Does not return transcripts or summaries."
+        },
+        {
+          "name": "fathom-mcp-read-transcripts",
+          "description": "Read the full transcript of a recorded meeting, including who said what and when."
+        },
+        {
+          "name": "fathom-mcp-read-summaries",
+          "description": "Read the AI-generated summary of a recorded meeting."
+        },
+        {
+          "name": "fathom-mcp-read-account",
+          "description": "See which Fathom account is connected (name and email) and which teams it belongs to."
+        }
+      ]
+    }
+  ],
+  "gamma-mcp": [
+    {
+      "scope": "gamma-mcp-api",
+      "display_name": "Gamma (MCP)",
+      "description": "Identifies requests to the Gamma hosted MCP server (mcp.gamma.app).",
+      "permissions": [
+        {
+          "name": "gamma-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Gamma content."
+        },
+        {
+          "name": "gamma-mcp-read-all",
+          "description": "Browse, search and read existing gammas, templates, themes, folders, comments and engagement analytics, export gammas to PDF, PPTX or PNG, and check the progress of generation, edit and export jobs. Does not create or change anything."
+        },
+        {
+          "name": "gamma-mcp-write-all",
+          "description": "Create new gammas (presentations, documents, webpages, social posts) from scratch or from templates, generate images, and edit existing gammas. These actions consume Gamma credits."
+        },
+        {
+          "name": "gamma-mcp-read-gammas",
+          "description": "Browse and search existing gammas, read their full content and outline, and view the comments on them."
+        },
+        {
+          "name": "gamma-mcp-read-workspace",
+          "description": "Browse and search the available templates, themes and folders."
+        },
+        {
+          "name": "gamma-mcp-read-analytics",
+          "description": "View engagement analytics for a gamma, including per-card engagement and who viewed it."
+        },
+        {
+          "name": "gamma-mcp-read-job-status",
+          "description": "Check the progress and results of previously started generation, image, edit and export jobs."
+        },
+        {
+          "name": "gamma-mcp-export-gammas",
+          "description": "Export an existing gamma to PDF, PPTX or PNG and fetch the download link when it is ready."
+        },
+        {
+          "name": "gamma-mcp-generate-gammas",
+          "description": "Create new gammas (presentations, documents, webpages or social posts) from a prompt, as multi-page sites, or from a template. Consumes Gamma credits."
+        },
+        {
+          "name": "gamma-mcp-generate-images",
+          "description": "Create standalone images from a text prompt. Consumes Gamma credits."
+        },
+        {
+          "name": "gamma-mcp-edit-gammas",
+          "description": "Change the content of an existing gamma using natural-language instructions (add, remove, reorder or rewrite cards). Consumes Gamma credits."
+        }
+      ]
+    }
+  ],
   "google-slides": [
     {
       "scope": "google-slides-api",
@@ -1714,6 +2364,55 @@
       ]
     }
   ],
+  "granola-mcp": [
+    {
+      "scope": "granola-mcp-api",
+      "display_name": "Granola (MCP)",
+      "description": "Identifies requests to the Granola hosted MCP server (mcp.granola.ai).",
+      "permissions": [
+        {
+          "name": "granola-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Granola content."
+        },
+        {
+          "name": "granola-mcp-read-all",
+          "description": "Run any read-only Granola MCP tool (list and read meeting notes, transcripts, shared-screen screenshots and folders, ask questions about meetings, see the connected account) plus the MCP session handshake."
+        },
+        {
+          "name": "granola-mcp-write-all",
+          "description": "Run any Granola MCP tool that changes something (create and edit folders, add or remove notes from folders, switch the active workspace, sign out) plus the MCP session handshake."
+        },
+        {
+          "name": "granola-mcp-read-meetings",
+          "description": "View meeting notes: list meetings, read their notes and AI summaries, see screenshots of content shared during meetings, and ask questions about past meetings."
+        },
+        {
+          "name": "granola-mcp-read-transcripts",
+          "description": "Read the raw transcript of a meeting (paid plans only)."
+        },
+        {
+          "name": "granola-mcp-read-folders",
+          "description": "List the folders of meeting notes you have access to (paid plans only)."
+        },
+        {
+          "name": "granola-mcp-write-folders",
+          "description": "Create and rename folders, and add notes to or remove notes from folders. Adding a note to a shared folder shares it with everyone who can see the folder."
+        },
+        {
+          "name": "granola-mcp-read-account",
+          "description": "See which Granola account and workspace are connected."
+        },
+        {
+          "name": "granola-mcp-switch-workspaces",
+          "description": "Change the active Granola workspace, which also changes it in the Granola app and other connected AI tools."
+        },
+        {
+          "name": "granola-mcp-sign-out",
+          "description": "Sign the AI tool out of the Granola account."
+        }
+      ]
+    }
+  ],
   "huggingface": [
     {
       "scope": "huggingface-api",
@@ -1735,6 +2434,250 @@
         {
           "name": "huggingface-download",
           "description": "Download repository contents by any transport: resolve/raw file requests, the redirected CDN and Xet storage hosts, and a read-only Git clone or fetch (including the LFS batch call it needs). Does not grant access to the rest of the Hub API."
+        }
+      ]
+    }
+  ],
+  "invideo-mcp": [
+    {
+      "scope": "invideo-mcp-api",
+      "display_name": "invideo (MCP)",
+      "description": "Identifies requests to the invideo hosted MCP server (mcp.invideo.io).",
+      "permissions": [
+        {
+          "name": "invideo-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify invideo content."
+        },
+        {
+          "name": "invideo-mcp-read-all",
+          "description": "Look at video projects without changing anything: list projects, read timelines, media and exports, and ask the server for help on how projects, timelines and media work, plus the MCP session handshake. invideo does not publicly document its MCP tool catalog, so this permission is based on tool-name conventions (tools whose names start with a read-style verb such as get, list or show)."
+        },
+        {
+          "name": "invideo-mcp-write-all",
+          "description": "Create and edit video projects: bring in media, change timelines, branch and checkpoint edits, generate images, video and audio (which spends invideo credits), and export finished videos, plus the MCP session handshake. invideo does not publicly document its MCP tool catalog, so this permission is based on tool-name conventions (any tool whose name does not start with a read-style verb such as get, list or show)."
+        }
+      ]
+    }
+  ],
+  "linktree-mcp": [
+    {
+      "scope": "linktree-mcp-api",
+      "display_name": "Linktree (MCP)",
+      "description": "Identifies requests to the Linktree hosted MCP server (mcp.linktr.ee).",
+      "permissions": [
+        {
+          "name": "linktree-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Linktree content."
+        },
+        {
+          "name": "linktree-mcp-read-all",
+          "description": "View everything on a Linktree account without changing it: profiles, links, social icons, appearance, analytics, recommendations, workspaces and the messages inbox."
+        },
+        {
+          "name": "linktree-mcp-write-all",
+          "description": "Make any change to a Linktree account: create and edit profiles, add, edit, reorder and delete links and social icons, change the appearance, record recommendation feedback and send replies to followers."
+        },
+        {
+          "name": "linktree-mcp-read-profiles",
+          "description": "View Linktree profiles the user can access and their details: display name, bio, suggested bio, connected social integrations, knowledge base entries and the profile sharing link. Also lets the agent pick which profile to work on."
+        },
+        {
+          "name": "linktree-mcp-write-profiles",
+          "description": "Create the user's first Linktree profile or change a profile's display name and bio."
+        },
+        {
+          "name": "linktree-mcp-read-links",
+          "description": "View the links, collections, shop products and social icons on a Linktree profile."
+        },
+        {
+          "name": "linktree-mcp-write-links",
+          "description": "Add, edit and reorder links, collections and social icons on a Linktree profile. Does not allow deleting them."
+        },
+        {
+          "name": "linktree-mcp-delete-links",
+          "description": "Delete links and social icons from a Linktree profile."
+        },
+        {
+          "name": "linktree-mcp-read-appearance",
+          "description": "View a Linktree profile's appearance settings: colors, fonts, button styles and background."
+        },
+        {
+          "name": "linktree-mcp-write-appearance",
+          "description": "Change a Linktree profile's appearance: colors, fonts, button styles and background."
+        },
+        {
+          "name": "linktree-mcp-read-analytics",
+          "description": "View Linktree analytics: profile views, clicks, click-through rates, earnings, top links, per-link trends and workspace-wide profile totals."
+        },
+        {
+          "name": "linktree-mcp-read-recommendations",
+          "description": "Get Linktree's suggestions for improving a profile."
+        },
+        {
+          "name": "linktree-mcp-write-recommendations",
+          "description": "Record whether the user accepted or declined a Linktree suggestion."
+        },
+        {
+          "name": "linktree-mcp-read-workspaces",
+          "description": "View the Linktree workspaces the user belongs to, their members and roles, and the profiles in each workspace."
+        },
+        {
+          "name": "linktree-mcp-read-messages",
+          "description": "Read conversations and messages from followers in a Linktree profile's inbox."
+        },
+        {
+          "name": "linktree-mcp-send-messages",
+          "description": "Send replies to followers in a Linktree profile's inbox. Messages are sent immediately."
+        }
+      ]
+    }
+  ],
+  "neon-mcp": [
+    {
+      "scope": "neon-mcp-api",
+      "display_name": "Neon (MCP)",
+      "description": "Identifies requests to the Neon hosted MCP server (mcp.neon.tech).",
+      "permissions": [
+        {
+          "name": "neon-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Neon data."
+        },
+        {
+          "name": "neon-mcp-read-all",
+          "description": "Run any read-only Neon MCP tool (list and describe projects, branches, databases, roles, schemas, computes, snapshots, functions, storage, logs; explain queries and run database health checks; search Neon docs) plus the MCP session handshake. Does not execute arbitrary SQL and does not reveal connection strings or secrets."
+        },
+        {
+          "name": "neon-mcp-write-all",
+          "description": "Run any Neon MCP tool that creates, modifies or deletes something or exposes secrets (execute SQL and migrations; create, update, reset and delete projects, branches, databases, roles, computes, snapshots, functions, storage, Neon Auth, Data API and Realtime; obtain connection strings and secrets; send feedback) plus the MCP session handshake."
+        },
+        {
+          "name": "neon-mcp-read-projects-and-branches",
+          "description": "View Neon organizations, projects and branches: project settings, members, permissions, regions and operations, branch details and the default branch, and search across organizations, projects and branches (search, fetch)."
+        },
+        {
+          "name": "neon-mcp-read-databases",
+          "description": "View Postgres databases and roles on a branch, inspect database schemas (tables, columns, constraints, all objects on a branch, schema diffs between branches) and analyze query performance (execution plans, slow queries, Neon's read-only health checks). Does not read table data."
+        },
+        {
+          "name": "neon-mcp-read-auth-and-credentials",
+          "description": "View Neon Auth status and configuration for a branch (with secrets redacted), its trusted redirect domains, and metadata about scoped service credentials issued on the branch. Does not reveal secrets or connection strings."
+        },
+        {
+          "name": "neon-mcp-read-computes-and-snapshots",
+          "description": "List and view compute endpoints, snapshots and a branch's automatic snapshot schedule."
+        },
+        {
+          "name": "neon-mcp-read-platform-add-ons",
+          "description": "View the configuration of Neon's platform add-ons on a branch: the Data API, Functions (with their custom domains and triggers), object storage (buckets and object listings), Realtime (without its secret) and the AI Gateway endpoint host."
+        },
+        {
+          "name": "neon-mcp-read-logs-and-docs",
+          "description": "Query branch logs (and their fields and values), and search and read Neon documentation, guides and blog posts on neon.com."
+        },
+        {
+          "name": "neon-mcp-write-projects-and-branches",
+          "description": "Create and update Neon projects and branches, recover a recently deleted project, set a project's default branch, finalize a branch restored from a snapshot, and send anonymous feedback to the Neon team (send_feedback). Does not delete projects or branches."
+        },
+        {
+          "name": "neon-mcp-delete-projects-and-branches",
+          "description": "Delete a Neon project with all of its branches and data (delete_project), delete a branch and all of its data (delete_branch), or reset a branch to its parent and discard its changes (reset_from_parent)."
+        },
+        {
+          "name": "neon-mcp-run-sql",
+          "description": "Execute arbitrary SQL on a Neon database: run statements and transactions directly (run_sql, run_sql_transaction), or prepare schema migrations and query-tuning changes on a temporary branch and then apply or discard them on the target branch. This can read, modify or delete any data or schema the connected role has access to."
+        },
+        {
+          "name": "neon-mcp-write-databases",
+          "description": "Create and update Postgres databases on a branch, and create Postgres roles or reset their passwords. Does not delete databases or roles."
+        },
+        {
+          "name": "neon-mcp-delete-databases",
+          "description": "Delete Postgres databases (and their data) or Postgres roles from a branch."
+        },
+        {
+          "name": "neon-mcp-write-auth-and-credentials",
+          "description": "Manage access to a branch: enable, configure or disable Neon Auth and manage its OAuth providers (including viewing their secrets), trusted domains and users; and issue, rotate and revoke scoped service credentials for object storage and the AI Gateway. Does not reveal Postgres connection strings or passwords."
+        },
+        {
+          "name": "neon-mcp-get-connection-strings",
+          "description": "Obtain Postgres connection strings, including the role password, for Neon databases (get_connection_string). These allow direct database access outside the MCP server."
+        },
+        {
+          "name": "neon-mcp-write-computes-and-snapshots",
+          "description": "Create, update and delete compute endpoints and start, suspend or restart them; create, update and delete snapshots, change a branch's snapshot schedule and restore a snapshot onto a new or existing branch."
+        },
+        {
+          "name": "neon-mcp-write-platform-add-ons",
+          "description": "Enable, configure, change or remove Neon's platform add-ons on a branch: the Data API; Functions with their custom domains and triggers; object storage buckets and objects (including deleting objects and creating presigned upload/download URLs); and Realtime, including viewing or rotating its shared secret."
+        }
+      ]
+    }
+  ],
+  "netlify-mcp": [
+    {
+      "scope": "netlify-mcp-api",
+      "display_name": "Netlify (MCP)",
+      "description": "Identifies requests to the Netlify hosted MCP server (netlify-mcp.netlify.app, also served as mcp.netlify.com).",
+      "permissions": [
+        {
+          "name": "netlify-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Netlify content."
+        },
+        {
+          "name": "netlify-mcp-read-all",
+          "description": "Run any read-only Netlify MCP tool (coding guidance, user and team info, projects and forms, deploys, extensions, database setup steps, observability queries and request logs, design-import status) on either tool surface (the netlify-*-services-reader selectors or the per-operation netlify-<domain>-<operation> tools), plus the MCP session handshake."
+        },
+        {
+          "name": "netlify-mcp-write-all",
+          "description": "Run any Netlify MCP tool that changes something (create or rename projects, visitor access controls, forms and form submissions, environment variables, deploys, extension installs, Claude Design imports) on either tool surface (the netlify-*-services-updater selectors or the per-operation netlify-<domain>-<operation> tools), plus the MCP session handshake."
+        },
+        {
+          "name": "netlify-mcp-read-coding-guidance",
+          "description": "Fetch Netlify's coding guidance and agent skills for functions, edge functions, blobs, database, forms, configuration and deploys (get-netlify-coding-context; netlify-coding-rules is the same tool's name on the local server)."
+        },
+        {
+          "name": "netlify-mcp-read-account",
+          "description": "Look up the signed-in user's profile, their teams and team-level environment variables (netlify-user-services-reader, netlify-team-services-reader and the per-operation get-user, get-teams, get-team, get-team-env-vars tools)."
+        },
+        {
+          "name": "netlify-mcp-read-projects",
+          "description": "List projects (sites), inspect a project's settings and list its forms (netlify-project-services-reader and the per-operation get-projects, get-project, get-forms-for-project tools)."
+        },
+        {
+          "name": "netlify-mcp-read-deploys",
+          "description": "Inspect deploys and build status by deploy ID or for a site (netlify-deploy-services-reader and the per-operation get-deploy, get-deploy-for-site tools)."
+        },
+        {
+          "name": "netlify-mcp-read-extensions",
+          "description": "Browse available Netlify extensions, read an extension's details and fetch the written setup steps for adding a Netlify Database (netlify-extension-services-reader and the per-operation get-extensions, get-full-extension-details, netlify-get-database-setup-steps tools). Does not install or provision anything."
+        },
+        {
+          "name": "netlify-mcp-read-observability",
+          "description": "Query a site's edge traffic analytics: request counts, top-k rankings, time series, request logs and single request details (netlify-observability-services-reader and the per-operation get-counts, get-topk, get-timeseries, get-request-logs, get-request-detail tools)."
+        },
+        {
+          "name": "netlify-mcp-write-projects",
+          "description": "Create and rename projects, change visitor access controls (password or SSO protection), toggle Netlify Forms and delete form submissions, and manage a project's environment variables (netlify-project-services-updater and all per-operation project write tools)."
+        },
+        {
+          "name": "netlify-mcp-write-env-vars",
+          "description": "Read, create, update or delete a project's environment variables via the per-operation tool only (netlify-project-manage-env-vars). On the default selector surface the same operation runs through netlify-project-services-updater, covered by netlify-mcp-write-projects."
+        },
+        {
+          "name": "netlify-mcp-write-forms",
+          "description": "Enable or disable Netlify Forms processing and read or permanently delete form submissions via the per-operation tools only (netlify-project-update-forms, netlify-project-manage-form-submissions). On the default selector surface these run through netlify-project-services-updater, covered by netlify-mcp-write-projects."
+        },
+        {
+          "name": "netlify-mcp-deploy-sites",
+          "description": "Publish a new deploy of a project to an existing Netlify site, making it live (netlify-deploy-services-updater and the per-operation netlify-deploy-site tool)."
+        },
+        {
+          "name": "netlify-mcp-write-extensions",
+          "description": "Install or uninstall Netlify extensions for a team (netlify-extension-services-updater and the per-operation netlify-extension-change-extension-installation tool)."
+        },
+        {
+          "name": "netlify-mcp-import-designs",
+          "description": "Deploy a Claude Design export to a new Netlify site and check the status of that import (import-claude-design-from-url, get-design-import-job-status). These tools are only offered to Claude clients."
         }
       ]
     }
@@ -1781,6 +2724,234 @@
         {
           "name": "openrouter-inference",
           "description": "Run models through the OpenRouter inference endpoints (POST chat/completions, messages, responses, embeddings, rerank, images, videos, and audio speech/transcriptions), which consume credits. Verified against the OpenRouter OpenAPI spec."
+        }
+      ]
+    }
+  ],
+  "otter-mcp": [
+    {
+      "scope": "otter-mcp-api",
+      "display_name": "Otter.ai (MCP)",
+      "description": "Identifies requests to the Otter.ai hosted MCP server (mcp.otter.ai).",
+      "permissions": [
+        {
+          "name": "otter-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Otter.ai content."
+        },
+        {
+          "name": "otter-mcp-read-all",
+          "description": "Run any Otter.ai MCP tool (search meetings by date, attendee, topic, keyword or title; read a meeting's full transcript, summary, outline and action items; see the connected account) plus the MCP session handshake. Otter's hosted MCP server is read-only, so this covers every tool it offers; nothing can be created, changed or deleted."
+        },
+        {
+          "name": "otter-mcp-search-meetings",
+          "description": "Search your Otter meetings by date, attendee, topic, keyword, folder, channel or title and see their summaries, outlines and action items."
+        },
+        {
+          "name": "otter-mcp-read-transcripts",
+          "description": "Read the full speaker-attributed transcript of a specific Otter meeting, together with its summary, outline, action items and attendees."
+        },
+        {
+          "name": "otter-mcp-read-account",
+          "description": "See the name and email of the connected Otter account."
+        }
+      ]
+    }
+  ],
+  "paypal-mcp": [
+    {
+      "scope": "paypal-mcp-api",
+      "display_name": "PayPal (MCP)",
+      "description": "Identifies requests to the PayPal hosted MCP server (mcp.paypal.com, or mcp.sandbox.paypal.com for the sandbox).",
+      "permissions": [
+        {
+          "name": "paypal-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PayPal data."
+        },
+        {
+          "name": "paypal-mcp-read-all",
+          "description": "Run any read-only PayPal MCP tool (view invoices, products, subscriptions, orders, refunds, disputes, shipment tracking, transactions and sales insights) plus the MCP session handshake. Never moves money or changes anything."
+        },
+        {
+          "name": "paypal-mcp-write-all",
+          "description": "Run any PayPal MCP tool that changes or moves something: create, edit, send and delete invoices, manage products, subscription plans and subscriptions, add shipment tracking, create and capture orders, issue refunds, check out carts and accept dispute claims; plus the MCP session handshake."
+        },
+        {
+          "name": "paypal-mcp-read-invoices",
+          "description": "View invoices and recurring invoice series: list, search and open them, generate an invoice QR code or the next invoice number. Does not change or send anything."
+        },
+        {
+          "name": "paypal-mcp-read-products",
+          "description": "View the product catalog and product details, and search the gift card catalog."
+        },
+        {
+          "name": "paypal-mcp-read-subscriptions",
+          "description": "View subscription plans and the details of individual subscriptions."
+        },
+        {
+          "name": "paypal-mcp-read-payments",
+          "description": "View the details of orders and refunds."
+        },
+        {
+          "name": "paypal-mcp-read-disputes",
+          "description": "View open and past disputes and their details."
+        },
+        {
+          "name": "paypal-mcp-read-shipments",
+          "description": "View shipment tracking information for transactions."
+        },
+        {
+          "name": "paypal-mcp-read-reports",
+          "description": "View transaction history and sales or order analytics."
+        },
+        {
+          "name": "paypal-mcp-write-invoices",
+          "description": "Create and edit invoices and recurring invoice series, set up or cancel automatic reminders, record payments or refunds made outside PayPal, and cancel sent invoices. Does not send invoices to customers or delete them."
+        },
+        {
+          "name": "paypal-mcp-send-invoices",
+          "description": "Send invoices and payment reminders to customers by email."
+        },
+        {
+          "name": "paypal-mcp-delete-invoices",
+          "description": "Permanently delete draft invoices and recurring invoice series."
+        },
+        {
+          "name": "paypal-mcp-write-products",
+          "description": "Create and edit products in the catalog."
+        },
+        {
+          "name": "paypal-mcp-write-subscriptions",
+          "description": "Create and edit subscription plans, and create, change or cancel customer subscriptions."
+        },
+        {
+          "name": "paypal-mcp-write-shipments",
+          "description": "Add or update shipment tracking information on transactions."
+        },
+        {
+          "name": "paypal-mcp-move-money",
+          "description": "Move money: create and capture orders, issue refunds to buyers, build and check out gift card carts, and accept dispute claims in the buyer's favor (which refunds them)."
+        }
+      ]
+    }
+  ],
+  "peloton-mcp": [
+    {
+      "scope": "peloton-mcp-api",
+      "display_name": "Peloton (MCP)",
+      "description": "Identifies requests to the Peloton hosted MCP server (mcp.onepeloton.com).",
+      "permissions": [
+        {
+          "name": "peloton-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Peloton content."
+        },
+        {
+          "name": "peloton-mcp-read-all",
+          "description": "Search the Peloton class library, view class details and draft weekly training plans, plus the MCP session handshake. Nothing is added to the member's Peloton account."
+        },
+        {
+          "name": "peloton-mcp-write-all",
+          "description": "Add classes to the member's Peloton calendar, plus the MCP session handshake."
+        },
+        {
+          "name": "peloton-mcp-read-classes",
+          "description": "Search Peloton classes by natural language (instructor, duration, discipline, music, difficulty) and view the details of a class."
+        },
+        {
+          "name": "peloton-mcp-create-training-plans",
+          "description": "Draft an interactive weekly training plan (up to 14 days) from Peloton classes and rest days. The plan is only displayed; it does not change the member's Peloton schedule."
+        },
+        {
+          "name": "peloton-mcp-schedule-classes",
+          "description": "Add Peloton classes at chosen dates and times to the member's Peloton calendar."
+        }
+      ]
+    }
+  ],
+  "posthog-mcp": [
+    {
+      "scope": "posthog-mcp-api",
+      "display_name": "PostHog (MCP)",
+      "description": "Identifies requests to the PostHog hosted MCP server (mcp.posthog.com, or mcp-eu.posthog.com for EU Cloud projects).",
+      "permissions": [
+        {
+          "name": "posthog-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PostHog content."
+        },
+        {
+          "name": "posthog-mcp-read-all",
+          "description": "Run any read-only PostHog MCP tool, i.e. the same set PostHog's own read-only mode exposes (SQL and analytics queries, insights, dashboards, feature flag and experiment lookups, error tracking, logs, replays, surveys, warehouse and workspace lookups), plus the MCP session handshake. Works in both the per-tool mode and the default CLI mode, where tools are invoked through the exec tool (\"call <tool>\") and discovered with its help, learn, tools, search, info and schema commands."
+        },
+        {
+          "name": "posthog-mcp-write-all",
+          "description": "Run any PostHog MCP tool that creates, modifies, deletes or triggers something (feature flags, experiments, insights, dashboards, notebooks, cohorts, surveys, workflows, warehouse tables, project settings, ...), plus the MCP session handshake. Works in both the per-tool mode and the default CLI mode, where tools are invoked through the exec tool (\"call <tool>\"); the exec discovery commands (help, learn, tools, search, info, schema) that CLI-mode clients need to find tools are included as well."
+        },
+        {
+          "name": "posthog-mcp-read-workspace",
+          "description": "View organization and project settings, members, roles, access control rules, billing and usage, integrations, reverse proxies, SSO configuration, approval requests, comments, support tickets and MCP connections, and discover what the PostHog MCP server can do: the CLI-mode exec commands (help, learn, tools, search, info, schema), the render-ui visualization tool, PostHog documentation search, app URL building, the MCP apps debug tool and sending product feedback (organizations-get, projects-get, org-members-list, billing-*, integration-get, docs-search, generate-app-url, agent-feedback, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-workspace",
+          "description": "Change organization and project settings: create projects, switch the active organization or project, manage access control rules, roles, SSO, approvals, integrations, reverse proxies, comments and support tickets (switch-project, project-create, project-settings-update, access-control-*-execute, proxy-create, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-analytics",
+          "description": "Run analytics queries and read their results, and view insights, dashboards and notebooks: HogQL/SQL (execute-sql), trends, funnels, retention, paths, lifecycle and stickiness queries, saved insights, web, marketing and metrics queries, heatmaps, AI citation tracking, dashboards and their tiles, subscriptions, alerts, annotations, notebooks, canvases and Streamlit apps (insight-query, query-*, insights-list, dashboard-get, alerts-list, notebooks-get, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-analytics",
+          "description": "Create, update and delete saved insights, heatmaps, conversion goals, tracked AI prompts and web analytics rules, dashboards and their tiles, subscriptions, alerts and annotations, and create, edit, run and delete notebooks (including running their SQL and Python cells), canvases and Streamlit apps (insight-create, insight-delete, dashboard-create, dashboard-delete, alert-create, notebooks-create, notebooks-run, canvas-create, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-experimentation",
+          "description": "View feature flags, their definitions, status and scheduled changes, early access features, experiments and their results, holdouts and shared metrics, and autoresearch pipelines (feature-flag-get-all, feature-flag-get-definition, early-access-feature-list, experiment-list, experiment-results-get, autoresearch-list, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-experimentation",
+          "description": "Create, update, enable, disable, roll out, archive and delete feature flags, scheduled changes and early access features; create, launch, pause, end, ship and delete experiments, holdouts and shared metrics; and manage autoresearch pipelines (create-feature-flag, update-feature-flag, delete-feature-flag, feature-flag-roll-out-to-everyone, experiment-create, experiment-launch, experiment-ship-variant, experiment-delete, autoresearch-create, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-people-and-customers",
+          "description": "Look up persons and their properties, view cohorts, and view customer analytics: accounts, contacts, deals, meetings, usage and health scores, feature requests, account notebooks and relationship definitions (persons-list, persons-retrieve, cohorts-list, accounts-list, accounts-retrieve, accounts-meetings-list, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-people-and-customers",
+          "description": "Set or delete person properties, delete persons, create or update cohorts, and create, update and delete customer analytics accounts, contacts, custom properties, deals, feature requests, relationship definitions and account notebooks (persons-property-set, persons-bulk-delete, cohorts-create, accounts-create, accounts-destroy, accounts-custom-property-values-create, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-data",
+          "description": "Explore the event schema (events, actions, event and person property definitions, data quality check results), the data warehouse (tables, saved queries, external data sources and their sync status, the data catalog, SQL variables and query endpoints) and data pipelines (CDP destinations, transformations and sources, their templates and invocation logs, and batch exports) (read-data-schema, actions-get-all, view-list, external-data-sources-list, endpoint-get, cdp-functions-list, batch-export-get, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-data",
+          "description": "Create, update and delete actions, event and property definitions and data quality checks, and create, update, run, materialize and delete saved queries, warehouse tables, external data sources and schemas, data catalog entries and query endpoints (action-create, event-definition-create, data-quality-check-run, view-create, view-run, view-materialize, warehouse-tables-create, external-data-sources-*, endpoint-create, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-pipelines",
+          "description": "Create, update, publish, test-invoke and delete data pipeline destinations, transformations and sources (Hog functions) and batch exports, which can send project data to external systems (cdp-functions-create, cdp-functions-publish, cdp-functions-delete, batch-export-create, batch-export-delete, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-monitoring",
+          "description": "View monitoring data: error tracking issues, occurrences, stack traces and rules, logs and tracing spans and log alerts, session recordings, playlists and Replay Vision scanners, LLM analytics (generations, traces, costs, evaluations, datasets and managed prompts), and Signals inbox reports, scouts, anomaly scores and activity summaries (query-error-tracking-issues-list, query-logs, query-session-recordings-list, get-llm-total-costs-for-project, llma-*-list, inbox-reports-list, anomaly-search, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-monitoring",
+          "description": "Change error tracking issue status and assignment, merge or split issues and manage error tracking rules, settings and alerts; create, update and delete log alerts; delete session recordings, manage playlists and Replay Vision scanners; create, update and delete LLM evaluations, clustering jobs, datasets and managed prompts; and act on Signals inbox reports and scouts (error-tracking-issues-partial-update, error-tracking-issues-merge-create, logs-alerts-create, session-recording-delete, vision-scanners-create, llma-evaluation-create, llma-prompt-create, inbox-report-actions-run, scout-run-now, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-messaging-and-surveys",
+          "description": "View messaging workflows, broadcasts, email templates, message categories and opt-outs, and surveys and their responses and statistics (workflows-list, workflows-get, workflows-blast-radius, message-categories-list, opt-outs-list, surveys-get-all, survey-get, survey-stats, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-messaging-and-surveys",
+          "description": "Create, update, test-run, enable, archive and convert messaging workflows and broadcasts, manage email templates and message categories, change the opt-out list, and create, update, launch, stop and delete surveys (workflows-create, workflows-update, broadcasts-create, opt-outs-add, survey-create, survey-launch, survey-stop, survey-delete, ...)."
+        },
+        {
+          "name": "posthog-mcp-read-agents-and-engineering",
+          "description": "View PostHog AI agent work and engineering tooling: agent tasks, channels and runs, the project knowledge used by agents (business knowledge libraries and documents, context wiki pages, skills and skill files, field notes, reminders and PostHog AI chat threads), AI code reviews (PostHog Review, Stamphog), visual review runs and CI/test analytics (tasks-list, channel-list, skill-list, context-wiki-page-retrieve, business-knowledge-documents-search, review-hog-reviews-list, engineering-analytics-flaky-tests, ...)."
+        },
+        {
+          "name": "posthog-mcp-write-agents-and-engineering",
+          "description": "Create and run agent tasks and channels, create, update and archive the project knowledge used by agents (business knowledge libraries, context wiki pages, skills and skill files, field notes and reminders), trigger code reviews and Stamphog digests, and change visual review settings and quarantines (tasks-create, tasks-run-create, channel-create, skill-create, context-wiki-page-update, reminder-create, review-hog-reviews-trigger, stamphog-review-runs-create, ...)."
         }
       ]
     }
@@ -1910,6 +3081,164 @@
       ]
     }
   ],
+  "readwise-mcp": [
+    {
+      "scope": "readwise-mcp-api",
+      "display_name": "Readwise (MCP)",
+      "description": "Identifies requests to the Readwise hosted MCP server (mcp2.readwise.io).",
+      "permissions": [
+        {
+          "name": "readwise-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Readwise content."
+        },
+        {
+          "name": "readwise-mcp-read-all",
+          "description": "View anything in Readwise without changing it: search and list highlights, the Daily Review, Reader documents and tags, document exports, the Books library, reading sessions and stats, and public feed tokens. Also includes the MCP session handshake."
+        },
+        {
+          "name": "readwise-mcp-write-all",
+          "description": "Make any change in Readwise: create, edit, tag or delete highlights; save, move, retag and edit Reader documents; add, edit or remove books and reading sessions; and create or revoke public feed tokens. Also includes the MCP session handshake."
+        },
+        {
+          "name": "readwise-mcp-read-highlights",
+          "description": "Search and list highlights in the Highlights library, see today's Daily Review, and view the highlights on a Reader document."
+        },
+        {
+          "name": "readwise-mcp-write-highlights",
+          "description": "Create new highlights, edit a highlight's text, note, location or tags, and add or remove tags and notes on Reader highlights. Does not allow deleting highlights."
+        },
+        {
+          "name": "readwise-mcp-delete-highlights",
+          "description": "Permanently delete a highlight from the Highlights library."
+        },
+        {
+          "name": "readwise-mcp-read-documents",
+          "description": "Search and list Reader documents, view a document's details and full content, and list the tags in the Reader library."
+        },
+        {
+          "name": "readwise-mcp-write-documents",
+          "description": "Save new documents to Reader, move documents between inbox, later, shortlist, archive and feed, edit document metadata in bulk, and add or remove tags on documents."
+        },
+        {
+          "name": "readwise-mcp-export-documents",
+          "description": "Start an export of all Reader documents and check its status to obtain the download link."
+        },
+        {
+          "name": "readwise-mcp-read-books",
+          "description": "View the Books library, reading sessions, daily reading totals, and reading stats and goals."
+        },
+        {
+          "name": "readwise-mcp-write-books",
+          "description": "Add books to the library, change a book's shelf, dates, rating or review, log reading sessions, and edit session captions. Does not allow deleting books or sessions."
+        },
+        {
+          "name": "readwise-mcp-delete-books",
+          "description": "Remove books from the library and delete reading sessions along with their XP and feed posts."
+        },
+        {
+          "name": "readwise-mcp-read-public-tokens",
+          "description": "List the tokens that let outside sites read the public book feed."
+        },
+        {
+          "name": "readwise-mcp-write-public-tokens",
+          "description": "Create or revoke tokens that let outside sites read the public book feed."
+        }
+      ]
+    }
+  ],
+  "supabase-mcp": [
+    {
+      "scope": "supabase-mcp-api",
+      "display_name": "Supabase (MCP)",
+      "description": "Identifies requests to the Supabase hosted MCP server (mcp.supabase.com).",
+      "permissions": [
+        {
+          "name": "supabase-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Supabase content."
+        },
+        {
+          "name": "supabase-mcp-read-all",
+          "description": "Run any read-only Supabase MCP tool (inspect database schema and migrations, read logs and advisors, project URLs and API keys, generated types, Edge Function source, organizations and projects, costs, docs search, branches, storage config, notebooks) plus the MCP session handshake. Does not include execute_sql."
+        },
+        {
+          "name": "supabase-mcp-write-all",
+          "description": "Run any Supabase MCP tool that changes something: execute SQL, apply migrations, deploy Edge Functions and secrets, create/pause/restore projects, create/merge/rebase/reset/delete branches, update storage config, create and run notebooks, and send feedback, plus the MCP session handshake."
+        },
+        {
+          "name": "supabase-mcp-read-database",
+          "description": "Inspect the database schema: list tables (with columns and keys), installed Postgres extensions, and applied migrations (list_tables, list_extensions, list_migrations)."
+        },
+        {
+          "name": "supabase-mcp-execute-sql",
+          "description": "Run arbitrary SQL against a project's Postgres database (execute_sql). This can read, modify or delete data unless the MCP server was started with read_only=true, so it is treated as a write permission."
+        },
+        {
+          "name": "supabase-mcp-write-database",
+          "description": "Apply schema migrations (DDL) to a project's database (apply_migration)."
+        },
+        {
+          "name": "supabase-mcp-read-logs",
+          "description": "Read project logs by service or with a custom log query, and fetch security, performance and health advisor notices (get_logs, query_logs, get_advisors)."
+        },
+        {
+          "name": "supabase-mcp-read-development",
+          "description": "Fetch a project's API URL and publishable/anon API keys, and generate TypeScript types from the database schema (get_project_url, get_publishable_keys, get_anon_key, generate_typescript_types)."
+        },
+        {
+          "name": "supabase-mcp-read-edge-functions",
+          "description": "List a project's Edge Functions and read their source code (list_edge_functions, get_edge_function)."
+        },
+        {
+          "name": "supabase-mcp-write-edge-functions",
+          "description": "Deploy Edge Functions, replacing any existing function with the same name, and create or update Edge Function secrets (deploy_edge_function, create_edge_function_secret)."
+        },
+        {
+          "name": "supabase-mcp-read-projects",
+          "description": "View the organizations and projects the account can access, including plan details, and look up and acknowledge the cost of a new project or branch (list_organizations, get_organization, list_projects, get_project, get_cost, confirm_cost)."
+        },
+        {
+          "name": "supabase-mcp-write-projects",
+          "description": "Create new Supabase projects, which can add to the organization's bill, and pause or restore existing projects (create_project, pause_project, restore_project)."
+        },
+        {
+          "name": "supabase-mcp-read-docs",
+          "description": "Search the Supabase documentation (search_docs)."
+        },
+        {
+          "name": "supabase-mcp-read-branches",
+          "description": "List a project's development branches and their status (list_branches)."
+        },
+        {
+          "name": "supabase-mcp-write-branches",
+          "description": "Create development branches (which can incur usage charges), merge a branch's migrations and Edge Functions into production, and rebase a branch onto production (create_branch, merge_branch, rebase_branch)."
+        },
+        {
+          "name": "supabase-mcp-delete-branches",
+          "description": "Delete a development branch or reset its migrations, discarding untracked changes (delete_branch, reset_branch)."
+        },
+        {
+          "name": "supabase-mcp-read-storage",
+          "description": "List a project's storage buckets and view its storage configuration (list_storage_buckets, get_storage_config)."
+        },
+        {
+          "name": "supabase-mcp-write-storage",
+          "description": "Change a project's storage configuration such as file size limits and image transformation settings (update_storage_config)."
+        },
+        {
+          "name": "supabase-mcp-read-notebooks",
+          "description": "List a project's SQL notebooks and read their cells (list_notebooks, get_notebook)."
+        },
+        {
+          "name": "supabase-mcp-write-notebooks",
+          "description": "Create notebooks and run their database and log query cells, which can modify data unless the server is in read-only mode (create_notebook, run_notebook)."
+        },
+        {
+          "name": "supabase-mcp-send-feedback",
+          "description": "Send feedback about the MCP tools to the Supabase team, or delete feedback sent earlier (submit_feedback, delete_feedback)."
+        }
+      ]
+    }
+  ],
   "tailscale": [
     {
       "scope": "tailscale-api",
@@ -1947,6 +3276,79 @@
         {
           "name": "tailscale-write-keys",
           "description": "Mint, update, or revoke any key the tailnet's keys endpoint serves: auth keys (tskey-auth, which the tailscale CLI consumes to bring up nodes), API access tokens, OAuth clients, and federated identities. Unsafe methods on the keys endpoint only. Note that minting an OAuth client or federated identity creates a long-lived credential that can mint further access tokens, so this scope is broader than Tailscale's own `auth_keys` OAuth scope (which covers device auth keys only) -- detent matches by method and path, not request body, so the keyType field that distinguishes them cannot be narrowed here. This is the scope an agent needs to connect new machines to the tailnet."
+        }
+      ]
+    }
+  ],
+  "ticktick-mcp": [
+    {
+      "scope": "ticktick-mcp-api",
+      "display_name": "TickTick (MCP)",
+      "description": "Identifies requests to the TickTick hosted MCP server (mcp.ticktick.com).",
+      "permissions": [
+        {
+          "name": "ticktick-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify TickTick content."
+        },
+        {
+          "name": "ticktick-mcp-read-all",
+          "description": "Run any read-only TickTick MCP tool (search and list tasks, lists, folders, sections, tags, comments, members, habits and check-ins, focus records, connected calendars, countdowns) plus the MCP session handshake."
+        },
+        {
+          "name": "ticktick-mcp-write-all",
+          "description": "Run any TickTick MCP tool that creates, modifies or deletes content (tasks, checklist items, comments, assignments, lists, sections, folders, tags, habits and check-ins, focus records) plus the MCP session handshake."
+        },
+        {
+          "name": "ticktick-mcp-read-tasks",
+          "description": "Look up tasks: search by keyword, list undone or completed tasks for a date range, filter tasks by list, priority, tag or status, and read a task and its comments."
+        },
+        {
+          "name": "ticktick-mcp-write-tasks",
+          "description": "Create and edit tasks (singly or in batches), mark tasks and checklist items complete, move tasks between lists, add comments, and assign or unassign tasks. Does not delete anything."
+        },
+        {
+          "name": "ticktick-mcp-delete-tasks",
+          "description": "Move tasks to the Trash and delete task comments."
+        },
+        {
+          "name": "ticktick-mcp-read-lists",
+          "description": "View lists (projects), their sections, the folders that group them, the members of shared lists, and the undone tasks in a list."
+        },
+        {
+          "name": "ticktick-mcp-write-lists",
+          "description": "Create and edit lists (projects), their sections, and the folders that group them, including dissolving a folder so its lists become ungrouped. Does not delete lists or tasks."
+        },
+        {
+          "name": "ticktick-mcp-read-tags",
+          "description": "View all tags in the account."
+        },
+        {
+          "name": "ticktick-mcp-write-tags",
+          "description": "Create, rename and recolor tags, or delete a tag (which also removes it from every task)."
+        },
+        {
+          "name": "ticktick-mcp-read-habits",
+          "description": "View habits, habit sections, and habit check-in history."
+        },
+        {
+          "name": "ticktick-mcp-write-habits",
+          "description": "Create and edit habits, and record or correct habit check-ins."
+        },
+        {
+          "name": "ticktick-mcp-read-focus-records",
+          "description": "View focus (Pomodoro) records, individually or by time range."
+        },
+        {
+          "name": "ticktick-mcp-write-focus-records",
+          "description": "Add, edit and delete focus (Pomodoro) records."
+        },
+        {
+          "name": "ticktick-mcp-read-calendar-events",
+          "description": "View the third-party calendar accounts connected to TickTick and the events on those calendars."
+        },
+        {
+          "name": "ticktick-mcp-read-countdowns",
+          "description": "View countdowns."
         }
       ]
     }
@@ -2012,6 +3414,270 @@
         {
           "name": "todoist-sync",
           "description": "Use the batched Sync endpoint (reads and writes in a single request)."
+        }
+      ]
+    }
+  ],
+  "trello-mcp": [
+    {
+      "scope": "trello-mcp-api",
+      "display_name": "Trello (MCP)",
+      "description": "Identifies requests to the Trello hosted MCP server (mcp.trello.com).",
+      "permissions": [
+        {
+          "name": "trello-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Trello content."
+        },
+        {
+          "name": "trello-mcp-read-all",
+          "description": "View anything in Trello: your profile, workspaces, boards, lists, cards, checklists, comments, Inbox cards and Planner events, and search across boards and cards. Nothing is created or changed."
+        },
+        {
+          "name": "trello-mcp-write-all",
+          "description": "Create and change things in Trello: boards, lists, cards (including moving, archiving, labels and comments), checklists, Inbox cards and Planner events. Trello MCP does not permanently delete anything."
+        },
+        {
+          "name": "trello-mcp-read-profile",
+          "description": "View your own Trello profile and preferences, such as your name and time zone."
+        },
+        {
+          "name": "trello-mcp-read-boards",
+          "description": "View workspaces, boards, their labels and the lists on them."
+        },
+        {
+          "name": "trello-mcp-write-boards",
+          "description": "Create boards and create, rename or move lists on them."
+        },
+        {
+          "name": "trello-mcp-read-cards",
+          "description": "View cards, their comments, and their checklists and checklist items."
+        },
+        {
+          "name": "trello-mcp-write-cards",
+          "description": "Create and edit cards: move, archive or complete them, add or remove labels and comments, and create or update checklists and their items."
+        },
+        {
+          "name": "trello-mcp-search",
+          "description": "Search for boards and cards by keyword."
+        },
+        {
+          "name": "trello-mcp-read-inbox",
+          "description": "View the cards in your personal Trello Inbox."
+        },
+        {
+          "name": "trello-mcp-write-inbox",
+          "description": "Create, edit and archive cards in your personal Trello Inbox."
+        },
+        {
+          "name": "trello-mcp-read-planner",
+          "description": "View your Trello Planner calendar and its events."
+        },
+        {
+          "name": "trello-mcp-write-planner",
+          "description": "Create focus-time events in Trello Planner and link or unlink cards to events."
+        }
+      ]
+    }
+  ],
+  "vercel-mcp": [
+    {
+      "scope": "vercel-mcp-api",
+      "display_name": "Vercel (MCP)",
+      "description": "Identifies requests to the Vercel hosted MCP server (mcp.vercel.com).",
+      "permissions": [
+        {
+          "name": "vercel-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Vercel content."
+        },
+        {
+          "name": "vercel-mcp-read-all",
+          "description": "Run any read-only Vercel MCP tool (teams, projects, deployments, build and runtime logs, observability, Web Analytics, domains and DNS, environment variables, feature flags, firewall, Global Config, integrations, routing, sandboxes, storage, CI, agent runs, toolbar threads, docs) plus the MCP session handshake."
+        },
+        {
+          "name": "vercel-mcp-write-all",
+          "description": "Run any Vercel MCP tool that creates or changes something (projects, deployments, promotions and rollbacks, domains, DNS, purchases, environment variables, feature flags, firewall, Global Config, connectors, KMS keys, routing, sandboxes and command execution, storage, Drains, toolbar threads, CI retries, feedback) plus the MCP session handshake."
+        },
+        {
+          "name": "vercel-mcp-read-account",
+          "description": "See who is signed in, their teams, team members, access groups and the team activity log, view billing charges and contract commitments, and search the Vercel documentation and CLI guidance (get_auth_user, list_teams, list_team_members, list_billing_charges, search_vercel_documentation, use_vercel_cli, ...)."
+        },
+        {
+          "name": "vercel-mcp-send-feedback",
+          "description": "Send feedback about Vercel to Vercel."
+        },
+        {
+          "name": "vercel-mcp-read-projects-and-deployments",
+          "description": "List and inspect projects and their settings, deployments with their build logs, files and events, rolling releases, Vercel CI runs and their logs, and runs of agents built with eve; also fetch content from a deployment URL and browse the Git repositories available to link (list_projects, get_project, list_deployments, get_deployment_build_logs, get_rolling_release, list_vercel_ci_invocations, list_agent_runs, ...). Includes get_project_deletion_link, which only returns a dashboard link."
+        },
+        {
+          "name": "vercel-mcp-write-projects-and-deployments",
+          "description": "Create and change projects (settings, pausing, project domains, deployment protection and bypass), create or cancel deployments, change which deployment serves production traffic by promoting, rolling back or running a rolling release, re-request deployment checks and retry Vercel CI runs (create_project, update_project, create_deployment, deploy_to_vercel, request_promote, request_rollback, retry_vercel_ci_invocation, ...)."
+        },
+        {
+          "name": "vercel-mcp-read-domains-and-routing",
+          "description": "List and inspect domains, DNS records, certificates and domain orders, check domain availability and prices (including read-only purchase quotes), view routing rules, redirects, their version history and aliases, and read the firewall configuration, bypass rules and active attack status (list_domains, get_records, search_domains, list_project_routes, list_aliases, get_firewall_config, ...). Also drafts a routing rule from a description without saving it (generate_route)."
+        },
+        {
+          "name": "vercel-mcp-write-domains-and-routing",
+          "description": "Add or transfer domains, create, update or replace DNS records, issue certificates, add, edit and stage routing rules and redirects, assign aliases, change URL protection bypass, and change the firewall configuration including Attack Challenge mode (create_or_transfer_domain, create_record, add_route, stage_redirects, assign_alias, put_firewall_config, ...). Does not buy domains; that needs vercel-mcp-make-purchases."
+        },
+        {
+          "name": "vercel-mcp-make-purchases",
+          "description": "Spend money on behalf of the team: register (buy) domains and, where still exposed, buy a Pro plan, prepaid credits or add-ons (buy_domain, buy_domains, buy_single_domain, buy_pro, buy_credits, buy_addon)."
+        },
+        {
+          "name": "vercel-mcp-read-configuration",
+          "description": "Read project and shared environment variables including their decrypted values, custom environments, feature flags, flag segments and SDK keys, Global Configs (Edge Config) with their items, read tokens and backups, integration configurations, webhooks and connectors, and KMS issuers (filter_project_envs, get_project_env, list_flags, get_edge_config_items, list_connectors, list_kms_issuers, ...)."
+        },
+        {
+          "name": "vercel-mcp-write-configuration",
+          "description": "Create and edit environment variables, feature flags, flag segments, flag settings and SDK keys, create and update Global Configs (Edge Config), their items, read tokens and backups, change connector settings and project connections, and manage KMS issuers, policies and signing keys including activating and revoking them (create_project_env, create_flag, patch_edge_config_items, update_connector, create_kms_issuer, revoke_kms_signing_key, ...)."
+        },
+        {
+          "name": "vercel-mcp-read-observability-and-analytics",
+          "description": "Read runtime logs, grouped runtime errors and request traces, query observability data and its schema, inspect configured Drains, and query Web Analytics page views and custom events (get_runtime_logs, get_runtime_errors, create_observability_query, list_drains, count_pageviews, aggregate_events, ...)."
+        },
+        {
+          "name": "vercel-mcp-write-observability-and-analytics",
+          "description": "Create, update and test Drains that send logs, traces and analytics data to external destinations, and mint trace session tokens (create_drain, update_drain, test_drain, create_trace_session). No tool changes Web Analytics data itself."
+        },
+        {
+          "name": "vercel-mcp-read-storage-and-sandboxes",
+          "description": "Inspect Blob stores, build cache artifacts and Remote Caching status, and inspect sandboxes and their sessions: list sessions, commands and snapshots, read command output and read files inside a sandbox (get_storage_stores_by_id, artifact_query, list_named_sandboxes, list_sessions, get_session_command_logs, read_session_file, ...)."
+        },
+        {
+          "name": "vercel-mcp-write-storage-and-sandboxes",
+          "description": "Create Blob stores, upload build cache artifacts and invalidate cached content, and create and manage sandboxes: run and kill commands inside them, write files, take snapshots, extend timeouts, change network policy and stop sessions (create_storage_stores_blob, upload_artifact, invalidate_by_tags, create_sandboxes_v4, run_session_command, write_session_files, ...). Commands run inside isolated Vercel sandboxes."
+        },
+        {
+          "name": "vercel-mcp-read-toolbar",
+          "description": "Read Vercel Toolbar comment threads and their messages."
+        },
+        {
+          "name": "vercel-mcp-write-toolbar",
+          "description": "Reply to Vercel Toolbar comment threads, edit messages, add reactions and resolve or reopen threads."
+        }
+      ]
+    }
+  ],
+  "webflow-mcp": [
+    {
+      "scope": "webflow-mcp-api",
+      "display_name": "Webflow (MCP)",
+      "description": "Identifies requests to the Webflow hosted MCP server (mcp.webflow.com).",
+      "permissions": [
+        {
+          "name": "webflow-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Webflow content."
+        },
+        {
+          "name": "webflow-mcp-read-all",
+          "description": "Use every Webflow MCP tool that only looks things up: site analytics (Analyze, AEO and Optimize reports), image previews and canvas snapshots, Webflow's built-in assistant and workflow guidance. Most other Webflow tools can both view and change a site and are therefore in the write permission. Includes the MCP session handshake."
+        },
+        {
+          "name": "webflow-mcp-write-all",
+          "description": "Use every Webflow MCP tool that can change a site or workspace: pages, CMS content, page elements, components, styles, assets, forms, comments, translations, custom code, access and settings, Webflow Cloud apps, campaigns, agent instructions, the live Designer session, and publishing. These tools also view the things they manage. Includes the MCP session handshake."
+        },
+        {
+          "name": "webflow-mcp-read-analytics",
+          "description": "View site analytics: visitor traffic, top pages, engagement and goals (Analyze), how AI assistants and crawlers see and cite the site (AEO), and the results of A/B tests and optimizations (Optimize). Read-only."
+        },
+        {
+          "name": "webflow-mcp-read-guidance",
+          "description": "Ask Webflow's built-in assistant questions about Webflow, read the recommended workflows and best practices, and request extra tools for capabilities not already available. Does not look at or change any site."
+        },
+        {
+          "name": "webflow-mcp-read-previews",
+          "description": "View images: preview an image from a site's asset library, or capture a picture of how an element currently looks on the Designer canvas (requires the Designer to be open)."
+        },
+        {
+          "name": "webflow-mcp-write-sites",
+          "description": "List the sites the connection can access, view a site's details, and publish a site so changes go live."
+        },
+        {
+          "name": "webflow-mcp-write-pages",
+          "description": "List pages, create new pages and edit page settings such as titles, slugs, SEO and structured data; manage page branches and choose which pages and CMS items appear in the sitemap."
+        },
+        {
+          "name": "webflow-mcp-write-cms",
+          "description": "View, create, edit and delete CMS collections, their fields and their items (blog posts, team members, products and other structured content), including publishing items live."
+        },
+        {
+          "name": "webflow-mcp-write-localization",
+          "description": "Read the text of pages and components and translate it into a site's secondary languages."
+        },
+        {
+          "name": "webflow-mcp-write-design",
+          "description": "Design pages in the Designer: inspect, add, move, remove and edit the elements on a page (including from HTML and CSS); create and edit reusable components, their properties and variants, and place component instances; create and edit styles (classes), design variables such as colors and spacing, and animations and interactions; and work with a live Designer session (see the current page, branch and selection, select elements, move around the canvas, create page folders). The live-session actions require the Designer to be open."
+        },
+        {
+          "name": "webflow-mcp-write-assets",
+          "description": "Upload, organize, update, compress and delete images, files, asset folders and custom fonts in a site's asset library."
+        },
+        {
+          "name": "webflow-mcp-write-comments",
+          "description": "Read comment threads left on a site in the Designer, look up who took part in them, and post replies."
+        },
+        {
+          "name": "webflow-mcp-write-campaigns-and-forms",
+          "description": "Manage marketing campaigns and forms: generate campaign landing pages, create and edit page variations and personalized content, and read campaign performance; view a site's forms and their fields, and view, update or delete the submissions people have sent through them."
+        },
+        {
+          "name": "webflow-mcp-write-custom-code",
+          "description": "Add, apply and remove custom code on a site or its pages, including scripts and head and footer code blocks."
+        },
+        {
+          "name": "webflow-mcp-write-site-settings",
+          "description": "Administer a site and workspace: manage who has access and their roles, send invitations, set up redirects, robots.txt and well-known files, manage webhooks that notify other services about site events, review the site activity log, and view, create, edit and delete the rules and skills the site stores to guide AI agents working on it."
+        },
+        {
+          "name": "webflow-mcp-write-cloud-apps",
+          "description": "Inspect and manage Webflow Cloud apps hosted alongside a site: their environments, deployments, domains and logs, including triggering new deployments or deleting apps."
+        }
+      ]
+    }
+  ],
+  "wix-mcp": [
+    {
+      "scope": "wix-mcp-api",
+      "display_name": "Wix (MCP)",
+      "description": "Identifies requests to the Wix hosted MCP server (mcp.wix.com).",
+      "permissions": [
+        {
+          "name": "wix-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Wix content."
+        },
+        {
+          "name": "wix-mcp-read-all",
+          "description": "Run any read-only Wix MCP tool (search and read the Wix REST, SDK, Headless, CLI, Build Apps, Design System and Help Center documentation, inspect API schemas, list the account's sites and their context, check site-creation job status, search site templates, get domain suggestions) plus the MCP session handshake."
+        },
+        {
+          "name": "wix-mcp-write-all",
+          "description": "Run any Wix MCP tool that can change things: call REST APIs on a site or run API scripts (CallWixSiteAPI, ExecuteWixAPI), create, update, publish or deploy sites (ManageWixSite, WixSiteBuilder, CreateSiteFromTemplate, UploadHeadlessWebsiteFiles, ...), upload images, and send feedback or issue reports to Wix; plus the MCP session handshake."
+        },
+        {
+          "name": "wix-mcp-read-docs",
+          "description": "Search and read the Wix developer documentation (REST, SDK, Headless, CLI, Build Apps, Design System, Help Center), browse the REST docs menu, fetch full articles and API method schemas, inspect the REST API spec, and get step-by-step guides for building with Wix. Does not touch any site or account data."
+        },
+        {
+          "name": "wix-mcp-read-sites",
+          "description": "List the sites in the Wix account and look up a site's ID, properties and installed apps (ListWixSites, GetSiteContext), check the status of a site-creation job, search the site template gallery, and get domain name suggestions."
+        },
+        {
+          "name": "wix-mcp-call-site-apis",
+          "description": "Call Wix REST APIs on a specific site, either as a single request (CallWixSiteAPI) or as a sandboxed script that chains and paginates calls (ExecuteWixAPI). This reaches all of a site's business data (CMS collections, Stores, Bookings, Blog, contacts, members, ...) and can read, create, update or delete it."
+        },
+        {
+          "name": "wix-mcp-write-sites",
+          "description": "Create, update, publish and deploy Wix sites at the account level: account-level site management (ManageWixSite), AI site generation (WixSiteBuilder), creating a site from a template, claiming an anonymously created site, importing a design from a URL, and deploying or uploading headless/static website files (StartDeployWebsite, StartHeadlessBuild, UploadHeadlessWebsiteFiles)."
+        },
+        {
+          "name": "wix-mcp-write-media",
+          "description": "Upload images to a Wix site's Media Manager (UploadImageToWixSite)."
+        },
+        {
+          "name": "wix-mcp-send-feedback",
+          "description": "Send feedback, support requests or issue reports about the Wix MCP and APIs to the Wix team (SupportAndFeedback, ReportIssueToWix)."
         }
       ]
     }
