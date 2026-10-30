@@ -9,6 +9,7 @@ const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp')
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 const { backgroundLaunchEnv } = require('./background-launch');
 const { bundledGitEnv } = require('./git-env');
+const { dropStdioWriteErrors } = require('./stdio-write-errors');
 const {
   createStderrTail,
   describeLaunch,
@@ -16,20 +17,11 @@ const {
   formatSpawnFailureDetails,
 } = require('./backend-exit-diagnostics');
 
-// Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
-// launches go through a pipe (e.g. `just minds-start | head -30`), the
-// reader can exit while the backend is still alive, leaving subsequent
-// writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
-// as an 'error' event. Without this handler the unhandled error surfaces
-// as a JS alert in the Electron window. We log nothing because the
-// downstream consumer is gone -- the log file is the durable record.
-for (const stream of [process.stdout, process.stderr]) {
-  stream.on('error', (err) => {
-    if (!err || err.code !== 'EPIPE') {
-      throw err;
-    }
-  });
-}
+// A failed write to the main process's own stdout/stderr -- EPIPE from a dev
+// launch piped through `head`, ENOSPC from stderr redirected to a file on a
+// full disk -- arrives as an async 'error' event that would otherwise crash
+// the main process.
+dropStdioWriteErrors({ stdout: process.stdout, stderr: process.stderr });
 
 let backendProcess = null;
 
@@ -586,11 +578,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       });
 
       // Stderr is human-readable logging -- capture to log file and console.
-      // The dev-mode forward to process.stderr can throw EPIPE if the parent
-      // (e.g. a `just` recipe whose stdout was piped through `head`) goes
-      // away while the backend is still emitting log lines. We swallow the
-      // error: the log file is the durable record, and a broken parent pipe
-      // should never bring down the Electron main process.
+      // The dev-mode forward to process.stderr does not throw when the write
+      // fails (a parent pipe gone, a full disk): the failure arrives as an
+      // 'error' event, dropped by dropStdioWriteErrors above, and the log file
+      // stays the durable record.
       child.stderr.on('data', (data) => {
         const text = data.toString();
         // Split into complete lines before logging so each one carries its own
@@ -604,13 +595,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           if (!isResolved && line.trim()) onLogLine(line.trim());
         }
         if (paths.isDev()) {
-          try {
-            process.stderr.write(text);
-          } catch (err) {
-            if (err && err.code !== 'EPIPE') {
-              throw err;
-            }
-          }
+          process.stderr.write(text);
         }
       });
 
