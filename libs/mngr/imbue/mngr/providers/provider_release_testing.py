@@ -36,7 +36,7 @@ offline-host_dir feature.
 
 These trips boot real cloud resources and cost real money, so they self-skip unless the
 provider's ``MNGR_<CLOUD>_RELEASE_TESTS=1`` opt-in is set: no per-PR CI path runs them. The
-``Release Tests`` workflow (``.github/workflows/release-tests.yml``) runs an opted-in cloud's trips
+``mngr Release Tests`` workflow (``.github/workflows/release-tests.yml``) runs an opted-in cloud's trips
 on manual dispatch (its ``run_<cloud>`` inputs). To run a provider's trips locally with credentials
 present, e.g.::
 

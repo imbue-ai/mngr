@@ -303,7 +303,9 @@ def _compute_max_duration() -> float:
     - unit tests: fast, local, no network (run together with integration tests)
     - integration tests: local, no network, used for coverage calculation
     - acceptance tests: run on every PR, have network/Modal/etc access
-    - release tests: comprehensive tests for release readiness, run via the Release Tests workflow and TMR, rather than per-PR
+    - release tests: comprehensive tests for release readiness, not run per-PR. mngr's run in the
+      `mngr Release Tests` workflow and TMR; minds' run from the minds jobs in `ci.yml`, behind its
+      `run_minds_release_tests` dispatch input
     """
     if "PYTEST_MAX_DURATION_SECONDS" in os.environ:
         return float(os.environ["PYTEST_MAX_DURATION_SECONDS"])
