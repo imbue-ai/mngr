@@ -1,3 +1,0 @@
-An error report's log upload no longer fails when the log file it selected is gone by the time the upload runs.
-
-Log attachments are selected when the report is built but read later on a worker thread. A size-rotated live log (such as the `mngr latchkey forward` daemon's `events.jsonl`) can be renamed away by its own log sink in between, which made the upload raise `FileNotFoundError` and file a separate `Sentry callback raised` event. The uploader now logs the missing file at INFO and skips it. That attachment's URI on the event stays unresolved, the same way a reserved report file that never materialized already behaves. Other read errors are still raised.

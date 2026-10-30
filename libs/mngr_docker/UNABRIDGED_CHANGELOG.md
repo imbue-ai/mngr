@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+Refreshed a comment naming the `Release Tests` workflow, which is called `mngr Release Tests`.
+
 ## 2026-10-27
 
 The warning logged when a container's live SSH port cannot be read, which keeps the recorded port, now also gives the recorded port, the container's status, and the container ports it publishes.

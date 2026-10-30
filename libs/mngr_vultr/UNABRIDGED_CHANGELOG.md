@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-17
 
 Hosts are now opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`; discovery reads the host id from the instance's `mngr-host-id` tag to pick that key, skipping (with a warning) instances that carry none. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them.

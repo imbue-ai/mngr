@@ -4,6 +4,48 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+The snapshot-resume release test for bug-report secret withholding now expects the template's per-file rule (default-workspace-template#939). A chat that carries a secret is withheld and named in `collection-notes.txt`. The clean chat and the logs still attach. Before, the test expected every chat to be withheld.
+
+- The desktop backend's HTTP clients now use `httpx2`, Pydantic's maintained fork of the unmaintained `httpx` with the same API. The package depends on `httpx2>=2.13.1` instead of `httpx`.
+
+- httpx2 verifies TLS against the operating system's trust store. On macOS, that store trusts the compromised emSign chain until Apple's 2026-10-19 update is installed, so the app now sets `SSL_CERT_FILE` to its environment's certifi bundle for the backend. That is the same bundle git and latchkey's curls already use, and httpx2 reads `SSL_CERT_FILE` first. On Linux the backend uses the host's CA store, as latchkey's curls do.
+
+- The dev-time desktop bundle lock (`electron/pyproject/uv.lock`) is regenerated. It had still recorded `imbue-mngr-forward` depending on `httpx`.
+
+- Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+Bump Latchkey version to 3.20.0.
+
+The live-env accounts contract test now also walks the browser sign-out: it asserts the sign-out response carries the clearing `Set-Cookie` headers, that the client's cookie jar drops the session cookies, and that the identity route answers 401 afterwards.
+
+Nineteen more connectors show their real logo in the Permissions tab instead of the generic glyph: Airtable, Atlassian, Buildkite, Cal.com, Fastmail, Hugging Face, Linktree, Neon, Netlify, OpenRouter, PayPal, PostHog, Supabase, Tailscale, TickTick, Trello, Vercel, Webflow and Wix. The marks come from the same vetted sets as the existing ones (SVG Logos, selfh.st/icons, simple-icons), plus Vercel's own published brand assets. Cal.com, Tailscale and Vercel ship the vendor's white variant for the dark theme, since their marks are near-black. Linktree, Webflow and Wix have no color artwork in any set and so, like Calendly and Umami, keep a flat silhouette in the brand's own color.
+
+- Clear every `pnpm audit --prod` finding in the Imbue Studio Electron package (28 advisories, 16 of them high): `@todesktop/runtime` 2.1.4 shares the app's own `electron-updater` 6.8.9 instead of nesting an unpatched 4.x (code-signing bypass, redirect leak, `js-yaml` CPU exhaustion), `@sentry/electron` 7.20.1 drops the vulnerable OpenTelemetry instrumentations and `@fastify/otel` from the shipped bundle, and `smol-toml` 1.9.1 fixes two parser denial-of-service bugs. The remaining transitive `js-yaml` and `brace-expansion` copies move to their patched releases.
+
+- Clear every `pnpm audit --prod` finding in the Imbue Studio renderer (`apps/minds/frontend`): `dompurify` 3.4.17 fixes a critical `SAFE_FOR_TEMPLATES` bypass and four `IN_PLACE` and SMIL sanitizer gaps in the app-icon markup sanitizer's only runtime dependency with an advisory.
+
+The desktop app bundles latchkey-curl-shims v0.7.1. The curl router behind the latchkey gateway no longer decodes the reply of an `X-Imbue-Impersonate` request; the reply is handed on compressed and the caller's own `latchkey curl --compressed` decodes it, so the gateway no longer frames a decoded body with the compressed body's `Content-Length`. This fixes datalib's Slack sync in a workspace failing on a truncated `auth.test` reply. On marked requests the router also strips the caller's browser-identity headers so Chrome's stand, takes the Chrome profile from the marker's value, and honors an environment proxy like the system curl does.
+
+- Start the Imbue Studio 0.9.4 stable rollout: the desktop stable channel offers ToDesktop build `2610286tjy4mwq2` to 20% of mac and Linux installs (mac needs macOS 13, `minimumSystemVersion: 22.0.0`, so macOS 12 installs stay on 0.8.5), and the stable download link serves 0.9.4 to every new download. Browser-created stable workspaces pin to `minds-v0.9.4`.
+
+Refreshed an `app-release.md` reference to the `Release Tests` workflow, which is called
+`mngr Release Tests`. The test it describes lives under `apps/apt_mirror`, so that workflow does run
+it; only the name was stale.
+
+The `/api/v1/files` WebDAV server now answers `403 Forbidden` instead of `500 Internal Server Error` when macOS privacy protection refuses access to a folder (such as the Photos, Music or TV libraries), and no longer reports those refusals to Sentry as errors. WsgiDAV only mapped "Permission denied" (`EACCES`) to 403; the "Operation not permitted" (`EPERM`) that macOS returns for protected folders fell through to a 500.
+
+Workspace updates move out of the way of the workspace.
+
+- A small status pill in the titlebar, after the workspace's icons, now carries a workspace's update: orange when it needs you ("Update available" is grey with an orange dot), and it opens the update chat or the Updates tab. Following "Update didn't finish" or "Updated, with a note" to the chat dismisses it. The full-width band no longer shows update notices, so the workspace keeps its full height. The pill hides while the band reports a connection problem and while an update is applying. A scheduled update shows no pill and no home-screen badge; the Updates tab says it is scheduled.
+
+- The update popup is gone. The pill, home badges and failed presses open the workspace's Settings -> Updates tab, which is rebuilt to say everything the popup did: a status block with the version jump, the security-fix card, what an update costs, the actions, and "Update to a specific version". How the last run ended (didn't start, didn't finish, updated) has no Dismiss button: leaving the tab dismisses it. A run's chat is offered wherever Studio can find it, including a run started by hand in a chat; when it can't, nothing tells you to go to the chat.
+
+- Auto-update is now per workspace: each workspace follows Studio settings, auto-updates in its own window, or updates only by hand. Studio settings lists the workspaces with their own setting. The "Update all" strip counts only workspaces auto-update won't handle. A release whose run failed or stalled is not scheduled again by auto-update until a newer release is out; dismissing the failure no longer re-arms it, and the workspace says it is behind meanwhile.
+
+- Copy: "Update didn't finish", "Update needs a decision", "your local time", "Studio settings", and tokens for cost.
+
 ## 2026-10-28
 
 - Promote Imbue Studio 0.9.4 to the beta channels: the desktop beta channel serves ToDesktop build `2610286tjy4mwq2` (mac and Linux, 100%; mac now needs macOS 13, `minimumSystemVersion: 22.0.0`), and browser-created beta workspaces pin to `minds-v0.9.4`. Stable stays on 0.8.5.

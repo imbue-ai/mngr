@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-28
 
 The statusline now records agy's reasoning effort in `model_state.json` alongside the model. As of agy 1.1.5, effort is its own setting (`/effort`, `--effort`), and the statusline payload reports it. When it does, the effort is written as `effort` and the matching tier suffix is dropped from the model name, so `Gemini 3.8 Flash (High)` is recorded as `{"model": "Gemini 3.8 Flash", "effort": "high"}`. A model whose effort cannot be changed reports no effort and is recorded under its full name, for example `Claude Sonnet 4.6 (Thinking)` or `GPT-OSS 120B (Medium)`.

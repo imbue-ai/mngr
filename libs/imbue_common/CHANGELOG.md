@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The owner-exec client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
+
+### Fixed
+
+- Fixed: Error-report log uploads no longer raise `FileNotFoundError` (and file a spurious `Sentry callback raised` event) when a size-rotated log file is renamed away before the upload runs; the missing file is logged and skipped.
+
 ## [v0.1.22] - 2026-10-28
 
 ### Added

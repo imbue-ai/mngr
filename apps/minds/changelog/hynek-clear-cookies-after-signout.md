@@ -1,1 +1,0 @@
-The live-env accounts contract test now also walks the browser sign-out: it asserts the sign-out response carries the clearing `Set-Cookie` headers, that the client's cookie jar drops the session cookies, and that the identity route answers 401 afterwards.

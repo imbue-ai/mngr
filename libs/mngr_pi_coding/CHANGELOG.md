@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The pi lifecycle extension streams pi's in-progress assistant message to `$MNGR_AGENT_STATE_DIR/pi_reply_draft` (updated from pi's `message_update` events, cleared when the turn ends or a new session starts), so Imbue Studio can show a pi reply while it is being written.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Added

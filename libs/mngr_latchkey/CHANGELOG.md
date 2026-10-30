@@ -6,8 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped Latchkey version to 3.20.0.
+
 ### Fixed
 
+- Fixed: The VPS gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing truncated Slack replies for datalib.
 - Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
 
 ## [v0.2.1] - 2026-10-28
