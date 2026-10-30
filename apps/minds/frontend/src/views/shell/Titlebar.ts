@@ -51,9 +51,10 @@ export function chromeAnchorRingClass(
 }
 
 /** The room a bar leaves under the native traffic lights on macOS (main.js
- * places them at the bar's left edge). */
+ * places them at the bar's left edge). The page under the native lights sets
+ * their cursor, so the spacer keeps a draggable bar's grab cursor off them. */
 export function trafficLightSpacer(): m.Children {
-  return m("div", { class: "w-[72px] shrink-0", "aria-hidden": "true" });
+  return m("div", { class: "w-[72px] shrink-0 cursor-default", "aria-hidden": "true" });
 }
 
 /** Whether the bar takes the Mac layout: the window controls at its left
