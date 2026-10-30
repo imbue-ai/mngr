@@ -22,12 +22,15 @@ export type MarkTone = "brand" | "muted";
  * pins the same literal to the files on disk. */
 export const DARK_SURFACE_VARIANT_SERVICE_NAMES: ReadonlySet<string> = new Set([
   "aws",
+  "cal-com-mcp",
   "github",
   "linear",
   "ngrok",
   "ramp",
   "sentry",
+  "tailscale",
   "umami",
+  "vercel-mcp",
 ]);
 
 /** Services whose mark asset 404'd. App-global rather than per-view: which

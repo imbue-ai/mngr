@@ -20,10 +20,21 @@ function imageSources(mark: m.Children): string[] {
  * files on disk. So a variant asked for without shipping its artwork -- which
  * would draw a broken image, since the variant carries no fallback probe --
  * fails on one side or the other. */
-const DARK_SURFACE_VARIANT_SERVICES = ["aws", "github", "linear", "ngrok", "ramp", "sentry", "umami"];
+const DARK_SURFACE_VARIANT_SERVICES = [
+  "aws",
+  "cal-com-mcp",
+  "github",
+  "linear",
+  "ngrok",
+  "ramp",
+  "sentry",
+  "tailscale",
+  "umami",
+  "vercel-mcp",
+];
 
 /** Services drawn with one image in both themes -- one per shape of mark:
- * multicolor, single-color by brand, and the two flat silhouettes. */
+ * multicolor, single-color by brand, and a flat silhouette. */
 const SINGLE_IMAGE_SERVICES = ["slack", "gitlab", "notion-mcp", "dropbox", "stripe", "calendly", "yelp"];
 
 describe("serviceMark", () => {

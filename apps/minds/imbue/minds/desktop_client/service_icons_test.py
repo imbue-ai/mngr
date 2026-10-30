@@ -18,12 +18,10 @@ SERVICE_ICON_DIR: Final[Path] = Path(__file__).resolve().parent / "static" / "se
 DARK_SURFACE_SUFFIX: Final[str] = "-on-dark"
 
 # Marks drawn in a single ink because that is how the brand draws them --
-# whether that ink is black (GitHub), a brand color (Claude's coral, Coolify's
-# purple), or near-black (ngrok, Ramp) -- plus the two services no color
-# artwork exists for anywhere (Calendly and Umami are ``palette: false`` in
-# every Iconify set that carries them, so they keep the flat simple-icons
-# silhouette with its fill written in). Pinned by name so that swapping any
-# *other* mark for a flat one fails here.
+# black, a brand color, or near-black -- plus the services no vetted set has
+# a color symbol for, which keep the flat simple-icons silhouette with its
+# fill written in. Pinned by name so that swapping any *other* mark for a flat
+# one fails here.
 SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
     {
         "calendly",
@@ -33,10 +31,16 @@ SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
         "dropbox",
         "github",
         "linear",
+        "linktree-mcp",
         "ngrok",
+        "openrouter",
         "ramp",
         "sentry",
+        "tailscale",
         "umami",
+        "vercel-mcp",
+        "webflow-mcp",
+        "wix-mcp",
         "yelp",
     }
 )
@@ -48,13 +52,13 @@ SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
 # render the second <img>. A variant asked for without artwork, or shipped
 # without being asked for, fails on one side or the other.
 DARK_SURFACE_VARIANT_SERVICES: Final[frozenset[str]] = frozenset(
-    {"aws", "github", "linear", "ngrok", "ramp", "sentry", "umami"}
+    {"aws", "cal-com-mcp", "github", "linear", "ngrok", "ramp", "sentry", "tailscale", "umami", "vercel-mcp"}
 )
 
 _PAINT_ATTR_RE: Final[re.Pattern[str]] = re.compile(r'(?:fill|stroke|stop-color)="([^"]+)"')
 _HEX_RE: Final[re.Pattern[str]] = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 # Elements that paint, and so fall back to black when nothing gives them a fill.
-_PAINTING_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<(?:path|circle|ellipse|rect|polygon|polyline|line)\b[^>]*>")
+_PAINTING_TAGS: Final[frozenset[str]] = frozenset({"path", "circle", "ellipse", "rect", "polygon", "polyline", "line"})
 
 
 def _mark_paths() -> tuple[Path, ...]:
@@ -66,18 +70,27 @@ def _declared_inks(text: str) -> frozenset[str]:
     return frozenset(value.lower() for value in _PAINT_ATTR_RE.findall(text) if _HEX_RE.match(value))
 
 
+def _has_unfilled_painting_element(element: ElementTree.Element, inherited_fill: str | None) -> bool:
+    """Whether any painting element below (or at) ``element`` ends up with no fill at all.
+
+    ``fill`` inherits, so a path inside ``<g fill="...">`` or under a filled
+    root is painted; only one with no fill anywhere up its ancestry is not.
+    """
+    fill = element.attrib.get("fill", inherited_fill)
+    if element.tag.rsplit("}", 1)[-1] in _PAINTING_TAGS and fill is None:
+        return True
+    return any(_has_unfilled_painting_element(child, fill) for child in element)
+
+
 def _inks(text: str) -> frozenset[str]:
     """Every color the file actually paints with.
 
-    A painting element with no fill of its own and no fill on the root paints
+    A painting element with no fill of its own and none inherited paints
     black -- Notion's mark does exactly this, deliberately, pairing an unfilled
     path with a white one -- so black counts as an ink even when unwritten.
     """
     declared = _declared_inks(text)
-    root_fill = ElementTree.fromstring(text).attrib.get("fill")
-    is_implicitly_black = root_fill is None and any(
-        "fill=" not in match.group(0) for match in _PAINTING_TAG_RE.finditer(text)
-    )
+    is_implicitly_black = _has_unfilled_painting_element(ElementTree.fromstring(text), None)
     return declared | ({"#000000"} if is_implicitly_black else frozenset())
 
 
