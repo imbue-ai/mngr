@@ -3,7 +3,6 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
-const { BUNDLED_UV_ENV } = require('./bundled-uv-env');
 const { getBuildMetadata } = require('./build-metadata');
 const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
@@ -450,7 +449,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...process.env,
           ...gitEnv,
           PATH: `${bundledBinDirs.join(':')}:${augmentedSystemPath}`,
-          ...BUNDLED_UV_ENV,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',

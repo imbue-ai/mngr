@@ -1,0 +1,1 @@
+The published `imbue-studio` skill's frontmatter carries `metadata.author: imbue`. default-workspace-template, which vendors the skill, holds a skill to its own checks only when it carries that marker (or `metadata.crystallized: true`), and treats any other as a third party's.
