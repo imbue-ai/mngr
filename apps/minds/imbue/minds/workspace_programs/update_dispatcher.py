@@ -380,13 +380,15 @@ def _read_agent_environment() -> dict[str, str]:
     return env
 
 
-def list_agents(agent_environment: AgentEnvironment) -> list[dict[str, str]] | None:
+def list_agents(
+    agent_environment: AgentEnvironment, timeout_seconds: float = _MNGR_LIST_TIMEOUT_SECONDS
+) -> list[dict[str, str]] | None:
     """Every agent the workspace's mngr lists, as dicts; None when it could not list them.
 
     A ``--format`` template scoped to the local provider: it answers from local state where
     ``--format json`` can fail.
     """
-    listed = run_command(list(_MNGR_LIST_ARGV), _MNGR_LIST_TIMEOUT_SECONDS, env=agent_environment.variables())
+    listed = run_command(list(_MNGR_LIST_ARGV), timeout_seconds, env=agent_environment.variables())
     if listed.returncode != 0:
         # ``--on-error continue`` still lists every agent it could; the services-agent check below decides.
         write_log_line("mngr list exited %d: %s" % (listed.returncode, _bounded_detail(listed.stderr)))

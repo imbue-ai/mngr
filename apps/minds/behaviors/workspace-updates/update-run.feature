@@ -4,11 +4,12 @@ Feature: Running an update
 
   @attended-dispatch
   Scenario: Starting an update takes the user to the conversation performing it
-    The workspace's interface opens the conversation's tab only for clients connected when the agent appears, so the app shows the workspace first.
+    The workspace's interface opens the conversation's tab only for clients connected when the agent appears, and the workspace's Updates tab keeps the workspace connected beneath it.
     Given an out-of-date workspace
-    When the user starts an update for that workspace
-    Then the app shows the user that workspace
-    And an update agent is then started inside that workspace
+    When the user starts an update for that workspace from its Updates tab
+    Then an update agent is started inside that workspace
+    And the app then shows the user that workspace
+    But an update that is refused keeps the user on the Updates tab, which says why
 
   @stopped-workspace-started
   Scenario: A stopped workspace is started before its update runs
@@ -50,7 +51,7 @@ Feature: Running an update
     And the user closes the window that asked before the app hears back
     Then the workspace's row reports that its update didn't start
     And opening that workspace's update again says why, with the underlying error message when there was one
-    And that report is gone once an update of that workspace goes out or is scheduled, or once the user dismisses it
+    And that report is gone once an update of that workspace goes out or is scheduled, or once the user has read it in the Updates tab and left it
 
   @stop-mid-apply-is-confirmed
   Scenario: Stopping a workspace while its update is being applied asks first
@@ -115,7 +116,7 @@ Feature: Running an update
     Nothing about a workspace's update can be read from it or done in it while it is stopped, and what the user has not dismissed comes back on the first read after it starts.
     Given a workspace that is stopped or stopping
     Then the app says nothing about whether that workspace is behind, scheduled, or skipped, or about how its last update ended
-    And its Updates settings, and an update window open over it, say to start the workspace to see its updates
+    And its Updates tab says to start the workspace to see its updates
     But the app still reports an update of it that is landing, an update it is starting that workspace for, an update of it that never went out, and that it is too old to update in place
     When that workspace is running again
     Then the app reports its update state again, without what the user dismissed
@@ -124,11 +125,20 @@ Feature: Running an update
   Scenario: A run's chat is one click away from where its progress or outcome is reported
     A scheduled run shows no window of its own while it runs, so its report is the way in.
     Given a workspace whose last update landed or is waiting for a decision
-    Then the outcome on the workspace's row offers a button into the run's chat, itself or in the window it opens
-    And the outcome over the workspace offers a button into the run's chat and a way to dismiss it
+    Then the outcome on the workspace's row offers a button into the run's chat, itself or in the Updates tab it opens
+    And the workspace's titlebar status opens the run's chat
+    And the workspace's Updates tab offers a button into the run's chat, and leaving the tab dismisses the outcome
     Given a workspace whose update is preparing, applying, or waiting for the user, and whose run's chat exists
-    Then the report over the workspace offers a button into the run's chat
-    And the update on the workspace's row opens the run's chat itself, not a window that only offers it
+    Then the workspace's Updates tab offers a button into the run's chat
+    And the update on the workspace's row opens the run's chat itself, not a tab that only offers it
+
+  @chat-pointed-at-only-when-known
+  Scenario: A run's chat is pointed at only where the app can open it
+    Given a workspace whose last update ended
+    When the app knows the run's chat, including the chat a run started by hand recorded itself in
+    Then the workspace's titlebar status opens that chat, and its Updates tab tells the user to check in there and offers a button into it
+    When the run's chat is gone
+    Then nothing about that run tells the user to go to its chat, and its titlebar status opens the Updates tab
 
   @idle-agent-reminded
   Scenario: An update agent that sits idle without a result is reminded
@@ -139,10 +149,9 @@ Feature: Running an update
 
   @failed-outcome-shows-details
   Scenario: An update that failed is reported with a way to its details
-    Whether the run's chat can still be opened is a question its details answer, so the report over the workspace does not promise it.
     Given a workspace whose last update failed
-    Then the outcome over the workspace offers a way to see its details and a way to dismiss it
-    And its details offer a button into the run's chat only while that chat exists
+    Then the workspace's Updates tab says what happened, and leaving the tab dismisses it
+    And it offers a button into the run's chat only while that chat exists
     And so does the outcome on the workspace's row
 
   @stopped-agent-revived
@@ -243,17 +252,18 @@ Feature: Running an update
   @run-is-reported-where-the-reader-is
   Rule: A run in flight is reported both on the workspace's row and over the workspace itself
     A user watching their workspace update is not on the page its row is on.
-    Both surfaces read one decision about the run, so they cannot describe it differently.
+    Over the workspace, a run is reported by its titlebar status and its Updates tab, and while it applies, by the notice covering the workspace.
+    Every surface reads one decision about the run, so they cannot describe it differently.
 
     @prepare-and-apply-are-named-apart
     Example: The part of a run that changes nothing is not reported as changing something
       Only the apply step changes the workspace, and it is also the step that takes its services away.
       Given a workspace with an update in flight that has not reached its apply step
       Then the app reports that update as preparing
-      And the app reports that update over that workspace as preparing
+      And the workspace's Updates tab reports that update as preparing
       When that update reaches its apply step
       Then the app reports that workspace as applying its update
-      And the app reports that update over that workspace as applying
+      And the app covers that workspace with a notice that its update is landing
 
     @landed-apply-is-finishing
     Example: A run whose apply has landed is reported as finishing until it ends
@@ -261,11 +271,11 @@ Feature: Running an update
       Given a workspace whose update's apply has landed
       And that run has not yet recorded how it ended
       Then the app reports that update as finishing
-      And the app reports that update over that workspace as finishing
+      And the workspace's titlebar status and Updates tab report that update as finishing
 
     @run-outcome-reported-over-the-workspace
     Example: A run that ended with a note for the user says so over the workspace
       The update landed, so the note is reported as news rather than as a fault.
       Given a workspace whose last update ended with a note for the user
-      Then the app reports that outcome over that workspace, not as a failure
-      And the app offers no update surface that opens itself over that workspace
+      Then the workspace's titlebar status reports that outcome as news, not as a failure
+      And the app opens no update surface over that workspace by itself

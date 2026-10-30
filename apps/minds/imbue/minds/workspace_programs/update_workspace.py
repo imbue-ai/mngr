@@ -10,8 +10,9 @@ workspace root. Each mode is idempotent and prints one marker-wrapped JSON answe
   the auto-open label and return once its create has finished;
 - ``cancel``: delete the schedule file;
 - ``read``: the schedule file, the run record and the last dispatch, the detection sweep's one
-  read; given the app's current values, an armed file is first refreshed with them, and asked,
-  it says whether an account is signed in;
+  read, with the id of the chat the run record names when the last dispatch does not name it;
+  given the app's current values, an armed file is first refreshed with them, and asked, it says
+  whether an account is signed in;
 - ``tick``: the dispatcher's own minute (``update_dispatcher``), run by cron from the installed copy;
 - ``busy``: the chats the workspace's background-task marker files hold live tasks for, which the app's run
   probe reads from the installed copy in a template without the background-task CLI.
@@ -255,12 +256,37 @@ def mode_cancel(context: ProgramContext) -> None:
     emit_update_answer({"mode": "cancel", "is_cancelled": True})
 
 
+# Bounds ``read``'s lookup of a run's chat inside the app's timeout for the whole ``read``, so a slow listing
+# costs the chat and not the answer.
+_RUN_CHAT_LOOKUP_TIMEOUT_SECONDS: Final[float] = 45.0
+
+
+def _run_chat_id(
+    run: dict[str, object] | None, last_dispatch: dict[str, object] | None, agent_environment: AgentEnvironment
+) -> str | None:
+    """The chat the run record names, looked up when the last dispatch does not name it.
+
+    That is a run started by hand in a chat, or one whose dispatch a later one replaced. None when there is
+    nothing to look up or the workspace's agents could not be listed; "" when no such chat is listed.
+    """
+    if run is None:
+        return None
+    chat_name = run.get("chat_agent_name")
+    if not chat_name or (last_dispatch or {}).get("chat_agent_name") == chat_name:
+        return None
+    agents = list_agents(agent_environment, timeout_seconds=_RUN_CHAT_LOOKUP_TIMEOUT_SECONDS)
+    if agents is None:
+        return None
+    lead = find_run_lead(agents, run)
+    return chat_id_of(lead) if lead is not None else ""
+
+
 def mode_read(context: ProgramContext) -> None:
     """The schedule, the run record and the last dispatch in one answer.
 
     With app fields given, an armed schedule is first rewritten with them and the dispatcher brought
     current. Whether an account is signed in rides along when the app asks, or the schedule's skip says
-    none was.
+    none was; the id of the chat the run record names, when the last dispatch does not name it.
     """
     schedule = read_json_object(SCHEDULE_FILE_PATH)
     if schedule is not None and _arg(context, "--ceiling"):
@@ -276,12 +302,15 @@ def mode_read(context: ProgramContext) -> None:
     )
     is_sign_in_asked = UPDATE_COMMAND_CHECK_SIGN_IN_FLAG in context["argv"] or is_skipped_for_sign_in
     is_signed_in = resolve_account(context["agent_environment"])[0] if is_sign_in_asked else None
+    run = read_json_object(RUN_RECORD_PATH)
+    last_dispatch = read_json_object(LAST_DISPATCH_FILE_PATH)
     emit_update_answer(
         {
             "mode": "read",
             "schedule": schedule,
-            "run": read_json_object(RUN_RECORD_PATH),
-            "last_dispatch": read_json_object(LAST_DISPATCH_FILE_PATH),
+            "run": run,
+            "last_dispatch": last_dispatch,
+            "run_chat_id": _run_chat_id(run, last_dispatch, context["agent_environment"]),
             "is_signed_in": is_signed_in,
         }
     )

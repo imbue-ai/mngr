@@ -137,7 +137,7 @@ class UpdateSkipReason(UpperCaseStrEnum):
     WINDOW_CLOSED = auto()
 
 
-# Shown in the modal; each names the condition, not the code path. Window-relative
+# Shown on the Updates tab; each names the condition, not the code path. Window-relative
 # rather than "last night": the window is configurable to any hours.
 SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
     UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this workspace during the last update window.",
@@ -146,6 +146,10 @@ SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
     UpdateSkipReason.DISPATCH_FAILED: "The update couldn't be started during the last update window.",
     UpdateSkipReason.WINDOW_CLOSED: "The last update window closed before the update could start.",
 }
+
+
+# Every route that sets an update window refuses an empty one in these words.
+EMPTY_UPDATE_WINDOW_MESSAGE: Final[str] = "The update window needs a start and end that differ"
 
 
 def format_update_window(window: tuple[int, int]) -> str:
@@ -193,7 +197,7 @@ class UpdateArmOutcome(UpperCaseStrEnum):
 
 
 def describe_skip_reason(recorded_reason: str) -> str:
-    """The modal's line for a recorded skip; '' for none, or for one this build does not know (a newer build's)."""
+    """The Updates tab's line for a recorded skip; '' for none, or for one only a newer build knows."""
     if not recorded_reason:
         return ""
     try:
@@ -227,7 +231,7 @@ class UpdateRunStatus(FrozenModel):
     is_holding: bool = Field(
         default=False, description="Whether the run has stopped to wait for the user; False while it is moving"
     )
-    hold_detail: str = Field(default="", description="One line naming what the run is waiting on, for the modal")
+    hold_detail: str = Field(default="", description="One line naming what the run is waiting on, for the Updates tab")
     apply_phase: str = Field(
         default="",
         description="The apply's last completed phase while it is landing (mirrored from the apply's own marker "
@@ -242,7 +246,7 @@ class UpdateRunStatus(FrozenModel):
         "or from a workspace whose skill predates the field",
     )
     verdict: UpdateVerdict | None = Field(default=None, description="The terminal verdict, None while the run goes")
-    detail: str = Field(default="", description="One-line human-readable summary, for the modal")
+    detail: str = Field(default="", description="One-line human-readable summary, for the Updates tab")
     resulting_ref: str = Field(default="", description="Ref the workspace is on now (success verdicts)")
     in_place_compatible_ref: str = Field(
         default="",
@@ -394,7 +398,7 @@ class UpdateLastDispatch(FrozenModel):
     chat_agent_name: str = Field(description="The chat's agent name")
     chat_id: str = Field(description="The chat's id, for opening it; '' when the create did not say")
     started_by: UpdateStartedBy | None = Field(description="Whether a schedule or a press started it")
-    ceiling_ref: str = Field(description="The app ceiling it was pinned to; '' when the record does not say")
+    target_ref: str = Field(description="The release the run aimed at; '' when the record does not say")
 
 
 def parse_update_last_dispatch(raw: object) -> UpdateLastDispatch | None:
@@ -410,5 +414,5 @@ def parse_update_last_dispatch(raw: object) -> UpdateLastDispatch | None:
         chat_agent_name=chat_agent_name,
         chat_id=str(record.get("chat_id") or ""),
         started_by=_parse_started_by(record.get("started_by")),
-        ceiling_ref=str(record.get("ceiling") or ""),
+        target_ref=str(record.get("target_ref") or ""),
     )

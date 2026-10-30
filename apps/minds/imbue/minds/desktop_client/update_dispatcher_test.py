@@ -309,7 +309,7 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     assert dispatch is not None and dispatch["started_by"] == "scheduled"
 
 
-@pytest.mark.witnesses("workspace-updates.skipped-window", partial="the recorded reason; not the modal line")
+@pytest.mark.witnesses("workspace-updates.skipped-window", partial="the recorded reason; not the Updates tab line")
 def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

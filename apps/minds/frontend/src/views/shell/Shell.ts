@@ -26,14 +26,8 @@ import {
   popoutFromPath,
 } from "./classify";
 import { PopoutChrome } from "./PopoutChrome";
-import { noticeBandFor } from "./notice-band";
-import {
-  isUpdateOffered,
-  standingUpdateNotice,
-  updateChatAgentIdFor,
-  updateRunOutcome,
-  updateRunPhase,
-} from "../../models/updates";
+import { surfaceNoticeBand } from "./workspace-notices";
+import { isUpdateOffered } from "../../models/updates";
 import { NoticeBand } from "./NoticeBand";
 import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
@@ -60,7 +54,6 @@ import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
-import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { electronBridge } from "../../electron-bridge";
 
@@ -358,11 +351,10 @@ export function Shell(): m.Component<ShellAttrs> {
           ? null
           : m(OverlayShell, overlayAttrs, overlayContent);
 
-      // The band speaks for whichever machine is painted, so it is keyed to the
-      // surface rather than the route: the workspace route's own frame, and
-      // equally the machine an app-level modal was opened over, which stays
-      // mounted behind the backdrop. A hub page with no machine behind it
-      // reports these conditions in its own flow instead.
+      // The band speaks for whichever machine is painted: the workspace
+      // route's own frame, and equally the machine an app-level modal was
+      // opened over. A hub page with no machine behind it reports these
+      // conditions in its own flow instead.
       //
       // Not gated on capture mode, unlike the reconnecting indicator above:
       // that one reads live channel liveness, which no capture has, while
@@ -372,78 +364,7 @@ export function Shell(): m.Component<ShellAttrs> {
         surfaceWorkspaceId === null
           ? null
           : shell.stores.workspaces.toAgentScopedId(surfaceWorkspaceId);
-      const health =
-        agentScoped === null
-          ? "healthy"
-          : shell.stores.health.statusFor(agentScoped);
-      // A machine the recovery verdict reads as unreachable through its own
-      // backend is unreachable for a reason the band can state, which is why it
-      // reads unhealthy at all. The list frame already carries the verdict and
-      // the backend's name per row, so the band can name it without a poll of
-      // its own -- and says the same thing the card behind "Open recovery" will.
-      const entry =
-        agentScoped === null
-          ? null
-          : shell.stores.workspaces.entryByAnyId(agentScoped);
-      const unreachableProviderLabel = entry?.is_backend_unreachable
-        ? entry.provider_label || null
-        : null;
-      const standingNotice =
-        agentScoped === null
-          ? "none"
-          : standingUpdateNotice(
-              shell.stores.updates.forAgent(agentScoped),
-              shell.stores.updates.isUpdating(agentScoped),
-              shell.stores.updates.isAutoUpdateEnabled,
-            );
-      // The band is where a run reports itself to the reader inside the
-      // machine, who cannot see the row badge.
-      const published =
-        agentScoped === null
-          ? null
-          : shell.stores.updates.publishedFor(agentScoped);
-      const updatePhase =
-        agentScoped === null
-          ? "none"
-          : updateRunPhase(
-              published,
-              shell.stores.updates.isUpdating(agentScoped),
-            );
-      const updateOutcome = updateRunOutcome(published);
-      const updateChatAgentId =
-        agentScoped === null
-          ? ""
-          : updateChatAgentIdFor(published, shell.stores.updates.isUpdating(agentScoped));
-      const band = noticeBandFor(
-        health,
-        shell.stores.health.discoveryHealth,
-        surfaceWorkspaceId !== null,
-        {
-          isRestartAppAvailable: electronBridge.isDesktop,
-          unreachableProviderLabel,
-          deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
-          // So the band can tell the user's own bounce, which narrates itself,
-          // from the app's unattended start, which must not hide the device.
-          recoveryKind:
-            agentScoped === null
-              ? null
-              : shell.stores.health.recoveryKindFor(agentScoped),
-          // Which scopes that app-global condition to the machines it can
-          // explain: one on an on-device backend answers over loopback with the
-          // wifi off. A row we have no entry for keeps the conservative default.
-          isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
-          isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
-          liveness: entry?.liveness ?? "",
-          stopKind: entry?.stop_kind ?? "",
-          updateRunPhase: updatePhase,
-          updateHoldDetail: published?.is_hold_recorded
-            ? (published.hold_detail ?? "")
-            : null,
-          updateRunOutcome: updateOutcome,
-          isUpdateChatKnown: updateChatAgentId !== "",
-          standingUpdateNotice: standingNotice,
-        },
-      );
+      const band = surfaceNoticeBand(shell, surfaceWorkspaceId);
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options
       // overlay there, but an app-level modal shares its z and is emitted after
@@ -454,9 +375,6 @@ export function Shell(): m.Component<ShellAttrs> {
         workspaceParam !== null &&
         agentScoped !== null &&
         shell.isRecoveryModalOpenFor(agentScoped);
-      // Not gated on a displayed machine: the machines list opens this for a
-      // row while Home is the surface.
-      const updateModalAgentId = shell.openUpdateModalAgentId();
       // Covers only the machine the apply is landing in; up exactly while the
       // run is applying.
       const isApplyCovering =
@@ -472,15 +390,18 @@ export function Shell(): m.Component<ShellAttrs> {
           (workspaceParam !== null && !isWorkspaceOverlayPath(routePath))) &&
         overlay === null &&
         !isRecoveryOpen &&
-        !isApplyCovering &&
-        updateModalAgentId === null;
+        !isApplyCovering;
       const autoUpdatePromptTrigger = isAutoUpdatePromptPlaceable
         ? shell.autoUpdatePrompt.triggerFor(
             shell.stores.updates.hasReceivedUpdates
               ? shell.stores.updates.isAutoUpdateEnabled
               : null,
-            shell.stores.workspaces.workspaces.some((workspace) =>
-              isUpdateOffered(shell.stores.updates.forAgent(workspace.id)),
+            // Only a workspace that follows Studio settings: the offer turns on
+            // Studio's switch, which one with its own setting ignores.
+            shell.stores.workspaces.workspaces.some(
+              (workspace) =>
+                shell.stores.updates.autoUpdateFor(workspace.id).override === null &&
+                isUpdateOffered(shell.stores.updates.forAgent(workspace.id)),
             ),
           )
         : null;
@@ -498,19 +419,7 @@ export function Shell(): m.Component<ShellAttrs> {
               onAction: (action) => {
                 if (action.kind === "restart-app") {
                   electronBridge.restartApp();
-                } else if (agentScoped === null) {
-                  return;
-                } else if (action.kind === "update-workspace") {
-                  shell.openUpdateModal(agentScoped);
-                } else if (action.kind === "sign-in-for-update") {
-                  shell.signInForUpdateOrExplain(agentScoped);
-                } else if (action.kind === "open-update-chat") {
-                  shell.openWorkspaceChat(agentScoped, updateChatAgentId);
-                } else if (action.kind === "dismiss-update-outcome") {
-                  shell.dismissUpdateOutcomeOrExplain(agentScoped);
-                } else if (action.kind === "skip-update") {
-                  shell.openUpdateModal(agentScoped, { isSkipConfirmOpen: true });
-                } else {
+                } else if (agentScoped !== null) {
                   shell.openRecoveryModal(agentScoped);
                 }
               },
@@ -528,17 +437,6 @@ export function Shell(): m.Component<ShellAttrs> {
               workspaceName:
                 shell.stores.workspaces.entryByAnyId(workspaceParam)?.name ??
                 "this workspace",
-            })
-          : null,
-        updateModalAgentId !== null
-          ? m(UpdateModal, {
-              agentId: updateModalAgentId,
-              workspaceName:
-                shell.stores.workspaces.entryByAnyId(updateModalAgentId)
-                  ?.name ?? "this workspace",
-              isSkipConfirmOpen: shell.isUpdateSkipConfirmRequested(),
-              openingFailure: shell.updateModalOpeningFailure(),
-              onClose: () => shell.closeUpdateModal(),
             })
           : null,
         autoUpdatePromptTrigger !== null

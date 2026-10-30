@@ -77,6 +77,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -762,14 +764,16 @@ def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> Non
     # The pid is alive, so the record is RUNNING regardless of host state; an
     # empty resolver is enough to drive the helper.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, None, None)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, None, None, None)
     assert marker == {str(agent_id): "running"}
 
 
 def test_destroying_marker_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without InstallationPaths;
     the helper must tolerate that without raising."""
-    assert _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None) == {}
+    assert (
+        _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None, None) == {}
+    )
 
 
 def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -> None:
@@ -798,7 +802,7 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     # gone -> the destroy is DONE.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
 
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -808,6 +812,38 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     records = session_store.record_store.list_records("user-1")
     assert len(records) == 1
     assert records[0].state == "destroyed"
+
+
+@pytest.mark.witnesses("workspace-updates.removed-workspace-forgets-its-setting")
+def test_a_removed_workspace_forgets_its_own_auto_update_setting(tmp_path: Path) -> None:
+    paths = InstallationPaths(data_dir=tmp_path)
+    removed_agent_id = AgentId.generate()
+    kept_agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, removed_agent_id, HostId.generate())
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    manual = WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.MANUAL)
+    minds_config.set_workspace_auto_update_override(str(removed_agent_id), manual)
+    minds_config.set_workspace_auto_update_override(str(kept_agent_id), manual)
+
+    _finalize_and_mark_destroying(paths, StaticBackendResolver(url_by_agent_and_service={}), None, None, minds_config)
+
+    assert minds_config.get_workspace_auto_update_overrides() == {str(kept_agent_id): manual}
+
+
+def test_an_unreadable_config_does_not_hold_up_finalizing_a_removed_workspace(tmp_path: Path) -> None:
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, agent_id, HostId.generate())
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.data_dir.mkdir()
+    (minds_config.data_dir / "config.toml").write_text("not = [valid toml\n")
+
+    marker = _finalize_and_mark_destroying(
+        paths, StaticBackendResolver(url_by_agent_and_service={}), None, None, minds_config
+    )
+
+    assert marker == {}
+    assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
 
 
 def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
@@ -833,7 +869,7 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     # Resolver still lists the workspace agent as active -> host still up -> FAILED.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
 
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -2434,7 +2470,7 @@ def test_finalize_and_mark_destroying_deletes_the_machines_share(tmp_path: Path)
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
+    _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
 
     assert cli.deleted_share_host_ids == [str(host_id)]
     assert cli.get_share_status(account="a@b.com", host_id=str(host_id)) is None
@@ -2465,7 +2501,7 @@ def test_finalize_and_mark_destroying_tombstones_even_if_the_share_delete_fails(
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
 
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()

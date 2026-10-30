@@ -99,6 +99,15 @@ class MindsConfigError(MindError):
     ...
 
 
+class WorkspaceAutoUpdateSettingError(MindsConfigError, ValueError):
+    """Raised when a workspace's own auto-update setting has a window its mode cannot have.
+
+    A ``ValueError`` so pydantic reports it as a validation error of the setting.
+    """
+
+    ...
+
+
 class NaiveTimestampError(MindError, ValueError):
     """Raised when a timezone-aware datetime is required but a naive one was passed."""
 

@@ -24,6 +24,7 @@ import type {
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
 import { BrowserImportModel } from "./browserImport";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
+import type { UpdatesStore } from "./updates";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   applyNotificationPrefs,
@@ -44,7 +45,7 @@ export interface SettingsOverview {
   version: string;
   update_window_start_hour: number;
   update_window_end_hour: number;
-  /** Whether the app arms every behind workspace's update itself. */
+  /** Whether the app arms the update of every behind workspace without its own setting. */
   is_auto_update_enabled: boolean;
   /** The answer to the one-time auto-update prompt; null until it is given. */
   auto_update_prompt_decision: AutoUpdatePromptDecision | null;
@@ -161,6 +162,9 @@ export class SettingsModel {
   updateWindowError = "";
   autoUpdateError = "";
   isAutoUpdateBusy = false;
+  /** The workspace being put back on Studio's auto-update setting, and why the last one could not be. */
+  workspaceResettingId: string | null = null;
+  workspaceResetError = "";
   signInBrowserError = "";
   notificationPrefsError = "";
   /** Set after a failed openNotificationOsSettings() call (e.g. no known
@@ -351,8 +355,20 @@ export class SettingsModel {
     this.redraw();
   }
 
-  /** Turn auto-update on or off for every workspace. A plain preference like
-   * the window: no If-Match. The switch shows what the backend confirmed. */
+  /** Put one workspace back on Studio's auto-update setting; the updates frame that follows drops its row. */
+  async resetWorkspaceAutoUpdate(agentId: string, updates: UpdatesStore): Promise<void> {
+    this.workspaceResettingId = agentId;
+    this.workspaceResetError = "";
+    this.redraw();
+    const result = await updates.setAutoUpdateOverride(agentId, null);
+    this.workspaceResettingId = null;
+    if (!result.isOk) this.workspaceResetError = result.error;
+    this.redraw();
+  }
+
+  /** Turn auto-update on or off for every workspace that follows Studio
+   * settings. A plain preference like the window: no If-Match. The switch
+   * shows what the backend confirmed. */
   async setAutoUpdateEnabled(isEnabled: boolean): Promise<void> {
     if (this.overview === null) return;
     this.autoUpdateError = "";

@@ -66,9 +66,9 @@ Feature: Detecting an out-of-date workspace
     Given the app supports a template release at or above the security floor
     And a workspace running a template release below the security floor, within the minor release the app supports
     Then the app badges that workspace as having a security update
-    And the app's notice for that workspace says that the update includes a critical security fix
-    And the app's explanation of that update offers details of what the security fix addresses
-    And that badge and notice are drawn with more emphasis than an ordinary update's
+    And the workspace's titlebar status says a security update is available, drawn as needing the user
+    And the workspace's Updates tab says that the update includes a critical security fix, with details of what it addresses, and offers updating now ahead of scheduling
+    And that badge is drawn with more emphasis than an ordinary update's
     And an action covering every workspace with an update available includes that workspace
     And the app offers to update that workspace
 
@@ -83,7 +83,7 @@ Feature: Detecting an out-of-date workspace
   Scenario: A workspace with only a patch available is not prompted to update
     Given the app supports a template release
     And a workspace running an earlier patch release of that same minor release
-    Then the app shows no update badge or notice for that workspace
+    Then the app shows no update badge or titlebar status for that workspace
     And an action covering every workspace with an update available passes over that workspace
 
   @patch-available-by-hand
@@ -115,12 +115,13 @@ Feature: Detecting an out-of-date workspace
     And the app offers no update for that workspace
     And the app explains that the user should create a new workspace and ask its agent to migrate the old one's work into it
 
-  @too-old-is-missing-security-fixes
-  Scenario: A workspace that needs recreating is told it is missing security fixes
-    The in-place cutoff sits below the security floor, so every such workspace is below the floor as well.
-    Given a workspace running a template release older than minds-v0.3.10
+  @too-old-over-security-update
+  Scenario: A workspace that needs recreating is not offered a security update
+    The in-place cutoff sits below the security floor, so every such workspace is below the floor as well, but no update can be applied to it in place.
+    Given the app supports a template release at or above the security floor
+    And a workspace running a template release older than minds-v0.3.10
     Then the app reports that workspace as needing recreation
-    And the app's notice for that workspace says that it is missing security fixes
+    And the app does not report that workspace as having a security update
 
   @no-workspace-version
   Scenario: A workspace with no readable template version is unknown

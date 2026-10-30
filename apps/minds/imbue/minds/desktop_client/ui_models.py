@@ -40,6 +40,8 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
+from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
@@ -498,6 +500,18 @@ class UiHealthMessage(FrozenModel):
     )
 
 
+class UiWorkspaceAutoUpdateOverride(FrozenModel):
+    """One workspace's own auto-update setting, in place of the app-wide one."""
+
+    mode: WorkspaceAutoUpdateMode = Field(description="Auto-update in its own window, or never")
+    window_start_hour: int | None = Field(
+        default=None, description="Local hour its window opens at, for CUSTOM_WINDOW; None for MANUAL"
+    )
+    window_end_hour: int | None = Field(
+        default=None, description="Local hour its window closes at, for CUSTOM_WINDOW; None for MANUAL"
+    )
+
+
 class UiWorkspaceUpdate(FrozenModel):
     """One workspace's update situation: what the store composes and what the SPA reads, one model.
 
@@ -595,17 +609,34 @@ class UiWorkspaceUpdate(FrozenModel):
         default="", description="The run's chat's id, for opening it from the app; '' when unknown or deleted"
     )
     is_chat_gone: bool = Field(
-        default=False, description="Whether the run's chat was deleted before the run recorded how it ended"
+        default=False, description="Whether a listing found the run's chat deleted, so there is no chat left to open"
+    )
+    last_dispatch_target_ref: str = Field(
+        default="",
+        description="The release the update chat last created there aimed at, which auto-update does not arm "
+        "again; '' when no record says",
     )
     is_backup_configured: bool = Field(
         default=False,
         description="Whether backups exist for this machine (keys the go-ahead-without-backups confirmation)",
     )
+    is_auto_update_enabled: bool = Field(
+        default=False,
+        description="Whether auto-update arms this workspace's update itself, under its own setting or the app's",
+    )
+    update_window: str = Field(
+        default="",
+        description="The local window this workspace's scheduled updates start in, e.g. '2:00 AM-5:00 AM': its "
+        "own when it has a custom window, else the app's",
+    )
+    auto_update_override: UiWorkspaceAutoUpdateOverride | None = Field(
+        default=None, description="The workspace's own auto-update setting; None while it follows the app's"
+    )
 
     @property
     def is_update_offered(self) -> bool:
         """Whether the app has positively read that this workspace is a minor release behind, or below the
-        security floor: the badge, the band, and bulk actions."""
+        security floor: the badge, the titlebar status, and bulk actions."""
         return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.SECURITY_UPDATE)
 
     @property
@@ -641,8 +672,15 @@ class UiWorkspaceUpdatesMessage(FrozenModel):
     update_window: str = Field(
         description="Human-readable local window scheduled updates run in, e.g. '2:00 AM-5:00 AM'"
     )
+    update_window_start_hour: int = Field(
+        default=DEFAULT_UPDATE_WINDOW[0], description="Local hour the app-wide window opens at"
+    )
+    update_window_end_hour: int = Field(
+        default=DEFAULT_UPDATE_WINDOW[1], description="Local hour the app-wide window closes at"
+    )
     is_auto_update_enabled: bool = Field(
-        default=False, description="Whether the app arms every behind workspace's update itself"
+        default=False,
+        description="The app-wide auto-update switch; each workspace's own effective value rides its update",
     )
 
 

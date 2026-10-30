@@ -550,11 +550,15 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function rowUpdateBadge(agentId: string): UpdateBadge | null {
     const updates = getAppContext().stores.updates;
-    return updateBadgeFor(updates.publishedFor(agentId), updates.isUpdating(agentId), updates.isAutoUpdateEnabled);
+    return updateBadgeFor(
+      updates.publishedFor(agentId),
+      updates.isUpdating(agentId),
+      updates.autoUpdateFor(agentId).isEnabled,
+    );
   }
 
   /** The row's one update control, or null when the machine has nothing to
-   * say: the update window it opens, or a running update's chat, holds the actions. */
+   * say: the Updates tab it opens, or a running update's chat, holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     const published = updates.publishedFor(entry.id);
@@ -568,9 +572,7 @@ export const LandingPage: m.ClosureComponent = () => {
         class: `${UPDATE_BADGE_CLASS} ${UPDATE_BADGE_TONES[badge.tone]} landing-update-badge`,
         "data-update-state": badge.state,
         "data-tooltip": badge.tooltip,
-        "aria-haspopup": isOpeningRunChat ? undefined : "dialog",
-        // Raised through the shell so it is one modal with one owner (Escape,
-        // navigation). The row behind is clickable, so the press stops here.
+        // The row behind is clickable, so the press stops here.
         onclick: (event: MouseEvent) => {
           event.stopPropagation();
           if (isOpeningRunChat)
@@ -578,7 +580,7 @@ export const LandingPage: m.ClosureComponent = () => {
               entry.id,
               updateChatAgentIdFor(published, updates.isUpdating(entry.id)),
             );
-          else getAppContext().shell.openUpdateModal(entry.id);
+          else getAppContext().shell.openUpdatesTab(entry.id);
         },
       },
       [
@@ -676,12 +678,11 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
-  /** The bulk strip, only when more than one machine is out of date: one
-   * machine has its own row action. Under auto-update the app arms them
-   * itself, so there is nothing to offer in bulk. */
+  /** The bulk strip, only when more than one machine auto-update will not
+   * handle has an update available: one machine has its own row action, and
+   * auto-update arms the rest itself. */
   function bulkUpdateActions(): m.Children {
     const updates = getAppContext().stores.updates;
-    if (updates.isAutoUpdateEnabled) return null;
     const agentIds = updates.updatableAgentIds();
     if (agentIds.length < 2) return null;
     return m(Notice, { extra: "mb-4", id: "landing-bulk-updates" }, [

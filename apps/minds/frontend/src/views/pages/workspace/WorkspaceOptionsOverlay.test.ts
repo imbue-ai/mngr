@@ -2,6 +2,7 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OptionsTab } from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
+import { createEmptyStores } from "../../../models/boot";
 import { PermissionsModel } from "../../../models/workspacePermissions";
 import { WorkspaceOptionsOverlay } from "./WorkspaceOptionsOverlay";
 import type { AnyVnode } from "../../../testing";
@@ -49,6 +50,7 @@ function render(stripX: number | null, tab: OptionsTab = "permissions"): AnyVnod
     shell: {
       accountId: "local",
       stores: {
+        ...createEmptyStores(),
         requests: { hasPendingForWorkspace: () => false },
         accounts: { labelFor: () => "This device" },
         notifications: {

@@ -43,6 +43,7 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.update_status import EMPTY_UPDATE_WINDOW_MESSAGE
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -101,7 +102,8 @@ class UiSettingsOverview(FrozenModel):
     update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
     update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
     is_auto_update_enabled: bool = Field(
-        default=False, description="Whether Imbue Studio arms every behind workspace's update itself"
+        default=False,
+        description="Whether Imbue Studio arms the update of every behind workspace without its own setting",
     )
     auto_update_prompt_decision: AutoUpdatePromptDecision | None = Field(
         default=None, description="How the one-time auto-update offer was answered; None while it never was"
@@ -172,7 +174,9 @@ class UiUpdateWindowWrite(FrozenModel):
 class UiAutoUpdateWrite(FrozenModel):
     """Body of the auto-update toggle write."""
 
-    is_enabled: bool = Field(description="Whether Imbue Studio arms every behind workspace's update itself")
+    is_enabled: bool = Field(
+        description="Whether Imbue Studio arms the update of every behind workspace without its own setting"
+    )
 
 
 class UiAutoUpdatePromptWrite(FrozenModel):
@@ -561,7 +565,7 @@ def _handle_browser_import_run() -> Response:
 
 
 def _empty_update_window_response() -> Response:
-    return _error_response("The update window needs a start and end that differ", 400)
+    return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400)
 
 
 def _handle_update_window_write() -> Response:

@@ -163,6 +163,12 @@ export class AutoUpdatePromptModel {
     return this.shownTrigger;
   }
 
+  /** Whether the offer has been answered, or null until the answer has been
+   * read: a workspace's Updates tab pitches the offer only while it is not. */
+  isAnswered(): boolean | null {
+    return this.decision === undefined ? null : this.decision !== null;
+  }
+
   /** Pick the update window that turning auto-update on will save. */
   setWindow(startHour: number, endHour: number): void {
     this.startHour = startHour;

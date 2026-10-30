@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localPageNoticeFor, noticeBandFor, workspacePageNoticeFor } from "./notice-band";
+import { localPageNoticeFor, noticeBandFor } from "./notice-band";
 
 describe("noticeBandFor", () => {
   it("shows nothing while the machine and the app are both healthy", () => {
@@ -261,194 +261,25 @@ describe("restart-app availability", () => {
   });
 });
 
-describe("noticeBandFor, out of date", () => {
-  it("bands a healthy machine that is a version behind", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "out-of-date" });
-    expect(band?.key).toBe("workspace-out-of-date");
-    expect(band?.variant).toBe("warn");
-    expect(band?.actions[0]?.kind).toBe("update-workspace");
+describe("noticeBandFor, an update landing", () => {
+  it("lets the apply silence the machine's own health, because it explains it", () => {
+    // Imbue Studio took those services down itself; "Lost connection" there
+    // misreads its own work, and the apply modal over the machine says so.
+    expect(noticeBandFor("stuck", "healthy", true, { isUpdateApplying: true })).toBeNull();
+    expect(noticeBandFor("recovery_failed", "healthy", true, { isUpdateApplying: true })).toBeNull();
+    // UNKNOWN names nobody, so the apply still silences the generic recovering line.
+    expect(noticeBandFor("stuck", "healthy", true, { isUpdateApplying: true, deviceEnvironment: "UNKNOWN" })).toBeNull();
   });
 
-  it("says nothing about the version while the machine is not answering", () => {
-    // A health condition is happening now; the version notice will still be
-    // true tomorrow.
-    expect(noticeBandFor("stuck", "healthy", true, { standingUpdateNotice: "out-of-date" })?.key).toBe("workspace-recovering");
-    expect(noticeBandFor("recovery_failed", "healthy", true, { standingUpdateNotice: "out-of-date" })?.key).toBe(
-      "workspace-restart-failed",
-    );
-  });
-
-  it("says nothing about the version while discovery is dead", () => {
-    expect(noticeBandFor("healthy", "blocked", true, { standingUpdateNotice: "out-of-date" })?.key).toBe("discovery-blocked");
-  });
-
-  it("bands nothing when no machine is displayed", () => {
-    expect(noticeBandFor("healthy", "healthy", false, { standingUpdateNotice: "out-of-date" })).toBeNull();
-  });
-
-  it("bands a machine with a security update more strongly than an ordinary one, with the same way into the modal", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "security-update" });
-    expect(band?.key).toBe("workspace-security-update");
-    expect(band?.variant).toBe("error");
-    expect(band?.actions.map((action) => action.kind)).toEqual(["update-workspace"]);
-    // Still a standing condition: a health condition and a run in flight outrank it.
-    expect(noticeBandFor("stuck", "healthy", true, { standingUpdateNotice: "security-update" })?.key).toBe(
-      "workspace-recovering",
-    );
+  it("does not silence this device's own condition, which no apply explains", () => {
     expect(
-      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "security-update" })?.key,
-    ).toBe("workspace-update-preparing");
-  });
-
-  it("bands a machine too old to update in place with the same way into the modal", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "needs-recreation" });
-    expect(band?.key).toBe("workspace-needs-recreation");
-    expect(band?.variant).toBe("warn");
-    expect(band?.actions[0]?.kind).toBe("update-workspace");
-    // Still a standing condition: a health condition outranks it.
-    expect(noticeBandFor("stuck", "healthy", true, { standingUpdateNotice: "needs-recreation" })?.key).toBe(
-      "workspace-recovering",
-    );
-  });
-});
-
-describe("noticeBandFor, an update run", () => {
-  it("tells the reader which half of the run they are in", () => {
-    // Preparing touches nothing; applying takes the services away.
-    const preparing = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing" });
-    const applying = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "applying" });
-    expect(preparing?.key).toBe("workspace-update-preparing");
-    expect(applying?.key).toBe("workspace-update-applying");
-    expect(applying?.message).toContain("services restart");
-  });
-
-  it("opens the run's chat from a run in flight once the chat exists", () => {
-    const kinds = (phase: "preparing" | "finishing" | "waiting" | "applying", isUpdateChatKnown: boolean): string[] =>
-      (noticeBandFor("healthy", "healthy", true, { updateRunPhase: phase, isUpdateChatKnown })?.actions ?? []).map(
-        (action) => action.kind,
-      );
-    expect(kinds("preparing", true)).toEqual(["open-update-chat"]);
-    expect(kinds("finishing", true)).toEqual(["open-update-chat"]);
-    expect(kinds("waiting", true)).toEqual(["open-update-chat"]);
-    // Before the chat exists there is nothing to open; a wait with no chat keeps the modal, which can say what for.
-    expect(kinds("preparing", false)).toEqual([]);
-    expect(kinds("finishing", false)).toEqual([]);
-    expect(kinds("waiting", false)).toEqual(["update-workspace"]);
-    // The apply takes the chat's services down with the rest.
-    expect(kinds("applying", true)).toEqual(["update-workspace"]);
-  });
-
-  it.each([
-    // Whether the failed run's chat is still there to open is the modal's to say.
-    ["failed", true, ["update-workspace", "dismiss-update-outcome"]],
-    ["failed", false, ["update-workspace", "dismiss-update-outcome"]],
-    ["needs-attention", true, ["open-update-chat", "dismiss-update-outcome"]],
-    ["needs-decision", true, ["open-update-chat", "skip-update"]],
-    ["needs-decision", false, ["skip-update"]],
-    // A run that never went out has no chat; its modal carries the error.
-    ["not-started", true, ["update-workspace", "dismiss-update-outcome"]],
-  ] as const)("offers a %s outcome (chat known: %s) the buttons that settle it", (outcome, isUpdateChatKnown, kinds) => {
-    const band = noticeBandFor("healthy", "healthy", true, { updateRunOutcome: outcome, isUpdateChatKnown });
-    expect(band?.actions.map((action) => action.kind)).toEqual(kinds);
-  });
-
-  it("says a landed update is finishing rather than preparing again", () => {
-    const finishing = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "finishing" });
-    expect(finishing?.key).toBe("workspace-update-finishing");
-    expect(finishing?.message).toContain("is updated");
-  });
-
-  it("lets the apply speak over the machine's own health, because it explains it", () => {
-    // Imbue Studio took those services down itself; "Lost connection" there misreads
-    // its own work.
-    expect(noticeBandFor("stuck", "healthy", true, { updateRunPhase: "applying" })?.key).toBe(
-      "workspace-update-applying",
-    );
-    expect(noticeBandFor("recovery_failed", "healthy", true, { updateRunPhase: "applying" })?.key).toBe(
-      "workspace-update-applying",
-    );
-  });
-
-  it("does not speak over this device's own condition, which no run explains", () => {
-    // An apply explains nothing about the laptop's network, and over a dead one
-    // the phase can no longer be refreshed. A loopback machine is untouched.
-    expect(
-      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "applying", deviceEnvironment: "OFFLINE" })
-        ?.message,
+      noticeBandFor("healthy", "healthy", true, { isUpdateApplying: true, deviceEnvironment: "OFFLINE" })?.message,
     ).toBe("No network connection.");
-    expect(
-      noticeBandFor("healthy", "healthy", true, {
-        updateRunPhase: "applying",
-        deviceEnvironment: "OFFLINE",
-        isWorkspaceNetworkDependent: false,
-      })?.key,
-    ).toBe("workspace-update-applying");
+    expect(noticeBandFor("stuck", "blocked", true, { isUpdateApplying: true })?.key).toBe("discovery-blocked");
   });
 
-  it("still speaks over a device nothing has been measured on yet", () => {
-    // UNKNOWN names nobody; an apply we know is running beats the generic
-    // recovering line.
-    expect(
-      noticeBandFor("stuck", "healthy", true, { updateRunPhase: "applying", deviceEnvironment: "UNKNOWN" })?.key,
-    ).toBe("workspace-update-applying");
-  });
-
-  it("leaves a machine that dies while merely preparing to the ordinary outage notice", () => {
-    // Nothing has been applied, so nothing about the run explains the outage.
-    expect(noticeBandFor("stuck", "healthy", true, { updateRunPhase: "preparing" })?.key).toBe("workspace-recovering");
-  });
-
-  it("names what a held run is waiting on when the run said", () => {
-    // The hold waits for the reader's go-ahead; the run's own line says on what.
-    const band = noticeBandFor("healthy", "healthy", true, {
-      updateRunPhase: "waiting",
-      updateHoldDetail: "Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.",
-    });
-    expect(band?.key).toBe("workspace-update-waiting");
-    expect(band?.variant).toBe("warn");
-    expect(band?.message.startsWith("Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.")).toBe(true);
-    expect(band?.message).toContain("waiting for your go-ahead");
-  });
-
-  it("says a waiting run is the reader's move rather than something in progress", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "waiting" });
-    expect(band?.key).toBe("workspace-update-waiting");
-    expect(band?.variant).toBe("warn");
-  });
-
-  it("reports how the last run ended, which the row badge cannot do from inside the machine", () => {
-    const failed = noticeBandFor("healthy", "healthy", true, { updateRunOutcome: "failed" });
-    const attention = noticeBandFor("healthy", "healthy", true, { updateRunOutcome: "needs-attention" });
-    expect(failed?.variant).toBe("error");
-    // The update landed, so this is neither an error nor a warning: a note.
-    expect(attention?.variant).toBe("info");
-  });
-
-  it("says an update that never went out didn't start, ahead of the standing version notice", () => {
-    // Update now enters the machine before dispatching, so the band is where
-    // a reader whose modal closed while it waited learns the press failed.
-    const band = noticeBandFor("healthy", "healthy", true, {
-      updateRunOutcome: "not-started",
-      standingUpdateNotice: "out-of-date",
-    });
-    expect(band?.message).toBe("This workspace's update didn't start.");
-    expect(band?.variant).toBe("error");
-    expect(band?.actions[0]?.kind).toBe("update-workspace");
-  });
-
-  it("prefers what a machine is doing now over how its last attempt ended", () => {
-    const band = noticeBandFor("healthy", "healthy", true, {
-      updateRunPhase: "preparing",
-      updateRunOutcome: "failed",
-    });
-    expect(band?.key).toBe("workspace-update-preparing");
-  });
-
-  it("keeps a run ahead of the standing version notice, and discovery death ahead of both", () => {
-    expect(noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "out-of-date" })?.key).toBe(
-      "workspace-update-preparing",
-    );
-    expect(noticeBandFor("healthy", "blocked", true, { updateRunPhase: "applying" })?.key).toBe("discovery-blocked");
+  it("leaves a machine that dies with no apply under way to the ordinary outage notice", () => {
+    expect(noticeBandFor("stuck", "healthy", true, { isUpdateApplying: false })?.key).toBe("workspace-recovering");
   });
 });
 
@@ -500,38 +331,5 @@ describe("noticeBandFor, a machine stopped on purpose", () => {
         noticeBandFor("recovering", "healthy", true, { liveness, recoveryKind: "restart", deviceEnvironment: "OFFLINE" }),
       ).toBeNull();
     }
-  });
-});
-
-describe("noticeBandFor's auto-update states", () => {
-  it("offers the sign-in a refused update is waiting on, as a standing condition below a run", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "needs-sign-in" });
-    expect(band).toMatchObject({ key: "workspace-needs-sign-in", actions: [{ kind: "sign-in-for-update" }] });
-    expect(
-      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "needs-sign-in" })
-        ?.key,
-    ).toBe("workspace-update-preparing");
-  });
-
-  it("says a pending decision is the reader's move in the same words as a run waiting on them, not a failure", () => {
-    const decision = noticeBandFor("healthy", "healthy", true, {
-      updateRunOutcome: "needs-decision",
-      isUpdateChatKnown: true,
-    });
-    const waiting = noticeBandFor("healthy", "healthy", true, { updateRunPhase: "waiting", isUpdateChatKnown: true });
-    expect(decision).toMatchObject({ key: "workspace-update-outcome", variant: "warn" });
-    expect(decision?.message).toBe(waiting?.message);
-    expect(decision?.actions.map((action) => action.label)).toEqual(["Open chat", "Dismiss"]);
-  });
-});
-
-describe("workspacePageNoticeFor", () => {
-  it("reaches the same payload as the band, so the two cannot drift apart", () => {
-    // The payload only; which machines get one is standingUpdateNotice's call.
-    expect(workspacePageNoticeFor("out-of-date")).toEqual(noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "out-of-date" }));
-  });
-
-  it("says nothing for a machine that is current", () => {
-    expect(workspacePageNoticeFor("none")).toBeNull();
   });
 });

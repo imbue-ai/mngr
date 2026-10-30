@@ -8,15 +8,12 @@ import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
 import { Icon16 } from "../../components/Icon";
-import { Collapsible } from "../../components/Collapsible";
 import type { IconName } from "../../components/icons";
-import { machineVerdict } from "../../components/MachineVerdict";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { CopyField, SectionHeader } from "../../components/Layout";
 import { FormLabel, Select, TextInput } from "../../components/FormControls";
-import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
   WorkspaceMachineSizeData,
@@ -37,32 +34,12 @@ import {
   machineSizeDraftFor,
 } from "../../../models/machineSize";
 import { MachineSizeInput } from "../../components/MachineSizeInput";
-import {
-  RUNNING_CHATS_PAUSE_LINE,
-  devOverridePrefill,
-  isArmedByAutoUpdate,
-  isRecreationRequired,
-  isUpdateDispatchable,
-  plainScheduleTargetRef,
-  recordedDispatchFailure,
-  scheduleSkipLine,
-  scheduledLine,
-  skippedVersionText,
-  standingUpdateNotice,
-  updateActivityNotice,
-} from "../../../models/updates";
-import { SettingsModel } from "../../../models/settings";
-import {
-  noBackupConfirmPrompt,
-  skipConfirmPrompt,
-  STOPPED_UPDATES_LINE,
-  updateVersionRow,
-} from "../../components/UpdateModal";
-import { workspaceUpdateSettings } from "../settings/WorkspaceUpdateSettings";
+import { updateNavDotFor } from "../../../models/updateSurfaces";
+import { shownUpdatePill } from "../../shell/workspace-notices";
 import { BackupGroup } from "./BackupGroup";
+import { UpdatesGroup } from "./UpdatesGroup";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
-import { workspacePageNoticeFor } from "../../shell/notice-band";
 
 const GROUPS: { id: SettingsGroup; icon: IconName; label: string }[] = [
   { id: "general", icon: "info", label: "General" },
@@ -82,37 +59,11 @@ interface SettingsGroupsLocalState {
   colorDraft: string | null;
   isDestroyDialogOpen: boolean;
   isUnlinkDialogOpen: boolean;
-  /** The specific-version field's text and the machine it was typed for; null
-   * until edited so the dev-build prefill shows through. */
-  overrideDraft: { agentId: string; value: string } | null;
-  isOverrideOpen: boolean;
-  /** The in-flight dispatch: its machine and target ref ("" for the plain
-   * "Update now"), which each button's spinner keys off. */
-  pendingDispatch: { agentId: string; targetRef: string } | null;
-  /** The in-flight schedule write, its machine, and its target ref ("" for the default). */
-  pendingSchedule: {
-    agentId: string;
-    action: "schedule" | "cancel" | "skip";
-    targetRef: string;
-  } | null;
-  /** The press held for the go-ahead-without-backups confirmation, and its machine. */
-  noBackupConfirm: {
-    agentId: string;
-    action: "now" | "schedule";
-    targetRef: string;
-  } | null;
-  /** The machine whose skip is waiting on its confirmation, or null. */
-  skipConfirmAgentId: string | null;
-  /** The last dispatch's refusal and the machine it was refused for, or null. */
-  updateError: { agentId: string; message: string; detail: string } | null;
   /** The resize fields as typed, and the machine they were typed for; null until edited. */
   sizeDraft: { agentId: string; draft: MachineSizeDraft } | null;
-  /** The app-wide update settings the Updates group mirrors (auto-update and
-   * the window); one copy for the pane, since they are not per machine. */
-  appSettings: SettingsModel;
 }
 
-/** The piece of update state only when it belongs to the machine being drawn:
+/** The piece of held state only when it belongs to the machine being drawn:
  * a route change between machines preserves this component instance, so every
  * piece is machine-stamped. */
 function forMachine<T extends { agentId: string }>(
@@ -128,55 +79,15 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     colorDraft: null,
     isDestroyDialogOpen: false,
     isUnlinkDialogOpen: false,
-    overrideDraft: null,
-    isOverrideOpen: false,
-    pendingDispatch: null,
-    pendingSchedule: null,
-    noBackupConfirm: null,
-    skipConfirmAgentId: null,
-    updateError: null,
     sizeDraft: null,
-    appSettings: new SettingsModel(),
   };
-  // ?override=1 is the update modal's "Update to a different version…" deep
-  // link. Watched per render because route changes preserve this instance, and
-  // for the value CHANGING to "1" because the param stays in the URL across
-  // group switches and must not re-open a field the user closed.
-  let lastOverrideParam: string | null | undefined;
-  // The app-wide values can change on another surface (app Settings, the
-  // auto-update offer) while this pane stays mounted; the updates frame says
-  // when, and the pane's copy is read again.
-  let lastSeenAppUpdateSettings: string | undefined;
-  function reloadAppSettingsWhenChangedElsewhere(): void {
-    const updates = getAppContext().stores.updates;
-    if (!updates.hasReceivedUpdates) return;
-    const seen = `${String(updates.isAutoUpdateEnabled)}|${updates.updateWindow}`;
-    if (lastSeenAppUpdateSettings !== undefined && seen !== lastSeenAppUpdateSettings) {
-      void local.appSettings.load();
-    }
-    lastSeenAppUpdateSettings = seen;
-  }
-  function consumeOverrideParam(): void {
-    const param = new URLSearchParams(
-      (m.route.get() ?? "").split("?")[1] ?? "",
-    ).get("override");
-    if (param === "1" && lastOverrideParam !== "1") local.isOverrideOpen = true;
-    lastOverrideParam = param;
-  }
-
   return {
-    oninit() {
-      void local.appSettings.load();
-    },
     view(vnode) {
-      consumeOverrideParam();
-      reloadAppSettingsWhenChangedElsewhere();
       const { model, selectedGroup, onSelectGroup } = vnode.attrs;
       const data = model.data;
       if (data === null) return null;
 
       return [
-        outOfDateNotice(data.agent_id),
         splitPane({
           navLabel: "Settings groups",
           nav: m(
@@ -195,6 +106,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
                 [
                   m(Icon16, { name: group.icon, extra: "shrink-0" }),
                   m("span", { class: "truncate" }, group.label),
+                  group.id === "updates" ? updatesNavDot(data.agent_id) : null,
                 ],
               ),
             ),
@@ -210,7 +122,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
               ? m(BackupGroup, { agentId: data.agent_id })
               : null,
             selectedGroup === "updates"
-              ? renderUpdatesGroup(data.agent_id, local)
+              ? m(UpdatesGroup, { agentId: data.agent_id })
               : null,
           ],
           extra: "mt-8",
@@ -224,453 +136,15 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
   };
 }
 
-/** The machine's own out-of-date notice, reached through the band's decision
- * so the two cannot disagree. */
-function outOfDateNotice(agentId: string): m.Children {
-  const { stores, shell } = getAppContext();
-  const payload = workspacePageNoticeFor(
-    standingUpdateNotice(
-      stores.updates.forAgent(agentId),
-      stores.updates.isUpdating(agentId),
-      stores.updates.isAutoUpdateEnabled,
-    ),
-  );
-  if (payload === null) return null;
-  return m(
-    Notice,
-    { variant: payload.variant, extra: "mb-4", id: "ws-settings-out-of-date" },
-    m("div", { class: "flex items-center justify-between gap-3" }, [
-      m("span", payload.message),
-      payload.actions.map((action) =>
-        m(
-          Button,
-          {
-            variant: "secondary",
-            onclick: () =>
-              action.kind === "sign-in-for-update"
-                ? shell.signInForUpdateOrExplain(agentId)
-                : shell.openUpdateModal(agentId),
-          },
-          action.label,
-        ),
-      ),
-    ]),
-  );
-}
-
-/** Why "Update now" is greyed out: a disabled button with nothing beside it
- * reads as a bug. */
-function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
-  const reason =
-    update.availability === "UP_TO_DATE"
-      ? "This workspace is up to date."
-      : update.availability === "APP_BEHIND"
-        ? "This workspace is newer than this copy of Imbue Studio. Update the app to catch up."
-        : isRecreationRequired(update)
-          ? "This workspace is too old to update in place and is missing security fixes. Create a new workspace and ask its agent to migrate your work across."
-          : (update.is_decision_pending ?? false)
-            ? "The last update is waiting for your decision in its chat."
-            : "";
-  return reason
-    ? m("p", { class: "type-helper text-tertiary mt-2" }, reason)
-    : null;
-}
-
-/** The Updates group: versions, the update action, and the collapsed
- * specific-version override. The override is a real feature (an up-to-date
- * machine can be moved to a branch or a newer release) but collapsed because
- * naming a ref is the rare path. */
-function renderUpdatesGroup(
-  agentId: string,
-  local: SettingsGroupsLocalState,
-): m.Children {
-  const { stores, shell } = getAppContext();
-  const updates = stores.updates;
-  const update = updates.forAgent(agentId);
-  const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
-  const isUpdating = updates.isUpdating(agentId);
-  // A run under way supersedes the schedule, and a skip or cancel beside it would not stop it.
-  const isScheduled = (update.is_scheduled ?? false) && !isUpdating;
-  const isSkipOffered =
-    isScheduled && isArmedByAutoUpdate(update, isAutoUpdateEnabled);
-  const pendingSchedule = forMachine(local.pendingSchedule, agentId);
-  // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
-  // Not while its skip is out: the skip cancels the schedule before it answers.
-  if (
-    local.skipConfirmAgentId === agentId &&
-    pendingSchedule?.action !== "skip" &&
-    !isSkipOffered
-  ) {
-    local.skipConfirmAgentId = null;
-  }
-  if (updates.isQuietWhileStopped(agentId)) {
-    if (forMachine(local.noBackupConfirm, agentId) !== null)
-      local.noBackupConfirm = null;
-    return m("div", { class: "max-w-md" }, [
-      m(SectionHeader, "Update"),
-      m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, STOPPED_UPDATES_LINE),
-      appUpdateSettingsSection(local),
-    ]);
-  }
-  const pending = forMachine(local.pendingDispatch, agentId);
-  const isBusy = pending !== null || pendingSchedule !== null;
-  const prefill = devOverridePrefill(update.supported_version ?? "");
-  const draft = forMachine(local.overrideDraft, agentId);
-  const overrideValue = draft?.value ?? prefill;
-  const skipLine = scheduleSkipLine(update);
-  const isDecisionPending = update.is_decision_pending ?? false;
-  const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
-  const chatAgentId = update.chat_agent_id ?? "";
-  // A pending decision is answered in the run's chat, not by another run.
-  const isDispatchBlocked =
-    isBusy || isUpdating || isDecisionPending || !isUpdateDispatchable(update);
-  const plainScheduleTarget = plainScheduleTargetRef(update);
-  // A named version is not gated on availability, as the specific-version field is not.
-  const isPlainScheduleBlocked =
-    plainScheduleTarget === "" ? isDispatchBlocked : isBusy || isUpdating || isDecisionPending;
-
-  /** A press of either update-now button; asks the same no-backups question the modal asks. */
-  function requestDispatch(targetRef: string): void {
-    local.updateError = null;
-    if (updates.needsNoBackupConfirmation(agentId)) {
-      local.noBackupConfirm = { agentId, action: "now", targetRef };
-      return;
-    }
-    dispatch(targetRef);
-  }
-
-  /** A press of either schedule button; asks the same no-backups question the modal asks. */
-  function requestSchedule(targetRef: string): void {
-    local.updateError = null;
-    if (updates.needsNoBackupConfirmation(agentId)) {
-      local.noBackupConfirm = { agentId, action: "schedule", targetRef };
-      return;
-    }
-    writeSchedule("schedule", targetRef);
-  }
-
-  function writeSchedule(
-    action: "schedule" | "cancel" | "skip",
-    targetRef = "",
-  ): void {
-    const inFlight = { agentId, action, targetRef };
-    local.pendingSchedule = inFlight;
-    local.updateError = null;
-    const call =
-      action === "schedule"
-        ? updates.scheduleUpdate(agentId, targetRef)
-        : action === "cancel"
-          ? updates.cancelSchedule(agentId)
-          : updates.skipUpdate(agentId);
-    void call.then((result) => {
-      if (local.pendingSchedule === inFlight) local.pendingSchedule = null;
-      if (action === "skip" && local.skipConfirmAgentId === agentId)
-        local.skipConfirmAgentId = null;
-      if (!result.isOk)
-        local.updateError = {
-          agentId,
-          message: result.error,
-          detail: result.detail,
-        };
-      m.redraw();
-    });
-  }
-
-  function dispatch(targetRef: string): void {
-    const inFlight = { agentId, targetRef };
-    local.pendingDispatch = inFlight;
-    local.updateError = null;
-    void updates.updateNow(agentId, targetRef).then((result) => {
-      // Only if still the dispatch being waited on: a press on another machine
-      // meanwhile owns the slot.
-      if (local.pendingDispatch === inFlight) local.pendingDispatch = null;
-      // Into the machine, as the modal's Update now does: an attended update is a conversation.
-      if (result.isOk) shell.enterWorkspace(agentId);
-      else
-        local.updateError = {
-          agentId,
-          message: result.error,
-          detail: result.detail,
-        };
-      m.redraw();
-    });
-  }
-
-  const activity = updateActivityNotice(update, isUpdating);
-  const held = forMachine(local.noBackupConfirm, agentId);
-  const shownError =
-    forMachine(local.updateError, agentId) ??
-    recordedDispatchFailure(update, isUpdating);
-  const errorMessage = shownError.message;
-
-  return m("div", { class: "max-w-md" }, [
-    m(SectionHeader, "Version"),
-    m("div", { class: "flex flex-col gap-1 mb-8" }, [
-      updateVersionRow("This workspace", update.current_version ?? ""),
-      updateVersionRow(
-        "Supported by Imbue Studio",
-        update.supported_version ?? "",
-      ),
-    ]),
-    m(SectionHeader, "Update"),
-    m("div", { id: "ws-updates-group", class: "mb-3" }, [
-      activity.message
-        ? m(
-            Notice,
-            { variant: "info", extra: "mb-3" },
-            m("span", { class: "inline-flex items-center gap-2" }, [
-              activity.isWaiting ? m(Spinner, { size: "sm" }) : null,
-              m("span", activity.message),
-            ]),
-          )
-        : null,
-      m(
-        "p",
-        { class: "type-helper text-secondary mb-3" },
-        "Updating runs an agent inside this workspace, which uses credits. Its chat is the record of what was done. " +
-          RUNNING_CHATS_PAUSE_LINE,
-      ),
-      held !== null
-        ? // The question replaces the controls so there is one way to answer it.
-          noBackupConfirmPrompt({
-            onConfirm: () => {
-              local.noBackupConfirm = null;
-              if (held.action === "schedule")
-                writeSchedule("schedule", held.targetRef);
-              else dispatch(held.targetRef);
-            },
-            onCancel: () => {
-              local.noBackupConfirm = null;
-            },
-          })
-        : local.skipConfirmAgentId === agentId
-          ? skipConfirmPrompt(update, isAutoUpdateEnabled, {
-              isSkipping: pendingSchedule?.action === "skip",
-              onConfirm: () => writeSchedule("skip"),
-              onCancel: () => {
-                local.skipConfirmAgentId = null;
-              },
-            })
-          : [
-              isScheduled
-                ? m("div", { class: "flex flex-col gap-1 mb-3" }, [
-                    m(
-                      "p",
-                      { class: "type-helper text-secondary" },
-                      scheduledLine(
-                        update,
-                        updates.updateWindow,
-                        isAutoUpdateEnabled,
-                      ),
-                    ),
-                    skipLine
-                      ? m("p", { class: "type-helper text-tertiary" }, skipLine)
-                      : null,
-                  ])
-                : null,
-              // A press the workspace just refused for want of a sign-in already says so in its own words.
-              needsSignIn && forMachine(local.updateError, agentId) === null
-                ? m(
-                    "p",
-                    { class: "type-helper text-secondary mb-3" },
-                    "No AI account is signed in to this workspace, so its update can't start.",
-                  )
-                : null,
-              // Schedule first, as in the modal: the update window is when nobody is in the machine.
-              m("div", { class: "flex items-center gap-2 flex-wrap" }, [
-                needsSignIn
-                  ? m(
-                      Button,
-                      {
-                        variant: "primary",
-                        id: "ws-update-sign-in-btn",
-                        disabled: isBusy,
-                        // Entering the workspace leaves this pane, so a refusal is explained in the modal.
-                        onclick: () => shell.signInForUpdateOrExplain(agentId),
-                      },
-                      "Sign in",
-                    )
-                  : null,
-                plainScheduleTarget === null
-                  ? null
-                  : m(
-                      Button,
-                      {
-                        variant: "primary",
-                        id: "ws-update-schedule-btn",
-                        disabled: isPlainScheduleBlocked,
-                        onclick: () => requestSchedule(plainScheduleTarget),
-                      },
-                      pendingSchedule?.action === "schedule" &&
-                        pendingSchedule.targetRef === plainScheduleTarget
-                        ? m(Spinner, { size: "sm" })
-                        : "Schedule update",
-                    ),
-                isSkipOffered
-                  ? m(
-                      Button,
-                      {
-                        variant: "secondary",
-                        id: "ws-update-skip-btn",
-                        disabled: isBusy,
-                        onclick: () => {
-                          local.skipConfirmAgentId = agentId;
-                        },
-                      },
-                      `Skip ${skippedVersionText(update)}`,
-                    )
-                  : isScheduled
-                    ? m(
-                        Button,
-                        {
-                          variant: "secondary",
-                          id: "ws-update-cancel-schedule-btn",
-                          disabled: isBusy,
-                          onclick: () => writeSchedule("cancel"),
-                        },
-                        pendingSchedule?.action === "cancel"
-                          ? m(Spinner, { size: "sm" })
-                          : "Cancel schedule",
-                      )
-                    : null,
-                m(
-                  Button,
-                  {
-                    variant: "secondary",
-                    id: "ws-update-now-btn",
-                    disabled: isDispatchBlocked,
-                    onclick: () => requestDispatch(""),
-                  },
-                  pending?.targetRef === ""
-                    ? m(Spinner, { size: "sm" })
-                    : "Update now",
-                ),
-                isDecisionPending && chatAgentId
-                  ? m(
-                      Button,
-                      {
-                        variant: "primary",
-                        id: "ws-update-open-chat-btn",
-                        onclick: () =>
-                          shell.openWorkspaceChat(agentId, chatAgentId),
-                      },
-                      "Open chat",
-                    )
-                  : null,
-              ]),
-              disabledUpdateReason(update),
-              // A named version is applied by the same in-place run, so a machine
-              // too old for one is too old for the other.
-              isRecreationRequired(update)
-                ? null
-                : m(
-                    Collapsible,
-                    {
-                      id: "update-override",
-                      isOpen: local.isOverrideOpen,
-                      onToggle: () =>
-                        (local.isOverrideOpen = !local.isOverrideOpen),
-                      extra: "mt-4",
-                      triggerExtra:
-                        "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
-                      panelExtra: "flex flex-col gap-2 mt-2",
-                      summary: m("span", "Update to a specific version"),
-                    },
-                    [
-                      m("div", { class: "flex items-center gap-2" }, [
-                        m(TextInput, {
-                          id: "update-override-input",
-                          name: "update_override_ref",
-                          value: overrideValue,
-                          placeholder: "minds-v0.4.2, main, or a git ref",
-                          spellcheck: "false",
-                          autocomplete: "off",
-                          "aria-label": "Version to update to",
-                          extra: "flex-1",
-                          oninput: (event: InputEvent) => {
-                            local.overrideDraft = {
-                              agentId,
-                              value: (event.target as HTMLInputElement).value,
-                            };
-                          },
-                        }),
-                        m(
-                          Button,
-                          {
-                            variant: "secondary",
-                            id: "update-override-btn",
-                            disabled:
-                              isBusy ||
-                              isUpdating ||
-                              isDecisionPending ||
-                              overrideValue.trim() === "",
-                            onclick: () =>
-                              requestDispatch(overrideValue.trim()),
-                          },
-                          pending !== null && pending.targetRef !== ""
-                            ? m(Spinner, { size: "sm" })
-                            : "Update to this version",
-                        ),
-                        // The same confirmation the press above is; scheduling only
-                        // changes when the run happens.
-                        m(
-                          Button,
-                          {
-                            variant: "secondary",
-                            id: "update-override-schedule-btn",
-                            disabled:
-                              isBusy ||
-                              isUpdating ||
-                              isDecisionPending ||
-                              overrideValue.trim() === "",
-                            onclick: () =>
-                              requestSchedule(overrideValue.trim()),
-                          },
-                          pendingSchedule?.action === "schedule" &&
-                            pendingSchedule.targetRef !== "" &&
-                            pendingSchedule.targetRef === overrideValue.trim()
-                            ? m(Spinner, { size: "sm" })
-                            : "Schedule",
-                        ),
-                      ]),
-                      prefill && draft === null
-                        ? m(
-                            "p",
-                            { class: "type-helper text-tertiary" },
-                            "Prefilled with the template ref this build of Imbue Studio runs from.",
-                          )
-                        : null,
-                      m(
-                        "p",
-                        { class: "type-helper text-tertiary" },
-                        "Works on an up-to-date workspace too. A version newer than this Imbue Studio app, a branch, or a bare " +
-                          "ref is allowed and applied without further confirmation: it may not be a tested release, " +
-                          "parts of this workspace may stop working until the app catches up, and the update agent " +
-                          'offers a rollback afterwards. On a branch, this workspace may afterwards read as "version unknown".',
-                      ),
-                    ],
-                  ),
-            ],
-      errorMessage
-        ? m(
-            "div",
-            { class: "type-helper text-important mt-3", role: "alert" },
-            [errorMessage, machineVerdict(shownError.detail)],
-          )
-        : null,
-    ]),
-    appUpdateSettingsSection(local),
-  ]);
-}
-
-/** The app-wide update settings, which need nothing from the machine, so a stopped one shows them too. */
-function appUpdateSettingsSection(local: SettingsGroupsLocalState): m.Children {
-  return local.appSettings.overview !== null
-    ? m("div", { class: "mt-8" }, [
-        m(SectionHeader, "Update settings"),
-        workspaceUpdateSettings(local.appSettings, "workspace"),
-      ])
-    : null;
+/** The Updates entry's dot, in the titlebar pill's colour, while the pill shows. */
+function updatesNavDot(agentId: string): m.Children {
+  const dot = updateNavDotFor(shownUpdatePill(getAppContext().shell, agentId));
+  if (dot === null) return null;
+  return m("span", {
+    id: "updates-nav-dot",
+    class: `ml-auto shrink-0 size-1.5 rounded-full ${dot === "success" ? "bg-success" : "bg-warning"}`,
+    "aria-hidden": "true",
+  });
 }
 
 function renderGeneralGroup(

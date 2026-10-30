@@ -17,14 +17,20 @@ from flask import Response
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import StrictInt
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
+from imbue.minds.desktop_client.minds_config import effective_auto_update
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.ui_models import UiWorkspaceAutoUpdateOverride
+from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.update_service import DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME
@@ -33,6 +39,7 @@ from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import UpdateSchedule
 from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.update_status import EMPTY_UPDATE_WINDOW_MESSAGE
 from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
@@ -91,21 +98,49 @@ def build_workspace_updates_message(
     """The store's composed state, plus the per-frame facts it does not hold."""
     ceiling_ref = service.settings_source.read_ceiling()
     is_auto_update_enabled = minds_config.get_auto_update_workspaces() if minds_config is not None else False
+    overrides = minds_config.get_workspace_auto_update_overrides() if minds_config is not None else {}
+    updates: dict[str, UiWorkspaceUpdate] = {}
+    for agent_id_str, state in service.state_store.snapshot().items():
+        override = overrides.get(agent_id_str)
+        effective = effective_auto_update(is_auto_update_enabled, update_window, override)
+        updates[agent_id_str] = state.model_copy_update(
+            # The SPA's no-backups confirmation keys on this, so the server never refuses.
+            to_update(state.field_ref().is_backup_configured, service.is_backup_configured(AgentId(agent_id_str))),
+            to_update(
+                state.field_ref().is_update_skipped,
+                minds_config is not None and minds_config.get_skipped_update_target(agent_id_str) == ceiling_ref,
+            ),
+            to_update(state.field_ref().is_auto_update_enabled, effective.is_enabled),
+            to_update(state.field_ref().update_window, format_update_window(effective.window)),
+            to_update(state.field_ref().auto_update_override, _ui_override(override)),
+        )
     return UiWorkspaceUpdatesMessage(
-        updates={
-            agent_id_str: state.model_copy_update(
-                # The SPA's no-backups confirmation keys on this, so the server never refuses.
-                to_update(state.field_ref().is_backup_configured, service.is_backup_configured(AgentId(agent_id_str))),
-                to_update(
-                    state.field_ref().is_update_skipped,
-                    minds_config is not None and minds_config.get_skipped_update_target(agent_id_str) == ceiling_ref,
-                ),
-            )
-            for agent_id_str, state in service.state_store.snapshot().items()
-        },
+        updates=updates,
         update_window=format_update_window(update_window),
+        update_window_start_hour=update_window[0],
+        update_window_end_hour=update_window[1],
         is_auto_update_enabled=is_auto_update_enabled,
     )
+
+
+def _ui_override(override: WorkspaceAutoUpdateOverride | None) -> UiWorkspaceAutoUpdateOverride | None:
+    if override is None:
+        return None
+    return UiWorkspaceAutoUpdateOverride(
+        mode=override.mode,
+        window_start_hour=override.window[0] if override.window is not None else None,
+        window_end_hour=override.window[1] if override.window is not None else None,
+    )
+
+
+class UiAutoUpdateOverrideRequest(FrozenModel):
+    """Body of a workspace auto-update write: its own setting, or null mode to follow the app's."""
+
+    mode: WorkspaceAutoUpdateMode | None = Field(
+        description="Auto-update in its own window, or never; null to follow the app-wide setting"
+    )
+    window_start_hour: StrictInt | None = Field(default=None, description="Local hour a custom window opens at")
+    window_end_hour: StrictInt | None = Field(default=None, description="Local hour a custom window closes at")
 
 
 def _json_response(payload: dict[str, object], status_code: int = 200) -> Response:
@@ -271,6 +306,41 @@ def _handle_sign_in(agent_id: str) -> Response:
     return _json_response({"ok": True})
 
 
+def _handle_set_auto_update_override(agent_id: str) -> Response:
+    """POST /ui/api/updates/<agent_id>/auto-update: set or clear this workspace's own auto-update setting."""
+    resolved = _resolve_machine_request(agent_id)
+    if isinstance(resolved, Response):
+        return resolved
+    service, parsed_id = resolved
+    body = request.get_json(silent=True, force=True)
+    try:
+        write = UiAutoUpdateOverrideRequest.model_validate(body if isinstance(body, dict) else {})
+        if write.window_start_hour is not None and write.window_start_hour == write.window_end_hour:
+            return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400)
+        override = (
+            None
+            if write.mode is None
+            else WorkspaceAutoUpdateOverride(
+                mode=write.mode,
+                window=(
+                    (write.window_start_hour, write.window_end_hour)
+                    if write.window_start_hour is not None and write.window_end_hour is not None
+                    else None
+                ),
+            )
+        )
+    except ValidationError as e:
+        logger.debug("Rejected a malformed auto-update setting: {}", e)
+        return _error_response("Invalid auto-update setting", 400)
+    if not service.set_auto_update_override(parsed_id, override):
+        return _error_response("Settings storage is not configured", 503)
+    # The setting lives in the app's settings, which no update-state change announces.
+    ui_publisher = get_state().ui_publisher
+    if ui_publisher is not None:
+        ui_publisher.notify_change()
+    return _json_response({"ok": True})
+
+
 def _parse_bulk_request() -> UiBulkUpdateRequest | None:
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -396,5 +466,8 @@ def register_update_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/updates/<agent_id>/sign-in", view_func=_handle_sign_in, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/dismiss", view_func=_handle_dismiss_run_outcome, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/note/dismiss", view_func=_handle_dismiss_note, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/updates/<agent_id>/auto-update", view_func=_handle_set_auto_update_override, methods=["POST"]
+    )
     blueprint.add_url_rule("/api/updates/bulk/now", view_func=_handle_bulk_now, methods=["POST"])
     blueprint.add_url_rule("/api/updates/bulk/schedule", view_func=_handle_bulk_schedule, methods=["POST"])

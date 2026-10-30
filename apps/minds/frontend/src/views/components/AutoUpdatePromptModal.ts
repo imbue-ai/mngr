@@ -24,7 +24,7 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
         {
           isOpen: true,
           onClose: () => model.putAway(),
-          size: "md",
+          size: "lg",
           cardExtra: "relative",
         },
         [
@@ -51,11 +51,12 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
                 idSuffix: "prompt",
                 startHour: model.startHour,
                 endHour: model.endHour,
+                isSentenceEnd: true,
                 onChange: (start, end) => model.setWindow(start, end),
               }),
               m("ul", { class: "type-helper text-tertiary list-disc pl-4" }, [
                 m("li", "Workspaces need to be running during this window"),
-                m("li", "You can change this anytime in Settings"),
+                m("li", "You can change this anytime in Studio settings"),
               ]),
             ]),
             model.error ? m(Notice, { variant: "error" }, model.error) : null,

@@ -1,5 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEmptyStores } from "../../models/boot";
 import { RequestsStore } from "../../models/requests";
 import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
@@ -70,8 +71,10 @@ function renderTitlebar(
     isTrafficLightsDrawn: options.isTrafficLightsDrawn ?? false,
     panelRouteBehindOverlay: options.panelRouteBehindOverlay ?? null,
     stores: {
+      ...createEmptyStores(),
       workspaces: {
         accentEntry: () => ({ name: "alpha" }),
+        entryByAnyId: () => null,
         toAgentScopedId: (anyId: string) => anyId,
       },
       // Real stores keep the request badge independent from the reminder feed.
@@ -94,7 +97,6 @@ function renderTitlebar(
         });
         return store;
       })(),
-      health: { isContentAssumedReady: () => true },
     },
     openSidebar: () => undefined,
     displayedWorkspaceAnyId: WORKSPACE_ID,

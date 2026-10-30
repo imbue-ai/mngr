@@ -1,4 +1,4 @@
-// The "Between <hour> and <hour> your time." row that picks the window
+// The "Between <hour> and <hour> your local time" row that picks the window
 // scheduled workspace updates start in. A plain renderer, like the switch: the
 // callers' tests read the selects straight off the vnode.
 
@@ -39,6 +39,8 @@ export interface UpdateWindowPickerAttrs {
   onChange: (startHour: number, endHour: number) => void;
   /** Classes for the row, beyond its flex layout. */
   class?: string;
+  /** The row finishes a sentence (the auto-update offer's), so it ends with a full stop. */
+  isSentenceEnd?: boolean;
 }
 
 export function renderUpdateWindowPicker(
@@ -55,7 +57,7 @@ export function renderUpdateWindowPicker(
       hourSelect(startId, startHour, (hour) => onChange(hour, endHour)),
       m("label", { class: "type-body text-primary", for: endId }, "and"),
       hourSelect(endId, endHour, (hour) => onChange(startHour, hour)),
-      m("span", { class: "type-helper text-tertiary" }, "your time."),
+      m("span", { class: "type-body text-primary" }, attrs.isSentenceEnd ? "your local time." : "your local time"),
     ],
   );
 }

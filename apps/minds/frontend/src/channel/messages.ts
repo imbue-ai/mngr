@@ -29,6 +29,7 @@ import type {
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceAutoUpdateOverride,
   UiWorkspaceUpdate,
   UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
@@ -36,6 +37,7 @@ import type {
   UpdateAvailability,
   UpdateUnknownReason,
   UpdateVerdict,
+  WorkspaceAutoUpdateMode,
 } from "../generated/ui";
 
 export type {
@@ -61,6 +63,7 @@ export type {
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceAutoUpdateOverride,
   UiWorkspaceUpdate,
   UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
@@ -68,6 +71,7 @@ export type {
   UpdateAvailability,
   UpdateUnknownReason,
   UpdateVerdict,
+  WorkspaceAutoUpdateMode,
 };
 
 // pydantic emits literal-defaulted `type` fields as optional in JSON Schema,

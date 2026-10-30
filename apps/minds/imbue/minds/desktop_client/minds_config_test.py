@@ -7,6 +7,8 @@ from imbue.minds.desktop_client.minds_config import MAX_RECENT_ACCOUNTS
 from imbue.minds.desktop_client.minds_config import MAX_RECENT_WORKSPACES_PER_ACCOUNT
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.testing import ReadCountingMindsConfig
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.errors import MindsConfigError
@@ -404,3 +406,66 @@ def test_an_unusable_stored_update_window_falls_back_rather_than_raising(
     (tmp_path / "config.toml").write_text(raw + "\n[updates]\n" + "\n".join(lines) + "\n")
 
     assert config.get_update_window() == DEFAULT_UPDATE_WINDOW
+
+
+def test_a_workspace_auto_update_setting_round_trips_and_is_dropped_when_cleared(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    custom = WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.CUSTOM_WINDOW, window=(1, 4))
+    manual = WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.MANUAL)
+
+    config.set_workspace_auto_update_override("agent-a", custom)
+    config.set_workspace_auto_update_override("agent-b", manual)
+
+    relaunched = _make_config(tmp_path)
+    assert relaunched.get_workspace_auto_update_overrides() == {"agent-a": custom, "agent-b": manual}
+
+    relaunched.set_workspace_auto_update_override("agent-a", None)
+
+    assert _make_config(tmp_path).get_workspace_auto_update_overrides() == {"agent-b": manual}
+
+
+@pytest.mark.parametrize(
+    ("is_app_enabled", "override", "expected"),
+    (
+        (False, None, (False, (23, 3))),
+        (True, None, (True, (23, 3))),
+        (
+            False,
+            WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.CUSTOM_WINDOW, window=(1, 4)),
+            (True, (1, 4)),
+        ),
+        (True, WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.MANUAL), (False, (23, 3))),
+    ),
+    ids=("follows-app-off", "follows-app-on", "custom-window-overrides-app-off", "manual-overrides-app-on"),
+)
+def test_a_workspace_own_setting_decides_its_auto_update_and_window(
+    tmp_path: Path,
+    is_app_enabled: bool,
+    override: WorkspaceAutoUpdateOverride | None,
+    expected: tuple[bool, tuple[int, int]],
+) -> None:
+    config = _make_config(tmp_path)
+    config.set_auto_update_workspaces(is_app_enabled)
+    config.set_update_window(23, 3)
+    config.set_workspace_auto_update_override("agent-a", override)
+
+    effective = config.get_effective_auto_update("agent-a")
+
+    assert (effective.is_enabled, effective.window) == expected
+    assert config.get_effective_auto_update("agent-other").is_enabled is is_app_enabled
+
+
+def test_an_unusable_stored_workspace_setting_reads_as_following_the_app(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_sign_in_browser_id("someone")
+    raw = (tmp_path / "config.toml").read_text()
+    (tmp_path / "config.toml").write_text(
+        raw
+        + '\n[updates.workspace_settings.agent-a]\nmode = "custom_window"\nwindow_start_hour = 4\n'
+        + '\n[updates.workspace_settings.agent-b]\nmode = "sometimes"\n'
+        + '\n[updates.workspace_settings.agent-c]\nmode = "custom_window"\nwindow_start_hour = true\nwindow_end_hour = 4\n'
+    )
+
+    assert config.get_workspace_auto_update_overrides() == {}
+    assert config.get_effective_auto_update("agent-a").override is None
+    assert config.get_effective_auto_update("agent-c").override is None

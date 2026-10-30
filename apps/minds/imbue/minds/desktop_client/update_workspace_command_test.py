@@ -540,6 +540,63 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
     assert facts.run_status is not None and facts.run_status.chat_agent_name == "update-to-minds-v0-9-1"
 
 
+@pytest.mark.parametrize(("override_ref", "target_ref"), (("", "minds-v0.9.0"), ("minds-v0.8.7", "minds-v0.8.7")))
+def test_reading_after_a_dispatch_names_the_release_the_run_aimed_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    override_ref: str,
+    target_ref: str,
+) -> None:
+    """Auto-update holds back the release the last dispatch aimed at, so the app must read it from the record."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    _run_mode(staged, "now", build_now_arguments(_SETTINGS, override_ref), capsys)
+
+    answer = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+
+    dispatch = parse_update_workspace_facts(answer).last_dispatch
+    assert dispatch is not None
+    assert dispatch.target_ref == target_ref
+
+
+@pytest.mark.parametrize(
+    ("dispatched_chat", "listed_chats", "is_services_agent_listed", "run_chat_id", "is_listing_expected"),
+    (
+        # A run started by hand in a chat: the listing names its chat.
+        ("Update-to-v090", ("update-self-1330f8",), True, "agent-" + "c" * 32, True),
+        # Its chat since deleted.
+        ("Update-to-v090", (), True, "", True),
+        # A listing that read the wrong host dir says nothing about the chat.
+        ("Update-to-v090", (), False, None, True),
+        # The last dispatch names the run's chat already, so nothing is listed.
+        ("update-self-1330f8", ("update-self-1330f8",), True, None, False),
+    ),
+)
+def test_reading_names_the_chat_of_a_run_the_last_dispatch_does_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dispatched_chat: str,
+    listed_chats: tuple[str, ...],
+    is_services_agent_listed: bool,
+    run_chat_id: str | None,
+    is_listing_expected: bool,
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {"chat_agent_name": "update-self-1330f8", "started_at": 1.0, "verdict": "STUCK"})
+    staged.write_state("last-dispatch.json", {"schema": 1, "chat_agent_name": dispatched_chat, "chat_id": "agent-x"})
+    staged.set_agents(
+        [{"name": name, "id": "agent-" + "c" * 32, "state": "STOPPED"} for name in listed_chats],
+        is_services_agent_listed=is_services_agent_listed,
+    )
+
+    answer = _run_mode(staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+
+    assert parse_update_workspace_facts(answer).run_chat_id == run_chat_id
+    is_listed = any(call[:1] == ["list"] for call in staged.recorded_calls())
+    assert is_listed is is_listing_expected
+
+
 def test_reading_a_workspace_with_nothing_armed_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

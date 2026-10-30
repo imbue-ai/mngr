@@ -1,6 +1,6 @@
 // The fixed 38px titlebar: breadcrumb (home / workspace / page), workspace
-// icon-tabs, notification bell, bug-report button, and non-mac window
-// controls. Faithful port of ChromeShell.jinja's markup + chrome.js's context
+// icon-tabs and the status pill after them, notification bell, bug-report
+// button, and non-mac window controls. Faithful port of ChromeShell.jinja's markup + chrome.js's context
 // state machine; DOM ids are preserved for the Playwright renderer-contract
 // specs.
 //
@@ -24,6 +24,8 @@ import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
 import { classifyRoute, hubPagePath, isWorkspaceOverlayPath } from "./classify";
 import { AccountSwitcherButton } from "./AccountSwitcher";
+import { TitlebarStatusPill } from "./titlebar-status";
+import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
 
@@ -159,6 +161,10 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         shell.panelRouteBehindOverlay !== null ||
         shell.isNotificationsOpen;
       const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
+      // The workspace's own status, after its icon group. Not on a creation
+      // page: the workspace it would speak for does not exist yet.
+      const status =
+        context.kind === "workspace" ? titlebarStatusFor(shell, context.workspaceAnyId ?? null) : null;
 
       const bar = m(
         "div#minds-titlebar",
@@ -348,6 +354,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                       ),
                     ],
                   ),
+                  // Hidden like the icons while a popup raises its copy over the titlebar.
+                  status !== null ? m(TitlebarStatusPill, { status, extra: popupHiddenClass }) : null,
                 ]
               : null,
           ),

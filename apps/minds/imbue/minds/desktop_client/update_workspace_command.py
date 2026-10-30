@@ -153,6 +153,11 @@ class UpdateWorkspaceFacts(FrozenModel):
     schedule: UpdateScheduleRecord | None = Field(description="The armed schedule; None when none is armed")
     run_status: UpdateRunStatus | None = Field(description="The latest run's record; None when there is none")
     last_dispatch: UpdateLastDispatch | None = Field(description="The update chat the program last created")
+    run_chat_id: str | None = Field(
+        default=None,
+        description="The id of the chat the run record names, looked up when the last dispatch does not name it; "
+        "'' when the workspace lists no such chat, None when not looked up or the chats could not be listed",
+    )
     is_signed_in: bool | None = Field(
         description="Whether an account is signed in, asked only when the app's row or the schedule's skip says "
         "it was not; None when not asked"
@@ -266,11 +271,13 @@ def parse_update_workspace_facts(payload: Mapping[str, object]) -> UpdateWorkspa
     raw_schedule = payload.get("schedule")
     raw_run = payload.get("run")
     raw_dispatch = payload.get("last_dispatch")
+    run_chat_id = payload.get("run_chat_id")
     is_signed_in = payload.get("is_signed_in")
     return UpdateWorkspaceFacts(
         schedule=parse_update_schedule_record(raw_schedule) if raw_schedule is not None else None,
         run_status=parse_update_run_record(raw_run) if raw_run is not None else None,
         last_dispatch=parse_update_last_dispatch(raw_dispatch) if raw_dispatch is not None else None,
+        run_chat_id=run_chat_id if isinstance(run_chat_id, str) else None,
         is_signed_in=is_signed_in if isinstance(is_signed_in, bool) else None,
     )
 

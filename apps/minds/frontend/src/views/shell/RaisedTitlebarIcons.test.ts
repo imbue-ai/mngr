@@ -7,8 +7,9 @@ import {
   openTitlebarPopup,
   titlebarAnchors,
 } from "./RaisedTitlebarIcons";
+import type { TitlebarStatus } from "./titlebar-status";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, collectVnodes } from "../../testing";
+import { allText, attrsOf, classTokensOf, collectVnodes } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
 
@@ -42,6 +43,7 @@ function renderStrip(
   onDismiss: () => void = () => undefined,
   hasWorkspaceRequestDot = false,
   accountLabel = "",
+  status: TitlebarStatus | null = null,
 ): AnyVnode {
   stubTitlebar(ids);
   const instance = RaisedTitlebarIcons() as unknown as m.Component;
@@ -55,6 +57,7 @@ function renderStrip(
       hasWorkspaceRequestDot,
       agentId: WORKSPACE_ID,
       accountLabel,
+      status,
     },
   });
 }
@@ -203,6 +206,38 @@ describe("the raised titlebar icon strip", () => {
     expect(allText(switcher)).toContain("Alice Nguyen");
     // The name is the switcher's alone: the other icons stay bare.
     expect(allText(icon(strip, "notifications"))).not.toContain("Alice Nguyen");
+  });
+
+  it("raises the status pill over the real one, still clickable, and only while the titlebar shows one", () => {
+    let clicks = 0;
+    const status: TitlebarStatus = {
+      key: "update-out-of-date",
+      label: "Update available",
+      tone: "quiet",
+      dot: "warning",
+      isDotPulsing: false,
+      tooltip: "This workspace is running an older version of Imbue Studio.",
+      onClick: () => (clicks += 1),
+    };
+    const raisedPill = (strip: AnyVnode): AnyVnode | undefined =>
+      collectVnodes(strip).find(
+        (vnode) => attrsOf(vnode).id === "titlebar-status-pill-raised",
+      );
+
+    const withPill = raisedPill(
+      renderStrip(["titlebar-status-pill", "help-toggle"], "help", undefined, undefined, false, "", status),
+    );
+    expect(withPill, "no raised status pill").toBeDefined();
+    expect(String(attrsOf(withPill as AnyVnode).style)).toContain("left: 100px; top: 5px");
+    expect(allText(withPill as AnyVnode)).toContain("Update available");
+    // Drawn outside the titlebar, it re-bases its text on the workspace accent itself, as the icons do.
+    expect(classTokensOf(withPill as AnyVnode)).toContain("titlebar-surface");
+    (attrsOf(withPill as AnyVnode).onclick as () => void)();
+    expect(clicks).toBe(1);
+
+    expect(
+      raisedPill(renderStrip(["help-toggle"], "help", undefined, undefined, false, "", status)),
+    ).toBeUndefined();
   });
 });
 

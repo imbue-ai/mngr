@@ -122,7 +122,7 @@ def test_a_dev_build_offers_no_security_update() -> None:
     assert detection.unknown_reason is UpdateUnknownReason.NO_APP_VERSION
 
 
-@pytest.mark.witnesses("workspace-updates.too-old-is-missing-security-fixes", partial="the detection verdict only")
+@pytest.mark.witnesses("workspace-updates.too-old-over-security-update", partial="the detection verdict only")
 def test_a_workspace_below_the_in_place_cutoff_needs_recreation_rather_than_a_security_update() -> None:
     """Recreation is checked first: an in-place security update cannot be applied to such a workspace either."""
     assert derive_update_detection("minds-v0.3.9", "minds-v0.9.0").availability is UpdateAvailability.NEEDS_RECREATION
@@ -327,7 +327,7 @@ def test_forgetting_a_destroyed_workspace_drops_every_slice(tmp_path: Path) -> N
 
 
 def test_dismissing_a_run_outcome_clears_a_stall_as_well_as_a_verdict(tmp_path: Path) -> None:
-    """Both draw the row's "Update failed" badge, so both have to be dismissible."""
+    """Both draw the row's "Update didn't finish" badge, so both have to be dismissible."""
     store, agent_id = _out_of_date_store(tmp_path)
     store.set_activity(agent_id, UpdateActivity.RUNNING)
     store.set_activity(agent_id, UpdateActivity.STALLED)
@@ -1301,7 +1301,7 @@ def test_a_scheduled_runs_start_kind_and_chat_come_from_its_dispatch_when_its_re
             chat_agent_name="update-to-minds-v0-4-1",
             chat_id="agent-" + "a" * 32,
             started_by=UpdateStartedBy.SCHEDULED,
-            ceiling_ref="minds-v0.4.1",
+            target_ref="minds-v0.4.1",
         ),
         is_signed_in=None,
     )
@@ -1335,7 +1335,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
             chat_agent_name=swept_chat,
             chat_id="agent-scheduled",
             started_by=UpdateStartedBy.SCHEDULED,
-            ceiling_ref="minds-v0.4.1",
+            target_ref="minds-v0.4.1",
         ),
         is_signed_in=None,
     )
@@ -1345,7 +1345,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
     assert state.chat_agent_id == "agent-scheduled"
 
 
-@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state; not the modal")
+@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state; not the Updates tab")
 def test_a_needs_decision_verdict_is_a_pending_decision_and_not_a_failure(tmp_path: Path) -> None:
     store, agent_id = _out_of_date_store(tmp_path)
     store.observe_run_record(agent_id, _run_record(verdict=UpdateVerdict.NEEDS_DECISION))
@@ -1398,20 +1398,131 @@ def test_auto_update_arms_only_a_minor_release_behind_with_nothing_in_the_way(
     assert should_auto_arm(state, policy, "minds-v0.4.1", last_dispatch=None) is is_armed
 
 
-@pytest.mark.witnesses(
-    "workspace-updates.failed-run-not-rescheduled", partial="the newer-release half; not the dismissal half"
-)
-def test_auto_update_arms_again_after_a_failure_once_the_ceiling_has_moved() -> None:
-    failed = _offered_state(verdict=UpdateVerdict.REFUSED, chat_agent_name="update-to-minds-v0-4-0")
-    dispatch = UpdateLastDispatch(
-        chat_agent_name="update-to-minds-v0-4-0",
+def _dispatch_to(target_ref: str, chat: str = "update-to-minds-v0-4-1") -> UpdateLastDispatch:
+    return UpdateLastDispatch(
+        chat_agent_name=chat,
         chat_id="",
         started_by=UpdateStartedBy.SCHEDULED,
-        ceiling_ref="minds-v0.4.0",
+        target_ref=target_ref,
     )
 
-    assert should_auto_arm(failed, _ENABLED, "minds-v0.4.0", dispatch) is False
-    assert should_auto_arm(failed, _ENABLED, "minds-v0.4.1", dispatch) is True
+
+@pytest.mark.witnesses(
+    "workspace-updates.failed-run-not-rescheduled",
+    partial="the auto-update half; not what the app says once dismissed, nor updating by hand",
+)
+@pytest.mark.parametrize("is_stalled", (False, True))
+def test_auto_update_retries_a_failed_release_only_once_a_newer_one_is_out(tmp_path: Path, is_stalled: bool) -> None:
+    """Reading the failure dismisses it from the row; the attempt is still on record, so dismissing re-arms nothing."""
+    store, agent_id = _out_of_date_store(tmp_path)
+    chat = "update-to-minds-v0-4-1"
+    if is_stalled:
+        store.observe_run_record(agent_id, _run_record(chat=chat))
+        store.set_activity(agent_id, UpdateActivity.STALLED)
+    else:
+        store.observe_run_record(agent_id, _run_record(chat=chat, verdict=UpdateVerdict.STUCK))
+    dispatch = _dispatch_to("minds-v0.4.1", chat)
+    store.record_schedule(agent_id, schedule=None, last_dispatch=dispatch, is_signed_in=None)
+    assert should_auto_arm(store.get(agent_id), _ENABLED, "minds-v0.4.1", dispatch) is False
+
+    store.dismiss_run_outcome(agent_id)
+    # The sweep re-reads the record after the dismissal.
+    store.observe_run_record(agent_id, _run_record(chat=chat, verdict=None if is_stalled else UpdateVerdict.STUCK))
+    dismissed = store.get(agent_id)
+    assert dismissed.verdict is None and dismissed.activity is not UpdateActivity.STALLED
+    # The row names the held-back release, so the app says the workspace is behind rather than left to auto-update.
+    assert dismissed.last_dispatch_target_ref == dismissed.supported_version == "minds-v0.4.1"
+
+    assert should_auto_arm(dismissed, _ENABLED, "minds-v0.4.1", dispatch) is False
+    assert should_auto_arm(dismissed, _ENABLED, "minds-v0.4.2", dispatch) is True
+
+
+def test_auto_update_holds_back_a_shown_failure_the_last_dispatch_did_not_make() -> None:
+    failed = _offered_state(verdict=UpdateVerdict.REFUSED, chat_agent_name="update-by-hand")
+
+    assert should_auto_arm(failed, _ENABLED, "minds-v0.4.2", _dispatch_to("minds-v0.4.1")) is False
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        _offered_state(),
+        _offered_state(verdict=UpdateVerdict.STUCK, chat_agent_name="update-to-minds-v0-4-1"),
+    ),
+    ids=("dismissed", "failure-shown"),
+)
+def test_auto_update_arms_the_release_on_offer_after_a_run_to_a_version_the_user_named(
+    state: UiWorkspaceUpdate,
+) -> None:
+    assert should_auto_arm(state, _ENABLED, "minds-v0.4.1", _dispatch_to("minds-v0.3.15")) is True
+
+
+def _run_chat_detector(
+    tmp_path: Path,
+    concurrency_group: ConcurrencyGroup,
+    agent_id: AgentId,
+    store: WorkspaceUpdateStateStore,
+    read_run_chat_id: Callable[[], str],
+) -> WorkspaceUpdateDetector:
+    """A sweep of ``agent_id`` whose read finds a STUCK run under a chat the last dispatch does not name."""
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    return _detector(
+        tmp_path,
+        resolver,
+        _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.3.12"}),
+        concurrency_group,
+        store=store,
+        read_update_facts=lambda _agent_id, _is_sign_in_checked: UpdateWorkspaceFacts(
+            schedule=None,
+            run_status=_run_record(chat="update-self-1330f8", verdict=UpdateVerdict.STUCK),
+            last_dispatch=_dispatch_to("minds-v0.4.1"),
+            run_chat_id=read_run_chat_id(),
+            is_signed_in=None,
+        ),
+    )
+
+
+@pytest.mark.witnesses(
+    "workspace-updates.chat-pointed-at-only-when-known",
+    partial="the app's record of the chat only, not the titlebar and Updates tab wording",
+)
+def test_the_sweep_gives_a_run_the_chat_the_workspace_found_for_it_until_that_chat_is_gone(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A run started by hand has no dispatch to name its chat, so the workspace's listing does."""
+    agent_id = AgentId.generate()
+    store = make_update_state_store(tmp_path)
+    run_chat_ids = ["agent-by-hand", ""]
+    detector = _run_chat_detector(tmp_path, root_concurrency_group, agent_id, store, lambda: run_chat_ids[0])
+
+    detector.run_pass()
+    assert store.get(agent_id).chat_agent_id == "agent-by-hand"
+
+    run_chat_ids.pop(0)
+    detector.run_pass()
+    state = store.get(agent_id)
+    assert (state.verdict, state.chat_agent_id, state.is_chat_gone) == (UpdateVerdict.STUCK, "", True)
+
+
+@pytest.mark.parametrize("earlier_run_chat_id", ("agent-earlier", ""))
+def test_the_sweep_leaves_an_in_flight_runs_chat_alone_while_the_run_record_is_an_earlier_runs(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, earlier_run_chat_id: str
+) -> None:
+    """Until a dispatched run's agent writes its record, the workspace's lookup is of the earlier run's chat."""
+    agent_id = AgentId.generate()
+    store = make_update_state_store(tmp_path)
+    assert store.try_begin_run(agent_id, target_override="")
+    store.adopt_dispatched_chat(agent_id, chat_agent_name="update-to-minds-v0-4-1", chat_agent_id="agent-pressed")
+    detector = _run_chat_detector(tmp_path, root_concurrency_group, agent_id, store, lambda: earlier_run_chat_id)
+
+    detector.run_pass()
+
+    state = store.get(agent_id)
+    assert (state.activity, state.chat_agent_id, state.is_chat_gone) == (
+        UpdateActivity.RUNNING,
+        "agent-pressed",
+        False,
+    )
 
 
 @pytest.mark.witnesses("workspace-updates.arms-behind-workspaces")

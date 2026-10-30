@@ -177,6 +177,7 @@ from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalSto
 from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import read_workspace_update_facts
+from imbue.minds.desktop_client.update_service import read_workspace_update_window
 from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
@@ -198,6 +199,7 @@ from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
+from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
@@ -1081,6 +1083,7 @@ def _finalize_and_mark_destroying(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
+    minds_config: MindsConfig | None,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
@@ -1105,7 +1108,7 @@ def _finalize_and_mark_destroying(
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli)
+            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli, minds_config)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
@@ -1116,8 +1119,9 @@ def _finalize_destroyed_workspace(
     paths: InstallationPaths,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
+    minds_config: MindsConfig | None,
 ) -> None:
-    """Tombstone a fully-destroyed workspace's record, then delete the destroying marker.
+    """Tombstone a fully-destroyed workspace's record, drop its own settings, then delete the destroying marker.
 
     Runs only once the host is confirmed gone (DONE). The workspace record is
     kept (state=DESTROYED, secrets intact) so the workspace's backups stay
@@ -1153,6 +1157,11 @@ def _finalize_destroyed_workspace(
                     agent_id,
                     owner_user_id,
                 )
+    if minds_config is not None:
+        try:
+            minds_config.set_workspace_auto_update_override(str(agent_id), None)
+        except MindsConfigError as e:
+            logger.warning("Could not drop destroyed agent {}'s auto-update setting: {}", agent_id, e)
     delete_destroying(agent_id, paths)
 
 
@@ -2095,7 +2104,7 @@ def _derive_ui_workspaces_message(
         # any request handler) is what deletes the destroying marker, the
         # machine's share, and the account association once the host is gone.
         destroying_marker = _finalize_and_mark_destroying(
-            paths, backend_resolver, session_store, get_state().imbue_cloud_cli
+            paths, backend_resolver, session_store, get_state().imbue_cloud_cli, get_state().minds_config
         )
         return UiWorkspacesMessage(
             workspaces=tuple(_ui_workspace_entry_from_legacy_dict(row) for row in rows),
@@ -2286,17 +2295,17 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_workspace_updates(self) -> UiWorkspaceUpdatesMessage:
         window = self.minds_config.get_update_window() if self.minds_config is not None else DEFAULT_UPDATE_WINDOW
         if self.workspace_update_service is None:
-            return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
+            return UiWorkspaceUpdatesMessage(
+                updates={},
+                update_window=format_update_window(window),
+                update_window_start_hour=window[0],
+                update_window_end_hour=window[1],
+            )
         return build_workspace_updates_message(self.workspace_update_service, window, self.minds_config)
 
     def resolve_workspace_account_id(self, agent_id: str) -> str:
         """The account a workspace's frames go to: its association, else the device."""
         return get_owning_account_id_for_workspace(session_store=self.session_store, workspace_any_id=agent_id)
-
-
-def _read_default_update_window() -> tuple[int, int]:
-    """The update window for a build with no settings storage to read one from."""
-    return DEFAULT_UPDATE_WINDOW
 
 
 class _UpdateRunHostLifecycle(MutableModel):
@@ -2420,7 +2429,7 @@ def _read_auto_update_policy(minds_config: MindsConfig | None, agent_id: AgentId
     if minds_config is None:
         return AutoUpdatePolicy(is_enabled=False, skipped_target_ref="")
     return AutoUpdatePolicy(
-        is_enabled=minds_config.get_auto_update_workspaces(),
+        is_enabled=minds_config.get_effective_auto_update(str(agent_id)).is_enabled,
         skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or "",
     )
 
@@ -2480,9 +2489,7 @@ def _build_workspace_update_service(
     )
     settings_source = UpdateSettingsSource(
         read_ceiling=default_workspace_template_ref,
-        read_update_window=(
-            minds_config.get_update_window if minds_config is not None else _read_default_update_window
-        ),
+        read_update_window=lambda agent_id: read_workspace_update_window(minds_config, agent_id),
         # The same reader the workspace's bootstrap asks for at boot.
         read_zone=read_host_timezone,
         paths=paths,

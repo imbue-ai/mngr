@@ -749,6 +749,24 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
+ * A workspace's Updates tab status block, arrived at from another surface: one
+ * ring in the status's tone (--flash), so the eye lands on what sent it here.
+ */
+@keyframes update-status-arrive {
+  0%,
+  25% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--flash) 45%, transparent); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+.update-status-arrive {
+  animation: update-status-arrive 1.4s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-status-arrive {
+    animation: none;
+  }
+}
+
+/*
  * A share-panel grant row added a moment ago. The success tint is laid over the
  * row's own surface as an inset shadow rather than a background, so it fades
  * away to whichever surface the row already has.

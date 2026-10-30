@@ -1,5 +1,5 @@
 Feature: Scheduling an update
-  A scheduled update runs in a configured window of local hours, usually while nobody is in the workspace.
+  A scheduled update runs in a configured window of local hours, usually while nobody is in the workspace: the workspace's own window when it has one, else Studio's (see Automatic workspace updates).
   The workspace owns its schedule: scheduling writes the window into the workspace, and the workspace starts the run itself, so neither the app nor the user's computer has to be running then.
   The update flow is unattended by design, so a scheduled run is the same run as one started by hand, only later.
   The window is configurable to any hours, so the app describes it as the update window rather than as a night.
@@ -89,7 +89,7 @@ Feature: Scheduling an update
   @schedule-follows-the-app
   Scenario: An armed schedule follows the app's settings and release
     Given a workspace with a scheduled update
-    When the user changes the update window, or the app moves to a newer release
+    When the user changes the update window that workspace follows, or the app moves to a newer release
     Then the workspace's schedule uses the new window and release from the app's next read of it
     And a version the user named for that schedule is kept
 
@@ -122,7 +122,7 @@ Feature: Scheduling an update
     Given a workspace with a scheduled update that cannot be reached
     When the user cancels that schedule
     Then the app says the cancel did not go through
-    And the workspace's row still shows it as scheduled
+    And the workspace's Updates tab still shows it as scheduled
 
   @failure-cancels-the-schedule
   Scenario: An update that fails is not retried unwatched

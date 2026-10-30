@@ -234,6 +234,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSwitchAccountResponse",
             "UiWaitingPermissionRequest",
             "UiWindowKind",
+            "UiWorkspaceAutoUpdateOverride",
             "UiWorkspaceDesktop",
             "UiWorkspaceEntry",
             "UiWorkspacePermissions",
@@ -247,6 +248,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UpdateStartedBy",
             "UpdateUnknownReason",
             "UpdateVerdict",
+            "WorkspaceAutoUpdateMode",
         ]
     )
 

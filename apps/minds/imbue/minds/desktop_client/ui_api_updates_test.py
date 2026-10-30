@@ -201,10 +201,10 @@ def _mark_up_to_date(app: Flask, agent_id: AgentId) -> None:
     _mark(app, agent_id, UpdateAvailability.UP_TO_DATE, "minds-v0.4.1")
 
 
-def _arm_on_the_row(app: Flask, agent_id: AgentId, override_ref: str) -> None:
+def _arm_on_the_row(app: Flask, agent_id: AgentId, override_ref: str, is_auto_armed: bool = False) -> None:
     """The row as an arm naming ``override_ref`` left it."""
     schedule = parse_update_schedule_record(
-        armed_update_schedule_file(ceiling_ref=_CEILING, override_ref=override_ref)
+        armed_update_schedule_file(ceiling_ref=_CEILING, override_ref=override_ref, is_auto_armed=is_auto_armed)
     )
     assert schedule is not None
     _service(app).state_store.record_armed_schedule(agent_id, schedule)
@@ -1378,12 +1378,12 @@ def test_a_skip_reason_from_a_newer_build_is_dropped_rather_than_shown_raw() -> 
 
 
 @pytest.mark.witnesses(
-    "workspace-updates.unknown-names-the-missing-side", partial="the channel frame only, not the modal copy"
+    "workspace-updates.unknown-names-the-missing-side", partial="the channel frame only, not the Updates tab copy"
 )
 def test_the_updates_frame_carries_which_side_had_no_version(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """The modal cannot tell the two unknowns apart if the frame flattens them."""
+    """The Updates tab cannot tell the two unknowns apart if the frame flattens them."""
     _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     service = _service(app)
     service.state_store.record_detection(
@@ -1400,7 +1400,7 @@ def test_the_updates_frame_carries_which_side_had_no_version(
 
     published = frame.updates[str(agent_id)]
     assert published.unknown_reason is UpdateUnknownReason.NO_APP_VERSION
-    # Both refs travel: the modal shows the real version beside the branch name.
+    # Both refs travel: the Updates tab shows the real version beside the branch name.
     assert published.current_version == "minds-v0.3.9"
     assert published.supported_version == "gabriel/some-branch"
 
@@ -1459,10 +1459,10 @@ def _press_update_now_and_fail_to_reach(client: FlaskClient, app: Flask, agent_i
 
 
 @pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
-def test_an_update_that_could_not_reach_the_machine_is_published_for_a_modal_opened_later(
+def test_an_update_that_could_not_reach_the_machine_is_published_for_an_updates_tab_opened_later(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """The 502 answers only the request that pressed the button; a modal closed while it waited never reads it."""
+    """The 502 answers only the request that pressed the button; a tab left while it waited never reads it."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -1606,3 +1606,143 @@ def test_a_dispatch_that_loses_to_a_live_run_records_no_failure_over_it(
     published = _published(app, agent_id)
     assert published.activity is UpdateActivity.RUNNING
     assert published.dispatch_failure == ""
+
+
+@pytest.mark.witnesses("workspace-updates.per-workspace-auto-update-setting")
+@pytest.mark.parametrize(
+    ("is_app_enabled", "body", "expected_is_enabled", "expected_window"),
+    (
+        (False, {"mode": "custom_window", "window_start_hour": 1, "window_end_hour": 7}, True, "1:00 AM-7:00 AM"),
+        (True, {"mode": "manual"}, False, "2:00 AM-5:00 AM"),
+        (True, {"mode": None}, True, "2:00 AM-5:00 AM"),
+    ),
+    ids=("custom-window-with-the-app-off", "manual-with-the-app-on", "back-on-the-apps-setting"),
+)
+def test_a_workspace_own_auto_update_setting_decides_its_arm_and_its_frame(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    agent_id: AgentId,
+    is_app_enabled: bool,
+    body: dict[str, Any],
+    expected_is_enabled: bool,
+    expected_window: str,
+) -> None:
+    """Only the workspace it was set for changes: the sweep's arm decision and the frame both read it."""
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_auto_update_workspaces(is_app_enabled)
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+    other_agent_id = AgentId.generate()
+    _mark_out_of_date(app, agent_id)
+    _mark_out_of_date(app, other_agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/auto-update", body)
+
+    assert response.status_code == 200
+    detector = _service(app).detector
+    assert detector.read_auto_update_policy(agent_id).is_enabled is expected_is_enabled
+    assert detector.read_auto_update_policy(other_agent_id).is_enabled is is_app_enabled
+    published = _published(app, agent_id)
+    assert (published.is_auto_update_enabled, published.update_window) == (expected_is_enabled, expected_window)
+    assert (published.auto_update_override is None) is (body["mode"] is None)
+    assert _published(app, other_agent_id).is_auto_update_enabled is is_app_enabled
+
+
+@pytest.mark.witnesses(
+    "workspace-updates.manual-keeps-schedules", partial="does not assert the Updates tab's Cancel schedule"
+)
+def test_setting_a_workspace_to_manual_leaves_the_schedule_auto_update_armed(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_auto_update_workspaces(True)
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+    _mark_out_of_date(app, agent_id)
+    _arm_on_the_row(app, agent_id, "", is_auto_armed=True)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/auto-update", {"mode": "manual"})
+
+    assert response.status_code == 200
+    assert _recording_caller(app).calls == []
+    published = _published(app, agent_id)
+    assert (published.is_scheduled, published.is_schedule_auto_armed) == (True, True)
+    # Off for this workspace, so the tab offers the schedule's Cancel rather than a skip auto-update would need.
+    assert published.is_auto_update_enabled is False
+
+
+@pytest.mark.witnesses("workspace-updates.custom-window-is-the-workspaces-own")
+def test_a_custom_window_is_what_every_check_tells_the_workspace(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The window rides every read the sweep makes, so a schedule's window follows the workspace's own hours."""
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+    other_agent_id = AgentId.generate()
+    _post(
+        client,
+        f"/ui/api/updates/{agent_id}/auto-update",
+        {"mode": "custom_window", "window_start_hour": 1, "window_end_hour": 7},
+    )
+    caller = _recording_caller(app)
+
+    def window_length_told(target: AgentId) -> str:
+        caller.calls.clear()
+        _service(app).detector.read_update_facts(target, False)
+        _mode, flags = update_program_invocation(caller.calls[-1])
+        return flags["--window-length-minutes"]
+
+    assert (window_length_told(agent_id), window_length_told(other_agent_id)) == ("360", "180")
+    # A later check, after the app's own window moved, still carries the workspace's hours.
+    minds_config.set_update_window(22, 23)
+    assert (window_length_told(agent_id), window_length_told(other_agent_id)) == ("360", "60")
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        {"mode": "custom_window"},
+        {"mode": "manual", "window_start_hour": 1, "window_end_hour": 4},
+        {"mode": "sometimes"},
+        {"mode": "custom_window", "window_start_hour": True, "window_end_hour": 4},
+    ),
+    ids=("custom-without-hours", "manual-with-hours", "unknown-mode", "boolean-hour"),
+)
+def test_an_unusable_auto_update_setting_is_refused_and_nothing_is_stored(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, body: dict[str, Any]
+) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    client, _app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/auto-update", body)
+
+    assert response.status_code == 400
+    assert minds_config.get_workspace_auto_update_overrides() == {}
+
+
+def test_an_empty_custom_window_is_refused_with_what_to_change(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The tab shows the refusal as it comes, so it names the problem as Studio's own window refusal does."""
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    client, _app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+
+    response = _post(
+        client,
+        f"/ui/api/updates/{agent_id}/auto-update",
+        {"mode": "custom_window", "window_start_hour": 3, "window_end_hour": 3},
+    )
+
+    assert (response.status_code, response.get_json()["error"]) == (
+        400,
+        "The update window needs a start and end that differ",
+    )
+    assert minds_config.get_workspace_auto_update_overrides() == {}

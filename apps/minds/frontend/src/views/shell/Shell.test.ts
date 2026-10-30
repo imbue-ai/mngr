@@ -6,7 +6,6 @@ import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
-import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
@@ -90,6 +89,7 @@ function updatesStoreStub(
     isApplying: () => isApplying,
     isUpdating: () => isUpdating,
     isAutoUpdateEnabled,
+    autoUpdateFor: () => ({ isEnabled: isAutoUpdateEnabled, window: "2:00 AM-5:00 AM", override: null }),
     hasReceivedUpdates: true,
   };
 }
@@ -127,7 +127,6 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
       updates: updatesStoreStub("UP_TO_DATE"),
     },
     isRecoveryModalOpenFor: () => false,
-    openUpdateModalAgentId: () => null,
     // Never loaded, so it never offers: suites not about it see no prompt.
     autoUpdatePrompt: new AutoUpdatePromptModel(),
     ...overrides,
@@ -823,19 +822,10 @@ describe("Shell notice band wiring", () => {
   });
 
   it.each([
-    [
-      "reading it as out of date raises the version band",
-      false,
-      "This workspace is running an older version of Imbue Studio.",
-    ],
-    [
-      "a run in flight replaces that with what the run is doing",
-      true,
-      "Preparing an update for this workspace. Nothing changes until it's ready to land.",
-    ],
-  ])("%s", (_name, isUpdating, expectedMessage) => {
-    // A band still saying "out of date" while the update runs is the two
-    // surfaces disagreeing about one machine.
+    ["out of date", false, false],
+    ["preparing its update", true, false],
+    ["landing its update", true, true],
+  ])("says nothing on the band about a machine %s: its update is the titlebar pill's", (_name, isUpdating, isApplying) => {
     const { state } = makeShell({
       accountId: "local",
       stores: {
@@ -847,112 +837,19 @@ describe("Shell notice band wiring", () => {
           entryByAnyId: () => null,
         },
         health: {
-          statusFor: () => "healthy",
+          // Mid-apply the machine reads unhealthy: the apply took its services down on purpose.
+          statusFor: () => (isApplying ? "stuck" : "healthy"),
           discoveryHealth: "healthy",
           appEnvironmentCondition: () => "NONE",
           recoveryKindFor: () => null,
         },
-        updates: updatesStoreStub("OUT_OF_DATE", isUpdating),
-      },
-    } as unknown as Partial<ShellState>);
-
-    const root = renderShell(
-      state,
-      `/workspace/${WORKSPACE_ID}`,
-      m("div#content"),
-    );
-
-    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
-    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
-      message: expectedMessage,
-    });
-  });
-
-  it.each([
-    ["auto-update will arm it", { is_workspace_readable: true }, null],
-    [
-      "the last sweep could not read it, so cannot arm it",
-      { is_workspace_readable: false },
-      "This workspace is running an older version of Imbue Studio.",
-    ],
-    ["the user skipped this release", { is_workspace_readable: true, is_update_skipped: true }, null],
-    [
-      "it cannot be armed without a sign-in",
-      { is_workspace_readable: true, needs_sign_in: true },
-      "This workspace can't update until an AI account is signed in to it.",
-    ],
-  ])(
-    "under auto-update, a behind machine whose %s gets the band it should",
-    (_name, fields, expectedMessage) => {
-      const { state } = makeShell({
-        accountId: "local",
-        stores: {
-          requests: { hasPendingForWorkspace: () => false },
-          accounts: { labelFor: () => "This device" },
-          workspaces: {
-            workspaces: [],
-            toAgentScopedId: (anyId: string) => anyId,
-            entryByAnyId: () => null,
-          },
-          health: {
-            statusFor: () => "healthy",
-            discoveryHealth: "healthy",
-            appEnvironmentCondition: () => "NONE",
-            recoveryKindFor: () => null,
-          },
-          updates: updatesStoreStub("OUT_OF_DATE", false, false, true, fields),
-        },
-      } as unknown as Partial<ShellState>);
-
-    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
-
-    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
-    if (expectedMessage === null) {
-      expect(band).toBeUndefined();
-    } else {
-      expect(attrsOf(band as AnyVnode).payload).toMatchObject({ message: expectedMessage });
-    }
-  });
-
-  it("routes a pending decision's band buttons: Open chat into the run's chat, Dismiss to the skip confirmation", () => {
-    const openWorkspaceChat = vi.fn();
-    const openUpdateModal = vi.fn();
-    const { state } = makeShell({
-      openWorkspaceChat,
-      openUpdateModal,
-      accountId: "local",
-      stores: {
-        requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
-        workspaces: {
-          workspaces: [],
-          toAgentScopedId: (anyId: string) => anyId,
-          entryByAnyId: () => null,
-        },
-        health: {
-          statusFor: () => "healthy",
-          discoveryHealth: "healthy",
-          appEnvironmentCondition: () => "NONE",
-          recoveryKindFor: () => null,
-        },
-        updates: updatesStoreStub("OUT_OF_DATE", false, false, false, {
-          verdict: "NEEDS_DECISION",
-          is_decision_pending: true,
-          chat_agent_id: "agent-update-chat",
-        }),
+        updates: updatesStoreStub("OUT_OF_DATE", isUpdating, isApplying),
       },
     } as unknown as Partial<ShellState>);
 
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
 
-    const attrs = attrsOf(collectVnodes(root).find((vnode) => vnode.tag === NoticeBand) as AnyVnode) as {
-      payload: { actions: { label: string }[] };
-      onAction: (action: unknown) => void;
-    };
-    expect(attrs.payload.actions.map((action) => action.label)).toEqual(["Open chat", "Dismiss"]);
-    for (const action of attrs.payload.actions) attrs.onAction(action);
-    expect(openWorkspaceChat).toHaveBeenCalledWith(WORKSPACE_ID, "agent-update-chat");
-    expect(openUpdateModal).toHaveBeenCalledWith(WORKSPACE_ID, { isSkipConfirmOpen: true });
+    expect(collectVnodes(root).some((vnode) => vnode.tag === NoticeBand)).toBe(false);
   });
 
   it("covers a machine whose update is landing with a card nothing dismisses", () => {
@@ -1028,46 +925,6 @@ describe("Shell notice band wiring", () => {
     expect(
       collectVnodes(root).some((vnode) => vnode.tag === UpdateApplyModal),
     ).toBe(false);
-  });
-
-  it("draws an out-of-date machine without raising the update modal over it", () => {
-    // The band carries the version; a draw that opens the modal unasked is the
-    // auto-raise back.
-    let openedAgentId: string | null = null;
-    const { state } = makeShell({
-      accountId: "local",
-      stores: {
-        requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
-        workspaces: {
-          workspaces: [],
-          toAgentScopedId: (anyId: string) => anyId,
-          entryByAnyId: () => null,
-        },
-        health: {
-          statusFor: () => "healthy",
-          discoveryHealth: "healthy",
-          appEnvironmentCondition: () => "NONE",
-          recoveryKindFor: () => null,
-        },
-        updates: updatesStoreStub("OUT_OF_DATE"),
-      },
-      openUpdateModal: (agentId: string) => {
-        openedAgentId = agentId;
-      },
-      openUpdateModalAgentId: () => openedAgentId,
-    } as unknown as Partial<ShellState>);
-
-    const root = renderShell(
-      state,
-      `/workspace/${WORKSPACE_ID}`,
-      m("div#content"),
-    );
-
-    expect(openedAgentId).toBeNull();
-    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateModal)).toBe(
-      false,
-    );
   });
 
   it("speaks the device's own condition over a machine nothing has convicted yet", () => {
@@ -1450,5 +1307,38 @@ describe("Shell auto-update prompt", () => {
     await settle();
     expect(settingsReads()).toBe(2);
     expect(hasPrompt(view("/"))).toBe(true);
+  });
+
+  it("offers it for an out-of-date workspace only while that workspace follows Studio settings", async () => {
+    const model = new AutoUpdatePromptModel(
+      (() =>
+        Promise.resolve(
+          jsonResponse(settingsOverview({ auto_update_prompt_decision: null })),
+        )) as typeof fetch,
+      () => Promise.resolve(false),
+      () => undefined,
+    );
+    await model.load();
+    let override: { mode: "manual" } | null = { mode: "manual" };
+    const { state } = makeShell({
+      autoUpdatePrompt: model,
+      currentRouteSearch: () => "",
+    } as unknown as Partial<ShellState>);
+    const stores = state.stores as unknown as Record<string, unknown>;
+    stores.workspaces = {
+      workspaces: [{ id: WORKSPACE_ID }],
+      toAgentScopedId: (anyId: string) => anyId,
+      entryByAnyId: () => null,
+    };
+    stores.updates = {
+      ...updatesStoreStub("OUT_OF_DATE"),
+      autoUpdateFor: () => ({ isEnabled: false, window: "2:00 AM-5:00 AM", override }),
+    };
+    const home = () =>
+      hasPrompt(renderShell(state, "/", m("div#home"), { workspaceParam: null }));
+
+    expect(home()).toBe(false);
+    override = null;
+    expect(home()).toBe(true);
   });
 });

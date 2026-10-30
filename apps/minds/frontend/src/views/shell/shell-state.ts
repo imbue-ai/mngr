@@ -118,11 +118,22 @@ export interface WorkspaceFrameHandle {
 /** A control of the chrome's own that a workspace's tour may ask to have ringed: the embed contract's CHROME_ANCHORS. */
 export type ChromeAnchor = "workspace-switcher" | "permissions" | "settings" | "share" | "help";
 
+/** One request for a workspace's Updates tab, taken once by the tab: it
+ * flashes its status block, and explains a press's failure when there is one. */
+export interface UpdatesTabArrival {
+  agentId: string;
+  serial: number;
+  /** A press made elsewhere that failed, which the tab opened to explain. */
+  failure: UpdateActionResult | null;
+}
+
 export class ShellState {
   readonly stores: AppStores;
   /** The one-time auto-update offer, one per window, so its answer and a
    * put-away hold across every surface the window shows. */
   readonly autoUpdatePrompt: AutoUpdatePromptModel;
+  private pendingUpdatesTabArrival: UpdatesTabArrival | null = null;
+  private updatesTabArrivalCount = 0;
   private readonly webLogin: WebLoginModel;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
@@ -191,12 +202,6 @@ export class ShellState {
    */
   private openRecovery: { agentId: string; isAutoRaised: boolean } | null =
     null;
-  /** Which machine's update modal is up. Unlike the recovery card this is not
-   * tied to a displayed machine (the machines list opens it from a row); it is
-   * dropped by the next navigation away from its machine. */
-  private openUpdateAgentId: string | null = null;
-  private isUpdateSkipConfirmOpen = false;
-  private updateModalFailure: UpdateActionResult | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -586,11 +591,14 @@ export class ShellState {
   }
 
   /** Land in a workspace on one of its chats: asked of the frame directly when
-   * the workspace is already on screen, else carried as ``?chat=`` for
-   * handleRouteChanged to forward once the frame is up. */
+   * the workspace is already on screen, with whatever floats over it (its
+   * options panel, or an app modal opened over it) put away so the chat is
+   * not left behind it, else carried as ``?chat=`` for handleRouteChanged to
+   * forward once the frame is up. */
   openWorkspaceChat(anyId: string, chatAgentId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     if (this.displayedWorkspaceAgentId() === agentScoped) {
+      if (!this.dismissAppOverlay()) this.closeWorkspaceOverlay();
       this.requestFocusChat(agentScoped, chatAgentId);
       return;
     }
@@ -604,17 +612,6 @@ export class ShellState {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     this.enterWorkspace(agentScoped);
     return await this.stores.updates.signIn(agentScoped);
-  }
-
-  /** A "Sign in" pressed outside the update modal (a row, the band, a notice):
-   * the sign-in chat, or the modal when it could not open, which has room to
-   * say why. */
-  signInForUpdateOrExplain(anyId: string): void {
-    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
-    void this.signInForUpdate(agentScoped).then((result) => {
-      if (!result.isOk) this.openUpdateModal(agentScoped);
-      m.redraw();
-    });
   }
 
   /** Enter a workspace the way its machines-list row does: onto its surface
@@ -1158,59 +1155,37 @@ export class ShellState {
     }
     return (
       this.closeOpenRecoveryModal() ||
-      this.closeOpenUpdateModal() ||
       this.closeWorkspaceOverlay() ||
       this.dismissAppOverlay()
     );
   }
 
-  /** The machine whose update modal is up, or null when none is. */
-  openUpdateModalAgentId(): string | null {
-    return this.openUpdateAgentId;
-  }
-
-  /** Whether the open update modal was asked for to confirm a skip. */
-  isUpdateSkipConfirmRequested(): boolean {
-    return this.isUpdateSkipConfirmOpen;
-  }
-
-  /** Why a press made outside the open update modal failed, for it to say. */
-  updateModalOpeningFailure(): UpdateActionResult | null {
-    return this.updateModalFailure;
-  }
-
-  /** The user asked for the update modal (a badge, the band's "See update"). */
-  openUpdateModal(
-    agentId: string,
-    options: { isSkipConfirmOpen?: boolean; failure?: UpdateActionResult } = {},
+  /**
+   * Open a workspace's Settings -> Updates tab, the one place its update is
+   * explained and acted on. The tab flashes its status block once on arrival.
+   */
+  openUpdatesTab(
+    anyId: string,
+    options: { failure?: UpdateActionResult } = {},
   ): void {
-    this.openUpdateAgentId = agentId;
-    this.isUpdateSkipConfirmOpen = options.isSkipConfirmOpen ?? false;
-    this.updateModalFailure = options.failure ?? null;
+    const agentId = this.stores.workspaces.toAgentScopedId(anyId);
+    this.pendingUpdatesTabArrival = {
+      agentId,
+      serial: ++this.updatesTabArrivalCount,
+      failure: options.failure ?? null,
+    };
+    const params = { tab: "settings", group: "updates" };
+    if (isTitlebarPopupRoutePath(this.currentRoutePath()))
+      m.route.set(`/workspace/${agentId}/options`, params, { replace: true });
+    else this.routeTo(`/workspace/${agentId}/options`, params);
   }
 
-  closeUpdateModal(): void {
-    this.openUpdateAgentId = null;
-    this.isUpdateSkipConfirmOpen = false;
-    this.updateModalFailure = null;
-  }
-
-  /** A run outcome's Dismiss pressed outside the update modal: the outcome
-   * cleared, or the modal when it could not be, which has room to say why. */
-  dismissUpdateOutcomeOrExplain(anyId: string): void {
-    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
-    void this.stores.updates.dismissRunOutcome(agentScoped).then((result) => {
-      if (!result.isOk) this.openUpdateModal(agentScoped, { failure: result });
-      m.redraw();
-    });
-  }
-
-  /** Close whichever update modal is up, reporting whether there was one. Not
-   * keyed on the displayed machine, because the modal is not. */
-  closeOpenUpdateModal(): boolean {
-    if (this.openUpdateAgentId === null) return false;
-    this.closeUpdateModal();
-    return true;
+  /** Take the pending Updates-tab request if it is for this machine, so it is acted on once. */
+  takeUpdatesTabArrival(agentId: string): UpdatesTabArrival | null {
+    const arrival = this.pendingUpdatesTabArrival;
+    if (arrival === null || arrival.agentId !== agentId) return null;
+    this.pendingUpdatesTabArrival = null;
+    return arrival;
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
@@ -1321,17 +1296,6 @@ export class ShellState {
       this.openRecovery.agentId !== heldAgentScoped
     ) {
       this.openRecovery = null;
-    }
-    // Dropped by a navigation to anywhere but its own machine: "Update now"
-    // enters the machine before dispatching (so the chat tab has a connected
-    // client to open in), and the modal rides that navigation. Keyed on the
-    // navigation because it can be open with no machine displayed.
-    if (
-      !isSameRoute &&
-      this.openUpdateAgentId !== null &&
-      this.openUpdateAgentId !== heldAgentScoped
-    ) {
-      this.openUpdateAgentId = null;
     }
     this.consumeReviewParam(path, search);
     this.consumeChatParam(path, search);

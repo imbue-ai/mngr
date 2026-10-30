@@ -32,7 +32,9 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
+from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -128,7 +130,7 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
 
 
 # What each outcome that did not dispatch tells the user; the route answers with it
-# and the run slice records it, so the modal says the same thing whether it stayed open.
+# and the run slice records it, so the Updates tab says the same thing whether it stayed open.
 DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
     UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this workspace.",
     UpdateDispatchOutcome.NEEDS_SIGN_IN: "Sign in to an AI account in this workspace, then try again.",
@@ -202,13 +204,22 @@ class UpdateSchedule(FrozenModel):
     failure_detail: str = Field(default="", description="The workspace's or mngr's words about a refusal, bounded")
 
 
+def read_workspace_update_window(minds_config: MindsConfig | None, agent_id: AgentId) -> tuple[int, int]:
+    """The window this workspace's updates start in: its own, else the app's, else the default."""
+    if minds_config is None:
+        return DEFAULT_UPDATE_WINDOW
+    return minds_config.get_effective_auto_update(str(agent_id)).window
+
+
 class UpdateSettingsSource(MutableModel):
     """The app's current update values, as each command carries them into a workspace."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     read_ceiling: Callable[[], str] = Field(frozen=True, description="The app's template ceiling")
-    read_update_window: Callable[[], tuple[int, int]] = Field(frozen=True, description="The configured window")
+    read_update_window: Callable[[AgentId], tuple[int, int]] = Field(
+        frozen=True, description="The window a workspace's updates start in: its own, else the app's"
+    )
     read_zone: Callable[[], str] = Field(frozen=True, description="The app host's IANA time zone, '' if unknown")
     paths: InstallationPaths | None = Field(
         frozen=True, description="Workspace data paths; None when backups are not configurable at all"
@@ -222,7 +233,7 @@ class UpdateSettingsSource(MutableModel):
         return self.paths is not None and has_canonical_env(self.paths, agent_id)
 
     def settings_for(self, agent_id: AgentId) -> UpdateWorkspaceSettings:
-        start_hour, end_hour = self.read_update_window()
+        start_hour, end_hour = self.read_update_window(agent_id)
         zone = resolve_update_window_zone(self.read_zone())
         return UpdateWorkspaceSettings(
             ceiling_ref=self.read_ceiling(),
@@ -531,6 +542,18 @@ class WorkspaceUpdateService(MutableModel):
             self.state_store.dismiss_run_outcome(agent_id)
         return None
 
+    def set_auto_update_override(self, agent_id: AgentId, override: WorkspaceAutoUpdateOverride | None) -> bool:
+        """Give this workspace its own auto-update setting, or put it back on the app's; whether it was stored.
+
+        A schedule auto-update already armed is left in place, as turning the app-wide switch off leaves it.
+        The sweep is asked to run so a workspace now under auto-update is armed, and its window refreshed.
+        """
+        if self.minds_config is None:
+            return False
+        self.minds_config.set_workspace_auto_update_override(str(agent_id), override)
+        self.detector.request_pass()
+        return True
+
     def open_sign_in_chat(self, agent_id: AgentId) -> bool:
         """Open a new chat window in the workspace with the provider chooser up; whether it opened.
 
@@ -668,7 +691,7 @@ class WorkspaceUpdateService(MutableModel):
         if is_records_run:
             assert status is not None
             # The run's own record outranks the claim: its start is what the sweep dedups the file by,
-            # its hold is what the modal quotes, and its verdict ends the run.
+            # its hold is what the Updates tab quotes, and its verdict ends the run.
             self.state_store.adopt_run_record(agent_id, status)
             if status.verdict is not None:
                 self._waiting_streak_by_agent.pop(aid_str, None)

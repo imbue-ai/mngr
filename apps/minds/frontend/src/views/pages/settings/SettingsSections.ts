@@ -435,7 +435,7 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
   if (model.overview === null) return null;
   return m("div", { class: "mt-8" }, [
     m("h3", { class: "type-heading text-primary mb-2" }, "Workspace updates"),
-    workspaceUpdateSettings(model, "app"),
+    workspaceUpdateSettings(model),
   ]);
 }
 

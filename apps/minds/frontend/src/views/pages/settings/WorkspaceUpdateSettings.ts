@@ -1,33 +1,19 @@
-// The app-wide workspace-update settings: auto-update and the window scheduled
-// updates start in. Every surface that draws them shows and writes the same
-// app-wide values.
+// Studio settings' workspace-update settings: the app-wide auto-update switch,
+// the workspaces that use their own setting instead, and the window scheduled
+// updates start in. Each workspace's own choice is made on its Updates tab.
 
 import m from "mithril";
+import { getAppContext } from "../../../app-context";
 import type { SettingsModel } from "../../../models/settings";
+import { Button } from "../../components/Button";
+import { Spinner } from "../../components/Spinner";
 import { renderSwitch } from "../../components/Switch";
 import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
 
-/** Where the controls are drawn: the app's own settings, or one workspace's,
- * which says the values are shared. */
-export type WorkspaceUpdateSettingsScope = "app" | "workspace";
-
-export function workspaceUpdateSettings(
-  model: SettingsModel,
-  scope: WorkspaceUpdateSettingsScope,
-): m.Children {
+export function workspaceUpdateSettings(model: SettingsModel): m.Children {
   const overview = model.overview;
   if (overview === null) return null;
-  const startHour = overview.update_window_start_hour;
-  const endHour = overview.update_window_end_hour;
-  const isAutoUpdateEnabled = overview.is_auto_update_enabled;
-  return m("div", { id: `update-settings-${scope}` }, [
-    scope === "workspace"
-      ? m(
-          "p",
-          { class: "type-helper text-tertiary mb-3" },
-          "These settings apply to every workspace; changing them here changes them everywhere.",
-        )
-      : null,
+  return m("div", { id: "update-settings-app" }, [
     m(
       "div",
       {
@@ -44,7 +30,7 @@ export function workspaceUpdateSettings(
           m(
             "span",
             {
-              id: `auto-update-note-${scope}`,
+              id: "auto-update-note-app",
               class: "block type-helper text-tertiary",
             },
             "When a workspace falls behind, Studio schedules its update for the window below. Updating uses " +
@@ -52,10 +38,10 @@ export function workspaceUpdateSettings(
           ),
         ]),
         renderSwitch({
-          id: `auto-update-toggle-${scope}`,
-          isOn: isAutoUpdateEnabled,
+          id: "auto-update-toggle-app",
+          isOn: overview.is_auto_update_enabled,
           label: "Update workspaces automatically",
-          describedBy: `auto-update-note-${scope}`,
+          describedBy: "auto-update-note-app",
           isWaiting: model.isAutoUpdateBusy,
           isDisabled: model.isAutoUpdateBusy,
           onFlip: (isOn) => void model.setAutoUpdateEnabled(isOn),
@@ -69,10 +55,11 @@ export function workspaceUpdateSettings(
           model.autoUpdateError,
         )
       : null,
+    customSettingsRow(model),
     renderUpdateWindowPicker({
-      idSuffix: scope,
-      startHour,
-      endHour,
+      idSuffix: "app",
+      startHour: overview.update_window_start_hour,
+      endHour: overview.update_window_end_hour,
       onChange: (start, end) => void model.setUpdateWindow(start, end),
       class: "py-3 border-b border-subtle",
     }),
@@ -90,4 +77,88 @@ export function workspaceUpdateSettings(
         )
       : null,
   ]);
+}
+
+/** The workspaces with their own auto-update setting, or nothing when none has one.
+ * Each name opens that workspace's Updates tab; "Use Studio settings" puts it back on these. */
+function customSettingsRow(model: SettingsModel): m.Children {
+  const { stores, shell } = getAppContext();
+  const updates = stores.updates;
+  const custom = stores.workspaces.workspaces.flatMap((workspace) => {
+    const autoUpdate = updates.autoUpdateFor(workspace.id);
+    return autoUpdate.override === null ? [] : [{ workspace, autoUpdate }];
+  });
+  if (custom.length === 0) return null;
+  return m(
+    "div",
+    {
+      id: "update-settings-custom",
+      class: "flex flex-col gap-2 py-3 border-b border-subtle",
+    },
+    [
+      m("span", [
+        m(
+          "span",
+          { class: "type-body text-primary font-semibold" },
+          "Custom settings",
+        ),
+        m(
+          "span",
+          { class: "block type-helper text-tertiary" },
+          "These workspaces use their own settings instead of these.",
+        ),
+      ]),
+      m(
+        "ul",
+        { class: "flex flex-col gap-1" },
+        custom.map(({ workspace, autoUpdate }) =>
+          m(
+            "li",
+            {
+              class:
+                "flex items-center justify-between gap-3 type-body text-secondary",
+              "data-agent-id": workspace.id,
+            },
+            [
+              m("span", { class: "min-w-0" }, [
+                m(
+                  "button",
+                  {
+                    type: "button",
+                    class:
+                      "text-primary underline underline-offset-2 hover:opacity-80 cursor-pointer",
+                    onclick: () => shell.openUpdatesTab(workspace.id),
+                  },
+                  workspace.name,
+                ),
+                autoUpdate.isEnabled
+                  ? ` · auto-update on · ${autoUpdate.window}`
+                  : " · auto-update off",
+              ]),
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  extra: "shrink-0",
+                  disabled: model.workspaceResettingId !== null,
+                  onclick: () =>
+                    void model.resetWorkspaceAutoUpdate(workspace.id, updates),
+                },
+                model.workspaceResettingId === workspace.id
+                  ? m(Spinner, { size: "sm" })
+                  : "Use Studio settings",
+              ),
+            ],
+          ),
+        ),
+      ),
+      model.workspaceResetError
+        ? m(
+            "p",
+            { class: "type-helper text-important", role: "alert" },
+            model.workspaceResetError,
+          )
+        : null,
+    ],
+  );
 }

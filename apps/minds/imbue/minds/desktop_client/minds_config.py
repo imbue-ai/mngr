@@ -15,16 +15,21 @@ from enum import auto
 from pathlib import Path
 from typing import Callable
 from typing import Final
+from typing import assert_never
 
 import tomlkit
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import StrictInt
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.errors import MindsConfigError
+from imbue.minds.errors import WorkspaceAutoUpdateSettingError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
 
@@ -62,6 +67,108 @@ class AutoUpdatePromptDecision(LowerCaseStrEnum):
 
     ACCEPTED = auto()
     DECLINED = auto()
+
+
+class WorkspaceAutoUpdateMode(LowerCaseStrEnum):
+    """A workspace's own auto-update setting, in place of the app-wide one.
+
+    The lowercase values are the wire strings the update routes accept (and what ``config.toml`` stores).
+    """
+
+    # Auto-update on for this workspace, in its own window, whatever the app-wide switch says.
+    CUSTOM_WINDOW = auto()
+    # Never auto-updated; updated only by hand.
+    MANUAL = auto()
+
+
+class WorkspaceAutoUpdateOverride(FrozenModel):
+    """One workspace's own auto-update setting; a workspace without one follows the app-wide setting."""
+
+    mode: WorkspaceAutoUpdateMode = Field(description="Auto-update in its own window, or never")
+    window: tuple[StrictInt, StrictInt] | None = Field(
+        default=None, description="Local-clock hours [start, end) for CUSTOM_WINDOW; None for MANUAL"
+    )
+
+    @model_validator(mode="after")
+    def _window_matches_mode(self) -> "WorkspaceAutoUpdateOverride":
+        match self.mode:
+            case WorkspaceAutoUpdateMode.CUSTOM_WINDOW:
+                if self.window is None or not is_usable_update_window(self.window[0], self.window[1]):
+                    raise WorkspaceAutoUpdateSettingError(
+                        f"A custom auto-update window needs two distinct hours in 0-23, got {self.window}"
+                    )
+            case WorkspaceAutoUpdateMode.MANUAL:
+                if self.window is not None:
+                    raise WorkspaceAutoUpdateSettingError("A manual auto-update setting has no window")
+            case _ as unreachable:
+                assert_never(unreachable)
+        return self
+
+
+class EffectiveAutoUpdate(FrozenModel):
+    """What auto-update does for one workspace: its own setting when it has one, else the app's."""
+
+    is_enabled: bool = Field(description="Whether the background check arms this workspace's update itself")
+    window: tuple[int, int] = Field(description="Local-clock hours [start, end) this workspace's updates start in")
+    override: WorkspaceAutoUpdateOverride | None = Field(description="The workspace's own setting; None to follow")
+
+
+@pure
+def is_usable_update_window(start_hour: object, end_hour: object) -> bool:
+    """Whether two stored values make an update window: whole hours in 0-23 that differ."""
+    # bool is an int subclass; a stored ``true`` is not hour one.
+    if not isinstance(start_hour, int) or not isinstance(end_hour, int):
+        return False
+    if isinstance(start_hour, bool) or isinstance(end_hour, bool):
+        return False
+    return 0 <= start_hour <= 23 and 0 <= end_hour <= 23 and start_hour != end_hour
+
+
+@pure
+def effective_auto_update(
+    app_is_enabled: bool, app_window: tuple[int, int], override: WorkspaceAutoUpdateOverride | None
+) -> EffectiveAutoUpdate:
+    """One workspace's auto-update: a custom window turns it on in its own hours, manual turns it off."""
+    if override is None:
+        return EffectiveAutoUpdate(is_enabled=app_is_enabled, window=app_window, override=None)
+    match override.mode:
+        case WorkspaceAutoUpdateMode.CUSTOM_WINDOW:
+            assert override.window is not None
+            return EffectiveAutoUpdate(is_enabled=True, window=override.window, override=override)
+        case WorkspaceAutoUpdateMode.MANUAL:
+            return EffectiveAutoUpdate(is_enabled=False, window=app_window, override=override)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _override_from_raw(value: object) -> WorkspaceAutoUpdateOverride | None:
+    """A stored workspace setting, or None (logged) when it is missing or unusable."""
+    table = _as_str_keyed_dict(value)
+    if table is None:
+        return None
+    start = table.get("window_start_hour")
+    end = table.get("window_end_hour")
+    try:
+        return WorkspaceAutoUpdateOverride.model_validate(
+            {
+                "mode": table.get("mode"),
+                "window": (start, end) if start is not None or end is not None else None,
+            }
+        )
+    except ValueError as e:
+        logger.warning("Ignoring an unusable workspace auto-update setting {!r}: {}", table, e)
+        return None
+
+
+def _update_window_from_table(table: dict[str, object]) -> tuple[int, int]:
+    """The window stored in ``table``'s ``window_*_hour`` keys, or the default when unusable."""
+    start = table.get("window_start_hour")
+    end = table.get("window_end_hour")
+    if isinstance(start, int) and isinstance(end, int) and is_usable_update_window(start, end):
+        return (start, end)
+    if start is not None or end is not None:
+        logger.warning("Ignoring an unusable update window ({}, {})", start, end)
+    return DEFAULT_UPDATE_WINDOW
 
 
 def _bool_from_raw(data: dict[str, object], key: str, default: bool) -> bool:
@@ -284,16 +391,7 @@ class MindsConfig(MutableModel):
             updates = _as_str_keyed_dict(data.get("updates"))
             if updates is None:
                 return DEFAULT_UPDATE_WINDOW
-            start = updates.get("window_start_hour")
-            end = updates.get("window_end_hour")
-            # bool is an int subclass; a stored ``true`` is not hour one.
-            is_bool_hour = isinstance(start, bool) or isinstance(end, bool)
-            if not isinstance(start, int) or not isinstance(end, int) or is_bool_hour:
-                return DEFAULT_UPDATE_WINDOW
-            if not (0 <= start <= 23 and 0 <= end <= 23) or start == end:
-                logger.warning("Ignoring an unusable update window ({}, {})", start, end)
-                return DEFAULT_UPDATE_WINDOW
-            return (start, end)
+            return _update_window_from_table(updates)
 
     def set_update_window(self, start_hour: int, end_hour: int) -> None:
         """Persist the local-clock hours scheduled updates may run in."""
@@ -313,12 +411,12 @@ class MindsConfig(MutableModel):
             self._write_raw(data)
 
     def get_auto_update_workspaces(self) -> bool:
-        """Return whether Imbue Studio arms every behind workspace's update itself. Default: False until chosen."""
+        """Return whether Imbue Studio arms every behind workspace without its own setting. Default: False."""
         with self._lock:
             return _bool_from_raw(self._read_updates_table(), "auto_update_workspaces", False)
 
     def set_auto_update_workspaces(self, is_enabled: bool) -> None:
-        """Persist whether Imbue Studio arms every behind workspace's update itself."""
+        """Persist whether Imbue Studio arms every behind workspace without its own setting."""
         self._write_updates_keys({"auto_update_workspaces": is_enabled})
 
     def get_auto_update_prompt_decision(self) -> AutoUpdatePromptDecision | None:
@@ -354,6 +452,42 @@ class MindsConfig(MutableModel):
             updates["skipped_targets"] = skipped
             data["updates"] = updates
             self._write_raw(data)
+
+    def get_workspace_auto_update_overrides(self) -> dict[str, WorkspaceAutoUpdateOverride]:
+        """Every workspace's own auto-update setting, keyed by agent id; unusable entries are left out."""
+        with self._lock:
+            by_workspace = _as_str_keyed_dict(self._read_updates_table().get("workspace_settings")) or {}
+        overrides = {agent_id: _override_from_raw(value) for agent_id, value in by_workspace.items()}
+        return {agent_id: override for agent_id, override in overrides.items() if override is not None}
+
+    def set_workspace_auto_update_override(self, agent_id: str, override: WorkspaceAutoUpdateOverride | None) -> None:
+        """Persist this workspace's own auto-update setting; None puts it back on the app-wide one."""
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates")) or {}
+            by_workspace = _as_str_keyed_dict(updates.get("workspace_settings")) or {}
+            if override is None:
+                if by_workspace.pop(agent_id, None) is None:
+                    return
+            else:
+                entry: dict[str, object] = {"mode": str(override.mode)}
+                if override.window is not None:
+                    entry["window_start_hour"], entry["window_end_hour"] = override.window
+                by_workspace[agent_id] = entry
+            updates["workspace_settings"] = by_workspace
+            data["updates"] = updates
+            self._write_raw(data)
+
+    def get_effective_auto_update(self, agent_id: str) -> EffectiveAutoUpdate:
+        """What auto-update does for this workspace: its own setting when it has one, else the app's."""
+        with self._lock:
+            updates = self._read_updates_table()
+        by_workspace = _as_str_keyed_dict(updates.get("workspace_settings")) or {}
+        return effective_auto_update(
+            app_is_enabled=_bool_from_raw(updates, "auto_update_workspaces", False),
+            app_window=_update_window_from_table(updates),
+            override=_override_from_raw(by_workspace.get(agent_id)),
+        )
 
     def _get_bool(self, key: str, default: bool) -> bool:
         """Read a top-level boolean setting, returning ``default`` when unset or malformed."""

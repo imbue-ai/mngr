@@ -115,7 +115,7 @@ def _build_service(
         backend_resolver=backend_resolver,
         settings_source=UpdateSettingsSource(
             read_ceiling=lambda: _CEILING,
-            read_update_window=lambda: (23, 3),
+            read_update_window=lambda agent_id: (23, 3),
             read_zone=lambda: "America/Los_Angeles",
             paths=None,
         ),
@@ -414,7 +414,7 @@ def test_a_verdict_that_landed_nothing_tells_no_listener(
     assert told == []
 
 
-@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state, not the modal")
+@pytest.mark.witnesses("workspace-updates.needs-decision", partial="the row state, not the Updates tab")
 @pytest.mark.parametrize(
     ("verdict", "is_decision_pending"),
     ((UpdateVerdict.NEEDS_DECISION, True), (UpdateVerdict.REFUSED, False)),

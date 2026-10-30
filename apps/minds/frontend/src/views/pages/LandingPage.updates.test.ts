@@ -71,6 +71,12 @@ function press(vnode: AnyVnode | undefined): void {
   } as MouseEvent);
 }
 
+/** The badge's press landed on the row's Updates tab, flagged to flash. */
+function expectUpdatesTabOpened(routeSet: Harness["routeSet"]): void {
+  expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}/options`, { tab: "settings", group: "updates" });
+  expect(getAppContext().shell.takeUpdatesTabArrival(ALPHA)).not.toBeNull();
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -102,7 +108,27 @@ describe("the machines list under auto-update", () => {
     expect(byId(root, "landing-bulk-updates")).toBeDefined();
   });
 
-  it("shows an armed row as scheduled, and a skipped one as skipped", () => {
+  const FOLLOWS_STUDIO = {};
+  const MANUAL = { is_auto_update_enabled: false, auto_update_override: { mode: "manual" } };
+  const OWN_WINDOW = {
+    is_auto_update_enabled: true,
+    auto_update_override: { mode: "custom_window", window_start_hour: 1, window_end_hour: 4 },
+  };
+  it.each([
+    ["badges and counts rows set to manual, though Studio auto-updates", true, MANUAL, MANUAL, ["out-of-date", "out-of-date"], true],
+    ["badges only the manual row when the other follows Studio's auto-update", true, FOLLOWS_STUDIO, MANUAL, ["out-of-date"], false],
+    ["leaves out a row with its own window, though Studio does not auto-update", false, FOLLOWS_STUDIO, OWN_WINDOW, ["out-of-date"], false],
+  ] as const)("%s, by each row's own effective setting", (_case, isStudioAuto, alphaSetting, betaSetting, badges, isStripShown) => {
+    const row = (setting: object): UiWorkspaceUpdate =>
+      ({ ...OUT_OF_DATE_UPDATE, is_workspace_readable: true, is_auto_update_enabled: isStudioAuto, ...setting }) as UiWorkspaceUpdate;
+    const { draw } = harness({ [ALPHA]: row(alphaSetting), [BETA]: row(betaSetting) }, isStudioAuto);
+    const root = draw();
+
+    expect(updateBadges(root).map((badge) => attrsOf(badge)["data-update-state"])).toEqual(badges);
+    expect(byId(root, "landing-bulk-updates") !== undefined).toBe(isStripShown);
+  });
+
+  it("shows nothing on an armed row, and a skipped one as skipped", () => {
     const { draw } = harness(
       {
         [ALPHA]: { ...OUT_OF_DATE_UPDATE, is_scheduled: true },
@@ -113,7 +139,7 @@ describe("the machines list under auto-update", () => {
 
     expect(
       updateBadges(draw()).map((badge) => allText(badge.children)),
-    ).toEqual(["Update scheduled", "Skipped v0.4.1"]);
+    ).toEqual(["Skipped v0.4.1"]);
   });
 });
 
@@ -130,15 +156,14 @@ describe("a row's update actions", () => {
       { ...OUT_OF_DATE_UPDATE, verdict: "NEEDS_DECISION", is_decision_pending: true, chat_agent_id: "agent-lead-8" },
       false,
     ],
-  ] as const)("are the badge alone on a row whose update %s, and it opens the update window", (_case, update, isAuto) => {
+  ] as const)("are the badge alone on a row whose update %s, and it opens the Updates tab", (_case, update, isAuto) => {
     const { draw, routeSet } = harness({ [ALPHA]: update as UiWorkspaceUpdate }, isAuto);
     const root = draw();
 
     expect(updateBadges(root)).toHaveLength(1);
     expect(pressable(root, "landing-update-open-chat")).toBeUndefined();
     press(updateBadges(root)[0]);
-    expect(getAppContext().shell.openUpdateModalAgentId()).toBe(ALPHA);
-    expect(routeSet).not.toHaveBeenCalled();
+    expectUpdatesTabOpened(routeSet);
   });
 
   it("include the Updated to X note, with its chat, on a row with no update badge", () => {
@@ -164,13 +189,17 @@ describe("a row's update actions", () => {
     });
   });
 
-  it.each([
-    ["a newer release is scheduled", { is_scheduled: true, verdict: "UPDATED" }, true],
-    ["a newer run failed", { verdict: "STUCK", chat_agent_id: "agent-lead-11" }, false],
-  ] as const)("leave the Updated to X note out while the row's badge says %s", (_case, fields, isAuto) => {
+  it("leave the Updated to X note out while the row's badge says a newer run failed", () => {
     const { draw } = harness(
-      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, success_note_version: "minds-v0.4.1", ...fields } as UiWorkspaceUpdate },
-      isAuto,
+      {
+        [ALPHA]: {
+          ...OUT_OF_DATE_UPDATE,
+          success_note_version: "minds-v0.4.1",
+          verdict: "STUCK",
+          chat_agent_id: "agent-lead-11",
+        },
+      },
+      false,
     );
     const root = draw();
 
@@ -209,18 +238,14 @@ describe("a row's update badge while its run is under way", () => {
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
       chat: "agent-lead-12",
     });
-    expect(getAppContext().shell.openUpdateModalAgentId()).toBeNull();
+    expect(getAppContext().shell.takeUpdatesTabArrival(ALPHA)).toBeNull();
   });
 
-  it.each([
-    ["a run still starting, with no chat yet", { ...OUT_OF_DATE_UPDATE, activity: "STARTING" }],
-    ["a scheduled update", { ...OUT_OF_DATE_UPDATE, is_scheduled: true, chat_agent_id: "agent-lead-old" }],
-  ] as const)("opens the update window for %s", (_case, update) => {
-    const { draw, routeSet } = harness({ [ALPHA]: update as UiWorkspaceUpdate }, false);
+  it("opens the Updates tab for a run still starting, with no chat yet", () => {
+    const { draw, routeSet } = harness({ [ALPHA]: { ...OUT_OF_DATE_UPDATE, activity: "STARTING" } }, false);
 
     press(updateBadges(draw())[0]);
 
-    expect(getAppContext().shell.openUpdateModalAgentId()).toBe(ALPHA);
-    expect(routeSet).not.toHaveBeenCalled();
+    expectUpdatesTabOpened(routeSet);
   });
 });

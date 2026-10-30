@@ -5,7 +5,12 @@
 // row before the round trip.
 
 import m from "mithril";
-import type { UiWorkspaceUpdate, UiWorkspaceUpdatesMessage, UpdateVerdict } from "../channel/messages";
+import type {
+  UiWorkspaceAutoUpdateOverride,
+  UiWorkspaceUpdate,
+  UiWorkspaceUpdatesMessage,
+  UpdateVerdict,
+} from "../channel/messages";
 
 /** The state for a machine the backend has said nothing about. Never "up to
  * date": silence is not a positive read. */
@@ -29,9 +34,9 @@ export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
 }
 
 /** Whether the app has positively read this machine as a minor release behind,
- * or below the security floor: what the badge and band claim, and what "Update
- * all" covers. A machine behind only by a patch is never prompted for, unless
- * the patch carries a security fix it lacks. */
+ * or below the security floor: what the badge and titlebar status claim, and
+ * what "Update all" covers. A machine behind only by a patch is never prompted
+ * for, unless the patch carries a security fix it lacks. */
 export function isUpdateOffered(update: UiWorkspaceUpdate): boolean {
   return update.availability === "OUT_OF_DATE" || isSecurityUpdate(update);
 }
@@ -50,8 +55,9 @@ export function isRecreationRequired(update: UiWorkspaceUpdate): boolean {
 
 /** Whether auto-update will take care of this machine on its own, so the
  * surfaces that offer the update stay quiet. A machine the sweep will not or
- * cannot arm says it is behind as it would without auto-update. One positively read
- * behind but not armed yet is handled; the next sweep arms it. */
+ * cannot arm says it is behind as it would without auto-update, among them one
+ * whose last run went out for the release on offer. One positively read behind
+ * but not armed yet is handled; the next sweep arms it. */
 export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): boolean {
   return (
     isAutoUpdateEnabled &&
@@ -59,7 +65,8 @@ export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEna
     (update.is_workspace_readable ?? false) &&
     !(update.needs_sign_in ?? false) &&
     !isUpdateSkipped(update) &&
-    !update.dispatch_failure
+    !update.dispatch_failure &&
+    (update.last_dispatch_target_ref ?? "") !== update.supported_version
   );
 }
 
@@ -90,34 +97,12 @@ export function skipConfirmationLine(update: UiWorkspaceUpdate, isAutoUpdateEnab
     : `Imbue Studio won't update this workspace to ${version}, and won't remind you about it. When a newer version is available, it'll let you know.`;
 }
 
-/** What a skipped machine's modal says in place of the offer. */
+/** What a skipped machine's Updates tab says in place of the offer. */
 export function skippedLine(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): string {
   const version = skippedVersionText(update);
   return isAutoUpdateEnabled
     ? `You skipped ${version} for this workspace. Imbue Studio won't update it automatically until a newer version is available.`
     : `You skipped ${version} for this workspace. Imbue Studio won't remind you about it until a newer version is available.`;
-}
-
-/** The standing condition a surface says about a machine's version, if any.
- * Standing because it will still be true tomorrow, unlike a run's phase or
- * outcome. */
-export type StandingUpdateNotice = "none" | "out-of-date" | "security-update" | "needs-sign-in" | "needs-recreation";
-
-/** What a surface should say about this machine's version. A run in flight
- * silences the out-of-date and security-update lines (the run is already being reported);
- * `isUpdating` rather than the pushed activity, so it does not reappear between
- * the press and the first frame. Recreation has no run to be silenced by. */
-export function standingUpdateNotice(
-  update: UiWorkspaceUpdate,
-  isUpdating: boolean,
-  isAutoUpdateEnabled = false,
-): StandingUpdateNotice {
-  if (isRecreationRequired(update)) return "needs-recreation";
-  if (isUpdating || isUpdateSkipped(update)) return "none";
-  if (update.needs_sign_in ?? false) return "needs-sign-in";
-  if (isUpdateOffered(update) && !isHandledByAutoUpdate(update, isAutoUpdateEnabled))
-    return isSecurityUpdate(update) ? "security-update" : "out-of-date";
-  return "none";
 }
 
 /** Whether an update run may be started or scheduled in this machine at all.
@@ -133,10 +118,6 @@ export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
   );
 }
 
-/** What an update does to the chats running in its workspace, said wherever one is started. */
-export const RUNNING_CHATS_PAUSE_LINE =
-  "Running chats pause for a few minutes while the update is applied, then continue.";
-
 /** Whether the last run ended in a way the user has to be told about as a
  * failure. Not NEEDS_DECISION: that run did its job and handed the user a
  * question, which has a state of its own. */
@@ -149,10 +130,10 @@ export function displayVersion(ref: string): string {
   return ref.replace(/^minds-(?=v\d)/, "");
 }
 
-/** What the specific-version field is prefilled with on a dev build, or "". A
- * released build (`minds-v*` ceiling) prefills nothing; a dev build reports the
- * branch it is pinned to, addressed the way the update agent's fetch resolves it. */
-export function devOverridePrefill(supportedVersion: string): string {
+/** The ref a dev build's supported version is reached by inside a workspace, or
+ * "" for a released build (`minds-v*` ceiling): a dev build reports the branch
+ * it is pinned to, addressed the way the update agent's fetch resolves it. */
+export function devBuildTargetRef(supportedVersion: string): string {
   if (!supportedVersion || supportedVersion.startsWith("minds-v")) return "";
   return supportedVersion === "main" ? "main" : `upstream/${supportedVersion}`;
 }
@@ -164,7 +145,7 @@ export function devOverridePrefill(supportedVersion: string): string {
 export function plainScheduleTargetRef(update: UiWorkspaceUpdate): string | null {
   if (!(update.is_scheduled ?? false)) return "";
   const supported = update.supported_version ?? "";
-  const named = devOverridePrefill(supported) || supported;
+  const named = devBuildTargetRef(supported) || supported;
   const armed = update.override_ref ?? "";
   if (armed === "" || named === "" || armed === supported || armed === named) return null;
   return named;
@@ -175,7 +156,7 @@ export function plainScheduleTargetRef(update: UiWorkspaceUpdate): string | null
  * finishing from both because the machine is already on the new version. */
 export type UpdateRunPhase = "none" | "preparing" | "applying" | "finishing" | "waiting";
 
-/** One producer for the row badge and the shell's band. */
+/** One producer for the row badge and the titlebar pill. */
 export function updateRunPhase(update: UiWorkspaceUpdate | null, isUpdating: boolean): UpdateRunPhase {
   if (!isUpdating) return "none";
   if (update?.activity === "WAITING") return "waiting";
@@ -217,7 +198,7 @@ export function recordedDispatchFailure(
   return { message: update.dispatch_failure ?? "", detail: update.dispatch_failure_detail ?? "" };
 }
 
-/** The modal's line about a run in flight, and whether it is still waiting. */
+/** The Updates tab's line about a run in flight, and whether it is still waiting. */
 export interface UpdateActivityNotice {
   message: string;
   /** Draws a spinner: the run is between claimed and actually started. */
@@ -229,16 +210,18 @@ const STARTING_NOTICE: UpdateActivityNotice = {
   isWaiting: true,
 };
 
-/** What a machine's run is doing, for the modal opened on one mid-run.
+/** What a machine's run is doing, for the Updates tab opened on one mid-run.
  * `isWaiting` spins through STARTING, which for a stopped machine is a cold
  * boot and during which the chat tab does not exist yet. `isDispatching` covers
- * the beat before the first frame, when the modal has already dropped its buttons. */
+ * the beat before the first frame, when the tab has already dropped its buttons. */
 export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = false): UpdateActivityNotice {
   if (isDispatching && !isRunInFlight(update)) return STARTING_NOTICE;
   // A run with a named target says so: the phase alone would be a different
   // fact from the one the reader asked for.
   const target = update.target_override ?? "";
   const preparing = target ? `Preparing the update to ${target}` : "Preparing the update";
+  // Only a chat the app can open is pointed at.
+  const isChatKnown = updateChatAgentIdFor(update, isDispatching) !== "";
   switch (update.activity) {
     case "APPLYING":
       return {
@@ -247,14 +230,14 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
       };
     case "FINISHING":
       return {
-        message: `The update${target ? ` to ${target}` : ""} is in place. The update agent is finishing its checks in the update chat.`,
+        message: `The update${target ? ` to ${target}` : ""} is in place. The update agent is finishing its checks${isChatKnown ? " in the update chat" : ""}.`,
         isWaiting: false,
       };
     case "STARTING":
       return STARTING_NOTICE;
     case "RUNNING":
       return {
-        message: `${preparing}. The update chat has the live progress.`,
+        message: isChatKnown ? `${preparing}. The update chat has the live progress.` : `${preparing}.`,
         isWaiting: false,
       };
     case "WAITING": {
@@ -263,8 +246,8 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
       const detail = update.hold_detail ? `${update.hold_detail} ` : "";
       return {
         message: update.is_hold_recorded
-          ? `${detail}The update agent is waiting for your go-ahead in the update chat.`
-          : "The update agent is waiting for you in the update chat.",
+          ? `${detail}The update agent is waiting for your go-ahead${isChatKnown ? " in the update chat" : ""}.`
+          : `The update agent is waiting for you${isChatKnown ? " in the update chat" : ""}.`,
         isWaiting: false,
       };
     }
@@ -272,7 +255,7 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
       return {
         message: update.is_chat_gone
           ? "The update's chat was deleted before the update recorded a result."
-          : "The update agent is no longer running and never reported a result. Check in with it in the update chat.",
+          : `The update agent is no longer running and never reported a result.${isChatKnown ? " Check in with it in the update chat." : ""}`,
         isWaiting: false,
       };
     default:
@@ -280,17 +263,17 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
   }
 }
 
-/** The one situation the update modal explains, ordered by what the reader
+/** The one situation the Updates tab explains, ordered by what the reader
  * would act on first. A run in flight and a run's outcome come first, as on
  * the row's badge, even over a machine that cannot be updated in place: the
- * outcome is settled (in its chat, or by dismissing it) before anything else is
+ * outcome is settled (in its chat, or by reading it in the Updates tab) before anything else is
  * said. A run that landed this app's version outranks the offer too, since
  * detection reads the machine as behind for a while after the apply; one that
  * landed an older version ranks below it, so a newer release is not hidden
  * behind its success. A stopped machine with nothing of its update state shown
- * (`UpdatesStore.isQuietWhileStopped`) outranks them all; `updateModalSituation`
+ * (`UpdatesStore.isQuietWhileStopped`) outranks them all; `updateSituation`
  * reads the update alone, so it never returns "stopped". */
-export type UpdateModalSituation =
+export type UpdateSituation =
   | "stopped"
   | "in-progress"
   | "not-started"
@@ -307,7 +290,7 @@ export type UpdateModalSituation =
   | "unknown"
   | "up-to-date";
 
-export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateModalSituation {
+export function updateSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateSituation {
   if (isUpdating) return "in-progress";
   const outcome = updateRunOutcome(update);
   if (outcome === "not-started") return "not-started";
@@ -337,7 +320,6 @@ export type UpdateBadgeState =
   | "needs-attention"
   | "needs-recreation"
   | "needs-sign-in"
-  | "scheduled"
   | "skipped"
   | "security-update"
   | "out-of-date"
@@ -352,12 +334,12 @@ export function updateChatAgentIdFor(update: UiWorkspaceUpdate | null, isUpdatin
 }
 
 /** Whether a click on a machine's update badge opens the run's chat instead of
- * the update modal, which during a run would only repeat the badge and offer
+ * the Updates tab, which during a run would only repeat the badge and offer
  * that chat. Not while STARTING: the chat tab does not exist yet. */
 export function isBadgeOpeningRunChat(update: UiWorkspaceUpdate | null, isUpdating: boolean): boolean {
   return (
     update !== null &&
-    updateModalSituation(update, isUpdating) === "in-progress" &&
+    updateSituation(update, isUpdating) === "in-progress" &&
     update.activity !== "STARTING" &&
     updateChatAgentIdFor(update, isUpdating) !== ""
   );
@@ -368,7 +350,7 @@ export interface UpdateBadge {
   state: UpdateBadgeState;
   tone: UpdateBadgeTone;
   label: string;
-  /** Hover text; the modal behind the badge carries the long version. */
+  /** Hover text; the Updates tab behind the badge carries the long version. */
   tooltip: string;
   isSpinnerShown: boolean;
 }
@@ -376,10 +358,10 @@ export interface UpdateBadge {
 /** Which badge a machine's row shows, or null. One at most, ordered by what
  * the reader would act on first: a run in flight, a decision or a failed run,
  * the standing "needs recreation", "skipped", "needs sign-in", "security update"
- * or "out of date", then "unknown", then a bare armed schedule. Every one opens
- * the modal (hence buttons); only "security update" and "out of date" are
- * offers, the security one drawn as the stronger, and under auto-update both
- * are withheld for a machine auto-update will arm itself. A null `update`
+ * or "out of date", then "unknown". Every one opens the Updates tab (hence
+ * buttons); only "security update" and "out of date" are offers, the security
+ * one drawn as the stronger, and both are withheld for a scheduled machine and,
+ * under auto-update, for one auto-update will arm itself. A null `update`
  * (nothing published yet) earns no badge, except for a dispatch this window just made. */
 export function updateBadgeFor(
   update: UiWorkspaceUpdate | null,
@@ -393,10 +375,12 @@ export function updateBadgeFor(
     return {
       state: "waiting",
       tone: "warn",
-      label: "Needs your answer",
+      label: "Update needs a decision",
       tooltip: update?.is_hold_recorded
         ? "The update is waiting for your go-ahead — open this workspace to continue"
-        : "The update agent has stopped and is waiting in its chat — open this workspace to continue",
+        : updateChatAgentIdFor(update, isUpdating) !== ""
+          ? "The update agent has stopped and is waiting in its chat — open this workspace to continue"
+          : "The update agent has stopped and is waiting for you — open this workspace's updates to continue",
       isSpinnerShown: false,
     };
   }
@@ -438,8 +422,11 @@ export function updateBadgeFor(
     return {
       state: "needs-decision",
       tone: "warn",
-      label: "Needs your answer",
-      tooltip: "The update can't keep something you built in this workspace — decide in its chat",
+      label: "Update needs a decision",
+      tooltip:
+        updateChatAgentIdFor(update, isUpdating) !== ""
+          ? "The update can't keep something you built in this workspace — decide in its chat"
+          : "The update can't keep something you built in this workspace",
       isSpinnerShown: false,
     };
   }
@@ -447,13 +434,13 @@ export function updateBadgeFor(
     return {
       state: "failed",
       tone: "error",
-      label: "Update failed",
+      label: "Update didn't finish",
       tooltip: "See what happened to this workspace's update",
       isSpinnerShown: false,
     };
   }
   // Not a failure, so not a warning: the update landed. Badged at all only
-  // because without one there is no way to reach the modal that carries the note.
+  // because without one there is no way to reach the tab that carries the note.
   if (outcome === "needs-attention") {
     return {
       state: "needs-attention",
@@ -469,12 +456,12 @@ export function updateBadgeFor(
       tone: "warn",
       label: "Recreate to update",
       tooltip:
-        "This workspace is too old to update in place and is missing security fixes — see how to move your work to a new one",
+        "This workspace is too old to update in place — see how to move your work to a new one",
       isSpinnerShown: false,
     };
   }
   // Neutral: the reader chose this, so it asks nothing of them, but it is still
-  // the way to the modal that updates the machine by hand.
+  // the way to the tab that updates the machine by hand.
   if (isUpdateSkipped(update)) {
     return {
       state: "skipped",
@@ -494,16 +481,8 @@ export function updateBadgeFor(
     };
   }
   if (isUpdateOffered(update)) {
-    if (update.is_scheduled ?? false) {
-      // A schedule auto-update armed asks nothing of the reader.
-      return {
-        state: "scheduled",
-        tone: isArmedByAutoUpdate(update, isAutoUpdateEnabled) ? "neutral" : "warn",
-        label: "Update scheduled",
-        tooltip: "See the update scheduled for this workspace",
-        isSpinnerShown: false,
-      };
-    }
+    // A scheduled update asks nothing of the reader until it runs.
+    if (update.is_scheduled ?? false) return null;
     if (isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return null;
     if (isSecurityUpdate(update)) {
       return {
@@ -536,19 +515,6 @@ export function updateBadgeFor(
       isSpinnerShown: false,
     };
   }
-  // A version the user named is armed against machines this app reads as up to
-  // date, and such an intent is kept rather than dropped, so without this the
-  // row would say nothing until the window took the machine's services down.
-  // Neutral, not the offered path's warn: nothing about this machine is behind.
-  if (update.is_scheduled) {
-    return {
-      state: "scheduled",
-      tone: "neutral",
-      label: "Update scheduled",
-      tooltip: "See the update scheduled for this workspace",
-      isSpinnerShown: false,
-    };
-  }
   return null;
 }
 
@@ -575,13 +541,14 @@ function localViewerClock(): ViewerClock {
 }
 
 /** The window an armed schedule runs in, in the reader's local time: the one
- * written into the workspace, which is what its own clock acts on, else the app's.
+ * written into the workspace, which is what its own clock acts on, else
+ * `workspaceWindow`, the one its updates start in (its own, else Studio's).
  * Read at the offset of the window open now, else the next to open, which is the
  * one the app took the UTC start from. */
-function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, clock: ViewerClock): string {
+function scheduleWindowText(update: UiWorkspaceUpdate, workspaceWindow: string, clock: ViewerClock): string {
   const startUtc = update.schedule_window_start_minute_utc;
   const length = update.schedule_window_length_minutes;
-  if (startUtc == null || length == null) return appWindow;
+  if (startUtc == null || length == null) return workspaceWindow;
   const nowMs = clock.now.getTime();
   const todaysOpeningMs = nowMs - (nowMs % MS_PER_DAY) + startUtc * MS_PER_MINUTE;
   const openingMs =
@@ -592,19 +559,18 @@ function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, clock:
   return `${formatClockMinute(start)}-${formatClockMinute((start + length) % MINUTES_PER_DAY)}`;
 }
 
-/** What an armed schedule says, for the modal and the machine's Updates
- * settings group. Window-relative rather than "tonight": the window is
+/** What an armed schedule says, for the machine's Updates tab. Window-relative rather than "tonight": the window is
  * configurable to any hours. One auto-update armed is the app's own doing, so
  * it also says nothing is asked of the reader, unless a sign-in is. */
 export function scheduledLine(
   update: UiWorkspaceUpdate,
-  appWindow: string,
+  workspaceWindow: string,
   isAutoUpdateEnabled = false,
   clock: ViewerClock = localViewerClock(),
 ): string {
   const override = update.override_ref ?? "";
   const target = override ? ` to ${displayVersion(override)}` : "";
-  const windowText = scheduleWindowText(update, appWindow, clock);
+  const windowText = scheduleWindowText(update, workspaceWindow, clock);
   if (!isArmedByAutoUpdate(update, isAutoUpdateEnabled))
     return `Scheduled to update${target} in the next update window (${windowText}).`;
   const line = `Studio will update this workspace${target} in the next update window (${windowText}).`;
@@ -646,10 +612,24 @@ function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate |
   };
 }
 
+/** What auto-update does for one machine: its own setting when it has one, else the app's. */
+export interface WorkspaceAutoUpdate {
+  /** Whether the background check arms this machine's update itself. */
+  isEnabled: boolean;
+  /** The local window its scheduled updates start in, e.g. "2:00 AM-5:00 AM". */
+  window: string;
+  /** Its own setting; null while it follows the app's. */
+  override: UiWorkspaceAutoUpdateOverride | null;
+}
+
 export class UpdatesStore {
-  /** The configured local window scheduled updates run in, as the modal shows it. */
+  /** The app-wide local window scheduled updates run in. A machine with its
+   * own window says so in `autoUpdateFor`. */
   updateWindow = "";
-  /** Whether the app arms every behind machine's update itself. */
+  /** The app-wide window's local hours, which a custom window starts from. */
+  updateWindowHours = { start: 2, end: 5 };
+  /** The app-wide auto-update switch. A machine with its own setting says so
+   * in `autoUpdateFor`. */
   isAutoUpdateEnabled = false;
   /** Whether a frame has arrived, so `isAutoUpdateEnabled` is the app's word rather than the default. */
   hasReceivedUpdates = false;
@@ -669,6 +649,10 @@ export class UpdatesStore {
   applyUpdatesMessage(message: UiWorkspaceUpdatesMessage): void {
     this.updateByAgentId = new Map(Object.entries(message.updates ?? {}));
     this.updateWindow = message.update_window ?? "";
+    this.updateWindowHours = {
+      start: message.update_window_start_hour ?? this.updateWindowHours.start,
+      end: message.update_window_end_hour ?? this.updateWindowHours.end,
+    };
     this.isAutoUpdateEnabled = message.is_auto_update_enabled ?? false;
     this.hasReceivedUpdates = true;
     for (const agentId of [...this.pendingAgentIds]) {
@@ -699,6 +683,11 @@ export class UpdatesStore {
     return updateShownWhileStopped(published);
   }
 
+  /** Whether this machine is stopped or stopping, so a run there starts it first. */
+  isStopped(agentId: string): boolean {
+    return isStoppedLiveness(this.livenessOf(agentId));
+  }
+
   /** Whether this machine is stopped with nothing of its update state shown. */
   isQuietWhileStopped(agentId: string): boolean {
     return this.publishedFor(agentId) === null && this.isHiddenWhileStopped(agentId);
@@ -713,13 +702,25 @@ export class UpdatesStore {
     return this.pendingAgentIds.has(agentId) || isRunInFlight(this.forAgent(agentId));
   }
 
+  /** What auto-update does for this machine. Read past the stopped filter: a
+   * stopped machine still has a setting, and its Updates tab still shows it. */
+  autoUpdateFor(agentId: string): WorkspaceAutoUpdate {
+    const published = this.updateByAgentId.get(agentId);
+    return {
+      isEnabled: published?.is_auto_update_enabled ?? this.isAutoUpdateEnabled,
+      window: published?.update_window || this.updateWindow,
+      override: published?.auto_update_override ?? null,
+    };
+  }
+
   /** Whether this machine is mid-apply, so health-driven recovery surfaces defer. */
   isApplying(agentId: string): boolean {
     return this.forAgent(agentId).activity === "APPLYING";
   }
 
   /** The machines the bulk actions cover: confirmed out of date or below the
-   * security floor, with nothing standing in the way of a fresh run. */
+   * security floor, with nothing standing in the way of a fresh run, and not
+   * left to auto-update by their own setting or the app's. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.keys()]
       .map((agentId) => [agentId, this.forAgent(agentId)] as const)
@@ -728,7 +729,8 @@ export class UpdatesStore {
           isUpdateOffered(update) &&
           !this.isUpdating(agentId) &&
           !(update.is_decision_pending ?? false) &&
-          !isUpdateSkipped(update),
+          !isUpdateSkipped(update) &&
+          !isHandledByAutoUpdate(update, this.autoUpdateFor(agentId).isEnabled),
       )
       .map(([agentId]) => agentId);
   }
@@ -782,6 +784,19 @@ export class UpdatesStore {
     return this.signInFailureByAgentId.get(agentId) ?? null;
   }
 
+  /** Give this machine its own auto-update setting, or put it back on the
+   * app's with null. The frame that follows carries the result. */
+  async setAutoUpdateOverride(
+    agentId: string,
+    override: UiWorkspaceAutoUpdateOverride | null,
+  ): Promise<UpdateActionResult> {
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/auto-update`, {
+      mode: override?.mode ?? null,
+      window_start_hour: override?.window_start_hour ?? null,
+      window_end_hour: override?.window_end_hour ?? null,
+    });
+  }
+
   /** Clear how the last run ended -- its verdict, or a stall -- or why the last one never went out. */
   async dismissRunOutcome(agentId: string): Promise<UpdateActionResult> {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/dismiss`, {});
@@ -790,6 +805,15 @@ export class UpdatesStore {
   /** Clear the "Updated to X" note (the row's own dismiss). */
   async dismissNote(agentId: string): Promise<UpdateActionResult> {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/note/dismiss`, {});
+  }
+
+  /** Clear how the last run ended, and the "Updated to X" note that outcome stands in front of. */
+  async dismissOutcome(agentId: string): Promise<UpdateActionResult> {
+    const update = this.publishedFor(agentId);
+    const result = await this.dismissRunOutcome(agentId);
+    const isNoteBehind =
+      update !== null && (update.success_note_version ?? "") !== "" && update.verdict !== "ALREADY_CURRENT";
+    return result.isOk && isNoteBehind ? await this.dismissNote(agentId) : result;
   }
 
   /** Dispatch every listed machine with no optimistic lock: a 200 means only

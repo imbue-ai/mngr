@@ -186,10 +186,11 @@ class _RunFacts(FrozenModel):
     # A run record started after this is a run the failed attempt did not account for.
     dispatch_attempted_at: datetime | None = Field(default=None)
     chat_agent_id: str = Field(
-        default="", description="The run's chat's id, for opening it: from the create, or the poll's listing"
+        default="",
+        description="The run's chat's id, for opening it: from the create, the poll's listing, or the sweep's",
     )
     is_chat_gone: bool = Field(
-        default=False, description="Whether the poll found the run's chat deleted, so there is no chat left to open"
+        default=False, description="Whether a listing found the run's chat deleted, so there is no chat left to open"
     )
     is_sign_in_refused: bool = Field(
         default=False, description="Whether the last arm or start was refused because no account is signed in"
@@ -290,6 +291,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
     """One workspace's three slices as the one model every reader sees."""
     is_waiting = run.activity is UpdateActivity.WAITING
     schedule = schedule_facts.record
+    dispatch = schedule_facts.last_dispatch
     return UiWorkspaceUpdate(
         availability=detected.availability,
         unknown_reason=detected.unknown_reason,
@@ -317,6 +319,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         chat_agent_name=run.record.chat_agent_name,
         chat_agent_id=_chat_agent_id(run, schedule_facts),
         is_chat_gone=run.is_chat_gone,
+        last_dispatch_target_ref=dispatch.target_ref if dispatch is not None else "",
         dispatch_failure=run.dispatch_failure.message if run.dispatch_failure is not None else "",
         dispatch_failure_detail=run.dispatch_failure.detail if run.dispatch_failure is not None else "",
     )
@@ -622,6 +625,28 @@ class WorkspaceUpdateStateStore(MutableModel):
             self._run_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().is_chat_gone, True))
         self._fire_on_change()
 
+    def observe_run_record_chat(self, agent_id: AgentId, status: UpdateRunStatus, chat_agent_id: str) -> None:
+        """Give an out-of-flight row holding ``status`` the chat the workspace listed for it ('' when it lists none).
+
+        In-flight rows are the poll's: until a dispatched run's agent writes its record, ``run.json`` still names
+        an earlier run's chat.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str)
+            if facts is None or facts.activity in IN_FLIGHT_ACTIVITIES:
+                return
+            if (facts.record.started_at, facts.record.chat_agent_name) != (status.started_at, status.chat_agent_name):
+                return
+            new_facts = facts.model_copy_update(
+                to_update(facts.field_ref().chat_agent_id, chat_agent_id),
+                to_update(facts.field_ref().is_chat_gone, not chat_agent_id),
+            )
+            if new_facts == facts:
+                return
+            self._run_by_agent[aid_str] = new_facts
+        self._fire_on_change()
+
     def release_failed_claim(self, agent_id: AgentId, failure: UpdateDispatchFailure | None) -> bool:
         """Hand back a run slot whose dispatch never went out, recording why; return whether it was released.
 
@@ -782,7 +807,7 @@ class WorkspaceUpdateStateStore(MutableModel):
     def dismiss_run_outcome(self, agent_id: AgentId) -> None:
         """Clear how the last run ended, or why the last one asked for never went out (the user acknowledged it).
 
-        STALLED draws the same "Update failed" badge as a verdict, so it is
+        STALLED draws the same "Update didn't finish" badge as a verdict, so it is
         dismissible too and goes back to IDLE. The dismissed run's start is
         persisted so the sweep's re-read of the record, in this launch or a
         later one, does not restore it. A failed dispatch is held only in
@@ -864,9 +889,9 @@ class _CachedVersionRead(FrozenModel):
 
 
 class AutoUpdatePolicy(FrozenModel):
-    """What the app-wide auto-update setting says about one workspace."""
+    """What auto-update does for one workspace: its own setting when it has one, else the app-wide one."""
 
-    is_enabled: bool = Field(description="Whether the app arms every behind workspace's update itself")
+    is_enabled: bool = Field(description="Whether the app arms this workspace's update itself when it falls behind")
     skipped_target_ref: str = Field(
         description="The release the user skipped for this workspace; '' when they skipped none"
     )
@@ -878,22 +903,22 @@ def should_auto_arm(
     """Whether the sweep arms this workspace's update for the user.
 
     Only a workspace positively read a minor release behind, with nothing armed or running, no
-    decision pending, and this release not skipped. A run that failed after its lead's
-    best effort, or stalled without a verdict, is not re-armed for the same release: a retry
-    needs something to have changed -- a newer ceiling, or the user dismissing the failure.
+    decision pending, and this release not skipped. A release a run already went out for is not
+    re-armed: the workspace is still behind, so that run failed or stalled, and only a newer
+    ceiling is a reason to try again unwatched. Reading the failure dismisses it from the row,
+    so the dispatch record, not the row, is what remembers the attempt. A failure still on the row
+    holds the release back unless it is the last dispatch's run and that run aimed elsewhere: at an
+    older ceiling, or at a version the user named.
     """
     if not policy.is_enabled or not state.is_update_offered or state.is_scheduled or state.is_run_in_flight:
         return False
     if state.is_decision_pending or policy.skipped_target_ref == ceiling_ref:
         return False
+    if last_dispatch is not None and last_dispatch.target_ref == ceiling_ref:
+        return False
     if state.verdict in FAILURE_UPDATE_VERDICTS or state.activity is UpdateActivity.STALLED:
-        is_failure_for_an_older_ceiling = (
-            last_dispatch is not None
-            and last_dispatch.chat_agent_name == state.chat_agent_name
-            and bool(last_dispatch.ceiling_ref)
-            and last_dispatch.ceiling_ref != ceiling_ref
-        )
-        return is_failure_for_an_older_ceiling
+        # A failure the last dispatch did not make says nothing of what it aimed at.
+        return last_dispatch is not None and last_dispatch.chat_agent_name == state.chat_agent_name
     return True
 
 
@@ -1066,6 +1091,9 @@ class WorkspaceUpdateDetector(MutableModel):
             return
         if facts.run_status is not None:
             self.store.observe_run_record(agent_id, facts.run_status)
+            # None: not looked up (the last dispatch names the run's chat), or the chats could not be listed.
+            if facts.run_chat_id is not None:
+                self.store.observe_run_record_chat(agent_id, facts.run_status, facts.run_chat_id)
         self.store.record_schedule(
             agent_id, schedule=facts.schedule, last_dispatch=facts.last_dispatch, is_signed_in=facts.is_signed_in
         )

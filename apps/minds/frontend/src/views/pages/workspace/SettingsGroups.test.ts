@@ -19,12 +19,10 @@ import {
   allText,
   attrsOf,
   byId,
+  classesOf,
   collectVnodes,
   jsonResponse,
-  publishWorkspaceLiveness,
   renderDeep,
-  scheduleWindowAtLocalHour,
-  settingsOverview,
   settle,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
@@ -34,7 +32,6 @@ import { SettingsGroups } from "./SettingsGroups";
 // is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
-const NO_BACKUP_QUESTION = "This workspace has no backups.";
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
@@ -54,24 +51,6 @@ interface Harness {
   requests: string[];
   /** The per-machine model the pane draws against, keyed by agent id. */
   models: Map<string, WorkspaceOptionsModel>;
-  /** The pane's oninit, which reads the app-wide update settings. */
-  init: () => void;
-}
-
-/** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
- * "Cancel" of their own. */
-function updatesGroup(root: m.Children): AnyVnode {
-  const group = collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).id === "ws-updates-group",
-  );
-  if (group === undefined) throw new Error("the Updates group was not drawn");
-  return group;
-}
-
-/** The same group, rendered through its components, for the assertions that
- * reach inside one -- the specific-version field lives in a collapsible. */
-function updatesGroupDeep(root: m.Children): AnyVnode {
-  return updatesGroup(renderDeep(root) as m.Children);
 }
 
 function pressableWithLabel(
@@ -83,24 +62,6 @@ function pressableWithLabel(
       typeof attrsOf(vnode).onclick === "function" &&
       allText(vnode.children).includes(label),
   );
-}
-
-/** The specific-version field of one drawn Updates group. */
-function overrideField(node: AnyVnode): AnyVnode {
-  const field = collectVnodes(node).find(
-    (vnode) => attrsOf(vnode).id === "update-override-input",
-  );
-  if (field === undefined)
-    throw new Error("the specific-version field was not drawn");
-  return field;
-}
-
-/** Type into that field: its oninput is the only writer of the typed ref. */
-function typeOverride(node: AnyVnode, value: string): void {
-  const oninput = attrsOf(overrideField(node)).oninput as (
-    event: InputEvent,
-  ) => void;
-  oninput({ target: { value } } as unknown as InputEvent);
 }
 
 function press(node: AnyVnode, label: string): void {
@@ -131,8 +92,7 @@ function harness(
     requests.push(url);
     return respond(url, init);
   });
-  // No ?override=1, which would open the specific-version field. A successful
-  // dispatch enters the machine and redraws; there is no mount for either.
+  // A successful press routes and redraws; there is no mount for either.
   vi.spyOn(m.route, "get").mockReturnValue(
     "/workspace/x/options?tab=settings&group=updates",
   );
@@ -185,10 +145,7 @@ function harness(
       vnode,
     );
   }
-  function init(): void {
-    (instance.oninit as unknown as () => void).call(instance);
-  }
-  return { draw, requests, models, init };
+  return { draw, requests, models };
 }
 
 /** A dispatch answers over several promise hops: the request, its body parse,
@@ -203,317 +160,31 @@ afterEach(() => {
   clearAppContextForTests();
 });
 
-describe("the Updates settings group's no-backup question", () => {
-  it("holds a press on a machine without backups and asks in place of the controls", () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-
-    const asked = updatesGroup(draw(UNBACKED));
-    expect(allText(asked)).toContain(NO_BACKUP_QUESTION);
-    // A live "Update now" under "Go ahead?" would be a second way to answer.
-    expect(pressableWithLabel(asked, "Update now")).toBeUndefined();
-    expect(requests).toEqual([]);
-  });
-
-  it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
-    const { draw } = harness();
-    publishWorkspaceLiveness(UNBACKED, "RUNNING");
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-
-    publishWorkspaceLiveness(UNBACKED, "STOPPED");
-    draw(UNBACKED);
-    publishWorkspaceLiveness(UNBACKED, "RUNNING");
-
-    expect(
-      pressableWithLabel(updatesGroup(draw(UNBACKED)), "Go ahead without backups"),
-    ).toBeUndefined();
-  });
-
-  it("dispatches only once the question is answered, and only for the machine it asked about", async () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/now`]);
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      NO_BACKUP_QUESTION,
-    );
-  });
-
-  it("takes back the press when the question is cancelled", () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-    press(updatesGroup(draw(UNBACKED)), "Cancel");
-
-    const settled = updatesGroup(draw(UNBACKED));
-    expect(allText(settled)).not.toContain(NO_BACKUP_QUESTION);
-    expect(pressableWithLabel(settled, "Update now")).toBeDefined();
-    expect(requests).toEqual([]);
-  });
-
-  it("never puts one machine's question in front of another, nor answers it for one", async () => {
-    // A route change between machines preserves this instance, so A's question
-    // must neither stand over B nor dispatch to it.
-    const { draw, requests } = harness();
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-
-    const other = updatesGroup(draw(BACKED));
-    expect(allText(other)).not.toContain(NO_BACKUP_QUESTION);
-    press(other, "Update now");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
-    // Unanswered, not discarded: the machine it was raised for still has it.
-    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
-  });
-
-  it("keeps a dispatch's spinner and its refusal on the machine the dispatch was made for", async () => {
-    // A dispatch can take minutes, so the reader may switch machines while it is out.
-    let answer: ((response: Response) => void) | null = null;
-    const { draw, requests } = harness(
-      () =>
-        new Promise<Response>((resolve) => {
-          answer = resolve;
-        }),
-    );
-    press(updatesGroup(draw(BACKED)), "Update now");
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
-
-    const other = updatesGroup(draw(UNBACKED));
-    const otherButton = pressableWithLabel(other, "Update now");
-    expect(otherButton).toBeDefined();
-    expect(attrsOf(otherButton as AnyVnode).disabled).toBe(false);
-
-    (answer as unknown as (response: Response) => void)(
-      jsonResponse(
-        { error: "An update is already running in this workspace." },
-        409,
-      ),
-    );
-    await settleDispatch();
-
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      "An update is already running",
-    );
-    expect(allText(updatesGroup(draw(BACKED)))).toContain(
-      "An update is already running",
-    );
-  });
-
-  it("says once that a refused Update now needs a sign-in", async () => {
-    const refusal = "Sign in to an AI account in this workspace, then try again.";
-    const { draw } = harness(() => Promise.resolve(jsonResponse({ error: refusal }, 409)));
-    press(updatesGroup(draw(BACKED)), "Update now");
-    await settleDispatch();
-    // The refusal also lands on the row, as the next updates frame carries it.
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, needs_sign_in: true } },
-      update_window: "2:00 AM-5:00 AM",
-    });
-
-    const text = allText(updatesGroup(draw(BACKED)));
-    expect(text).toContain(refusal);
-    expect(text).not.toContain("so its update can't start");
-  });
-
-  it("quotes the machine's own verdict under the refusal", async () => {
-    // The reason a wedged machine gives is the only thing that tells the reader
-    // retrying will not help, so it has to survive all the way onto the pane.
-    const { draw } = harness(() =>
-      Promise.resolve(
-        jsonResponse(
-          {
-            error: "Couldn't start the update agent in this workspace.",
-            detail:
-              "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
-          },
-          502,
-        ),
-      ),
-    );
-
-    press(updatesGroup(draw(BACKED)), "Update now");
-    await settleDispatch();
-
-    const refused = allText(updatesGroup(draw(BACKED)));
-    expect(refused).toContain(
-      "Couldn't start the update agent in this workspace.",
-    );
-    expect(refused).toContain(
-      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
-    );
-  });
-});
-
-describe("the Updates settings group's scheduled update", () => {
-  it("asks the no-backup question for a schedule press too, and arms the schedule once answered", async () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Schedule update");
-    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
-    expect(requests).toEqual([]);
-
-    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
-    await settleDispatch();
-
-    // A held schedule press arms a schedule, not a run.
-    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/schedule`]);
-  });
-
-  it("offers to cancel a scheduled machine's run in place of scheduling it again", async () => {
-    const { draw, requests } = harness();
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          is_scheduled: true,
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-    });
-
-    const group = updatesGroup(draw(BACKED));
-    expect(allText(group)).toContain(
-      "Scheduled to update in the next update window (2:00 AM-5:00 AM)",
-    );
-    expect(pressableWithLabel(group, "Schedule update")).toBeUndefined();
-    press(group, "Cancel schedule");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule/cancel`]);
-  });
-});
-
-describe("the Updates settings group's specific-version field", () => {
-  it("keeps a typed ref on the machine it was typed for", () => {
-    const { draw } = harness();
-
-    // The disclosure is one toggle for the pane, so it stays open across the switch.
-    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
-    typeOverride(updatesGroupDeep(draw(UNBACKED)), "upstream/some-branch");
-
-    const other = updatesGroupDeep(draw(BACKED));
-    expect(attrsOf(overrideField(other)).value).toBe("");
-    // Nothing was typed for this machine, so there is nothing to send.
-    const otherDispatch = pressableWithLabel(other, "Update to this version");
-    expect(otherDispatch).toBeDefined();
-    expect(attrsOf(otherDispatch as AnyVnode).disabled).toBe(true);
-
-    // Kept for the machine it was typed for, not wiped on every switch.
-    expect(attrsOf(overrideField(updatesGroupDeep(draw(UNBACKED)))).value).toBe(
-      "upstream/some-branch",
-    );
-  });
-
-  it("starts no run over a decision the last one is waiting on", () => {
-    const { draw } = harness();
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [UNBACKED]: {
-          ...OUT_OF_DATE,
-          verdict: "NEEDS_DECISION",
-          is_decision_pending: true,
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-    });
-
-    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
-    typeOverride(updatesGroupDeep(draw(UNBACKED)), "minds-v0.9.1");
-
-    const pane = updatesGroupDeep(draw(UNBACKED));
-    for (const label of ["Update to this version", "Schedule"]) {
-      const button = pressableWithLabel(pane, label);
-      expect(button).toBeDefined();
-      expect(attrsOf(button as AnyVnode).disabled).toBe(true);
-    }
-  });
-
-  it("leaves its Schedule alone while the plain schedule is out, though both name no version", () => {
-    const { draw } = harness(() => new Promise<Response>(() => undefined));
-
-    press(updatesGroupDeep(draw(BACKED)), "Update to a specific version");
-    press(updatesGroupDeep(draw(BACKED)), "Schedule update");
-
-    const pane = updatesGroupDeep(draw(BACKED));
-    expect(allText(byId(pane, "ws-update-schedule-btn")?.children)).toBe("");
-    expect(allText(byId(pane, "update-override-schedule-btn")?.children)).toBe(
-      "Schedule",
-    );
-  });
-});
-
-describe("the Updates settings group's sign-in", () => {
-  it("explains a sign-in the machine could not open in the update modal, since the press leaves this pane", async () => {
-    const { draw, requests } = harness(() =>
-      Promise.resolve(
-        jsonResponse({ error: "Couldn't open a chat in this workspace to sign in." }, 502),
-      ),
-    );
-    const { stores, shell } = getAppContext();
-    stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, needs_sign_in: true } },
-      update_window: "2:00 AM-5:00 AM",
-    });
-
-    press(updatesGroup(draw(BACKED)), "Sign in");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/sign-in`]);
-    expect(shell.openUpdateModalAgentId()).toBe(BACKED);
-  });
-});
-
-describe("the Updates settings group after an update that never went out", () => {
-  function recordFailureOnBacked(): void {
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          dispatch_failure: "Couldn't start this workspace to run the update.",
-          dispatch_failure_detail: "ERROR: The box behind host-5821 is gone",
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-    });
+describe("the Updates entry in the settings nav", () => {
+  function navDot(root: m.Children): AnyVnode | undefined {
+    return byId(root, "updates-nav-dot");
   }
 
-  it("shows the machine's recorded reason, on that machine only", () => {
+  it("wears the titlebar pill's colour while the pill shows, and nothing otherwise", () => {
     const { draw } = harness();
-    recordFailureOnBacked();
+    // Out of date, nothing handling it: the pill's orange dot.
+    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-warning");
 
-    const backed = allText(updatesGroup(draw(BACKED)));
-    expect(backed).toContain(
-      "Couldn't start this workspace to run the update.",
-    );
-    expect(backed).toContain("ERROR: The box behind host-5821 is gone");
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      "Couldn't start this workspace",
-    );
-  });
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, availability: "UP_TO_DATE", verdict: "UPDATED_WITH_REBUILD_ITEMS" } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+    // A landed update with a note: good news, green.
+    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-success");
 
-  it("holds the recorded reason back while a new press is out", () => {
-    // The press is the newer question; the old answer beside its spinner would read as its reply.
-    const { draw } = harness(() => new Promise<Response>(() => undefined));
-    recordFailureOnBacked();
-
-    press(updatesGroup(draw(BACKED)), "Update now");
-
-    expect(allText(updatesGroup(draw(BACKED)))).not.toContain(
-      "Couldn't start this workspace",
-    );
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_scheduled: true } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+    // A schedule asks nothing, so there is no pill and no dot.
+    expect(navDot(draw(BACKED))).toBeUndefined();
   });
 });
 
@@ -1154,354 +825,5 @@ describe("the General settings group's Machine size section", () => {
     expect(
       plainSave === undefined ? undefined : attrsOf(plainSave).disabled,
     ).toBe(true);
-  });
-});
-
-describe("the Updates settings group's app-wide update settings", () => {
-  it("shows the app-wide auto-update setting, and a flip here changes it app-wide", async () => {
-    const bodies: Record<string, string> = {};
-    const { draw, init } = harness((url, init) => {
-      if (init?.body !== undefined) bodies[url] = String(init.body);
-      if (url === "/ui/api/settings") {
-        return Promise.resolve(
-          jsonResponse(settingsOverview({ is_auto_update_enabled: false })),
-        );
-      }
-      if (url === "/ui/api/settings/auto-update") {
-        return Promise.resolve(jsonResponse({ is_enabled: true }));
-      }
-      return Promise.resolve(jsonResponse({}));
-    });
-    init();
-    await settleDispatch();
-
-    const toggle = collectVnodes(draw(BACKED)).find(
-      (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
-    );
-    expect(toggle).toBeDefined();
-    expect(attrsOf(toggle as AnyVnode)["aria-checked"]).toBe("false");
-
-    (attrsOf(toggle as AnyVnode).onclick as () => void)();
-    await settleDispatch();
-
-    expect(JSON.parse(bodies["/ui/api/settings/auto-update"])).toEqual({
-      is_enabled: true,
-    });
-    const flipped = collectVnodes(draw(UNBACKED)).find(
-      (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
-    );
-    // One app-wide value, so every machine's pane shows the flip.
-    expect(attrsOf(flipped as AnyVnode)["aria-checked"]).toBe("true");
-  });
-});
-
-describe("the Updates settings group's app-wide settings changed elsewhere", () => {
-  it("shows a flip made on another surface once the updates frame reports it", async () => {
-    let isEnabled = false;
-    const { draw, init } = harness((url) =>
-      Promise.resolve(
-        jsonResponse(
-          url === "/ui/api/settings"
-            ? settingsOverview({ is_auto_update_enabled: isEnabled })
-            : {},
-        ),
-      ),
-    );
-    init();
-    await settleDispatch();
-    const toggleState = (): unknown =>
-      attrsOf(
-        collectVnodes(draw(BACKED)).find(
-          (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
-        ) as AnyVnode,
-      )["aria-checked"];
-    expect(toggleState()).toBe("false");
-
-    isEnabled = true;
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {},
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
-    draw(BACKED);
-    await settleDispatch();
-
-    expect(toggleState()).toBe("true");
-  });
-});
-
-describe("the Updates settings group under auto-update", () => {
-  function underAutoUpdate(updates: Record<string, UiWorkspaceUpdate>): void {
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates,
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
-  }
-
-  it("offers no schedule for a machine it armed to the supported version, only a skip", async () => {
-    const { draw, requests } = harness();
-    underAutoUpdate({
-      [BACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: true,
-        is_workspace_readable: true,
-        is_scheduled: true,
-        is_schedule_auto_armed: true,
-      },
-    });
-
-    const armed = updatesGroup(draw(BACKED));
-    expect(byId(armed, "ws-update-schedule-btn")).toBeUndefined();
-    expect(pressableWithLabel(armed, "Cancel schedule")).toBeUndefined();
-    press(armed, "Skip v0.4.1");
-    // Asked first, as the update modal asks.
-    const asking = updatesGroup(draw(BACKED));
-    expect(pressableWithLabel(asking, "Cancel")).toBeDefined();
-    expect(requests).toEqual([]);
-    press(asking, "Skip v0.4.1");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/skip`]);
-  });
-
-  it.each([
-    ["auto-update has not armed yet", OUT_OF_DATE],
-    [
-      "only a patch behind",
-      {
-        ...OUT_OF_DATE,
-        availability: "PATCH_AVAILABLE",
-        current_version: "minds-v0.4.0",
-      },
-    ],
-    [
-      "of unknown version",
-      { ...OUT_OF_DATE, availability: "UNKNOWN", current_version: "" },
-    ],
-    ["whose release was skipped", { ...OUT_OF_DATE, is_update_skipped: true }],
-  ] as const)(
-    "offers to schedule a machine %s",
-    async (_case, update) => {
-      const { draw, requests } = harness();
-      underAutoUpdate({
-        [BACKED]: {
-          ...(update as UiWorkspaceUpdate),
-          is_backup_configured: true,
-          is_workspace_readable: true,
-        },
-      });
-
-      press(updatesGroup(draw(BACKED)), "Schedule update");
-      await settleDispatch();
-
-      expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
-    },
-  );
-
-  it("offers to schedule a specific version on a machine it will arm", async () => {
-    const { draw, requests } = harness();
-    underAutoUpdate({
-      [BACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: true,
-        is_workspace_readable: true,
-      },
-    });
-
-    press(updatesGroupDeep(draw(BACKED)), "Update to a specific version");
-    typeOverride(updatesGroupDeep(draw(BACKED)), "upstream/some-branch");
-    const schedule = byId(
-      updatesGroupDeep(draw(BACKED)),
-      "update-override-schedule-btn",
-    );
-    expect(schedule).toBeDefined();
-    (attrsOf(schedule as AnyVnode).onclick as () => void)();
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
-  });
-
-  it("offers no schedule for a machine the user scheduled to the supported version by name", () => {
-    const { draw } = harness();
-    underAutoUpdate({
-      [BACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: true,
-        is_workspace_readable: true,
-        is_scheduled: true,
-        override_ref: "minds-v0.4.1",
-      },
-    });
-
-    const group = updatesGroup(draw(BACKED));
-    expect(byId(group, "ws-update-schedule-btn")).toBeUndefined();
-    expect(pressableWithLabel(group, "Cancel schedule")).toBeDefined();
-  });
-
-  it("replaces a schedule for another version with one naming the supported version", async () => {
-    const bodies: Record<string, string> = {};
-    const { draw, requests } = harness((url, init) => {
-      if (init?.body !== undefined) bodies[url] = String(init.body);
-      return Promise.resolve(jsonResponse({}));
-    });
-    underAutoUpdate({
-      [BACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: true,
-        is_workspace_readable: true,
-        is_scheduled: true,
-        override_ref: "upstream/some-branch",
-      },
-    });
-
-    const group = updatesGroup(draw(BACKED));
-    expect(pressableWithLabel(group, "Cancel schedule")).toBeDefined();
-    press(group, "Schedule update");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
-    // A bare press keeps the armed version, so this one names the app's.
-    expect(
-      JSON.parse(bodies[`/ui/api/updates/${BACKED}/schedule`]),
-    ).toEqual({ target_ref: "minds-v0.4.1" });
-  });
-
-  it("lets the user cancel a schedule they armed, which says it is scheduled rather than that nothing is asked", async () => {
-    const { draw, requests } = harness();
-    underAutoUpdate({
-      [BACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: true,
-        is_workspace_readable: true,
-        is_scheduled: true,
-        is_schedule_auto_armed: false,
-        override_ref: "upstream/some-branch",
-        ...scheduleWindowAtLocalHour(1, 3),
-      },
-    });
-
-    const group = updatesGroup(draw(BACKED));
-    expect(allText(group)).toContain(
-      "Scheduled to update to upstream/some-branch in the next update window",
-    );
-    expect(allText(group)).not.toContain("No action is needed.");
-    expect(byId(group, "ws-update-skip-btn")).toBeUndefined();
-    press(group, "Cancel schedule");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule/cancel`]);
-  });
-});
-
-describe("the Updates settings group's skip question", () => {
-  function armBacked(isScheduled: boolean): void {
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          is_scheduled: isScheduled,
-          is_schedule_auto_armed: isScheduled,
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
-  }
-
-  it("stays up, held, while the skip is out, and gives way to its answer", async () => {
-    let answer: ((response: Response) => void) | null = null;
-    const { draw } = harness(
-      () =>
-        new Promise<Response>((resolve) => {
-          answer = resolve;
-        }),
-    );
-    armBacked(true);
-    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
-    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
-    // The skip cancels the schedule first, so the unscheduled row arrives before its answer.
-    armBacked(false);
-
-    const cancel = pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel");
-    expect(cancel).toBeDefined();
-    expect(attrsOf(cancel as AnyVnode).disabled).toBe(true);
-
-    const refusal = "This workspace couldn't record the skip.";
-    (answer as unknown as (response: Response) => void)(jsonResponse({ error: refusal }, 409));
-    await settleDispatch();
-
-    const answered = updatesGroup(draw(BACKED));
-    expect(pressableWithLabel(answered, "Cancel")).toBeUndefined();
-    expect(allText(answered)).toContain(refusal);
-  });
-
-  it("is dropped once the schedule it asks about is gone, so it does not come back unasked", () => {
-    const { draw } = harness();
-    armBacked(true);
-    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
-    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
-
-    armBacked(false);
-    draw(BACKED);
-    armBacked(true);
-
-    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
-  });
-
-  it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
-    const { draw } = harness();
-    armBacked(true);
-    publishWorkspaceLiveness(BACKED, "RUNNING");
-    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
-    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
-
-    publishWorkspaceLiveness(BACKED, "STOPPED");
-    draw(BACKED);
-    publishWorkspaceLiveness(BACKED, "RUNNING");
-
-    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
-  });
-});
-
-describe("the Updates settings group over a run under way", () => {
-  it.each([true, false])(
-    "drops the schedule's controls, which would not stop the run (auto-update %s)",
-    (isAutoUpdateEnabled) => {
-      const { draw } = harness();
-      getAppContext().stores.updates.applyUpdatesMessage({
-        type: "workspace_updates",
-        updates: {
-          [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true, activity: "RUNNING" },
-        },
-        update_window: "2:00 AM-5:00 AM",
-        is_auto_update_enabled: isAutoUpdateEnabled,
-      });
-
-      const group = updatesGroup(draw(BACKED));
-      expect(byId(group, "ws-update-skip-btn")).toBeUndefined();
-      expect(byId(group, "ws-update-cancel-schedule-btn")).toBeUndefined();
-    },
-  );
-});
-
-describe("the Updates settings group of a stopped workspace", () => {
-  it("offers nothing to do in it until it starts and claims no version state, but keeps the app-wide settings", async () => {
-    const { draw, init } = harness((url) =>
-      Promise.resolve(jsonResponse(url === "/ui/api/settings" ? settingsOverview() : {})),
-    );
-    init();
-    await settleDispatch();
-    publishWorkspaceLiveness(BACKED, "STOPPED");
-
-    const pane = renderDeep(draw(BACKED)) as m.Children;
-    expect(byId(pane, "ws-updates-stopped")).toBeDefined();
-    expect(byId(pane, "ws-updates-group")).toBeUndefined();
-    expect(allText(pane)).not.toContain("v0.3.9");
-    expect(byId(pane, "auto-update-toggle-workspace")).toBeDefined();
   });
 });

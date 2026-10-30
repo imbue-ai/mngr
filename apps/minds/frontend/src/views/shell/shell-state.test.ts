@@ -401,6 +401,33 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("opens a chat of the workspace on screen in place, putting what floats over it away first", () => {
+    const shell = makeShell();
+    const sent: [string, string][] = [];
+    recordFocusChats(shell, sent);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openWorkspaceChat(WORKSPACE_ID, "agent-cc33");
+    expect(routeSet).not.toHaveBeenCalled();
+
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=settings&group=updates`);
+    shell.openWorkspaceChat(WORKSPACE_ID, "agent-dd44");
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, undefined);
+
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    shell.openWorkspaceChat(WORKSPACE_ID, "agent-ee55");
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+
+    expect(sent).toEqual([
+      [WORKSPACE_ID, "agent-cc33"],
+      [WORKSPACE_ID, "agent-dd44"],
+      [WORKSPACE_ID, "agent-ee55"],
+    ]);
+  });
+
   it("puts the feed overlay away on an in-place ask, which changes no route", () => {
     const shell = makeShell();
     shell.registerWorkspaceMessageSender(() => true);
@@ -1665,7 +1692,7 @@ describe("ShellState.handleEscape", () => {
   });
 });
 
-describe("ShellState update modal", () => {
+describe("ShellState updates", () => {
   type UpdateActivity = "IDLE" | "RUNNING" | "APPLYING";
 
   function applyUpdateActivity(
@@ -1693,41 +1720,39 @@ describe("ShellState update modal", () => {
     return shell;
   }
 
-  it("opens for a machine with no machine displayed, which is how the machines list opens it", () => {
-    // From a row on Home there is no displayed machine to key on.
-    const shell = outOfDateShell();
-    shell.openUpdateModal(AGENT);
-    expect(shell.openUpdateModalAgentId()).toBe(AGENT);
-  });
-
-  it("is dismissed by Escape wherever it was opened from", () => {
-    const shell = outOfDateShell();
-    shell.openUpdateModal(AGENT);
-    expect(shell.handleEscape()).toBe(true);
-    expect(shell.openUpdateModalAgentId()).toBeNull();
-  });
-
-  it("is dropped by a navigation to anywhere but its own machine", () => {
+  it("opens the machine's Updates tab from Home, flagging one arrival for the tab to flash", () => {
     const shell = outOfDateShell();
     stubAccentPainting();
-    shell.handleRouteChanged("/");
-    shell.openUpdateModal(AGENT);
-    shell.handleRouteChanged("/settings");
-    expect(shell.openUpdateModalAgentId()).toBeNull();
+    land(shell, "/");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openUpdatesTab(AGENT);
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}/options`, { tab: "settings", group: "updates" });
+    expect(shell.takeUpdatesTabArrival(AGENT)).toMatchObject({ agentId: AGENT, failure: null });
   });
 
-  it("rides the navigation into its own machine, which Update now makes before dispatching", () => {
-    // The press enters the machine before dispatching (the chat tab opens only
-    // for connected clients), so the modal must survive that navigation.
+  it("replaces the open panel's history entry, and flags a fresh arrival on each request", () => {
+    // Asked from the tab itself (a pill click while the panel is up) it must
+    // still flash, without stacking a Back entry per click.
     const shell = outOfDateShell();
     stubAccentPainting();
-    shell.handleRouteChanged("/");
-    shell.openUpdateModal(AGENT);
-    shell.handleRouteChanged(`/workspace/${AGENT}`);
-    expect(shell.openUpdateModalAgentId()).toBe(AGENT);
-    // Not pinned there: leaving the machine afterwards drops it like any other.
-    shell.handleRouteChanged("/");
-    expect(shell.openUpdateModalAgentId()).toBeNull();
+    land(shell, `/workspace/${AGENT}/options?tab=settings&group=general`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openUpdatesTab(AGENT);
+    const first = shell.takeUpdatesTabArrival(AGENT)?.serial ?? 0;
+    const failure = { isOk: false, error: "Couldn't reach this workspace.", detail: "" };
+    shell.openUpdatesTab(AGENT, { failure });
+
+    expect(routeSet).toHaveBeenLastCalledWith(
+      `/workspace/${AGENT}/options`,
+      { tab: "settings", group: "updates" },
+      { replace: true },
+    );
+    const second = shell.takeUpdatesTabArrival(AGENT);
+    expect(second?.serial).toBe(first + 1);
+    expect(second?.failure).toBe(failure);
   });
 
   it("leaves the recovery card alone while the machine is mid-apply", () => {

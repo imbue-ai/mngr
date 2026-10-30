@@ -20,6 +20,8 @@ import { Icon16 } from "../components/Icon";
 import type { IconName } from "../components/icons";
 import type { ShellState } from "./shell-state";
 import { isTitlebarPopupRoutePath } from "./classify";
+import type { TitlebarStatus } from "./titlebar-status";
+import { titlebarStatusPillClass, titlebarStatusPillContent } from "./titlebar-status";
 import type { OptionsTab } from "../../models/workspaceOptions";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
@@ -109,6 +111,8 @@ export interface TitlebarAnchors {
   rectOf(id: TitlebarPopupId): AnchorRect | null;
   /** The `#ws-tab-strip` rect, which the docked panels hang their card from. */
   stripRect(): AnchorRect | null;
+  /** The titlebar status pill's rect, or null while there is no pill. */
+  statusPillRect(): AnchorRect | null;
   /** Re-read every rect, redrawing only if one actually moved. */
   remeasure(): void;
 }
@@ -120,6 +124,7 @@ export interface TitlebarAnchors {
 export function titlebarAnchors(): TitlebarAnchors {
   const rects = new Map<string, AnchorRect>();
   let strip: AnchorRect | null = null;
+  let statusPill: AnchorRect | null = null;
 
   function measure(): boolean {
     let hasChanged = false;
@@ -136,6 +141,12 @@ export function titlebarAnchors(): TitlebarAnchors {
       strip = nextStrip;
       hasChanged = true;
     }
+    // Unlike the icons, the pill comes and goes with its status, so its absence is a reading too.
+    const nextStatusPill = readAnchorRect("titlebar-status-pill");
+    if (nextStatusPill === null ? statusPill !== null : !isSameRect(statusPill, nextStatusPill)) {
+      statusPill = nextStatusPill;
+      hasChanged = true;
+    }
     return hasChanged;
   }
 
@@ -148,6 +159,7 @@ export function titlebarAnchors(): TitlebarAnchors {
       return rects.get(entry.buttonId) ?? null;
     },
     stripRect: () => strip,
+    statusPillRect: () => statusPill,
     remeasure() {
       if (measure()) m.redraw();
     },
@@ -175,6 +187,9 @@ export interface RaisedTitlebarIconsAttrs {
   agentId: string | null;
   /** What the account switcher's copy says: the window's account, as the real button names it. */
   accountLabel: string;
+  /** The titlebar's status pill, raised with the icons so it stays readable
+   * (and clickable) over the dimmed titlebar; null for none. */
+  status: TitlebarStatus | null;
 }
 
 /** The raised copy of the titlebar's popup icons, drawn over the dimmed real
@@ -197,7 +212,9 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
         hasWorkspaceRequestDot,
         agentId,
         accountLabel,
+        status,
       } = vnode.attrs;
+      const statusPillRect = anchors.statusPillRect();
       return m(
         "div",
         {
@@ -206,7 +223,8 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
           "aria-label": "Titlebar panels",
           class: "contents",
         },
-        TITLEBAR_POPUP_ICONS.map((entry) => {
+        [
+          ...TITLEBAR_POPUP_ICONS.map((entry) => {
           const rect = anchors.rectOf(entry.id);
           if (rect === null) return null;
           const isSelected = entry.id === selected;
@@ -278,9 +296,28 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
             ],
           );
         }),
+          status !== null && statusPillRect !== null ? raisedStatusPill(status, statusPillRect) : null,
+        ],
       );
     },
   };
+}
+
+/** The status pill's raised copy, at the real pill's rect. */
+function raisedStatusPill(status: TitlebarStatus, rect: AnchorRect): m.Children {
+  return m(
+    "button",
+    {
+      id: "titlebar-status-pill-raised",
+      "data-status": status.key,
+      class: `titlebar-surface pointer-events-auto fixed ${titlebarStatusPillClass(status)}`,
+      style: `left: ${rect.x}px; top: ${rect.y}px; height: ${rect.height}px`,
+      type: "button",
+      "data-tooltip": status.tooltip,
+      onclick: () => status.onClick(),
+    },
+    titlebarStatusPillContent(status),
+  );
 }
 
 /** Go from whichever titlebar popup is open to the one `id` names, putting the
