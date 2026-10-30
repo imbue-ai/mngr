@@ -11,6 +11,7 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 
@@ -30,6 +31,11 @@ REAL_HOME: Path = Path.home()
 # mngr schedule commands need to be in a git repo for auto-merge and code
 # packaging to work.
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent.parent
+
+# `cleanup_modal_app` runs in a test's `finally`, so it spends from the same
+# per-test timeout the test body does. Both of its Modal calls get this long.
+MODAL_APP_CLEANUP_TIMEOUT_SECONDS: Final[int] = 30
+MODAL_APP_CLEANUP_RESERVE_SECONDS: Final[int] = 2 * MODAL_APP_CLEANUP_TIMEOUT_SECONDS
 
 
 def _get_all_plugin_names() -> frozenset[str]:
@@ -147,7 +153,7 @@ def cleanup_modal_app(
             ["uv", "run", "modal", "app", "list", "--json", "--env", modal_environment],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=MODAL_APP_CLEANUP_TIMEOUT_SECONDS,
             env=env,
             cwd=cwd,
         )
@@ -161,7 +167,7 @@ def cleanup_modal_app(
                         # CI), which would otherwise leak the test app.
                         ["uv", "run", "modal", "app", "stop", app.app_id, "--env", modal_environment, "--yes"],
                         capture_output=True,
-                        timeout=30,
+                        timeout=MODAL_APP_CLEANUP_TIMEOUT_SECONDS,
                         env=env,
                         cwd=cwd,
                     )
