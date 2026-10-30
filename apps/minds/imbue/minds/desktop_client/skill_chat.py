@@ -216,7 +216,7 @@ def build_account_binding_probe_args(workspace_address: str) -> list[str]:
     probe = (
         f"if [ -f {script} ]; then "
         f"echo {ACCOUNT_ARGS_BEGIN_SENTINEL}; "
-        f"uv run python {script} {shlex.quote(_CHAT_HARNESS)}; "
+        f"uv run --no-sync python {script} {shlex.quote(_CHAT_HARNESS)}; "
         f"account_args_status=$?; "
         f"echo {ACCOUNT_ARGS_END_SENTINEL}; "
         f"echo {ACCOUNT_ARGS_EXIT_SENTINEL}$account_args_status; "

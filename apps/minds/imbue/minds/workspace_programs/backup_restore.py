@@ -684,7 +684,7 @@ def main(argv: Sequence[str]) -> None:
         _finish(result, obligations, BackupProgramStatus.FAILED, "no --snapshot-subpath provided")
 
     # Gate before anything mutates. The chat half needs the current machine
-    # code (`uv run mngr`); a forced restore skips only that half -- the tick
+    # code (`uv run --no-sync mngr`); a forced restore skips only that half -- the tick
     # wait is self-healing (a stopped host-backup service means no live tick)
     # and needs no machine code.
     if is_chat_gate_skipped:

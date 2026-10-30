@@ -500,7 +500,9 @@ def test_update_now_asks_an_older_templates_account_resolver_once_and_creates_on
     answer = _run_mode(staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
-    assert staged.tool_calls("uv") == [["run", "python", "system/scripts/default_account_args.py", "claude"]]
+    assert staged.tool_calls("uv") == [
+        ["run", "--no-sync", "python", "system/scripts/default_account_args.py", "claude"]
+    ]
     creates = [call for call in staged.recorded_calls() if call[:1] == ["create"]]
     assert len(creates) == 1
     assert creates[0][creates[0].index("--env") + 1] == "CLAUDE_CONFIG_DIR=/home/user/acc/a1"
