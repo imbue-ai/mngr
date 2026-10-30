@@ -23,7 +23,7 @@ this package for the full picture):
    the VM self-deletes even if pytest itself is killed. The production
    GcpProvider refuses to create instances under pytest without this set.
 
-Run manually (no per-PR CI path runs these; the ``mngr Release Tests`` workflow runs them
+Run manually (no per-PR CI path runs these; the ``Release Tests`` workflow runs them
 on manual dispatch with ``run_gcp=true``):
 
     MNGR_GCP_RELEASE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=1800 \\

@@ -4,12 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
-Refreshed a docstring naming the `Release Tests` workflow, which is called `mngr Release Tests`.
-
 ## 2026-10-18
 
 `mngr gcp prepare --format jsonl` now announces its two steps (`gcp.firewall`, `gcp.state_bucket`) as a plan and reports each one starting and completing, so a caller driving it from a UI can show real progress while the firewall rule and state bucket are set up.

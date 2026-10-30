@@ -24,7 +24,6 @@ DARK_SURFACE_SUFFIX: Final[str] = "-on-dark"
 # one fails here.
 SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
     {
-        "asana",
         "calendly",
         "claude-ai",
         "coolify",

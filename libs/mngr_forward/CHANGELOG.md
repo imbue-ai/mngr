@@ -6,10 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-### Changed
-
-- Changed: The `httpx2` dependency floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
-
 ### Fixed
 
 - Fixed: An SSH host that closes the connection during the handshake or while a reverse tunnel is being set up now surfaces as an `SSHTunnelError` (`HOST_CONNECT`) instead of a bare paramiko `EOFError` that used to kill the reverse-tunnel health-check thread and abort the latchkey discovery cycle.

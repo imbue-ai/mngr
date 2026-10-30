@@ -4,12 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-The `httpx2` floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
 ## 2026-10-28
 
 - An SSH host that closes the connection during the handshake, or while a reverse tunnel is being requested, now surfaces as an `SSHTunnelError` tagged `HOST_CONNECT` instead of a bare paramiko `EOFError`. Previously the `EOFError` escaped every caller's handler: it killed the reverse-tunnel health-check thread, so no tunnel in the process was repaired again until restart, and it aborted the latchkey discovery cycle that was wiring the tunnel.

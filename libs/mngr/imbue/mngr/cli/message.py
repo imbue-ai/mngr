@@ -326,21 +326,27 @@ If no message is specified with --message or --message-file, reads from stdin
 Use '-' in place of agent names to read them from stdin, one per line.
 
 Delivery guarantee: for interactive TUI agents (claude, codex, antigravity)
-the command succeeds only after durable evidence shows the agent accepted the
-message (for claude, the message's own content appearing in its transcript;
-for codex/antigravity, their turn marker advancing). If no evidence appears
-within the confirmation window -- with the Enter keystroke re-sent a bounded
-number of times along the way -- the command fails with diagnostics instead of
-silently dropping the message. Messages starting with '/' (TUI slash commands
+the command succeeds only after evidence shows the agent accepted the message
+(for claude, the message's own content appearing in its transcript, or its
+screen showing the message submitted with the input box empty, since claude
+records it only once its SessionStart hooks finish; for codex/antigravity,
+their turn marker advancing). If no evidence appears within the confirmation
+window -- with the Enter keystroke re-sent a bounded number of times along the
+way -- the agent's screen decides: for claude, a message shown submitted with
+the input box empty is delivered, and one still in the input box was never
+taken, so it is cleared from there and the command fails as not submitted.
+Otherwise the command fails with diagnostics instead of silently
+dropping the message. Messages starting with '/' (TUI slash commands
 such as /clear) are best-effort: they succeed even when no evidence is
 observable, logging a warning and an agent event instead.
 
 Exit codes: 0 = delivered and no unresolved dialog; 7 = delivered, but a
 blocking interactive dialog (e.g. Claude's /model confirmation) could not be
 resolved and the agent is now stuck on it (see the agent-type auto_accept_*
-settings); any other non-zero = the message was not delivered, or, when the
-error says no submission evidence appeared, it was typed but not confirmed and
-may already be in the agent's input, so check before resending.""",
+settings); any other non-zero = the message was not delivered (after a not
+submitted failure, sending it again delivers it once), or, when the error says
+no submission evidence appeared, it was typed but not confirmed and may already
+be in the agent's input, so check before resending.""",
     aliases=("msg",),
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),

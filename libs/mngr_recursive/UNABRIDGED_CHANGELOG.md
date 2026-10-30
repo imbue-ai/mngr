@@ -4,10 +4,6 @@ Full, unedited changelog entries for the `mngr_recursive` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
 ## 2026-10-23
 
 Recursive provisioning installs uv 0.13.4 from its versioned installer instead of whatever version `install.sh` resolves to at run time. 0.13.4 drops the compromised `emSign ECC Root CA - G3` root.

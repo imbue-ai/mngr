@@ -86,7 +86,6 @@ The CC BY 4.0 set requires attribution wherever the app ships. That lives in
 | `calendly.svg` | simple-icons v13.21.0 (CC0-1.0) |
 | `umami.svg` | simple-icons v13.21.0 (CC0-1.0) |
 | `airtable-mcp.svg` | `logos:airtable` |
-| `asana.svg` | `logos:asana-icon` |
 | `atlassian-mcp.svg` | `logos:atlassian` |
 | `buildkite-mcp.svg` | `logos:buildkite-icon` |
 | `cal-com-mcp.svg` | `selfhst:cal-com` |
@@ -128,7 +127,7 @@ inherits no color from the page: left implicit, all would paint black.
 
 Several of the vendor marks are single-color because that is how the brand
 draws them — GitHub, Linear, Sentry, Dropbox, Discord and Yelp in their brand
-ink, Claude and Asana each in their own coral, Coolify in its purple, OpenRouter in its violet,
+ink, Claude in its coral, Coolify in its purple, OpenRouter in its violet,
 ngrok, Ramp, Tailscale and Vercel in black or near-black. That is the brand's
 choice, not a monochrome treatment applied here.
 

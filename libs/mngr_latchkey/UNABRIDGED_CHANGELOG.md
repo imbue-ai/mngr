@@ -4,14 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
-Bump Latchkey version to 3.20.0.
-
-The VPS gateway installs latchkey-curl-shims v0.7.1. Its curl router no longer asks curl-impersonate to decode the reply of an `X-Imbue-Impersonate` request: the reply is handed on compressed, the way the Chrome profile asked for, and the caller's own `latchkey curl --compressed` decodes it. This fixes the gateway framing a decoded body with the compressed body's `Content-Length`, which truncated Slack replies for datalib. The router also strips the caller's browser-identity headers (`Accept-Encoding`, `Accept-Language`, client hints, `Sec-Fetch-*`) on marked requests so Chrome's stand, takes the Chrome profile from the marker's value (`1` still means the default), and honors an environment proxy like the system curl does.
-
 ## 2026-10-28
 
 The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection to an agent host loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake). The failure is now retried on a rebuilt connection and, if it persists, recorded as a transient wiring-step failure for the next discovery cycle to retry.

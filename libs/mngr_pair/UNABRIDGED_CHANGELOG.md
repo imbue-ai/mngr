@@ -4,10 +4,6 @@ Full, unedited changelog entries for the `mngr_pair` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
 ## 2026-10-26
 
 `mngr pair`'s first pass now always ends with a `pair_transferring` event carrying `is_transferring: false`, even when unison found nothing to move ("Nothing to do"). Before, a pairing whose two directories already agreed never said so: `pair_syncing` only means unison is up, and a quiet first pass is not an edge, so a caller could not tell "compared and level" from "still comparing". Human output prints `Up to date.` at that point too.

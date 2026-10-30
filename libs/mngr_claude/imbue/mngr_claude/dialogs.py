@@ -196,6 +196,43 @@ def has_input_prompt_line(pane_content: str) -> bool:
 
 
 @pure
+def _alnum_lower(text: str) -> str:
+    return "".join(char for char in text.lower() if char.isalnum())
+
+
+@pure
+def is_input_text_of_message(input_text: str, message: str, paste_placeholder_prefixes: Sequence[str]) -> bool:
+    """Whether text in the input box is the start of ``message``: words that begin it, or a paste's placeholder."""
+    if any(input_text.startswith(prefix) for prefix in paste_placeholder_prefixes):
+        return True
+    words = _alnum_lower(input_text)
+    return words != "" and _alnum_lower(message).startswith(words)
+
+
+@pure
+def count_message_turns_above_input_row(
+    pane_content: str, message: str, paste_placeholder_prefixes: Sequence[str]
+) -> int | None:
+    """How many past user turns above the input row read as ``message``, or None when no input row is on screen.
+
+    Claude renders each submitted message at column 0 behind the prompt glyph, showing its first
+    line (or the placeholder of a long paste). A turn reads as the message when it is a paste
+    placeholder or its words begin the message's, so an earlier turn can read as it too: only a
+    count that grew past one taken before the send says this send's turn is on screen.
+    """
+    lines = pane_content.splitlines()
+    input_row_idx = _find_input_row_idx(lines)
+    if input_row_idx is None:
+        return None
+    return sum(
+        1
+        for line in lines[:input_row_idx]
+        if line.startswith(INPUT_PROMPT_GLYPH)
+        and is_input_text_of_message(line[len(INPUT_PROMPT_GLYPH) :].strip(), message, paste_placeholder_prefixes)
+    )
+
+
+@pure
 def is_shell_command_message(message: str) -> bool:
     """Whether a message drives Claude Code's shell (bash) mode -- a leading ``!``.
 

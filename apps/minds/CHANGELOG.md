@@ -8,8 +8,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
-- Added: Nineteen more connectors (Airtable, Atlassian, Buildkite, Cal.com, Fastmail, Hugging Face, Linktree, Neon, Netlify, OpenRouter, PayPal, PostHog, Supabase, Tailscale, TickTick, Trello, Vercel, Webflow, Wix) now show their real logo in the Permissions tab instead of the generic glyph.
-- Added: Started the Imbue Studio 0.9.4 stable rollout — the desktop stable channel offers the 0.9.4 build to 20% of mac and Linux installs, and the stable download link and browser-created workspaces pin `minds-v0.9.4`.
 - Added: Released Imbue Studio 0.9.4 and promoted it to the alpha desktop and browser channels (`FALLBACK_BRANCH` pinned to `minds-v0.9.4`; beta stays 0.8.7, stable 0.8.5), carrying harness-version-mismatch warnings, Antigravity reasoning-effort recording, and clearing of the data-encryption key after logout.
 - Added: Native crashes of the desktop app's main process now carry crashpad annotations on their Sentry minidump (last navigation milestone, a once-a-minute memory snapshot, and the last main-process event handled) to diagnose an unsymbolicated `EXC_BREAKPOINT` crash.
 - Added: Imbue Studio asks before a workspace opens a custom-scheme link (e.g. `paseo://`, `slack://`, `vscode://`), with a per-scheme "Always allow"; workspace apps on newer templates can handle such links themselves.
@@ -169,9 +167,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: The desktop backend's HTTP clients now use `httpx2` (Pydantic's maintained `httpx` fork); on macOS the backend sets `SSL_CERT_FILE` to its certifi bundle so TLS keeps working before Apple's 2026-10-19 emSign update, while Linux uses the host CA store.
-- Changed: Bumped bundled Latchkey to 3.20.0.
-- Changed: Redesigned workspace updates — a titlebar status pill (replacing the full-width notice band and the update popup) carries a workspace's update and opens the rebuilt Settings > Updates tab, and auto-update is now per-workspace.
 - Changed: The update modal's security-fix notice is now drawn in the warning (orange) palette with plainer "See details" text.
 - Changed: The "Failed to start" screen (and reports filed from it) now show the backend's last stderr lines, exit code or signal, run duration, and how it was launched, instead of only the exit code.
 - Changed: Redesigned the share panel into two-line person cards that show whether each person has opened your workspace and where their invitation stands, replacing the "(hasn't signed up yet)" / "Joined" text.
@@ -388,8 +383,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
-- Fixed: The latchkey gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing datalib's Slack sync failing on a truncated `auth.test` reply.
-- Fixed: The `/api/v1/files` WebDAV server returns `403 Forbidden` instead of `500` (and no longer reports to Sentry) when macOS privacy protection blocks a folder such as Photos, Music or TV.
 - Fixed: An update running on a workspace whose template predates minds-v0.8.x is no longer stopped partway when the workspace runs short of memory.
 - Fixed: Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent runs a background command.
 - Fixed: A folder sync whose workspace was not running now waits and starts once the workspace is running again, instead of staying stopped until "Try again".
@@ -522,7 +515,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Security
 
-- Security: Cleared every `pnpm audit --prod` finding in the Electron package (28 advisories, 16 high) and the renderer (`dompurify` 3.4.17 fixes a critical sanitizer bypass).
 - Security: The desktop app's Electron 45 bundle moves to 45.1.0, adding Chromium 156 security fixes and stricter handling of malformed asar archives and File System Access writes to `.git/hooks`.
 - Security: Security update for the emSign/eMudhra CA compromise -- Electron 45, uv 0.13.4, certifi 2026.10.19 and Node 24.22.1 drop the compromised CA root, and workspaces below the new security floor are offered the fix (Electron 45 drops macOS 12 support).
 - Security: Redact secrets from persisted logs. The `mngr create` subprocess is now given a log-safe process `name` with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field or `ProcessError` messages. The `modal secret create` subprocess used by `minds env` deploy tooling is likewise named with its `KEY=VALUE` secret values masked so raw Vault secrets no longer reach the thread name or error messages. The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie — a reusable, session-lifetime bearer token — before writing backend stdout events to disk. The single-use one-time login code is left as-is (spent immediately at session start).

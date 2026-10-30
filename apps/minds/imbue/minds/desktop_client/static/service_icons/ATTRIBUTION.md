@@ -32,14 +32,13 @@ Dedicated to the public domain under CC0 1.0:
 <https://creativecommons.org/publicdomain/zero/1.0/>. No attribution is
 required; it is recorded here for provenance.
 
-Icons used, unmodified: `airtable`, `asana-icon`, `atlassian`, `aws`,
-`buildkite-icon`, `claude-icon`, `discord-icon`, `dropbox`, `figma`,
-`github-icon`, `gitlab-icon`, `google-analytics`, `google-calendar`,
-`google-maps`, `google-drive`, `google-gmail`, `hugging-face-icon`,
-`linear-icon`, `mailchimp-freddie`, `neon-icon`, `netlify-icon`,
-`notion-icon`, `openrouter-icon`, `paypal`, `posthog-icon`, `sentry-icon`,
-`slack-icon`, `supabase-icon`, `tailscale`, `telegram`, `todoist-icon`,
-`zoom-icon`.
+Icons used, unmodified: `airtable`, `atlassian`, `aws`, `buildkite-icon`,
+`claude-icon`, `discord-icon`, `dropbox`, `figma`, `github-icon`,
+`gitlab-icon`, `google-analytics`, `google-calendar`, `google-maps`,
+`google-drive`, `google-gmail`, `hugging-face-icon`, `linear-icon`,
+`mailchimp-freddie`, `neon-icon`, `netlify-icon`, `notion-icon`,
+`openrouter-icon`, `paypal`, `posthog-icon`, `sentry-icon`, `slack-icon`,
+`supabase-icon`, `tailscale`, `telegram`, `todoist-icon`, `zoom-icon`.
 
 ## simple-icons — CC0 1.0
 

@@ -4,21 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-The owner-exec client's requests now use `httpx2`, Pydantic's maintained fork of the unmaintained `httpx` with the same API. The package depends on `httpx2>=2.13.1` instead of `httpx`. httpx2 verifies TLS against the operating system's trust store instead of certifi's bundle, unless `SSL_CERT_FILE` names a bundle.
-
-Adds the `httpx imports` common ratchet (`PREVENT_HTTPX_IMPORT`, `check_httpx_import`) and the repo-wide `test_prevent_httpx_import` test that uses it, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
-The pytest tier docstring described release tests as running via "the Release Tests workflow and
-TMR". That workflow is named `mngr Release Tests`, and it is only one of two lanes: it excludes the
-`apps/minds` tree by path, and minds' release tests run from the minds jobs in `ci.yml` behind that
-workflow's `run_minds_release_tests` dispatch input. The docstring now names both.
-
-An error report's log upload no longer fails when the log file it selected is gone by the time the upload runs.
-
-Log attachments are selected when the report is built but read later on a worker thread. A size-rotated live log (such as the `mngr latchkey forward` daemon's `events.jsonl`) can be renamed away by its own log sink in between, which made the upload raise `FileNotFoundError` and file a separate `Sentry callback raised` event. The uploader now logs the missing file at INFO and skips it. That attachment's URI on the event stays unresolved, the same way a reserved report file that never materialized already behaves. Other read errors are still raised.
-
 ## 2026-10-28
 
 The `@pytest.mark.release` time-limit docstring no longer says release tests run on `v*` tag pushes.

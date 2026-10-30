@@ -26,9 +26,12 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.installation import VersionMismatchPolicy
+from imbue.mngr.agents.mock_host_test import run_bash_against_stand_in_pane
+from imbue.mngr.agents.tui_utils import PANE_TARGET_SHELL_VARIABLE
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import UnconfirmedSubmissionReading
 from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.message import MessageResult
@@ -1705,7 +1708,7 @@ def test_content_probe_confirms_only_on_message_content_appended_after_baseline(
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     message = 'Please destroy that "inspiration" repo\non github now'
     probes = agent._build_submission_evidence_probes(message, SubmissionConfirmationPolicy.STRICT)
-    assert [probe.name for probe in probes] == ["content-native-transcript", "content-raw-transcript"]
+    assert [probe.name for probe in probes] == ["content-native-transcript", "content-raw-transcript", "screen-taken"]
 
     state_dir = tmp_path / "agent-state"
     log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
@@ -2222,6 +2225,218 @@ def test_send_falls_back_to_append_warning_when_clearing_restored_compact_leaves
 
     assert agent.pressed_keys == ["C-e", "C-u"]
     assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
+
+
+def _screen(above: str, input_text: str) -> str:
+    return f"{above}\n────────\n❯ {input_text}\n────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+
+
+_EARLIER_TURNS = "❯ what is 4*8\n● 32\n✻ Cogitated for 4s"
+_PASTE_PLACEHOLDER = "[Pasted text #1 +20 lines]"
+_HELD_DURING_HOOKS_PANE = (
+    "❯ what is 4*8\n● 32\n✻ Cogitated for 4s\n❯ what is 3+3? reply with just the number\n"
+    "✽ Undulating… (running SessionStart hooks… 8/9 · 1m 35s)\n────────\n❯ \n────────\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+)
+_UNCONFIRMED_MESSAGE = "what is 3+3? reply with just the number"
+_PRE_SEND_PANE = _screen(_EARLIER_TURNS, "")
+
+
+@pytest.mark.parametrize(
+    ("pre_send_pane", "panes", "expected_reading", "expected_keys"),
+    [
+        pytest.param(
+            _PRE_SEND_PANE, [_HELD_DURING_HOOKS_PANE], UnconfirmedSubmissionReading.TAKEN, [], id="held-during-hooks"
+        ),
+        pytest.param(
+            None,
+            [_HELD_DURING_HOOKS_PANE],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="held-but-nothing-to-compare-against",
+        ),
+        pytest.param(
+            _screen(f"{_EARLIER_TURNS}\n❯ what", ""),
+            [_screen(f"{_EARLIER_TURNS}\n❯ what", "")],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="only-an-earlier-turn-that-begins-it",
+        ),
+        pytest.param(
+            _screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", ""),
+            [_screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", "")],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="only-an-earlier-copy",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [_input_box_pane(_UNCONFIRMED_MESSAGE), _input_box_pane(_UNCONFIRMED_MESSAGE), _EMPTY_INPUT_BOX_PANE],
+            UnconfirmedSubmissionReading.NOT_TAKEN,
+            ["C-e", "C-u"],
+            id="still-in-the-box-is-cleared",
+        ),
+        pytest.param(
+            None,
+            [_input_box_pane(_UNCONFIRMED_MESSAGE)],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="in-the-box-but-no-capture-to-tell-a-draft-by",
+        ),
+        pytest.param(
+            "Resuming the conversation…",
+            [_input_box_pane(_UNCONFIRMED_MESSAGE)],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="in-the-box-but-no-input-box-before-the-send",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [
+                _input_box_pane(_PASTE_PLACEHOLDER),
+                _input_box_pane(_PASTE_PLACEHOLDER),
+                _EMPTY_INPUT_BOX_PANE,
+            ],
+            UnconfirmedSubmissionReading.NOT_TAKEN,
+            ["C-e", "C-u"],
+            id="a-paste-still-in-the-box",
+        ),
+        pytest.param(
+            _input_box_pane("/compact"),
+            [_input_box_pane(_UNCONFIRMED_MESSAGE), _input_box_pane(_UNCONFIRMED_MESSAGE), _EMPTY_INPUT_BOX_PANE],
+            UnconfirmedSubmissionReading.NOT_TAKEN,
+            ["C-e", "C-u"],
+            id="still-in-the-box-after-a-restored-compact-the-send-cleared",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [_input_box_pane("a draft of my own")],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="someone-elses-draft",
+        ),
+        pytest.param(
+            _input_box_pane(_PASTE_PLACEHOLDER),
+            [_input_box_pane(f"{_PASTE_PLACEHOLDER}{_UNCONFIRMED_MESSAGE}")],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="appended-to-a-pasted-draft",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [_input_box_pane("just the number")],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="a-draft-of-words-from-inside-the-message",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [_input_box_pane(_UNCONFIRMED_MESSAGE)],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            ["C-e", "C-u"],
+            id="a-box-that-will-not-clear",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            [_EMPTY_INPUT_BOX_PANE],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="empty-with-no-sign-of-it",
+        ),
+        pytest.param(
+            _PRE_SEND_PANE,
+            ["Do you trust the files in this folder?\n❯ 1. Yes"],
+            UnconfirmedSubmissionReading.UNKNOWN,
+            [],
+            id="a-dialog",
+        ),
+    ],
+)
+def test_an_unconfirmed_send_is_read_off_the_input_box(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    pre_send_pane: str | None,
+    panes: list[str | None],
+    expected_reading: UnconfirmedSubmissionReading,
+    expected_keys: list[str],
+) -> None:
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, panes, agent_class=_KeyRecordingClaudeAgent)
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    assert agent._read_unconfirmed_submission(_TARGET, _UNCONFIRMED_MESSAGE, pre_send_pane) is expected_reading
+    assert agent.pressed_keys == expected_keys
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "is_taken"),
+    [
+        pytest.param(
+            _screen(_EARLIER_TURNS, _UNCONFIRMED_MESSAGE), _HELD_DURING_HOOKS_PANE, True, id="held-during-hooks"
+        ),
+        pytest.param(
+            _screen(_EARLIER_TURNS, _UNCONFIRMED_MESSAGE),
+            _screen(_EARLIER_TURNS, _UNCONFIRMED_MESSAGE),
+            False,
+            id="still-in-the-box",
+        ),
+        pytest.param(
+            _screen(_EARLIER_TURNS, _UNCONFIRMED_MESSAGE),
+            _screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", _UNCONFIRMED_MESSAGE),
+            False,
+            id="shown-but-back-in-the-box",
+        ),
+        pytest.param(
+            _screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", _UNCONFIRMED_MESSAGE),
+            _screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", ""),
+            False,
+            id="only-an-earlier-copy",
+        ),
+        pytest.param(
+            _screen(_EARLIER_TURNS, _UNCONFIRMED_MESSAGE),
+            "Do you want to proceed?\n❯ 1. Yes\n  2. No",
+            False,
+            id="a-dialog",
+        ),
+        pytest.param(
+            _screen(_EARLIER_TURNS, _PASTE_PLACEHOLDER),
+            _screen(f"{_EARLIER_TURNS}\n❯ {_PASTE_PLACEHOLDER}", ""),
+            True,
+            id="a-paste",
+        ),
+        pytest.param(
+            "Resuming the conversation…",
+            _screen(f"{_EARLIER_TURNS}\n❯ {_UNCONFIRMED_MESSAGE}", ""),
+            False,
+            id="no-baseline-to-compare-against",
+        ),
+    ],
+)
+def test_the_screen_probe_confirms_a_message_claude_shows_taken(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    before: str,
+    after: str,
+    is_taken: bool,
+) -> None:
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [before])
+    probe = agent._build_screen_submission_probe(_UNCONFIRMED_MESSAGE)
+    assert probe is not None
+    target = f"{PANE_TARGET_SHELL_VARIABLE}=%1"
+
+    base = run_bash_against_stand_in_pane(f"{target}; {probe.baseline_command}", before).stdout.strip()
+    current = run_bash_against_stand_in_pane(f"{target}; base={base}; {probe.poll_command}", after).stdout.strip()
+
+    assert (current != "" and current != base) is is_taken
+
+
+def test_a_message_with_no_ascii_letters_or_digits_gets_no_screen_probe(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    probes = agent._build_submission_evidence_probes("日本語のメッセージ", SubmissionConfirmationPolicy.STRICT)
+    assert [probe.name for probe in probes] == ["any-record-native-transcript", "any-record-raw-transcript"]
 
 
 @pytest.mark.parametrize(

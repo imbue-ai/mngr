@@ -4,14 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-The connector client's requests now use `httpx2`, Pydantic's maintained fork of the unmaintained `httpx` with the same API. The package depends on `httpx2>=2.13.1` instead of `httpx`. httpx2 verifies TLS against the operating system's trust store instead of certifi's bundle, unless `SSL_CERT_FILE` names a bundle.
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
-Removed the connector client's unused `auth_get_user` method along with the unauthenticated `GET /auth/users/{user_id}` connector route it bound to. Nothing in the plugin or the minds app ever called it; `GET /users/{user_id}` (signed-in callers only) remains the way to read a user's identity record by id.
-
 ## 2026-10-26
 
 Added: `ImbueCloudAccountDeletedError`, raised when the connector refuses a call with 403 `account_deleted` (a deleted account's device-token exchange, which `mngr imbue_cloud login` completes through). It carries the connector's own message, which says the account has been deleted and names the support contact, where before the client raised `ImbueCloudAuthError("Unauthenticated (403): ...")` with the JSON body as text. The CLI emits it as `code: account_deleted`, mirroring `account_suspended`, so the minds desktop client can key off the refusal structurally.

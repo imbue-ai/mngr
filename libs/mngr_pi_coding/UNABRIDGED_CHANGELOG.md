@@ -4,12 +4,6 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-29
-
-Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
-
-The pi lifecycle extension now writes the assistant message pi is streaming to `$MNGR_AGENT_STATE_DIR/pi_reply_draft` as it arrives (from pi's `message_update` events, at most every 100 ms, with the finished text on `message_end`), and removes it when the turn ends or a new session starts. The Imbue Studio chat reads it to show a pi reply while it is being written, for any model pi runs.
-
 ## 2026-10-28
 
 New `version_mismatch` setting on the pi-coding agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.

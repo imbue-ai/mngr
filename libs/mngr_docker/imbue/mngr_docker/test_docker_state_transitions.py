@@ -93,7 +93,7 @@ def test_discover_host_state_failed_for_bad_build(
     assert state == HostState.FAILED
 
 
-# Release tests -- marked @pytest.mark.release, run via the mngr Release Tests workflow and TMR
+# Release tests -- marked @pytest.mark.release, run via the Release Tests workflow and TMR
 
 
 @pytest.mark.release
