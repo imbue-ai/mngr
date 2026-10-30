@@ -1,0 +1,1 @@
+Added a second WireGuard operator key for Josh (`josh-laptop`) to the dev (`10.112.0.7`), staging (`10.96.0.6`), and production (`10.64.0.6`) management-plane peer lists, so the laptop can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers` for each tier.

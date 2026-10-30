@@ -77,6 +77,13 @@ name = "russell"
 public_key = "F6Lqe8VQX4ruwqHnT9NutBPspliXjzM0Dq1KWlYqtC8="
 address = "10.64.0.5"
 
+# Josh's laptop key (a second identity beside the desktop's "josh" entry; the
+# private half lives on the laptop at ~/.mindsadmin/production/wireguard.key).
+[[management_plane.wireguard.operators]]
+name = "josh-laptop"
+public_key = "7Wh3p0l8ITk5S08ZOH4pdlWE607GcliQmpa93tHJPV4="
+address = "10.64.0.6"
+
 # The tier's Modal Proxy: created 2026-09-13 in the minds-production Modal
 # workspace's 'main' environment, in Modal's us-east region.
 [management_plane.modal_proxy]

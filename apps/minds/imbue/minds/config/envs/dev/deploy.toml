@@ -121,6 +121,13 @@ name = "russell"
 public_key = "1i7iKVb4FUMIUTOzkCmTWyiBqZ1jJnNuqEJgobvdgl4="
 address = "10.112.0.6"
 
+# Josh's laptop key (a second identity beside the desktop's "josh" entry; the
+# private half lives on the laptop at ~/.mindsadmin/dev/wireguard.key).
+[[management_plane.wireguard.operators]]
+name = "josh-laptop"
+public_key = "tYlyD8X7BojIAm280ppHF6cvSr9hzbNN4JjTxwnGJkE="
+address = "10.112.0.7"
+
 # The tier's Modal Proxy: created once in the minds-dev Modal workspace,
 # named here with its static egress IPs. Proxy lookup is Modal-environment
 # scoped and the workspace holds at most one proxy, so the shared dev proxy
