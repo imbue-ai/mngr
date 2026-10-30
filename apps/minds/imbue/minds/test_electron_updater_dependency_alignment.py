@@ -2,11 +2,11 @@
 
 The Electron shell pins ``electron-updater`` exactly and also lists its
 ``builder-util-runtime`` dependency as a direct dependency, pinned to the same
-version electron-updater resolved against. ``@todesktop/runtime`` pulls in an
-old electron-updater with an old builder-util-runtime, and ToDesktop's Linux
-build packs electron-updater without its nested copy, so the top-level copy is
-the one electron-updater actually runs against. The direct pin decides which
-copy that is.
+version electron-updater resolved against. ToDesktop's Linux build packs
+electron-updater without its nested builder-util-runtime copy, so the top-level
+copy is the one electron-updater actually runs against, and any other
+builder-util-runtime in the graph would be hoisted in its place. The direct pin
+decides which copy that is.
 
 That only helps while the pin equals what the lockfile records under the
 pinned electron-updater's own dependencies. If electron-updater moves to a

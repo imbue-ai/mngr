@@ -17,13 +17,13 @@
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
-    "@sentry/electron": "^7.13.0",
-    "@todesktop/runtime": "^1.6.0",
+    "@sentry/electron": "^7.20.1",
+    "@todesktop/runtime": "^2.1.4",
     "builder-util-runtime": "9.7.0",
     "electron-updater": "6.8.9",
     "latchkey": "^3.20.0",
     "semver": "^7.6.3",
-    "smol-toml": "^1.6.1"
+    "smol-toml": "^1.9.1"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",

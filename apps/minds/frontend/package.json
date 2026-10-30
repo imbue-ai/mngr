@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@tanstack/query-core": "^5.103.2",
-    "dompurify": "^3.4.13",
+    "dompurify": "^3.4.17",
     "mithril": "^2.2.7"
   },
   "devDependencies": {
