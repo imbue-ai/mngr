@@ -14,12 +14,9 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from imbue.minds.desktop_client.e2e_workspace_runner import E2E_HARNESS_MARKER_ENV_VAR
 from imbue.minds.desktop_client.e2e_workspace_runner import MAIN_CHAT_ROW_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import NEW_CHAT_ROW_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import NEW_TERMINAL_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
-from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_FIELD_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
@@ -27,9 +24,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_t
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
-from imbue.minds.desktop_client.e2e_workspace_runner import open_terminal_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
-from imbue.minds.desktop_client.e2e_workspace_runner import start_new_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 
 # A workspace-ready URL (matches the agent-subdomain pattern) and a still-pending
@@ -322,62 +317,6 @@ def test_chat_frame_raises_when_no_chat_opens_in_time() -> None:
         chat_frame(cast(Frame, workspace), timeout_seconds=0)
 
 
-class _FakeLauncherWorkspace(_FakeWorkspaceFrame):
-    """A workspace frame under the desktop's launcher contract.
-
-    The launcher opens from the taskbar's search field (its input, or the field itself where the
-    compact layout renders it as a button: ``has_launcher_input``) and its rows are in the DOM
-    only while its menu shows; a row wait succeeds only when it is scoped to the showing menu,
-    the way the runner issues it. Records the selectors clicked; ``existing_chats`` are open
-    from the start (the welcome chat a fresh workspace opens on), and the chat frame joins them
-    only after the New Chat row is pressed, the way the shell frames it.
-    """
-
-    def __init__(
-        self,
-        *,
-        is_launcher_showing: bool,
-        existing_chats: Sequence[_FakeFrame],
-        chat: _FakeFrame,
-        has_launcher_input: bool = True,
-    ) -> None:
-        super().__init__(child_frame_lists=[list(existing_chats)])
-        self._is_launcher_showing = is_launcher_showing
-        self._has_launcher_input = has_launcher_input
-        self._existing_chats = list(existing_chats)
-        self._chat = chat
-        self.clicked: list[str] = []
-
-    def query_selector(self, selector: str) -> object | None:
-        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible":
-            return object() if self._is_launcher_showing else None
-        if selector == _LAUNCHER_INPUT_SELECTOR:
-            return object() if self._has_launcher_input else None
-        return None
-
-    def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
-        if not selector.startswith(f"{_LAUNCHER_OVERLAY_SELECTOR}:visible ") or not self._is_launcher_showing:
-            raise PlaywrightTimeoutError(f"no visible launcher carries a row matching {selector!r}")
-
-    def click(self, selector: str) -> None:
-        self.clicked.append(selector)
-        if selector in (_LAUNCHER_INPUT_SELECTOR, _LAUNCHER_FIELD_SELECTOR):
-            self._is_launcher_showing = True
-        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_CHAT_ROW_SELECTOR}":
-            self._child_frame_lists = [[*self._existing_chats, self._chat]]
-
-
-class _FakeTerminalLauncherWorkspace(_FakeLauncherWorkspace):
-    """The launcher fake for the terminal row: records what it waits for, since the terminal's page is a plain iframe."""
-
-    def __init__(self, *, is_launcher_showing: bool) -> None:
-        super().__init__(is_launcher_showing=is_launcher_showing, existing_chats=[], chat=_FakeFrame(urls=[]))
-        self.waited_for: list[str] = []
-
-    def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
-        self.waited_for.append(selector)
-
-
 class _FakeTypingLauncherWorkspace(_FakeWorkspaceFrame):
     """The launcher fake for a text typed into the field: records every fill, wait and key press, in order."""
 
@@ -395,10 +334,6 @@ class _FakeTypingLauncherWorkspace(_FakeWorkspaceFrame):
         self.actions.append(("press", selector, key))
 
 
-_VISIBLE_NEW_CHAT_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_CHAT_ROW_SELECTOR}"
-_VISIBLE_NEW_TERMINAL_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_TERMINAL_ROW_SELECTOR}"
-
-
 def test_send_to_main_chat_types_the_text_and_presses_enter_once_the_main_chat_row_is_the_highlighted_one() -> None:
     workspace = _FakeTypingLauncherWorkspace()
     send_to_main_chat_from_launcher(cast(Frame, workspace), "build me a thing")
@@ -407,94 +342,6 @@ def test_send_to_main_chat_types_the_text_and_presses_enter_once_the_main_chat_r
         ("wait", f'{_LAUNCHER_OVERLAY_SELECTOR}:visible {MAIN_CHAT_ROW_SELECTOR}[data-highlighted="true"]'),
         ("press", _LAUNCHER_INPUT_SELECTOR, "Enter"),
     ]
-
-
-def test_open_terminal_presses_the_terminal_row_and_waits_for_its_frame() -> None:
-    workspace = _FakeTerminalLauncherWorkspace(is_launcher_showing=True)
-    open_terminal_from_launcher(cast(Frame, workspace))
-    assert workspace.clicked == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR]
-    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR, TERMINAL_IFRAME_SELECTOR]
-
-
-def test_open_terminal_opens_the_launcher_first_when_it_is_not_showing() -> None:
-    workspace = _FakeTerminalLauncherWorkspace(is_launcher_showing=False)
-    open_terminal_from_launcher(cast(Frame, workspace))
-    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_TERMINAL_ROW_SELECTOR]
-
-
-def test_start_new_chat_presses_the_row_and_returns_the_chat_frame_it_opens() -> None:
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[], chat=chat)
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_VISIBLE_NEW_CHAT_ROW_SELECTOR]
-
-
-def test_start_new_chat_opens_the_launcher_first_when_it_is_not_showing() -> None:
-    # A workspace showing only its windows has no row on screen; the taskbar's search field
-    # opens the launcher that carries it.
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(is_launcher_showing=False, existing_chats=[], chat=chat)
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_CHAT_ROW_SELECTOR]
-
-
-def test_start_new_chat_opens_the_launcher_from_the_field_itself_when_it_has_no_input() -> None:
-    # The compact layout renders the taskbar's search field as a bare button, with no input to click.
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(
-        is_launcher_showing=False, existing_chats=[], chat=chat, has_launcher_input=False
-    )
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_LAUNCHER_FIELD_SELECTOR, _VISIBLE_NEW_CHAT_ROW_SELECTOR]
-
-
-def test_start_new_chat_returns_the_chat_the_row_opened_and_not_the_welcome_chat_already_open() -> None:
-    # A fresh workspace opens on the welcome chat the creation page seeded, so a chat frame is
-    # open (and first in frame order) before the row is pressed; the chat the press starts
-    # is the frame that was not there before.
-    welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(is_launcher_showing=False, existing_chats=[welcome], chat=chat)
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert chat_frame(cast(Frame, workspace), timeout_seconds=0) is cast(Frame, welcome)
-
-
-def test_start_new_chat_tells_the_welcome_chat_apart_by_its_id_when_its_url_changes_after_the_press() -> None:
-    # The chat page reports its own URL back to the shell, so the welcome chat's frame URL can
-    # pick up a query string or trailing slash between the pre-press snapshot and the poll; it
-    # is still the same chat, and only the row-minted one is new.
-    welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL, f"{_WELCOME_CHAT_PAGE_URL}/?tab=1"])
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[welcome], chat=chat)
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-
-
-class _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheRow(_FakeLauncherWorkspace):
-    """The launcher fake on a workspace still booting: the welcome chat's frame appears at the moment the row
-    comes on screen, since the shell renders both from the same app-list arrival."""
-
-    def __init__(self, *, welcome: _FakeFrame, chat: _FakeFrame) -> None:
-        super().__init__(is_launcher_showing=True, existing_chats=[], chat=chat)
-        self._welcome = welcome
-
-    def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
-        super().wait_for_selector(selector, state, timeout)
-        self._existing_chats = [self._welcome]
-        self._child_frame_lists = [[self._welcome]]
-
-
-def test_start_new_chat_does_not_take_a_welcome_chat_framed_during_the_row_wait_for_the_new_chat() -> None:
-    welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheRow(welcome=welcome, chat=chat)
-    assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-
-
-def test_start_new_chat_raises_when_only_the_welcome_chat_is_open_after_the_press() -> None:
-    welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[welcome], chat=welcome)
-    with pytest.raises(WorkspaceFlowError):
-        start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=0)
 
 
 def test_build_electron_env_sets_the_harness_marker(tmp_path: Path) -> None:

@@ -143,7 +143,7 @@ internal pin nor an export can be tagged) -- is in `apps/minds/docs/deploy/ops/a
 
 `materialize_paired_default_workspace_template_worktree`
 (`apps/minds/imbue/minds/desktop_client/default_workspace_template_worktree.py`) gives
-the snapshot bake, the full-flow e2e and `just minds-test-electron*` a throwaway
+the snapshot bake and `just minds-test-electron` a throwaway
 clone of the DEFAULT_WORKSPACE_TEMPLATE branch named like the current mngr branch
 (else `main`). The workspace it builds runs the mngr that clone pins. With the paired
 branch pinned to this branch's commit on mngr-internal, or to its public export, that

@@ -217,9 +217,10 @@ actually run), but these tests do **not** require an imbue_cloud login.
   `[framework].paths` in `offload-modal-minds-snapshot.toml`.
 - **Live Electron workspace** (driver, not a fixture):
   `imbue/minds/desktop_client/e2e_workspace_runner.py` --
-  `create_workspace_via_electron`, `destroy_agent_best_effort`,
+  `create_workspace_via_electron`,
   `resolve_default_workspace_template_path`, `materialize_isolated_default_workspace_template`, `ensure_minds_env_defaults`,
-  `find_free_port`.
+  `find_free_port`. The driver has no destroy helper: each caller owns its own
+  cleanup (the Electron test removes its root's containers in `finally`).
 - **Deployment/services** (`deployment_tests/conftest.py`): `shared_env(role)`,
   `verified_user`, `ephemeral_env`, `signup_email` (mail.tm).
 - **General Imbue Studio helpers** (`imbue/minds/testing.py`): `make_git_repo`,
@@ -512,7 +513,8 @@ cross-component behavior.
 3. **Workspace lifecycle stop/start** [snapshot] -- `POST
    /workspaces/<id>/stop` then `/start`, asserting `host_state` transitions and
    that `system_interface` serves again after start. Complements the existing
-   "recovery restores a dead system_interface" test.
+   "recovery restores a dead system_interface" test. No suite stops and starts
+   a workspace through the app today; tracked as MIND-637.
 4. **Service discovery contract** [snapshot] -- assert the workspace writes
    `events/services/events.jsonl` with at least `system_interface` (and `web`,
    `terminal`), and that `mngr event <id> services/events.jsonl` returns them --
@@ -532,9 +534,19 @@ cross-component behavior.
 7. **Create -> v1 destroy round-trip** [electron] -- extend the existing create
    e2e: after `system_interface` renders, drive `POST
    /api/v1/workspaces/<id>/destroy`, poll `GET
-   /workspaces/operations/destroy/<id>` to DONE, and assert the host is gone (the
-   operator harness `scripts/electron_full_flow_e2e.py` already does a superset;
-   this would crystallize the destroy half as a CI-run acceptance test).
+   /workspaces/operations/destroy/<id>` to DONE, and assert the host is gone.
+   Today only `scripts/launch_to_msg_e2e.py` (the self-hosted Mac job) and the
+   smoke journey (1.10) drive the settings-page destroy through the app, and
+   neither runs per PR; this would crystallize the destroy half as a CI-run
+   acceptance test.
+
+7b. **A second chat and a terminal from the launcher** [electron] -- from the
+   ready workspace, press the launcher's `chat:new` row and wait for the new
+   chat's composer, then its `terminal:new` row and wait for the terminal
+   iframe (`NEW_CHAT_ROW_SELECTOR`, `NEW_TERMINAL_ROW_SELECTOR` and
+   `TERMINAL_IFRAME_SELECTOR` in `e2e_workspace_runner.py` name them). No suite
+   drives either row today; tracked as MIND-639 (second chat) and MIND-638
+   (terminal).
 8. **Browser create posts to `/api/v1/workspaces`** [electron] -- once the create
    UI is repointed (handoff item #2.B), assert the form submit drives the v1
    create + operation poll, not the legacy `/api/create-agent/...` routes.

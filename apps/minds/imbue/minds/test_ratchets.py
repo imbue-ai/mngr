@@ -138,7 +138,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(13))
+    rc.check_async_await(_DIR, snapshot(11))
 
 
 def test_prevent_httpx_import() -> None:
