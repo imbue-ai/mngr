@@ -160,6 +160,7 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "coolify-api": "Coolify",
     "umami-api": "Umami",
     "todoist-api": "Todoist",
+    "asana-api": "Asana",
     "google-gmail-api": "Gmail",
     "google-calendar-api": "Google Calendar",
     "google-drive-api": "Google Drive",

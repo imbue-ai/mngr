@@ -1727,6 +1727,67 @@
       ]
     }
   ],
+  "asana": [
+    {
+      "scope": "asana-api",
+      "display_name": "Asana",
+      "description": "Any request to the Asana API.",
+      "permissions": [
+        {
+          "name": "asana-read-all",
+          "description": "Read anything in Asana."
+        },
+        {
+          "name": "asana-write-all",
+          "description": "Create, change, or delete anything in Asana."
+        },
+        {
+          "name": "asana-read-tasks",
+          "description": "Read tasks and subtasks, including their details, dependencies, followers, time tracking, and task search. Does not include comments or attachments."
+        },
+        {
+          "name": "asana-write-tasks",
+          "description": "Create, change, complete, move, or delete tasks and subtasks, including their assignees, due dates, dependencies, followers, tags, and time tracking. Does not include comments or attachments."
+        },
+        {
+          "name": "asana-read-comments",
+          "description": "Read comments, activity history, and attachments on tasks."
+        },
+        {
+          "name": "asana-write-comments",
+          "description": "Post, edit, or delete comments and upload or delete attachments on tasks."
+        },
+        {
+          "name": "asana-read-projects",
+          "description": "Read projects, sections, project templates, project briefs, status updates, and project members. Does not include the tasks inside projects."
+        },
+        {
+          "name": "asana-write-projects",
+          "description": "Create, change, or delete projects, sections, project templates, project briefs, status updates, and project members. Does not include the tasks inside projects."
+        },
+        {
+          "name": "asana-read-portfolios-and-goals",
+          "description": "Read portfolios, goals, their status updates, and the projects and people linked to them."
+        },
+        {
+          "name": "asana-write-portfolios-and-goals",
+          "description": "Create, change, or delete portfolios and goals, post status updates on them, and link projects or people to them."
+        },
+        {
+          "name": "asana-read-workspace",
+          "description": "Read workspace-level information: workspaces, teams, people and their memberships, tags, custom fields, name lookup, webhooks, and audit logs. Does not include tasks, projects, or goals."
+        },
+        {
+          "name": "asana-write-workspace",
+          "description": "Manage workspace-level settings: teams and their members, inviting or removing people, tags, custom fields, webhooks, and exports. Does not include tasks, projects, or goals."
+        },
+        {
+          "name": "asana-batch",
+          "description": "Send several reads and writes together in one batch request."
+        }
+      ]
+    }
+  ],
   "atlassian-mcp": [
     {
       "scope": "atlassian-mcp-api",
