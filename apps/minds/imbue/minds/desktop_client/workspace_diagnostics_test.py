@@ -20,7 +20,9 @@ import io
 import json
 import os
 import shutil
+import threading
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -34,12 +36,16 @@ from imbue.minds.desktop_client.workspace_diagnostics import REMOTE_GATEWAY_TAIL
 from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS
+from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionQueue
+from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionResult
 from imbue.minds.desktop_client.workspace_diagnostics import _SCAN_TIMEOUT_FRACTION_OF_BUDGET
 from imbue.minds.desktop_client.workspace_diagnostics import build_diagnostics_argv
 from imbue.minds.desktop_client.workspace_diagnostics import build_latchkey_logs_argv
 from imbue.minds.desktop_client.workspace_diagnostics import collect_workspace_diagnostics
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_GATEWAY_LOG_FILENAME
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_LOG_DIR
@@ -543,3 +549,200 @@ def test_the_mirror_exec_carries_the_outer_flags(
     assert outer_invocations[:2] == ["exec", str(_WORKSPACE_AGENT_ID)]
     assert "--outer" in outer_invocations
     assert "--no-start" in outer_invocations
+
+
+def _wait_for_log(log_output: io.StringIO, message: str) -> None:
+    wait_for(lambda: message in log_output.getvalue(), timeout=10.0, error_message=f"never logged: {message}")
+
+
+def _queued_message(workspace_agent_id: str) -> str:
+    return f"Queueing a workspace collection for {workspace_agent_id} behind the one running"
+
+
+def _joined_message(workspace_agent_id: str) -> str:
+    return f"Joining the workspace collection already queued for {workspace_agent_id}"
+
+
+def _collect_on_another_thread(
+    queue: WorkspaceCollectionQueue,
+    workspace_agent_id: str,
+    collect: Callable[[], WorkspaceCollectionResult],
+    results: list[WorkspaceCollectionResult],
+    is_transcript_included: bool = True,
+) -> threading.Thread:
+    def run() -> None:
+        results.append(queue.collect_fresh(workspace_agent_id, True, is_transcript_included, collect))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def _blocking_collection(
+    name: str, calls: list[str], release: threading.Event
+) -> Callable[[], WorkspaceCollectionResult]:
+    def collect() -> WorkspaceCollectionResult:
+        calls.append(name)
+        assert release.wait(timeout=10.0)
+        return WorkspaceCollectionResult(note=f"{name} collected")
+
+    return collect
+
+
+def _recording_collection(name: str, calls: list[str]) -> Callable[[], WorkspaceCollectionResult]:
+    def collect() -> WorkspaceCollectionResult:
+        calls.append(name)
+        return WorkspaceCollectionResult(note=f"{name} collected")
+
+    return collect
+
+
+def _start_a_running_collection(
+    queue: WorkspaceCollectionQueue,
+    workspace_agent_id: str,
+    name: str,
+    calls: list[str],
+    release: threading.Event,
+    results: list[WorkspaceCollectionResult],
+) -> threading.Thread:
+    """Start a collection on another thread and return once it is running, holding the workspace until released."""
+    thread = _collect_on_another_thread(queue, workspace_agent_id, _blocking_collection(name, calls, release), results)
+    wait_for(lambda: calls == [name], timeout=10.0, error_message=f"the {name} collection never started")
+    return thread
+
+
+def test_a_report_filed_while_its_workspace_is_collecting_collects_afresh_once_that_collection_ends() -> None:
+    """A report filed mid-collection neither runs beside the running collection nor takes its archive, which may
+    predate what it reports: its own collection starts once the running one has ended."""
+    queue = WorkspaceCollectionQueue()
+    release = threading.Event()
+    calls: list[str] = []
+    first_results: list[WorkspaceCollectionResult] = []
+    second_results: list[WorkspaceCollectionResult] = []
+    with capture_loguru(level="INFO") as log_output:
+        first = _start_a_running_collection(queue, "agent-71324", "first", calls, release, first_results)
+        second = _collect_on_another_thread(
+            queue, "agent-71324", _recording_collection("second", calls), second_results
+        )
+        _wait_for_log(log_output, _queued_message("agent-71324"))
+        assert calls == ["first"]
+        release.set()
+    first.join(timeout=10.0)
+    second.join(timeout=10.0)
+
+    assert calls == ["first", "second"]
+    assert [result.note for result in first_results + second_results] == ["first collected", "second collected"]
+
+
+def test_reports_queued_together_behind_a_running_collection_share_the_next_one() -> None:
+    queue = WorkspaceCollectionQueue()
+    release = threading.Event()
+    calls: list[str] = []
+    queued_results: list[WorkspaceCollectionResult] = []
+    with capture_loguru(level="INFO") as log_output:
+        first = _start_a_running_collection(queue, "agent-62018", "first", calls, release, [])
+        second = _collect_on_another_thread(
+            queue, "agent-62018", _recording_collection("second", calls), queued_results
+        )
+        _wait_for_log(log_output, _queued_message("agent-62018"))
+        third = _collect_on_another_thread(queue, "agent-62018", _recording_collection("third", calls), queued_results)
+        _wait_for_log(log_output, _joined_message("agent-62018"))
+        release.set()
+    for thread in (first, second, third):
+        thread.join(timeout=10.0)
+
+    assert calls == ["first", "second"]
+    assert [result.note for result in queued_results] == ["second collected", "second collected"]
+
+
+def test_a_queued_report_asking_for_other_boxes_does_not_share_the_queued_collection() -> None:
+    """Sharing is only for the same boxes -- an archive without chats cannot stand in for one that asked for them --
+    but the two still run one after the other, never beside each other."""
+    queue = WorkspaceCollectionQueue()
+    release_first = threading.Event()
+    release_queued = threading.Event()
+    calls: list[str] = []
+    third_results: list[WorkspaceCollectionResult] = []
+    with capture_loguru(level="INFO") as log_output:
+        first = _start_a_running_collection(queue, "agent-48851", "first", calls, release_first, [])
+        second = _collect_on_another_thread(
+            queue, "agent-48851", _blocking_collection("second", calls, release_queued), []
+        )
+        _wait_for_log(log_output, _queued_message("agent-48851"))
+        third = _collect_on_another_thread(
+            queue,
+            "agent-48851",
+            _blocking_collection("third", calls, release_queued),
+            third_results,
+            is_transcript_included=False,
+        )
+        wait_for(
+            lambda: log_output.getvalue().count(_queued_message("agent-48851")) == 2,
+            timeout=10.0,
+            error_message="the report asking for other boxes never queued its own collection",
+        )
+        assert calls == ["first"]
+        release_first.set()
+        wait_for(lambda: len(calls) == 2, timeout=10.0, error_message="no queued collection started")
+        assert calls[1] in ("second", "third")
+        assert len(calls) == 2
+        release_queued.set()
+    for thread in (first, second, third):
+        thread.join(timeout=10.0)
+
+    assert sorted(calls) == ["first", "second", "third"]
+    assert [result.note for result in third_results] == ["third collected"]
+
+
+def test_a_collection_another_workspace_is_running_does_not_hold_up_this_one() -> None:
+    queue = WorkspaceCollectionQueue()
+    release = threading.Event()
+    calls: list[str] = []
+    other = _start_a_running_collection(queue, "agent-busy-80412", "busy", calls, release, [])
+    try:
+        own = queue.collect_fresh("agent-quiet-80413", True, True, _recording_collection("quiet", calls))
+        assert own.note == "quiet collected"
+    finally:
+        release.set()
+        other.join(timeout=10.0)
+
+
+def test_a_queued_collection_that_fails_releases_the_reports_sharing_it() -> None:
+    """A collection that raises must not leave a report sharing it waiting forever: the sharer gets a note saying the
+    collection failed, which its status document carries."""
+    queue = WorkspaceCollectionQueue()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def failing_collection() -> WorkspaceCollectionResult:
+        raise OSError("the workspace went away")
+
+    owner_errors: list[BaseException] = []
+
+    def run_failing_owner() -> None:
+        try:
+            queue.collect_fresh("agent-90233", True, True, failing_collection)
+        except OSError as error:
+            owner_errors.append(error)
+
+    sharer_results: list[WorkspaceCollectionResult] = []
+    with capture_loguru(level="INFO") as log_output:
+        first = _start_a_running_collection(queue, "agent-90233", "first", calls, release, [])
+        owner = threading.Thread(target=run_failing_owner)
+        owner.start()
+        _wait_for_log(log_output, _queued_message("agent-90233"))
+        sharer = _collect_on_another_thread(
+            queue, "agent-90233", _recording_collection("sharer", calls), sharer_results
+        )
+        _wait_for_log(log_output, _joined_message("agent-90233"))
+        release.set()
+    for thread in (first, owner, sharer):
+        thread.join(timeout=10.0)
+
+    assert [str(error) for error in owner_errors] == ["the workspace went away"]
+    assert not sharer.is_alive()
+    assert calls == ["first"]
+    assert [result.staged_zip_path for result in sharer_results] == [None]
+    assert [result.note for result in sharer_results] == [
+        "workspace collection failed while another report filed from this workspace was running it"
+    ]

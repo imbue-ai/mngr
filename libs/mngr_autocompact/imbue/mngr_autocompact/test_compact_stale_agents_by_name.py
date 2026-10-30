@@ -79,6 +79,17 @@ def _make_proactive_timer_mngr_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
     )
 
 
+def _local_host_with_compaction_agent_type(temp_mngr_ctx: MngrContext) -> tuple[MngrContext, Host, AgentTypeName]:
+    """A proactive-timer context, its local host, and a freshly registered compaction agent type to create agents of."""
+    agent_type = AgentTypeName(f"file-state-compaction-{uuid4().hex}")
+    register_agent_class(str(agent_type), _FileStateCompactionAgent)
+    register_agent_config(str(agent_type), AgentTypeConfig)
+    mngr_ctx = _make_proactive_timer_mngr_ctx(temp_mngr_ctx)
+    host = get_provider_instance(ProviderInstanceName("local"), mngr_ctx).create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    return mngr_ctx, host, agent_type
+
+
 def _create_agent_idle_since(
     host: Host, work_dir: Path, agent_type: AgentTypeName, idle_since: datetime
 ) -> AgentInterface:
@@ -105,12 +116,7 @@ def test_compact_stale_agents_by_name_compacts_an_eligible_running_local_agent(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    agent_type = AgentTypeName(f"file-state-compaction-{uuid4().hex}")
-    register_agent_class(str(agent_type), _FileStateCompactionAgent)
-    register_agent_config(str(agent_type), AgentTypeConfig)
-    mngr_ctx = _make_proactive_timer_mngr_ctx(temp_mngr_ctx)
-    host = get_provider_instance(ProviderInstanceName("local"), mngr_ctx).create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
+    mngr_ctx, host, agent_type = _local_host_with_compaction_agent_type(temp_mngr_ctx)
     now = datetime.now(timezone.utc)
 
     eligible_agent = _create_agent_idle_since(host, temp_work_dir, agent_type, now - timedelta(minutes=100))
@@ -139,3 +145,34 @@ def test_compact_stale_agents_by_name_compacts_an_eligible_running_local_agent(
     finally:
         for agent in [*running_agents, stopped_agent]:
             host.destroy_agent(agent)
+
+
+@pytest.mark.tmux
+def test_compact_stale_agents_by_name_asks_only_the_providers_it_is_scoped_to(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """An embedder that knows where its agents live names those providers, so the call skips resolving the names
+    through the discovery event log: an agent on a provider outside the scope is not found."""
+    mngr_ctx, host, agent_type = _local_host_with_compaction_agent_type(temp_mngr_ctx)
+    now = datetime.now(timezone.utc)
+    eligible_agent = _create_agent_idle_since(host, temp_work_dir, agent_type, now - timedelta(minutes=100))
+    host.start_agents([eligible_agent.id])
+    try:
+        wait_for(
+            eligible_agent.is_running, timeout=30.0, poll_interval=0.5, error_message="agent did not start running"
+        )
+
+        out_of_scope = compact_stale_agents_by_name(
+            mngr_ctx, names=[eligible_agent.name], now=now, provider_names=["provider-without-the-agent-31877"]
+        )
+        assert out_of_scope == []
+        assert not _was_compaction_requested(host, eligible_agent)
+
+        in_scope = compact_stale_agents_by_name(
+            mngr_ctx, names=[eligible_agent.name], now=now, provider_names=["local"]
+        )
+        assert in_scope == [eligible_agent.name]
+        assert _was_compaction_requested(host, eligible_agent)
+    finally:
+        host.destroy_agent(eligible_agent)

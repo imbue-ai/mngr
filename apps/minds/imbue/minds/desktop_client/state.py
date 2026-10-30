@@ -64,6 +64,7 @@ from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
+from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionQueue
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
@@ -308,6 +309,11 @@ class DesktopClientState(MutableModel):
         default_factory=MachineSharingLockRegistry,
         frozen=True,
         description="Per-machine locks serializing the machine-sharing PUT/DELETE handlers",
+    )
+    workspace_collection_queue: WorkspaceCollectionQueue = Field(
+        default_factory=WorkspaceCollectionQueue,
+        frozen=True,
+        description="Runs bug-report workspace collections one at a time per workspace",
     )
     workspace_update_service: WorkspaceUpdateService | None = Field(
         default=None,
