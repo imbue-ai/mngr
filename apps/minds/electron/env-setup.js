@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const { BUNDLED_UV_ENV } = require('./bundled-uv-env');
 
 /**
  * Run `uv sync` using the bundled uv binary and the bundled pyproject.toml.
@@ -89,6 +90,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
       ...(process.platform === 'darwin'
         ? { PATH: [paths.getUvShimBinDir(), process.env.PATH].filter(Boolean).join(path.delimiter) }
         : {}),
+      ...BUNDLED_UV_ENV,
       VIRTUAL_ENV: venvDir,
       UV_CACHE_DIR: uvCacheDir,
       UV_PYTHON_INSTALL_DIR: uvPythonDir,
