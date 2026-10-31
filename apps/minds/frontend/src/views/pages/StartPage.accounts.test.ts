@@ -6,7 +6,8 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { UiAccountEntry } from "../../channel/messages";
 import { createEmptyStores } from "../../models/boot";
 import type { CreateFormDefaults } from "../../models/create";
-import { startFlow } from "../../models/startFlow";
+import { VERIFICATION_POLL_MS } from "../../models/emailVerification";
+import { dismissPendingModal, startFlow } from "../../models/startFlow";
 import { webLogin } from "../../models/webLogin";
 import {
   accountEntry,
@@ -19,7 +20,7 @@ import {
   secondAccountEntry,
 } from "../../testing";
 import { ShellState } from "../shell/shell-state";
-import { pressLast, renderStartPage } from "./StartPage.testing";
+import { pressLast, pressTitlebarLogIn, renderStartPage } from "./StartPage.testing";
 
 vi.mock("../../models/webLogin", () => ({
   webLogin: {
@@ -292,7 +293,7 @@ describe("the account step on the live page", () => {
         .mockImplementation(() => undefined);
       const page = renderStartPage();
       pressLast(page.view(), "data-answer", "reporting-yes");
-      pressLast(page.view(), "data-aside", "");
+      pressTitlebarLogIn();
       signIn(signedIn);
       reportSignIn("done", reportedEmail, reportedUserId);
       try {
@@ -312,6 +313,36 @@ describe("the account step on the live page", () => {
     },
   );
 
+  it("registers the title bar's log-in on mount and redraws, since the title bar was drawn first", () => {
+    const redraw = vi.mocked(m.redraw);
+    redraw.mockClear();
+    renderStartPage();
+    expect(startFlow.logInExisting).not.toBeNull();
+    expect(redraw).toHaveBeenCalled();
+  });
+
+  it("the title bar's log-in works before the reporting question is answered, leaving for the account's hub", async () => {
+    signinLandingByAccount = { [BOB.user_id]: { state: "done", workspace_count: 2 } };
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const page = renderStartPage();
+    pressTitlebarLogIn();
+    signIn([BOB]);
+    reportSignIn("done", BOB.email, BOB.user_id);
+    try {
+      page.update();
+      await vi.waitFor(() =>
+        expect(routeSet.mock.calls.map((call) => call[0])).toEqual([`/account/${BOB.user_id}/`]),
+      );
+    } finally {
+      reportSignIn("waiting", "");
+    }
+
+    expect(shell.accountId).toBe(BOB.user_id);
+    expect(onboardingCompleteCalls()).toHaveLength(1);
+  });
+
   it.each([
     ["no workspaces", { state: "done", workspace_count: 0 }],
     ["a record fetch that failed", { state: "failed", workspace_count: 0 }],
@@ -324,7 +355,7 @@ describe("the account step on the live page", () => {
         .mockImplementation(() => undefined);
       const page = renderStartPage();
       pressLast(page.view(), "data-answer", "reporting-yes");
-      pressLast(page.view(), "data-aside", "");
+      pressTitlebarLogIn();
       signIn([BOB]);
       reportSignIn("done", BOB.email, BOB.user_id);
       try {
@@ -369,7 +400,7 @@ describe("the account step on the live page", () => {
       .mockImplementation(() => undefined);
     const page = renderStartPage();
     pressLast(page.view(), "data-answer", "reporting-yes");
-    pressLast(page.view(), "data-aside", "");
+    pressTitlebarLogIn();
     signIn([BOB]);
     reportSignIn("done", BOB.email, BOB.user_id);
     try {
@@ -385,6 +416,48 @@ describe("the account step on the live page", () => {
       reportSignIn("waiting", "");
     }
     expect(landingAsks).toBe(2);
+  });
+
+  it("the title bar's log-in does nothing while the owed cloud create's verification check runs", () => {
+    signIn([ALICE]);
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    pressLast(page.view(), "data-answer", "continue");
+    expect(startFlow.state.isCloudCreatePending).toBe(true);
+    vi.mocked(webLogin.start).mockClear();
+
+    pressTitlebarLogIn();
+    expect(startFlow.state.pending).toBeNull();
+    expect(webLogin.start).not.toHaveBeenCalled();
+  });
+
+  it("a verification that lands while the title bar's log-in is signing in does not send the create", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      signIn([ALICE]);
+      const page = renderStartPage();
+      pressLast(page.view(), "data-answer", "reporting-yes");
+      pressLast(page.view(), "data-answer", "cloud");
+      pressLast(page.view(), "data-answer", "continue");
+      await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
+
+      pressTitlebarLogIn();
+      expect(startFlow.state.pending).toBe("existing-login");
+      VERIFIED_EMAILS.add(ALICE.email);
+      const checksBefore = verificationChecks().length;
+      await vi.advanceTimersByTimeAsync(VERIFICATION_POLL_MS * 2);
+      expect(verificationChecks()).toHaveLength(checksBefore);
+      expect(createCalls()).toHaveLength(0);
+
+      // A dismissed sign-in hands the wait back to the poll.
+      startFlow.state = dismissPendingModal(startFlow.state);
+      await vi.advanceTimersByTimeAsync(VERIFICATION_POLL_MS);
+      await vi.waitFor(() => expect(createCalls()).toHaveLength(1));
+    } finally {
+      VERIFIED_EMAILS.delete(ALICE.email);
+      vi.useRealTimers();
+    }
   });
 
   it("with an account already signed in, the cloud answer asks whether to keep it", () => {

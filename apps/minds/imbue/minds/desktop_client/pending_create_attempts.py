@@ -88,9 +88,9 @@ class PendingCreateAttemptRequest(FrozenModel):
     )
     is_onboarding_driven_by_agent: bool = Field(
         default=False,
-        description="Whether the creation page asks its onboarding questions while this workspace is built "
+        description="Whether the creation page shows its onboarding examples while this workspace is built "
         "(the first-run start flow's creates do; a create from the form does only when its "
-        "'Use onboarding questions?' switch is on)",
+        "'Show onboarding examples?' switch is on)",
     )
 
 

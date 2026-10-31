@@ -164,7 +164,7 @@ export interface FlowStep {
   /** The points of the answer the question recommends, under its title, on the question that has them. */
   table?: TableColumn[];
   choices: FlowChoice[];
-  /** The answers it does not recommend: small links under the buttons, so they read as the exceptions. */
+  /** The answers it does not recommend: small links at the row's left, so they read as the exceptions. */
   minorChoices?: FlowChoice[];
   /** The quieter, agent-side way out under the question, when there is one. */
   aside?: { label: string };
@@ -200,7 +200,8 @@ const WHERE_TO_RUN_CHOICES: Pick<FlowStep, "choices" | "minorChoices"> = {
   minorChoices: [LOCAL_CHOICE, OWN_CLOUD_CHOICE],
 };
 
-export const EXISTING_LOGIN_LABEL = "I have an account (log in)";
+/** The start flow's title-bar way back in for a returning user, offered for the whole flow. */
+export const EXISTING_LOGIN_LABEL = "Already set up? Log in";
 export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
@@ -243,7 +244,6 @@ export const FLOW: Record<StepId, FlowStep> = {
       },
     ],
     ...WHERE_TO_RUN_CHOICES,
-    aside: { label: EXISTING_LOGIN_LABEL },
   },
   // Sign in leads: the app is downloaded from a page that already required an
   // Imbue account, so the account step is a sign-in for nearly everyone. The
@@ -524,7 +524,7 @@ export function landedAccount(
   return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
 }
 
-/** The user pressed the quieter "I have an account (log in)" under the first question. */
+/** The user pressed the title bar's "Already set up? Log in". */
 export function chooseExistingLogin(state: StartFlowState): StartFlowState {
   return { ...state, pending: "existing-login" };
 }
@@ -534,10 +534,12 @@ export const NO_WORKSPACES_ACK = "You don't have any workspaces yet, so let's cr
 
 /**
  * The existing-login sign-in landed on an account with no workspaces: the
- * sign-in receipt becomes the open where-to-run question's answer, and the
- * question is asked again -- the first workspace still needs to be made, now
- * under the signed-in account (the view adopts it into the window). An
- * account that has workspaces leaves the flow for its home page instead,
+ * sign-in receipt becomes the open question's answer, whichever it is, and
+ * where to run is asked again -- the first workspace still needs to be made,
+ * now under the signed-in account (the view adopts it into the window), so
+ * an account or verification the flow had settled on is dropped. With no
+ * question open yet (the reporting question unanswered) nothing is recorded.
+ * An account that has workspaces leaves the flow for its home page instead,
  * which is the view's doing, like the routing itself.
  */
 export function continueExistingLoginWithoutWorkspaces(
@@ -546,13 +548,14 @@ export function continueExistingLoginWithoutWorkspaces(
 ): StartFlowState {
   if (state.pending !== "existing-login") return state;
   const at = openStepIndex(state);
-  const entry = at === null ? undefined : state.entries[at];
-  if (at === null || entry === undefined || entry.kind !== "step" || entry.id !== "run") {
-    return { ...state, pending: null };
-  }
+  if (at === null) return { ...state, pending: null };
   return {
     ...state,
     pending: null,
+    account: null,
+    offeredAccount: null,
+    verificationEmail: null,
+    isCloudCreatePending: false,
     entries: [
       ...withAnswer(state.entries, at, "existing-login", signedInSaid(account.email)),
       stepEntry("again", NO_WORKSPACES_ACK),
@@ -728,11 +731,17 @@ function lastAccountStepIndex(entries: TranscriptEntry[]): number {
   return -1;
 }
 
-/** The question the user is being asked right now, or null when none is open. */
+/**
+ * The question the user is being asked right now, or null when none is open:
+ * the last question, unless it is answered. Notes may follow it (a re-sent
+ * verification email's), and it is still the one being asked.
+ */
 export function openStepIndex(state: StartFlowState): number | null {
-  const last = state.entries[state.entries.length - 1];
-  if (last === undefined || last.kind !== "step" || last.answer !== null) return null;
-  return state.entries.length - 1;
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry.kind === "step") return entry.answer === null ? index : null;
+  }
+  return null;
 }
 
 /**
@@ -751,6 +760,11 @@ export class StartFlowModel {
    * reader's own.
    */
   isSubmittedCreateCloudPreset = false;
+  /**
+   * The open start page's sign-in for a returning user, which the title bar
+   * offers at every point of the flow; null while no start page is mounted.
+   */
+  logInExisting: (() => void) | null = null;
 
   reset(): void {
     this.state = initialStartFlowState();

@@ -4,6 +4,7 @@ import { createEmptyStores } from "../../models/boot";
 import { RequestsStore } from "../../models/requests";
 import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
+import { EXISTING_LOGIN_LABEL, startFlow } from "../../models/startFlow";
 import { Titlebar } from "./Titlebar";
 import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
@@ -539,5 +540,28 @@ describe("Titlebar window controls", () => {
     expect(collectVnodes(root).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
     const buttonCluster = windowButtonCluster(root);
     expect(classTokensOf(buttonCluster)).not.toContain("hidden");
+  });
+});
+
+describe("the start flow's titlebar", () => {
+  afterEach(() => {
+    startFlow.logInExisting = null;
+  });
+
+  it("offers the returning user's log-in at its right while a start page is up, and presses the page's", () => {
+    const presses: string[] = [];
+    startFlow.logInExisting = () => presses.push("log-in");
+    const root = renderTitlebar("", { routePath: "/start" });
+    expect(attrsOf(root)["data-titlebar-kind"]).toBe("start");
+    const logIn = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "start-log-in") as AnyVnode;
+    expect(logIn).toBeDefined();
+    expect(collectVnodes(logIn).some((vnode) => vnode.children === EXISTING_LOGIN_LABEL)).toBe(true);
+    (attrsOf(logIn).onclick as () => void)();
+    expect(presses).toEqual(["log-in"]);
+  });
+
+  it("offers no log-in when no start page is up to run it", () => {
+    const root = renderTitlebar("", { routePath: "/start" });
+    expect(collectVnodes(root).find((vnode) => attrsOf(vnode).id === "start-log-in")).toBeUndefined();
   });
 });

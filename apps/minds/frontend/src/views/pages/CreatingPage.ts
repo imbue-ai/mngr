@@ -6,46 +6,33 @@
 // attempt (status polling + the op-log SSE). Reached from the start flow in
 // the same session, the flow's transcript renders between the two.
 //
-// An attempt submitted with its onboarding questions on (the start flow's
-// creates, or the form's "Use onboarding questions?") keeps the loading box
-// out of sight while the agent asks whether the reader knows what to build,
-// and, for one who does not, whether to see examples or describe a problem.
-// The answer decides the welcome the workspace opens on; a workspace ready by
-// then is entered at once, and one still being built is from then on watched
-// through the revealed box.
+// An onboarding attempt (the start flow's creates, or the form's "Show
+// onboarding examples?") shows a recording of apps built in Studio, under a
+// line introducing it, between the setup line and the loading box.
 //
 // The whole conversation is handed over as the new workspace's first chat
-// (models/welcomeChat.ts): as soon as the page knows the attempt's settings
-// when it asks nothing, so it is seeded even if the page is left before the
-// workspace is ready, and once the questions are answered when it asks them
-// (or as the page is left, with the answers so far). When the attempt is
-// ready the agent says so, the page waits for that seed, and the wash carries
-// the app in; a failure or an interrupted record becomes an agent turn with
-// Retry and Dismiss / Discard, the retry reopening the create form as a modal
-// prefilled from the attempt's record.
+// (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
+// it is seeded even if the page is left before the workspace is ready. When
+// the attempt is ready the agent says so, the page waits for that seed, and
+// the wash carries the app in; a failure or an interrupted record becomes an
+// agent turn with Retry and Dismiss / Discard, the retry reopening the create
+// form as a modal prefilled from the attempt's record.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type { CreateAttemptDetail, CreateAttemptRequestSummary } from "../../models/create";
 import { CreateAttemptWatcher, fetchCreateAttemptDetail } from "../../models/create";
 import { ProgressDisplay } from "../../models/progress";
-import type { BuildAnswerId, OnboardingChoice, PathAnswerId, ShowcaseApp } from "../../models/creationTranscript";
+import type { ShowcaseApp } from "../../models/creationTranscript";
 import {
-  BUILD_ASK,
-  BUILD_CHOICES,
-  FINISHING_LINE,
   IMBUE_CLOUD_SUMMARY_LINE,
   INTERRUPTED_LINE,
-  PATH_ASK,
-  PATH_CHOICES,
   READY_LINE,
   SETUP_LINE,
   SHOWCASE_APP,
-  SHOWCASE_READ_MS,
+  SHOWCASE_INTRO_LINE,
   SUMMARY_HEADING,
-  choiceLabel,
   failureLine,
-  onboardingIntent,
   summarySettingLines,
 } from "../../models/creationTranscript";
 import {
@@ -63,7 +50,6 @@ import {
   streamDurationMs,
 } from "../../models/startFlow";
 import { wash } from "../../models/wash";
-import type { OnboardingAnswers } from "../../models/welcomeChat";
 import { postWelcomeChat, welcomeChatBody } from "../../models/welcomeChat";
 import { Button } from "../components/Button";
 import { ImageLightbox } from "../components/ImageLightbox";
@@ -103,13 +89,6 @@ interface CreatingState {
   isLogPinnedToEnd: boolean;
   /** How many lines the log was last pinned at, so a redraw with no new line moves nothing. */
   pinnedLogLineCount: number;
-  /** The onboarding questions' answers, by choice id; null while a question is open or was never asked. */
-  buildAnswer: BuildAnswerId | null;
-  pathAnswer: PathAnswerId | null;
-  /** Whether the loading box is on the page: at once for an attempt asking nothing, else once the answers came. */
-  isBoxRevealed: boolean;
-  /** Whether the conversation has reached the desktop client (a page asking questions hands it over once answered). */
-  isWelcomeChatHandedOver: boolean;
   /** Whether the settings turn's lines are open under its heading. */
   isSummaryDetailsOpen: boolean;
   /** The manifesto points the reader has opened. */
@@ -203,10 +182,6 @@ function freshState(createAttemptId: string): CreatingState {
     isLogOpen: false,
     isLogPinnedToEnd: true,
     pinnedLogLineCount: 0,
-    buildAnswer: null,
-    pathAnswer: null,
-    isBoxRevealed: false,
-    isWelcomeChatHandedOver: false,
     isSummaryDetailsOpen: false,
     openManifestoIds: new Set<string>(),
     isReportingMoreOpen: false,
@@ -253,11 +228,6 @@ export const CreatingPage: m.ClosureComponent = () => {
     return readyStartAtMs + streamDurationMs(READY_LINE);
   }
 
-  /** When the agent's next turn arrives after an answer: at once, or after the recording the answer brought. */
-  function afterAnswerAtMs(): number {
-    return state.pathAnswer === "examples" ? FLOW_THINK_MS + SHOWCASE_READ_MS : FLOW_THINK_MS;
-  }
-
   // The conversation reaches the workspace, then the workspace's color takes
   // the window and the shell enters the workspace while the cover is whole.
   function startEntry(): void {
@@ -288,41 +258,26 @@ export const CreatingPage: m.ClosureComponent = () => {
     }, readyLandedAtMs(readyStartAtMs) + READY_HOLD_MS);
   }
 
-  /** Whether the attempt was submitted with the onboarding questions on. */
-  function isDrivenByAgent(): boolean {
+  /** Whether the attempt is an onboarding create, which shows the recording under the setup line. */
+  function isShowcaseShown(): boolean {
     return state.detail?.live?.request.is_onboarding_driven_by_agent ?? false;
   }
 
-  /** Whether the page is still waiting on an answer that decides the welcome. */
-  function isAwaitingAnswer(): boolean {
-    return (
-      isDrivenByAgent() &&
-      onboardingIntent(state.buildAnswer, state.pathAnswer) === null
-    );
-  }
-
-  function onboardingAnswers(): OnboardingAnswers {
-    return { isDriven: isDrivenByAgent(), buildAnswer: state.buildAnswer, pathAnswer: state.pathAnswer };
-  }
-
   /**
-   * Hand the conversation so far to the new workspace as its first chat. For an attempt asking
-   * nothing, posted once the page knows the attempt's settings, while the workspace is still being
-   * built, so the desktop client seeds it when the attempt finishes even if this page has been
-   * left by then; for one asking its questions, posted once they are answered (the welcome is
-   * written for the answer), or as the page is left. Posted again once the attempt is done, which
-   * waits for that seed. Best effort: a workspace that cannot take it (its chat app still down, an
-   * older template) is entered all the same, with the reason in the console.
+   * Hand the conversation so far to the new workspace as its first chat: posted once the page knows
+   * the attempt's settings, while the workspace is still being built, so the desktop client seeds it
+   * when the attempt finishes even if this page has been left by then. Posted again once the attempt
+   * is done, which waits for that seed. Best effort: a workspace that cannot take it (its chat app
+   * still down, an older template) is entered all the same, with the reason in the console.
    */
   function handOverWelcomeChat(): Promise<void> {
     const request = state.detail?.live?.request;
     if (request === undefined || request === null) return Promise.resolve();
-    state.isWelcomeChatHandedOver = true;
     const entries = state.isFromStartFlow ? startFlow.state.entries : [];
     const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
     return postWelcomeChat(
       state.createAttemptId,
-      welcomeChatBody(entries, request, isCloudPreset, onboardingAnswers()),
+      welcomeChatBody(entries, request, isCloudPreset, isShowcaseShown()),
     ).then(
       () => undefined,
       (error: unknown) => {
@@ -344,8 +299,6 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state.isDone) return;
         state.isDone = true;
         state.redirectUrl = redirectUrl;
-        // An open question holds the entry: the answer decides the welcome, and settles it.
-        if (isAwaitingAnswer()) return;
         state.welcomeChat = handOverWelcomeChat();
         scheduleEntry(FLOW_THINK_MS);
       },
@@ -597,82 +550,8 @@ export const CreatingPage: m.ClosureComponent = () => {
     ];
   }
 
-  /** The row of answers to an onboarding question, as the user's turn. */
-  function answerChoices<Id extends string>(key: string, delayMs: number, isInstant: boolean, choices: OnboardingChoice<Id>[], onAnswer: (id: Id) => void): m.Children {
-    return answerRow({
-      key,
-      delayMs,
-      isInstant,
-      buttons: choices.map((choice) => ({
-        id: choice.id,
-        label: choice.label,
-        isEmphasized: choice.isEmphasized,
-        onPress: () => onAnswer(choice.id),
-      })),
-    });
-  }
-
-  /**
-   * An answer settled where the questions lead: the welcome is decided, so the conversation is
-   * handed over. A workspace already ready is entered now, with no loading box ever shown; one
-   * still being built is watched through the box from here on.
-   */
-  function settleAnswers(): void {
-    if (onboardingIntent(state.buildAnswer, state.pathAnswer) === null) return;
-    state.welcomeChat = handOverWelcomeChat();
-    if (state.isDone) {
-      scheduleEntry(afterAnswerAtMs());
-      return;
-    }
-    state.isBoxRevealed = true;
-  }
-
-  function answerBuild(id: BuildAnswerId): void {
-    if (state.buildAnswer !== null) return;
-    state.buildAnswer = id;
-    settleAnswers();
-  }
-
-  function answerPath(id: PathAnswerId): void {
-    if (state.pathAnswer !== null) return;
-    state.pathAnswer = id;
-    settleAnswers();
-  }
-
-  /**
-   * The onboarding questions as far as they have been answered: the first question with its row of
-   * answers, the answer once given, and for a reader who did not know yet the follow-up the same way.
-   * Turns a press caused arrive on the press's clock; the first question follows the setup line.
-   */
-  function questionTurns(askAt: number, isInstant: boolean): m.Children[] {
-    const turns: m.Children[] = [
-      agentTurn({ key: "creation-build-ask", text: BUILD_ASK, startAtMs: askAt, isInstant }),
-    ];
-    if (state.buildAnswer === null) {
-      const buttonsAt = isInstant ? 0 : askAt + streamDurationMs(BUILD_ASK) + FLOW_OPTIONS_GAP_MS;
-      turns.push(answerChoices("creation-build-answers", buttonsAt, isInstant, BUILD_CHOICES, answerBuild));
-      return turns;
-    }
-    turns.push(
-      userTurn({ key: "creation-build-answer", delayMs: 0, text: choiceLabel(BUILD_CHOICES, state.buildAnswer) }),
-    );
-    if (state.buildAnswer === "yes") return turns;
-    turns.push(agentTurn({ key: "creation-path-ask", text: PATH_ASK, startAtMs: FLOW_THINK_MS }));
-    if (state.pathAnswer === null) {
-      const buttonsAt = FLOW_THINK_MS + streamDurationMs(PATH_ASK) + FLOW_OPTIONS_GAP_MS;
-      turns.push(answerChoices("creation-path-answers", buttonsAt, false, PATH_CHOICES, answerPath));
-      return turns;
-    }
-    turns.push(
-      userTurn({ key: "creation-path-answer", delayMs: 0, text: choiceLabel(PATH_CHOICES, state.pathAnswer) }),
-    );
-    if (state.pathAnswer === "examples") turns.push(showcaseBlock(SHOWCASE_APP, FLOW_THINK_MS));
-    return turns;
-  }
-
-  /** The one app others have built, for a reader who asked to see examples: its recording with its title and
-   *  description under it, drawn the width of an agent turn. The recording opens enlarged on a click: it holds
-   *  more detail than the column width shows. */
+  /** The recording of an app built in Studio, drawn the width of an agent turn. It opens enlarged on a click:
+   *  it holds more detail than the column width shows. */
   function showcaseBlock(app: ShowcaseApp, arriveAtMs: number): m.Children {
     return m(
       "div",
@@ -689,18 +568,14 @@ export const CreatingPage: m.ClosureComponent = () => {
           "button",
           {
             type: "button",
-            "aria-label": `View the ${app.title} recording larger`,
+            "aria-label": "View the recording larger",
             class: "block w-full cursor-zoom-in",
             onclick: () => {
               state.isShowcaseLightboxOpen = true;
             },
           },
-          m("img", { src: app.gifUrl, alt: app.title, class: "block w-full bg-fill-subtle object-contain" }),
+          m("img", { src: app.gifUrl, alt: app.label, class: "block w-full bg-fill-subtle object-contain" }),
         ),
-        m("div", { class: "px-4 py-3" }, [
-          m("div", { class: "type-body font-semibold text-primary" }, app.title),
-          m("div", { class: "mt-0.5 type-helper text-secondary" }, app.description),
-        ]),
       ],
     );
   }
@@ -716,10 +591,8 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /**
-   * A live attempt: the setup line, then either the live failure, or the onboarding questions when
-   * the attempt asks them, and the loading box (at once for an attempt asking nothing; under "let me
-   * just finish" once the questions were answered with the workspace still being built; never, when
-   * it was ready by then), with the ready line under whatever is there once the attempt is done.
+   * A live attempt: the setup line, then either the live failure, or the recording under its intro line (for
+   * an onboarding attempt) and the loading box, with the ready line under them once the attempt is done.
    */
   function liveTurns(workspaceName: string, isInstant: boolean): m.Children[] {
     const setupAt = isInstant ? 0 : FLOW_THINK_MS;
@@ -732,23 +605,15 @@ export const CreatingPage: m.ClosureComponent = () => {
       return turns;
     }
     const afterSetupAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
-    if (!isDrivenByAgent()) {
+    if (!isShowcaseShown()) {
       turns.push(loadingBox(afterSetupAt));
-      if (state.isDone) turns.push(readyTurn(FLOW_THINK_MS));
-      return turns;
+    } else {
+      turns.push(agentTurn({ key: "creation-showcase-intro", text: SHOWCASE_INTRO_LINE, startAtMs: afterSetupAt, isInstant }));
+      const showcaseAt = isInstant ? 0 : afterSetupAt + streamDurationMs(SHOWCASE_INTRO_LINE) + FLOW_OPTIONS_GAP_MS;
+      turns.push(showcaseBlock(SHOWCASE_APP, showcaseAt));
+      turns.push(loadingBox(isInstant ? 0 : showcaseAt + FLOW_THINK_MS));
     }
-    turns.push(...questionTurns(afterSetupAt, isInstant));
-    if (isAwaitingAnswer()) return turns;
-    // The turn after the answer (the finishing line, or the ready line when the workspace was ready by then)
-    // waits for the recording the answer brought, when it brought one.
-    const nextAt = afterAnswerAtMs();
-    if (state.isBoxRevealed) {
-      turns.push(agentTurn({ key: "creation-finishing", text: FINISHING_LINE, startAtMs: nextAt }));
-      turns.push(loadingBox(nextAt + streamDurationMs(FINISHING_LINE) + FLOW_OPTIONS_GAP_MS));
-      if (state.isDone) turns.push(readyTurn(FLOW_THINK_MS));
-      return turns;
-    }
-    if (state.isDone) turns.push(readyTurn(nextAt));
+    if (state.isDone) turns.push(readyTurn(FLOW_THINK_MS));
     return turns;
   }
 
@@ -811,19 +676,12 @@ export const CreatingPage: m.ClosureComponent = () => {
     return [...summary, ...liveTurns(workspaceName, isInstant)];
   }
 
-  /**
-   * Leave `state` behind: the page is being removed, or a later attempt is taking it over. A
-   * conversation not yet handed over (the questions still open) goes now, with the answers so far,
-   * so the workspace still opens on it.
-   */
+  /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */
   function stopWatching(): void {
     state.isEntryCancelled = true;
     state.watcher?.stop();
     if (state.progressTimer !== null) clearInterval(state.progressTimer);
     if (state.washTimer !== null) clearTimeout(state.washTimer);
-    if (state.detail?.kind === "live" && !state.isFailed && !state.isWelcomeChatHandedOver) {
-      void handOverWelcomeChat();
-    }
   }
 
   /** Show `createAttemptId`: fresh state, its detail, and (for a live attempt) the watcher. */
@@ -837,12 +695,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state !== own) return;
         own.detail = detail;
         if (detail.kind === "live") {
-          // An attempt asking its questions hands the conversation over once they are answered.
-          if (detail.live?.request.is_onboarding_driven_by_agent === true) own.isBoxRevealed = false;
-          else {
-            own.isBoxRevealed = true;
-            void handOverWelcomeChat();
-          }
+          void handOverWelcomeChat();
           startWatching();
         } else if (detail.kind === "gone") {
           getAppContext().shell.routeToHub();
@@ -896,7 +749,7 @@ export const CreatingPage: m.ClosureComponent = () => {
                 m(ImageLightbox, {
                   key: "showcase-lightbox",
                   imageUrl: SHOWCASE_APP.gifUrl,
-                  title: SHOWCASE_APP.title,
+                  title: SHOWCASE_APP.label,
                   onClose: () => {
                     state.isShowcaseLightboxOpen = false;
                   },

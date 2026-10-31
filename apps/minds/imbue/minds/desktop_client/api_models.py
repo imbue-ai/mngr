@@ -387,8 +387,8 @@ class CreateWorkspaceRequest(ApiRequestModel):
     is_onboarding_driven_by_agent: bool | None = Field(
         default=None,
         description=(
-            "Ask the onboarding questions on the creation page while the workspace is built, and close its "
-            "welcome chat on the answer (default off; the first-run start flow turns it on for its creates)"
+            "Show the onboarding examples on the creation page while the workspace is built "
+            "(default off; the first-run start flow turns it on for its creates)"
         ),
     )
 

@@ -73,7 +73,7 @@ export interface CreateRetryPrefill {
   memory_gb: number | null;
   disk_gb: number | null;
   color: string;
-  /** Whether the attempt's creation page asks the onboarding questions, which a retry keeps. */
+  /** Whether the attempt's creation page shows the onboarding examples, which a retry keeps. */
   is_onboarding_driven_by_agent: boolean;
   /** Why the attempt cannot be retried as recorded (its connection was removed); empty when it can. */
   unavailable_reason: string;
@@ -146,7 +146,7 @@ export interface CreateAttemptRequestSummary {
   disk_gb: number | null;
   repository: string;
   branch: string;
-  /** Whether the creation page asks its onboarding questions while the workspace is built; not a setting it restates. */
+  /** Whether the creation page shows its onboarding examples while the workspace is built; not a setting it restates. */
   is_onboarding_driven_by_agent: boolean;
 }
 

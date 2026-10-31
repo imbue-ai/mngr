@@ -1,6 +1,6 @@
-// The onboarding's hosted media: the to-do list recording the creation page
-// shows a reader who asked to see examples (and the seeded welcome chat carries
-// after that answer). Nothing is bundled or committed;
+// The onboarding's hosted media: the to-do list recording an onboarding
+// create's creation page shows under its setup line (and the seeded welcome
+// chat carries). Nothing is bundled or committed;
 // every file lives in the onboarding-media R2 bucket under a content-addressed
 // name (scripts/onboarding_media/publish.py), so a changed recording is a new
 // name here and an old one keeps resolving for every client that still holds it.

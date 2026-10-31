@@ -22,6 +22,13 @@ Feature: Start-flow invariants
     Any answer, and any answer taken back, ends the flow's wait on a dialog or sign-in it started earlier.
     A sign-in that completes after its wait has ended answers nothing and sends no create.
 
+  @log-in-offered-throughout
+  Rule: A returning user can log in at every point of the flow
+    The title bar offers "Already set up? Log in" from the flow's first frame, while the opening exchange is still typing and before the reporting question is answered, until the flow leaves for a creation page.
+    Pressing it while a cloud create is being sent does nothing.
+    A sign-in to an account with no workspaces answers whichever question is open, drops any account or email verification the flow had settled on, and asks again where to run the workspace.
+    Rationale: someone who already has a workspace should not have to sit through the onboarding to reach it.
+
   @change-answer-offered
   Rule: Every changeable answer can be changed until a create goes out
     Every changeable answer carries its "Change answer" control from the moment it is given until the flow sends a create.

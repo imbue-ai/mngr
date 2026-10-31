@@ -82,7 +82,7 @@ def _handle_consent_answer() -> Response:
 def _handle_onboarding_complete() -> Response:
     """Record that the installation is past the start flow (POST /ui/api/onboarding/complete).
 
-    The SPA posts this when the start flow's "I have an account (log in)" answer
+    The SPA posts this when the start flow's title-bar "Already set up? Log in"
     signs in to an account that already has workspaces, since that path creates
     nothing (the create front door records the same fact for every create
     attempt on its own, which is how a sign-in landing on a workspace-less
@@ -101,7 +101,7 @@ def _handle_onboarding_complete() -> Response:
 def _handle_signin_landing() -> Response:
     """Answer where the start flow's existing-login sign-in should land (GET /ui/api/onboarding/signin-landing).
 
-    The flow asks after its "I have an account (log in)" sign-in completes, with
+    The flow asks after its title-bar "Already set up? Log in" sign-in completes, with
     the signed-in account id as ``?account=``: ``done`` with the account's
     active synced-workspace count once the first record pull has finished (or
     the records were already local), ``pending`` while that pull is still in

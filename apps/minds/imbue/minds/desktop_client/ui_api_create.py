@@ -148,7 +148,7 @@ class CreateRetryPrefill(FrozenModel):
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     color: str = Field(description="Accent color of the interrupted attempt")
     is_onboarding_driven_by_agent: bool = Field(
-        description="Whether the attempt's creation page asks the onboarding questions, which a retry keeps"
+        description="Whether the attempt's creation page shows the onboarding examples, which a retry keeps"
     )
     unavailable_reason: str = Field(
         description=(
@@ -272,8 +272,8 @@ class CreateAttemptRequestSummary(FrozenModel):
     branch: str = Field(description="Requested branch/tag, empty for the repo default")
     is_onboarding_driven_by_agent: bool = Field(
         default=False,
-        description="Whether the creation page asks its onboarding questions while the workspace is built and "
-        "closes the welcome chat on the answer; not a setting the page restates",
+        description="Whether the creation page shows its onboarding examples while the workspace is built; "
+        "not a setting the page restates",
     )
 
 

@@ -1,16 +1,16 @@
 Feature: Where to run the first workspace
   The first question after the reporting question, and how the user moves between its answers.
-  Imbue Cloud is the answer the flow recommends; the others are offered as smaller links beneath it, the same answers the create form offers as cards (whose Imbue Cloud card an account's window carries; a window on the device, the start flow's included, offers only the other two).
+  Imbue Cloud is the answer the flow recommends; the others are offered as smaller links to the left of its buttons, the same answers the create form offers as cards (whose Imbue Cloud card an account's window carries; a window on the device, the start flow's included, offers only the other two).
 
   Background:
     Given the user is in the start flow
     And they have answered the reporting question
 
   @cloud-recommended
-  Scenario: The question recommends Imbue Cloud and offers the other answers beneath it
+  Scenario: The question recommends Imbue Cloud and offers the other answers beside it
     Then the flow recommends running the workspace on Imbue Cloud
     And it offers "Use Imbue Cloud" as the one button
-    And it offers "Run it on this computer" and "Use your own cloud" as links beneath that button
+    And it offers "Run it on this computer" and "Use your own cloud" as links to the left of that button
 
   @form-answers-open-form
   Scenario Outline: A smaller answer opens the create form on that answer
@@ -46,13 +46,13 @@ Feature: Where to run the first workspace
 
   @existing-workspace-sign-in
   Scenario: Signing in to an account that has workspaces leaves the start flow for its home page
-    When the user presses "I have an account (log in)" and signs in to an account that has workspaces
+    When the user presses the title bar's "Already set up? Log in" and signs in to an account that has workspaces
     Then they land on that account's home page
     And the start flow is not shown again
 
   @existing-login-no-workspaces
   Scenario: Signing in to an account with no workspaces continues the conversation
-    When the user presses "I have an account (log in)" and signs in to an account with no workspaces
+    When the user presses the title bar's "Already set up? Log in" and signs in to an account with no workspaces
     Then the sign-in is recorded as the answer to the first question
     And the flow asks again where to run the workspace, under the signed-in account
     And a later visit to a home page still hands over to the start flow until a create is started

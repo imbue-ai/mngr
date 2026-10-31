@@ -4,19 +4,25 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
 import {
-  BUILD_ASK,
-  FINISHING_LINE,
-  PATH_ASK,
   SETUP_LINE,
   SHOWCASE_APP,
-  SHOWCASE_READ_MS,
+  SHOWCASE_INTRO_LINE,
   readyTurnMarkdown,
+  showcaseMarkdown,
 } from "../../models/creationTranscript";
-import { FLOW_THINK_MS, MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/startFlow";
+import {
+  FLOW_OPTIONS_GAP_MS,
+  FLOW_THINK_MS,
+  MANIFESTO_OPENER,
+  MANIFESTO_QUESTION,
+  REPORTING_ASK,
+  startFlow,
+  streamDurationMs,
+} from "../../models/startFlow";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import type { AnyVnode } from "../../testing";
-import { allText, byId, classTokensOf, classesOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
+import { allText, byId, classTokensOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
 import { Button } from "../components/Button";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
@@ -64,6 +70,7 @@ describe("failureTurn", () => {
 
 describe("CreatingPage across a route change", () => {
   afterEach(() => {
+    startFlow.reset();
     vi.useRealTimers();
     clearAppContextForTests();
     vi.unstubAllGlobals();
@@ -148,21 +155,6 @@ describe("CreatingPage across a route change", () => {
     const turn = (rendered.children as m.Vnode[]).find((child) => attrsOf(child).key === key);
     expect(turn, `the ${key} turn`).toBeDefined();
     return turn as AnyVnode;
-  }
-
-  /** When the turn keyed `key` starts streaming: its first character's delay. */
-  function streamStartOf(rendered: m.Vnode, key: string): number {
-    const firstChar = collectVnodes(columnTurn(rendered, key)).find((node) => classesOf(node).includes("start-char"));
-    expect(firstChar, `a streamed character of ${key}`).toBeDefined();
-    return Number(/--start-char-delay: ([\d.]+)ms/.exec(String(attrsOf(firstChar as AnyVnode).style))?.[1]);
-  }
-
-  /** Render the page for `createAttemptId` and press the answer button called `answerId`. */
-  function pressAnswer(page: m.Component, createAttemptId: string, answerId: string): void {
-    const rendered = (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor(createAttemptId));
-    const button = collectVnodes(rendered).find((node) => attrsOf(node)["data-answer"] === answerId);
-    expect(button, `the ${answerId} answer`).toBeDefined();
-    (attrsOf(button as AnyVnode).onclick as () => void)();
   }
 
   it("opens with the manifesto exchange even for an attempt the start flow did not submit", async () => {
@@ -300,17 +292,17 @@ describe("CreatingPage across a route change", () => {
     expect(turns[1]).toEqual({ role: "user", text: MANIFESTO_QUESTION });
     expect(turns[3].text).toContain(REPORTING_ASK);
     expect(turns[4].text).toContain("Name — workspace-create-attempt-d");
-    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown("problem"));
+    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
     const root = render(vnodeFor("create-attempt-d"));
     const nodes = collectVnodes(root);
-    // The settings turn, the setup line, the loading box at once (no questions were asked), and the ready
+    // The settings turn, the setup line, the loading box at once (no recording), and the ready
     // line, which stands further from the box than one turn from the next.
     const keys = columnKeys(root);
     expect(keys.indexOf("creation-summary")).toBeLessThan(keys.indexOf("creation-setup"));
     expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-box"));
     expect(keys.indexOf("creation-box")).toBeLessThan(keys.indexOf("creation-ready"));
     expect(keys.indexOf("creation-ready")).toBeLessThan(keys.indexOf("scroll-anchor"));
-    expect(keys).not.toContain("creation-build-ask");
+    expect(keys).not.toContain("showcase-todo-list");
     const ready = nodes.find((node) => attrsOf(node).key === "creation-ready") as AnyVnode;
     expect(classTokensOf(ready)).toContain("mt-20");
 
@@ -390,135 +382,48 @@ describe("CreatingPage across a route change", () => {
     (page.onremove as () => void).call(page);
   });
 
-  it("asks what to build with the box hidden, and on an answer while the workspace is still being built says it will finish and reveals the box", async () => {
-    const { page, seedBodies } = mountDoneAttempt("create-attempt-k", "CREATING_WORKSPACE", true);
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    await vi.waitFor(() => expect(columnKeys(render(vnodeFor("create-attempt-k")))).toContain("creation-build-answers"));
+  it("shows an onboarding attempt's recording under its intro line, with no caption, before the box, and hands it over at once", async () => {
+    // Submitted by the start flow, as an onboarding create is, so its turns arrive on the agent's clock.
+    startFlow.submittedCreateAttemptId = "create-attempt-k";
+    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt("create-attempt-k", "CREATING_WORKSPACE", true);
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-k"));
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
 
-    // Nothing is handed over before the answer, and the box is nowhere.
-    expect(seedBodies).toEqual([]);
-    const asked = render(vnodeFor("create-attempt-k"));
-    expect(allText(asked)).toContain(SETUP_LINE);
-    expect(allText(asked)).toContain(BUILD_ASK);
-    expect(columnKeys(asked)).not.toContain("creation-box");
-    expect(allText(asked)).not.toContain(PATH_ASK);
-
-    pressAnswer(page, "create-attempt-k", "no");
-    const followUp = render(vnodeFor("create-attempt-k"));
-    expect(columnKeys(followUp)).toEqual(
-      expect.arrayContaining(["creation-build-answer", "creation-path-ask", "creation-path-answers"]),
-    );
-    expect(columnKeys(followUp)).not.toContain("creation-build-answers");
-    // Turns a press caused stream in, a character per span.
-    expect(collectText(followUp).join("")).toContain(PATH_ASK);
-    expect(seedBodies).toEqual([]);
-
-    pressAnswer(page, "create-attempt-k", "examples");
-    const settled = render(vnodeFor("create-attempt-k"));
-    const keys = columnKeys(settled);
-    // "See examples" brings the one recording, between the answer and the finishing line.
-    expect(keys.indexOf("creation-path-answer")).toBeLessThan(keys.indexOf("showcase-todo-list"));
-    expect(keys.indexOf("showcase-todo-list")).toBeLessThan(keys.indexOf("creation-finishing"));
-    expect(keys.indexOf("creation-finishing")).toBeLessThan(keys.indexOf("creation-box"));
+    // The intro and the recording sit under the setup line, the box under them.
+    const building = render();
+    const keys = columnKeys(building);
+    expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-showcase-intro"));
+    expect(keys.indexOf("creation-showcase-intro")).toBeLessThan(keys.indexOf("showcase-todo-list"));
+    expect(keys.indexOf("showcase-todo-list")).toBeLessThan(keys.indexOf("creation-box"));
     expect(keys).not.toContain("creation-ready");
-    expect(collectText(settled).join("")).toContain(FINISHING_LINE);
-    // The recording arrives on the agent's beat; the finishing line waits for it to be looked at.
-    expect(String(attrsOf(columnTurn(settled, "showcase-todo-list")).style)).toContain(`--start-chat-delay: ${FLOW_THINK_MS}ms`);
-    expect(streamStartOf(settled, "creation-finishing")).toBe(FLOW_THINK_MS + SHOWCASE_READ_MS);
-    // The answer decided the welcome, so the conversation went over then, with the questions in it.
-    expect(seedBodies).toHaveLength(1);
-    const texts = seedBodies[0].turns.map((turn) => turn.text);
-    expect(texts).toEqual(expect.arrayContaining([BUILD_ASK, "No", PATH_ASK, "See examples"]));
-    expect(texts[texts.length - 1]).toBe(readyTurnMarkdown("examples"));
-    (page.onremove as () => void).call(page);
-    expect(seedBodies).toHaveLength(1);
-  });
+    expect(collectText(columnTurn(building, "creation-showcase-intro")).join("")).toContain(SHOWCASE_INTRO_LINE);
+    const showcase = columnTurn(building, "showcase-todo-list");
+    expect(collectText(showcase).join("").trim()).toBe("");
+    const image = collectVnodes(showcase).find((node) => node.tag === "img") as AnyVnode;
+    expect(attrsOf(image).src).toBe(SHOWCASE_APP.gifUrl);
+    expect(attrsOf(image).alt).toBe(SHOWCASE_APP.label);
+    // The recording arrives once its intro has landed, and the box a beat after the recording.
+    const introAt = FLOW_THINK_MS + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
+    const recordingAt = introAt + streamDurationMs(SHOWCASE_INTRO_LINE) + FLOW_OPTIONS_GAP_MS;
+    expect(String(attrsOf(showcase).style)).toContain(`--start-chat-delay: ${recordingAt}ms`);
+    expect(String(attrsOf(columnTurn(building, "creation-box")).style)).toContain(
+      `--start-chat-delay: ${recordingAt + FLOW_THINK_MS}ms`,
+    );
 
-  it("watches a workspace answered for while still being built through the box, and enters it once it is ready", async () => {
-    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt("create-attempt-o", "CREATING_WORKSPACE", true);
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-o"));
-    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-build-answers"));
+    // The conversation went over with the recording in it, ahead of the welcome.
+    const tail = seedBodies[0].turns.slice(-3).map((turn) => turn.text);
+    expect(tail).toEqual([SETUP_LINE, showcaseMarkdown(SHOWCASE_APP), readyTurnMarkdown()]);
 
-    pressAnswer(page, "create-attempt-o", "yes");
-    const building = columnKeys(render());
-    expect(building.indexOf("creation-finishing")).toBeLessThan(building.indexOf("creation-box"));
-    expect(building).not.toContain("creation-ready");
-    expect(seedBodies).toHaveLength(1);
-
-    // The attempt finishes: the conversation goes over again, the ready line lands under the box.
+    // The attempt finishes: the ready line lands under the box, and the entry waits for the seed.
     setStatus("DONE");
     await vi.advanceTimersByTimeAsync(2000);
     expect(seedBodies).toHaveLength(2);
-    const texts = seedBodies[1].turns.map((turn) => turn.text);
-    expect(texts).toEqual(expect.arrayContaining([BUILD_ASK, "Yes"]));
-    expect(texts[texts.length - 1]).toBe(readyTurnMarkdown("build"));
     const done = columnKeys(render());
     expect(done.indexOf("creation-box")).toBeLessThan(done.indexOf("creation-ready"));
-
-    // The hold passes, but the entry waits for the seed.
     await vi.advanceTimersByTimeAsync(30_000);
     expect(entered).toEqual([]);
     settleSeed();
     await vi.advanceTimersByTimeAsync(0);
-    expect(entered).toEqual(["agent-0123abcd"]);
-    (page.onremove as () => void).call(page);
-    expect(seedBodies).toHaveLength(2);
-  });
-
-  it("holds a ready workspace on the open question, then enters it on Yes with no box ever shown", async () => {
-    const { page, entered, seedBodies, settleSeed } = mountDoneAttempt("create-attempt-l", "DONE", true);
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    await vi.waitFor(() => expect(columnKeys(render(vnodeFor("create-attempt-l")))).toContain("creation-build-answers"));
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(entered).toEqual([]);
-    expect(seedBodies).toEqual([]);
-    expect(columnKeys(render(vnodeFor("create-attempt-l")))).not.toContain("creation-ready");
-
-    pressAnswer(page, "create-attempt-l", "yes");
-    const keys = columnKeys(render(vnodeFor("create-attempt-l")));
-    expect(keys.indexOf("creation-build-answer")).toBeLessThan(keys.indexOf("creation-ready"));
-    expect(keys).not.toContain("creation-box");
-    expect(keys).not.toContain("creation-finishing");
-    expect(seedBodies).toHaveLength(1);
-    const texts = seedBodies[0].turns.map((turn) => turn.text);
-    expect(texts).toEqual(expect.arrayContaining([BUILD_ASK, "Yes"]));
-    expect(texts[texts.length - 1]).toBe(readyTurnMarkdown("build"));
-
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(entered).toEqual([]);
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(entered).toEqual(["agent-0123abcd"]);
-    (page.onremove as () => void).call(page);
-  });
-
-  it("shows a ready workspace's recording on See examples, and enters it only once the recording has had its read beat", async () => {
-    const { page, entered, seedBodies, settleSeed } = mountDoneAttempt("create-attempt-p", "DONE", true);
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-p"));
-    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-build-answers"));
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(entered).toEqual([]);
-
-    pressAnswer(page, "create-attempt-p", "no");
-    pressAnswer(page, "create-attempt-p", "examples");
-    const settled = render();
-    const keys = columnKeys(settled);
-    expect(keys.indexOf("creation-path-answer")).toBeLessThan(keys.indexOf("showcase-todo-list"));
-    expect(keys.indexOf("showcase-todo-list")).toBeLessThan(keys.indexOf("creation-ready"));
-    expect(keys).not.toContain("creation-box");
-    expect(keys).not.toContain("creation-finishing");
-    expect(streamStartOf(settled, "creation-ready")).toBe(FLOW_THINK_MS + SHOWCASE_READ_MS);
-    expect(seedBodies).toHaveLength(1);
-    expect(seedBodies[0].turns[seedBodies[0].turns.length - 1].text).toBe(readyTurnMarkdown("examples"));
-
-    // With the seed already settled, the entry still waits: without the read beat the ready line would have
-    // landed and its hold passed well within two seconds of the answer.
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(entered).toEqual([]);
-    await vi.advanceTimersByTimeAsync(3000);
     expect(entered).toEqual(["agent-0123abcd"]);
     (page.onremove as () => void).call(page);
   });
@@ -526,15 +431,13 @@ describe("CreatingPage across a route change", () => {
   it("opens the recording enlarged on a click and closes it again", async () => {
     const { page } = mountDoneAttempt("create-attempt-q", "DONE", true);
     const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-q"));
-    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-build-answers"));
-    pressAnswer(page, "create-attempt-q", "no");
-    pressAnswer(page, "create-attempt-q", "examples");
+    await vi.waitFor(() => expect(columnKeys(render())).toContain("showcase-todo-list"));
 
     // The recording is a control; nothing is enlarged until it is pressed.
     const settled = renderDeep(render());
     expect(collectVnodes(settled).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
     const opener = collectVnodes(settled).find(
-      (node) => attrsOf(node)["aria-label"] === `View the ${SHOWCASE_APP.title} recording larger`,
+      (node) => attrsOf(node)["aria-label"] === "View the recording larger",
     ) as AnyVnode;
     expect(opener.tag).toBe("button");
     (attrsOf(opener).onclick as () => void)();
@@ -543,7 +446,7 @@ describe("CreatingPage across a route change", () => {
     const enlarged = renderDeep(render());
     const dialog = collectVnodes(enlarged).find((node) => attrsOf(node).role === "dialog") as AnyVnode;
     expect(dialog).toBeDefined();
-    expect(attrsOf(dialog)["aria-label"]).toBe(SHOWCASE_APP.title);
+    expect(attrsOf(dialog)["aria-label"]).toBe(SHOWCASE_APP.label);
     const enlargedImage = collectVnodes(dialog).find(
       (node) => node.tag === "img" && attrsOf(node).src === SHOWCASE_APP.gifUrl,
     );
@@ -556,21 +459,6 @@ describe("CreatingPage across a route change", () => {
     (attrsOf(close).onclick as () => void)();
     expect(collectVnodes(renderDeep(render())).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
     (page.onremove as () => void).call(page);
-  });
-
-  it("hands the conversation over as the page is left with its question still open, so the workspace still opens on it", async () => {
-    const { page, seedBodies } = mountDoneAttempt("create-attempt-m", "CREATING_WORKSPACE", true);
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    await vi.waitFor(() => expect(columnKeys(render(vnodeFor("create-attempt-m")))).toContain("creation-build-answers"));
-    pressAnswer(page, "create-attempt-m", "not-sure");
-    expect(seedBodies).toEqual([]);
-
-    (page.onremove as () => void).call(page);
-    expect(seedBodies).toHaveLength(1);
-    const texts = seedBodies[0].turns.map((turn) => turn.text);
-    expect(texts).toEqual(expect.arrayContaining([BUILD_ASK, "I’m not sure", PATH_ASK]));
-    expect(texts[texts.length - 1]).toBe(readyTurnMarkdown("problem"));
   });
 
   it("does not enter the workspace when the page was left while the hand-off was in flight", async () => {
@@ -597,7 +485,7 @@ describe("CreatingPage across a route change", () => {
       role: "assistant",
       text: manifestoOpenerMarkdown(),
     });
-    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown("problem"));
+    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
     await vi.advanceTimersByTimeAsync(30_000);
     (page.onremove as () => void).call(page);
     expect(seedBodies).toHaveLength(1);

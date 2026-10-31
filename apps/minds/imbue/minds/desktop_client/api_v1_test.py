@@ -6085,7 +6085,7 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
     assert creator.last_call["account_id"] == "user-77120"
 
 
-def test_create_workspace_threads_the_onboarding_questions_flag_off_unless_the_body_turns_it_on(
+def test_create_workspace_threads_the_onboarding_examples_flag_off_unless_the_body_turns_it_on(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:

@@ -155,8 +155,8 @@ export class CreateFormModel {
   // new workspace right after its create. On by default under an account
   // (syncAccountDefaults), off without one, since a share needs an owner.
   enableWebAccess = false;
-  // The advanced view's "Use onboarding questions?": whether the creation page
-  // asks its questions while the workspace is built. Off from the form; the
+  // The advanced view's "Show onboarding examples?": whether the creation page
+  // shows its recording while the workspace is built. Off from the form; the
   // start flow's creates turn it on (its form opens with it on).
   isOnboardingDrivenByAgent = false;
   // Whether the user set the switch or the backup provider by hand: an

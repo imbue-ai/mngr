@@ -369,6 +369,33 @@ describe("the existing-account way out", () => {
     expect(openStepIndex(undone)).toBe(1);
   });
 
+  it("at the account step, the receipt answers it and where to run is asked again with no account offered", () => {
+    const atAccount = answerStep(started(), 1, "cloud", SIGNED_IN);
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(atAccount), BOB);
+    expect(state.entries[2]).toMatchObject({ id: "account", answer: "existing-login", said: signedInSaid(BOB.email) });
+    expect(state.entries.at(-1)).toMatchObject({ id: "again", ack: NO_WORKSPACES_ACK, answer: null });
+    expect(state.offeredAccount).toBeNull();
+    expect(state.account).toBeNull();
+  });
+
+  it("while waiting on a verification, even after a re-sent email, the wait is dropped and where to run is asked again", () => {
+    const verifying = noteVerificationEmailSent(requireEmailVerification(owingCreate()), "sent");
+    expect(verifying.entries.at(-1)?.kind).toBe("note");
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(verifying), BOB);
+    const verifyAt = state.entries.findIndex((entry) => entry.kind === "step" && entry.id === "verify");
+    expect(state.entries[verifyAt]).toMatchObject({ answer: "existing-login", said: signedInSaid(BOB.email) });
+    expect(state.entries.at(-1)).toMatchObject({ id: "again", ack: NO_WORKSPACES_ACK, answer: null });
+    expect(state.verificationEmail).toBeNull();
+    expect(state.isCloudCreatePending).toBe(false);
+    expect(state.account).toBeNull();
+  });
+
+  it("before the reporting question is answered, nothing is recorded", () => {
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(initialStartFlowState()), BOB);
+    expect(state.pending).toBeNull();
+    expect(state.entries).toEqual([]);
+  });
+
   it("continuing is ignored while the flow is not waiting on the existing-login sign-in", () => {
     const state = started();
     expect(continueExistingLoginWithoutWorkspaces(state, ALICE)).toBe(state);

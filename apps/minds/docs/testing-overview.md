@@ -368,7 +368,7 @@ the resource guards' shim directory on `PATH` are dropped, and
 explicitly. The `BROWSER` it is given is a no-op, so its web-login never
 reaches the operator's own browser (which would hand whatever account is
 signed in there to the app); the suite opens the hosted sign-in URL from the
-start flow's "I have an account (log in)" aside and completes it in its own
+start flow's title-bar "Already set up? Log in" and completes it in its own
 headless Chromium.
 
 The workspace is created in the region the form already points at, which is

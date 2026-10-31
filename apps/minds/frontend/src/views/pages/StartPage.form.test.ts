@@ -50,6 +50,6 @@ describe("the where-to-run links on the live page", () => {
     const nodes = collectVnodes(view());
     expect(openCreateFormModal(nodes)).toBeUndefined();
     const offered = nodes.map((node) => attrsOf(node)["data-answer"]).filter((id) => id !== undefined);
-    expect(offered.slice(-3)).toEqual(["cloud", "local", "own-cloud"]);
+    expect(offered.slice(-3)).toEqual(["local", "own-cloud", "cloud"]);
   });
 });

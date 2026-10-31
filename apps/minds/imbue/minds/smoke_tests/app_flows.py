@@ -54,10 +54,10 @@ LANDING_SELECTORS: Final[tuple[str, ...]] = (
 _CONSENT_CONTINUE: Final[str] = "#consent-continue"
 _START_FLOW: Final[str] = "#start-flow"
 # The start flow (``StartPage.ts``): its answer buttons carry their choice in
-# ``data-answer``; the first question's quiet way out, for someone who already
-# has an account, is the row's aside.
+# ``data-answer``; the way in for someone who already has a workspace is the
+# start titlebar's log-in.
 _REPORTING_DECLINE: Final[str] = '[data-answer="reporting-no"]'
-_EXISTING_LOGIN_ASIDE: Final[str] = "button[data-aside]"
+_EXISTING_LOGIN_BUTTON: Final[str] = "#start-log-in"
 # The Manage Accounts page's one button, and the web-login modal's copy of the sign-in URL.
 _ACCOUNTS_PATH: Final[str] = "/accounts"
 _ADD_ACCOUNT_BUTTON: Final[str] = 'button:has-text("Add account")'
@@ -228,9 +228,8 @@ def wait_for_landing_page(session: StudioAppSession) -> str:
 def start_web_login(session: StudioAppSession, landed_on: str) -> str:
     """Open the app's web-login flow the way the page it landed on offers it; return the hosted sign-in URL.
 
-    A fresh install is in its start flow, whose first question has a quiet
-    "I have an account (log in)" way out; an install past onboarding signs in
-    from Manage Accounts.
+    A fresh install is in its start flow, whose title bar offers "Already set up? Log in"
+    throughout; an install past onboarding signs in from Manage Accounts.
     """
     if landed_on == _START_FLOW:
         return _start_web_login_from_start_flow(session)
@@ -242,8 +241,8 @@ def _start_web_login_from_start_flow(session: StudioAppSession) -> str:
     page = session.page
     page.wait_for_selector(_REPORTING_DECLINE, state="visible", timeout=_PAGE_TIMEOUT_MS)
     page.click(_REPORTING_DECLINE)
-    page.wait_for_selector(_EXISTING_LOGIN_ASIDE, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_EXISTING_LOGIN_ASIDE)
+    page.wait_for_selector(_EXISTING_LOGIN_BUTTON, state="visible", timeout=_PAGE_TIMEOUT_MS)
+    page.click(_EXISTING_LOGIN_BUTTON)
     return _wait_for_web_login_url(page)
 
 

@@ -29,7 +29,7 @@ describe("cloudCreateBody", () => {
       branch: "minds-v9.9.9",
       color: "#0b292b",
       host_name: "",
-      // The first workspace's creation page asks the onboarding questions.
+      // The first workspace's creation page shows the onboarding examples.
       is_onboarding_driven_by_agent: true,
     });
   });
@@ -72,7 +72,7 @@ describe("areDefaultsStale", () => {
 describe("transcriptTurns", () => {
   const started = startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL);
 
-  it("renders the open question with Imbue Cloud's points, its button, the two minor answers, and the existing-account way out", () => {
+  it("renders the open question with Imbue Cloud's points, its button, and the two minor answers", () => {
     const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true });
     const text = allText(turns);
     expect(text).toContain(REPORTING_ACCEPT_LABEL);
@@ -80,10 +80,12 @@ describe("transcriptTurns", () => {
     expect(text).toContain("Recommended");
     expect(text).toContain("30 second setup");
     const answers = withAttr(turns, "data-answer");
-    expect(answers.map((node) => node.attrs?.["data-answer"])).toEqual(["cloud", "local", "own-cloud"]);
-    // Only Imbue Cloud is a button; the other two are links.
-    expect(answers.map((node) => typeof node.tag === "string")).toEqual([false, true, true]);
-    expect(allText(withAttr(turns, "data-aside"))).toContain(EXISTING_LOGIN_LABEL);
+    // The two minor answers are links at the row's left; Imbue Cloud is the main button, at its right.
+    expect(answers.map((node) => node.attrs?.["data-answer"])).toEqual(["local", "own-cloud", "cloud"]);
+    expect(answers.map((node) => typeof node.tag === "string")).toEqual([true, true, false]);
+    // The returning user's way in is the title bar's, for the whole flow, not this question's.
+    expect(withAttr(turns, "data-aside")).toHaveLength(0);
+    expect(text).not.toContain(EXISTING_LOGIN_LABEL);
   });
 
   it("renders an answered question as the user's words with an undo, and no buttons", () => {
@@ -157,6 +159,8 @@ describe("transcriptTurns on the verification question", () => {
     expect(allText(turns)).toContain("(click the link emailed to a@b.com when you created your account)");
     expect(withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"])).toEqual(["verified"]);
     expect(allText(withAttr(turns, "data-aside"))).toContain(RESEND_EMAIL_LABEL);
+    // The resend stays a link: a plain link-styled <button> element, not the Button component.
+    expect(withAttr(turns, "data-aside").map((node) => node.tag)).toEqual(["button"]);
   });
 
   it("puts the resend on the same row as the button", () => {

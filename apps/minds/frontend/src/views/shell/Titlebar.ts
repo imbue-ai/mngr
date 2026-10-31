@@ -28,6 +28,7 @@ import { TitlebarStatusPill } from "./titlebar-status";
 import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
+import { EXISTING_LOGIN_LABEL, startFlow } from "../../models/startFlow";
 
 export interface TitlebarAttrs {
   shell: ShellState;
@@ -78,8 +79,10 @@ export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
 };
 
 /**
- * The start flow's titlebar: nothing but the lockup, centered, in the brand color.
- * Every other control points at something that does not exist yet.
+ * The start flow's titlebar: the lockup, centered, in the brand color, and at
+ * the right the returning user's way in, there from the first frame so the
+ * flow never has to be sat through to reach it. Every other control points at
+ * something that does not exist yet.
  */
 function startTitlebar(shell: ShellState): m.Children {
   const isDesktop = electronBridge.isDesktop;
@@ -95,11 +98,28 @@ function startTitlebar(shell: ShellState): m.Children {
       m("div", { class: "flex-1" }),
       m("img", {
         id: "start-mark",
-        class: "start-chrome-mark absolute left-1/2 top-1/2 h-5 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
+        // 24px tall, 1px below the bar's centre: electron/shell.html parks the loading screen's mark there too.
+        class:
+          "start-chrome-mark absolute left-1/2 top-[calc(50%+1px)] h-6 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
         src: lockupUrl,
         alt: "Imbue Studio",
         draggable: false,
       }),
+      ...(startFlow.logInExisting === null
+        ? []
+        : [
+            m(
+              TitlebarButton,
+              {
+                id: "start-log-in",
+                variant: "crumb",
+                tone: "muted",
+                extra: "group mr-3 translate-y-1",
+                onclick: () => startFlow.logInExisting?.(),
+              },
+              m("span", { class: "type-body text-tertiary group-hover:text-primary" }, EXISTING_LOGIN_LABEL),
+            ),
+          ]),
       m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
         m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
         m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),

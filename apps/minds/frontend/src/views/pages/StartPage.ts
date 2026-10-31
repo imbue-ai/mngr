@@ -4,7 +4,8 @@
 // asked one at a time as a chat (see models/startFlow.ts for the transcript
 // and its transitions). The cloud answer submits the create form's remote
 // preset directly; the two quieter answers open the create form itself as a
-// modal, on their own preset; "I have an account (log in)" signs in and, when
+// modal, on their own preset; the title bar's "Already set up? Log in", offered
+// throughout the flow, signs in and, when
 // the account has workspaces, leaves for its home page -- with none, the
 // conversation continues under the signed-in account, since the first
 // workspace still needs to be made. A cloud create waits for the account's
@@ -195,7 +196,7 @@ export function areDefaultsStale(
 
 /**
  * The create form's remote preset under the flow's account, submitted without the form. The first workspace's
- * creation page asks the onboarding questions, as it does for the flow's form answers.
+ * creation page shows the onboarding examples, as it does for the flow's form answers.
  */
 export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
   const model = new CreateFormModel();
@@ -348,13 +349,20 @@ export const StartPage: m.ClosureComponent = () => {
     );
   }
 
-  /** One quiet poll while the flow waits on the link; a failed check simply waits for the next. */
+  /**
+   * One quiet poll while the flow waits on the link; a failed check simply
+   * waits for the next. Polls hold off while the title bar's log-in is
+   * signing in, which may replace this account.
+   */
   async function pollVerification(): Promise<void> {
-    if (flow.state.verificationEmail === null || isCheckingVerification) return;
+    const isPollHeld = (): boolean => flow.state.pending === "existing-login";
+    if (flow.state.verificationEmail === null || isCheckingVerification || isPollHeld()) return;
     const email = flow.state.verificationEmail;
     isCheckingVerification = true;
     try {
-      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email) finishVerification();
+      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email && !isPollHeld()) {
+        finishVerification();
+      }
     } catch {
       // Left for the next poll.
     } finally {
@@ -487,6 +495,7 @@ export const StartPage: m.ClosureComponent = () => {
       userId: landing.accountId,
       email: landing.email,
     });
+    if (flow.state.verificationEmail === null) stopVerificationTimers();
     redraw();
   }
 
@@ -548,10 +557,16 @@ export const StartPage: m.ClosureComponent = () => {
   }
 
   function onAside(stepId: StepId): void {
-    if (stepId === "verify" || stepId === "verify-again") {
-      resendVerification();
-      return;
-    }
+    if (stepId === "verify" || stepId === "verify-again") resendVerification();
+  }
+
+  /**
+   * The title bar's log-in for a returning user, at any point of the flow but
+   * a cloud create under way: from the owed create's verification check to
+   * the request itself.
+   */
+  function logInExisting(): void {
+    if (isSubmittingCloud || flow.state.isCloudCreatePending) return;
     cancelSigninLanding();
     flow.state = chooseExistingLogin(flow.state);
     void webLogin.start("Sign in to see your existing workspaces.");
@@ -659,6 +674,9 @@ export const StartPage: m.ClosureComponent = () => {
   return {
     oninit() {
       loadDefaults();
+      flow.logInExisting = logInExisting;
+      // The shell drew the title bar ahead of this page, before the log-in was registered.
+      redraw();
     },
     onupdate() {
       syncAccounts();
@@ -666,6 +684,7 @@ export const StartPage: m.ClosureComponent = () => {
     onremove() {
       stopVerificationTimers();
       cancelSigninLanding();
+      if (flow.logInExisting === logInExisting) flow.logInExisting = null;
     },
     view() {
       const state = flow.state;

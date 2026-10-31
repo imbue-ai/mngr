@@ -212,7 +212,7 @@ def test_empty_after_discovery_hands_over_to_the_start_flow(tmp_path: Path) -> N
     assert status["restorable_workspace_ids"] == []
     assert status["is_onboarding_complete"] is False
 
-    # And once they sign in from the start flow's "I have an account (log in)" answer
+    # And once they sign in from the start flow's title-bar "Already set up? Log in"
     # (the SPA posts the completion), no later visit reads as incomplete again.
     assert client.post("/ui/api/onboarding/complete").status_code == 200
     for _ in range(2):

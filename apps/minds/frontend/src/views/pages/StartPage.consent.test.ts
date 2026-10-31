@@ -1,6 +1,7 @@
 // The reporting question that closes the manifesto: what it says, what "See more" opens, and that either answer is
 // saved before the questions begin. A file of its own because it drives the live page, whose sign-in module is
 // replaced here.
+import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
@@ -34,6 +35,7 @@ describe("the manifesto's reporting question", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
     const shell = new ShellState(createEmptyStores());
     registerAppContext({ stores: shell.stores, shell });
     fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));

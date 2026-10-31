@@ -1,18 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import type { BuildAnswerId } from "./creationTranscript";
 import {
-  BUILD_CHOICES,
   IMBUE_CLOUD_SUMMARY_LINE,
-  PATH_CHOICES,
   READY_LINE,
   SHOWCASE_APP,
+  SHOWCASE_INTRO_LINE,
   SUMMARY_HEADING,
   WELCOME_BODY,
-  WELCOME_BODY_BUILD,
-  choiceLabel,
   failureLine,
-  onboardingIntent,
   readyTurnMarkdown,
   shortRepository,
   showcaseMarkdown,
@@ -164,53 +159,11 @@ describe("failureLine", () => {
 });
 
 describe("readyTurnMarkdown", () => {
-  it("puts the ready line as a heading over the welcome written for where the questions led", () => {
-    expect(readyTurnMarkdown("problem")).toBe(`## ${READY_LINE}\n\n${WELCOME_BODY}`);
+  it("puts the ready line as a heading over the welcome", () => {
+    expect(readyTurnMarkdown()).toBe(`## ${READY_LINE}\n\n${WELCOME_BODY}`);
     expect(WELCOME_BODY).toContain("**What’s annoying, overwhelming, or tedious");
     expect(WELCOME_BODY.endsWith("tells me what to do next.*")).toBe(true);
-
-    expect(readyTurnMarkdown("build")).toBe(`## ${READY_LINE}\n\n${WELCOME_BODY_BUILD}`);
-    expect(WELCOME_BODY_BUILD.startsWith("Just tell me what you want to build.")).toBe(true);
-    expect(WELCOME_BODY_BUILD).toContain("**Focus on describing the problem");
-    expect(WELCOME_BODY_BUILD.endsWith("when I need them.*")).toBe(true);
-  });
-
-  it("gives a reader who asked for examples the problem welcome, the recording having been shown on the page", () => {
-    expect(readyTurnMarkdown("examples")).toBe(readyTurnMarkdown("problem"));
-    expect(readyTurnMarkdown("examples")).not.toContain(SHOWCASE_APP.gifUrl);
-  });
-});
-
-describe("onboardingIntent", () => {
-  it("is settled by Yes alone, by either follow-up answer, and by nothing else", () => {
-    expect(onboardingIntent(null, null)).toBeNull();
-    expect(onboardingIntent("yes", null)).toBe("build");
-    expect(onboardingIntent("no", null)).toBeNull();
-    expect(onboardingIntent("not-sure", null)).toBeNull();
-    expect(onboardingIntent("no", "examples")).toBe("examples");
-    expect(onboardingIntent("not-sure", "problem")).toBe("problem");
-  });
-
-  it("offers Yes as the one emphasized first answer, and Describe a problem as the emphasized follow-up", () => {
-    expect(BUILD_CHOICES.map((choice) => [choice.label, choice.isEmphasized])).toEqual([
-      ["I’m not sure", false],
-      ["No", false],
-      ["Yes", true],
-    ]);
-    expect(PATH_CHOICES.map((choice) => [choice.label, choice.isEmphasized])).toEqual([
-      ["See examples", false],
-      ["Describe a problem", true],
-    ]);
-  });
-});
-
-describe("choiceLabel", () => {
-  it("says what the user's bubble says for an answer, and refuses an answer no question offers", () => {
-    expect(choiceLabel(BUILD_CHOICES, "not-sure")).toBe("I’m not sure");
-    expect(choiceLabel(PATH_CHOICES, "problem")).toBe("Describe a problem");
-    // An id the type allows but the list lacks: the two are kept in step by hand.
-    const unlisted = "maybe" as unknown as BuildAnswerId;
-    expect(() => choiceLabel(BUILD_CHOICES, unlisted)).toThrow("No onboarding choice is called maybe");
+    expect(readyTurnMarkdown()).not.toContain(SHOWCASE_APP.gifUrl);
   });
 });
 
@@ -228,17 +181,12 @@ describe("the showcase", () => {
     expect(SHOWCASE_APP.id).toBe("todo-list");
     expect(SHOWCASE_APP.gifUrl.startsWith(`${ONBOARDING_MEDIA_BASE_URL}/`)).toBe(true);
     expect(SHOWCASE_APP.gifUrl).toMatch(/\/[0-9a-f]{64}\.gif$/);
-    expect(SHOWCASE_APP.description.length).toBeGreaterThan(0);
+    expect(SHOWCASE_APP.label.length).toBeGreaterThan(0);
   });
 
-  it("carries an app into the chat as its bold title, the recording, and the description", () => {
-    expect(
-      showcaseMarkdown({
-        id: "a",
-        title: "Alpha",
-        description: "Does a thing.",
-        gifUrl: "https://cdn.example/a.gif",
-      }),
-    ).toBe("**Alpha**\n\n![Alpha](https://cdn.example/a.gif)\n\nDoes a thing.");
+  it("carries the recording into the chat under its intro line, with no title or description", () => {
+    expect(showcaseMarkdown({ id: "a", label: "Alpha", gifUrl: "https://cdn.example/a.gif" })).toBe(
+      `${SHOWCASE_INTRO_LINE}\n\n![Alpha](https://cdn.example/a.gif)`,
+    );
   });
 });

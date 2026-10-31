@@ -535,7 +535,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
     assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
-    # A retry keeps asking the onboarding questions when the attempt did.
+    # A retry keeps showing the onboarding examples when the attempt did.
     assert prefill["is_onboarding_driven_by_agent"] is True
     assert prefill["cloud_account"].startswith("gcp_")
     assert prefill["unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
