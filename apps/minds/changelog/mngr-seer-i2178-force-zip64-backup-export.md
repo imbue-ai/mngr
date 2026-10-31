@@ -1,1 +1,0 @@
-- Fixed exporting a workspace backup as a zip failing with a 500 ("File size too large, try using force_zip64") when the snapshot contains any file larger than 2 GiB. Streamed zip entries are now always opened with ZIP64 headers.

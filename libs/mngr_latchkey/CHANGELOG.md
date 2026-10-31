@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Bumped Latchkey version to 3.20.0.
+- Changed: Bumped Latchkey version to 3.21.0; the bundled service catalog now includes Asana.
 
 ### Fixed
 

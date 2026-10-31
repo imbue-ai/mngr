@@ -4,6 +4,36 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-30
+
+- Removed the unmaintained full-lifecycle Electron harness, `apps/minds/scripts/electron_full_flow_e2e.py` (formerly run by `just minds-test-electron-flow`). It had not got past its create step since the create form stopped rendering `#configure-toggle` on 2026-06-24.
+
+- Removed the harness-only helpers from `desktop_client/e2e_workspace_runner.py`: `run_full_workspace_flow`, `destroy_agent_best_effort`, `drive_create_docker_imbue_workspace` and the per-step helpers. Also removed `start_new_chat_from_launcher` and `open_terminal_from_launcher`, whose only remaining callers were their own unit tests, along with those tests. The remaining chat helpers save their debug screenshots to `/tmp/minds-electron-e2e/` rather than `/tmp/minds-electron-flow/`. `create_workspace_via_electron` and `drive_create_flow` drop their unused `account_label` parameter, which selected an `#account_id` field the create form no longer has.
+
+- Coverage the harness was meant to provide, and that no surviving suite has, is tracked in MIND-637 (stopping and starting a workspace), MIND-638 (a terminal from the launcher) and MIND-639 (a second chat from the launcher).
+
+- The minds `test_prevent_async_await` ratchet drops from 13 to 11. Its two matches were JavaScript `async`/`await` inside a deleted `page.evaluate` string.
+
+- `docs/testing-overview.md` and `docs/dwt-mngr-pin.md` no longer describe the removed harness or its `destroy_agent_best_effort` helper; the e2e backlog in `testing-overview.md` now names the surviving drivers of the settings-page destroy and points at MIND-637, MIND-638 and MIND-639 for the stop/start, terminal and second-chat coverage.
+
+On macOS, the traffic lights of a pulled-out window now show the normal pointer instead of the drag (grab) cursor from the window's bar.
+
+Bump Latchkey version to 3.21.0. The Permissions tab shows Asana's brand mark for the Asana connection this Latchkey release added.
+
+Added a second WireGuard operator key for Josh (`josh-laptop`) to the dev (`10.112.0.7`), staging (`10.96.0.6`), and production (`10.64.0.6`) management-plane peer lists, so the laptop can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers` for each tier.
+
+- Cut the Imbue Studio 0.9.5 release: the app version is 0.9.5 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.9.5`, carrying everything that landed on `main` since `minds-v0.9.4`. A patch release, so workspaces already on 0.9.x are not prompted to take it; the security floor stays `minds-v0.9.0`. Highlights: a redesigned workspace-update experience (a titlebar status pill, a rebuilt Settings > Updates tab, and per-workspace update settings); the app's HTTP clients move to httpx2; first-run setup verifies certificates against the operating system's store; backup exports handle files over 2 GiB; and the bundled latchkey moves to 3.21.0.
+
+- Imbue Studio 0.9.4 reaches every stable desktop install: the stable channel's rollout moves from 20% to 100% for mac (macOS 13 and later) and Linux. macOS 12 installs stay on 0.8.5.
+
+- Promote Imbue Studio 0.9.5 to the desktop alpha channel: it serves ToDesktop build `261031sx3nysvlr` (mac and Linux, 100%; mac still needs macOS 13, `minimumSystemVersion: 22.0.0`). Browser-created alpha workspaces stay pinned to `minds-v0.9.4` until production is baked at `minds-v0.9.5`; beta and stable stay on 0.9.4.
+
+- Fixed exporting a workspace backup as a zip failing with a 500 ("File size too large, try using force_zip64") when the snapshot contains any file larger than 2 GiB. Streamed zip entries are now always opened with ZIP64 headers.
+
+The desktop app's bundled `uv` now trusts the operating system's certificate store (`UV_SYSTEM_CERTS=1`) for both environment setup (`uv sync`) and starting the backend (`uv run`). Before, uv checked TLS only against its own built-in root certificates. On networks that re-sign HTTPS with a private CA installed in the OS (corporate proxies, antivirus HTTPS scanning), first-run setup failed with `invalid peer certificate: UnknownIssuer` while downloading Python or packages, even though the rest of the app connected fine (i2285).
+
+A failed write to the desktop app's own stdout or stderr no longer crashes the Electron main process. A dev run whose stderr was redirected to a file on a full disk died on the first backend log line it echoed, with `ENOSPC`. Only a broken pipe (`EPIPE`) was tolerated before. Now every such write failure is dropped. The first one on each stream other than `EPIPE` is noted in `electron.log`, and the backend's lines are still recorded in `minds.log`. After a failure the console echo stays off for the rest of that run.
+
 ## 2026-10-29
 
 The snapshot-resume release test for bug-report secret withholding now expects the template's per-file rule (default-workspace-template#939). A chat that carries a secret is withheld and named in `collection-notes.txt`. The clean chat and the logs still attach. Before, the test expected every chat to be withheld.

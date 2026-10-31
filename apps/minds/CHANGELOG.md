@@ -166,6 +166,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: A workspace app can ask Imbue Studio to open the Permissions pane's Local files section (embed contract v11, `minds:open-local-files`).
 - Added: Released Imbue Studio 0.9.2 (a patch over 0.9.1, template `minds-v0.9.2`) and promoted it to the alpha desktop and workspace channels.
 - Added: Promoted Imbue Studio 0.9.4 to the beta desktop and browser channels (beta workspaces pin `minds-v0.9.4`, mac now requires macOS 13); stable stays 0.8.5.
+- Added: Cut the Imbue Studio 0.9.5 release and promoted it to the desktop alpha channel — a patch release carrying a redesigned workspace-update experience (titlebar status pill, rebuilt Settings > Updates tab, per-workspace update settings), HTTP clients moved to httpx2, first-run certificate verification against the OS trust store, >2 GiB backup exports, and bundled Latchkey 3.21.0.
+- Added: Bundled Latchkey 3.21.0 adds the Asana connector, shown with its brand mark in the Permissions tab.
 
 ### Changed
 
@@ -356,6 +358,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: A synced folder reads "Syncing" until unison's first pass has compared both sides and left them level, and only then "Synced"; it used to say "Synced" the moment unison started.
 - Changed: A popped-out window no longer merges back when dragged over the window showing its workspace; its close control and the taskbar's "Bring back to desktop" remain the ways back, and the re-dock drop target and desktop ghost are gone.
 - Changed: The backup, restore and apply-update gates count a chat whose state can't be read (UNKNOWN) as running, so they don't run underneath a live chat on a loaded workspace.
+- Changed: Completed the Imbue Studio 0.9.4 stable rollout to 100% of mac (macOS 13+) and Linux installs; macOS 12 stays on 0.8.5.
 
 ### Deprecated
 
@@ -519,6 +522,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The Permissions pane's once-a-second poll no longer shows a sync that failed to come back at launch as a plain "stopped" row while another sync is running; it reports the failure.
 - Fixed: Quitting Imbue Studio now reliably stops every folder sync, including one that was part-way to starting (which used to leave a `mngr pair` and its unison outliving the app).
 - Fixed: Creating a workspace from a remote repository with a branch it does not have (e.g. `main` on a `master`-default repo) no longer reports "This repository looks private"; the creating page explains the ref is missing (new `GIT_REF_NOT_FOUND` `error_kind`) and the failure is no longer sent to error tracking.
+- Fixed: On macOS, the traffic lights of a pulled-out window now show the normal pointer instead of the grab cursor.
+- Fixed: Exporting a workspace backup as a zip no longer fails with a 500 when the snapshot contains a file larger than 2 GiB (zip entries now use ZIP64 headers).
+- Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
+- Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
 
 ### Security
 
