@@ -200,8 +200,7 @@ class MultiAccountSessionStore(MutableModel):
         """The plugin's sessions dir, or None while it cannot be resolved yet.
 
         Resolution needs the host dir's ``config.toml`` (for the active
-        profile id), which the app writes on mngr initialization -- so a miss
-        is retried on the next read rather than cached.
+        profile id); a miss is retried on the next read rather than cached.
         """
         if self.mngr_host_dir is None:
             return None

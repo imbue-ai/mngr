@@ -3,9 +3,8 @@
 The pre-import reconcile (``mngr_settings/reconcile.py``) owns only what must
 be on disk before mngr loads: the plugin block, the top-level settings, and
 the default-instance suppression blocks. The materializer re-runs it on every
-pass, because the startup call no-ops on a fresh env whose mngr profile dir
-does not exist yet (mngr creates it moments later), and the first signin must
-still land the suppression blocks. Everything else under ``[providers.*]``
+pass, so a settings file that drifts from that shape while the app runs is
+brought back to it. Everything else under ``[providers.*]``
 that minds manages -- one ``imbue_cloud_<user id>`` block per signed-in
 account and one ``<backend>_<hex>`` block per connection whose credentials
 are available here -- is derived by :func:`desired_provider_blocks` and
@@ -451,18 +450,17 @@ def reconcile_provider_settings(
 ) -> ProviderReconcileResult:
     """Write the desired managed blocks whole and delete stale ones; reports whether the file changed and what went.
 
-    Runs under the settings store's write lock. Skips (an unchanged result) while
-    mngr is uninitialized in this host dir, since there is nothing to write to.
+    Runs under the settings store's write lock. Skips (an unchanged result) when
+    the host dir has no active profile dir, since there is nothing to write to.
     """
     store = settings_store_for(root)
     if store is None:
-        # Nothing to write to yet, which is routine before mngr first initializes
-        # this host dir -- but blocks that were due and not written are exactly
-        # what a later "Unknown provider backend" from a command addressing one of
-        # them is diagnosed from, so that case is not silent.
+        # Blocks that were due and not written are exactly what a later "Unknown
+        # provider backend" from a command addressing one of them is diagnosed
+        # from, so skipping them is not silent.
         if desired:
             logger.warning(
-                "Skipped writing {} managed provider block(s): no active mngr profile under the host dir yet",
+                "Skipped writing {} managed provider block(s): no active mngr profile under the host dir",
                 len(desired),
             )
         return ProviderReconcileResult(is_changed=False, removed_instance_names=())

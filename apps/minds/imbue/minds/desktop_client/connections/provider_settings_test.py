@@ -496,10 +496,10 @@ def test_read_signed_in_accounts_from_index_refuses_an_unreadable_index(
         read_signed_in_accounts_from_index(_ROOT)
 
 
-def test_materializer_lands_the_pre_import_shape_a_fresh_profile_missed(
+def test_materializer_restores_the_pre_import_shape_a_settings_file_lacks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The startup ensure no-ops before mngr creates the profile, so the first materialize must land it too.
+    """Every materialize lands the pre-import shape too, so a settings file that lost it gets it back.
 
     Without the suppression blocks, discovery auto-creates a phantom default
     ``imbue_cloud`` instance (no connector_url) that errors on every cycle.

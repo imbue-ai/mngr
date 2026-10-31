@@ -1,14 +1,17 @@
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
+from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.mngr_settings.errors import MindsSettingsError
+from imbue.minds.mngr_settings.reconcile import ensure_mngr_profile_and_settings_before_mngr_import
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings_before_mngr_import
 from imbue.minds.testing import stub_mngr_host_dir
@@ -38,27 +41,73 @@ def test_importing_the_pre_import_reconcile_loads_no_mngr_module() -> None:
     assert result.stdout.strip() == "[]"
 
 
-def test_ensure_before_mngr_import_raises_when_mngr_already_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+_PRE_IMPORT_ENTRY_POINTS = pytest.mark.parametrize(
+    "ensure_before_mngr_import",
+    [ensure_mngr_profile_and_settings_before_mngr_import, ensure_mngr_settings_before_mngr_import],
+)
+
+
+@_PRE_IMPORT_ENTRY_POINTS
+def test_ensure_before_mngr_import_raises_when_mngr_already_loaded(
+    monkeypatch: pytest.MonkeyPatch, ensure_before_mngr_import: Callable[[], None]
+) -> None:
     monkeypatch.setitem(sys.modules, "imbue.mngr.config", ModuleType("imbue.mngr.config"))
     with pytest.raises(MindsSettingsError, match="before importing mngr"):
-        ensure_mngr_settings_before_mngr_import()
+        ensure_before_mngr_import()
 
 
-def test_ensure_before_mngr_import_noops_when_root_name_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@_PRE_IMPORT_ENTRY_POINTS
+def test_ensure_before_mngr_import_noops_when_root_name_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ensure_before_mngr_import: Callable[[], None]
+) -> None:
     _forget_imported_mngr_modules(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
-    ensure_mngr_settings_before_mngr_import()
-    assert not (tmp_path / ".minds").exists()
+    ensure_before_mngr_import()
+    assert not MindsRoot(DEFAULT_MINDS_ROOT_NAME).state_dir.exists()
 
 
-def test_ensure_before_mngr_import_reconciles_active_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@_PRE_IMPORT_ENTRY_POINTS
+def test_ensure_before_mngr_import_reconciles_active_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ensure_before_mngr_import: Callable[[], None]
+) -> None:
     _forget_imported_mngr_modules(monkeypatch)
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
-    ensure_mngr_settings_before_mngr_import()
+    ensure_before_mngr_import()
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_ensure_profile_and_settings_before_mngr_import_creates_the_profile_and_lands_the_overrides_in_a_fresh_host_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forget_imported_mngr_modules(monkeypatch)
+    root = MindsRoot("minds-dev-tname")
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root.root_name)
+    assert not root.mngr_host_dir.exists()
+
+    ensure_mngr_profile_and_settings_before_mngr_import()
+
+    profile_id = tomllib.loads((root.mngr_host_dir / "config.toml").read_text())["profile"]
+    settings_path = root.mngr_host_dir / "profiles" / profile_id / "settings.toml"
+    providers = tomllib.loads(settings_path.read_text())["providers"]
+    assert providers["aws"]["is_enabled"] is False
+    assert providers["gcp"]["is_enabled"] is False
+    assert providers["azure"]["is_enabled"] is False
+
+
+def test_ensure_settings_before_mngr_import_leaves_a_missing_profile_uncreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell still activated against a destroyed env must not get the env's root back from the next command."""
+    _forget_imported_mngr_modules(monkeypatch)
+    root = MindsRoot("minds-dev-tname")
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root.root_name)
+
+    ensure_mngr_settings_before_mngr_import()
+
+    assert not root.state_dir.exists()
 
 
 def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(

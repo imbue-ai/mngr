@@ -83,7 +83,7 @@ def _write_owner_only(path: Path, text: str) -> None:
 
 
 def settings_store_for(root: MindsRoot) -> FileMindsSettingsStore | None:
-    """Return the store for the env's active profile, or None when mngr isn't initialized yet."""
+    """Return the store for the env's active profile, or None when the host dir has no active profile dir."""
     settings_path = resolve_active_settings_path(root)
     if settings_path is None:
         return None

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -31,6 +32,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -67,10 +69,14 @@ from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_ag
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import SESSION_EXPIRED_ERROR_TYPE_NAMES
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.mngr_settings.profile_paths import ensure_active_profile_dir
+from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.testing import write_imbue_cloud_accounts_index
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.config.loader import get_or_create_profile_dir
+from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
@@ -117,6 +123,98 @@ def test_ensure_skips_silently_when_mngr_uninitialized(monkeypatch: pytest.Monke
     monkeypatch.setenv("HOME", str(tmp_path))
     assert ensure_mngr_settings(_ROOT) is False
     assert not mngr_host_dir_for(_ROOT_NAME).exists()
+
+
+def test_importing_the_minds_entry_point_creates_the_mngr_profile_with_the_overrides() -> None:
+    """``imbue.minds.main`` runs its bootstrap at import time, so only a fresh interpreter exercises it."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import imbue.minds.main"],
+        env={**os.environ, MINDS_ROOT_NAME_ENV_VAR: _ROOT_NAME},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    profile_dir = find_profile_dir_lightweight(mngr_host_dir_for(_ROOT_NAME))
+    assert profile_dir is not None
+    assert _parsed(profile_dir / "settings.toml") == _BASE_RECONCILED_SHAPE
+
+
+def test_mngr_resolves_the_profile_studio_created_without_rewriting_its_config() -> None:
+    mngr_host_dir = mngr_host_dir_for(_ROOT_NAME)
+    ensure_active_profile_dir(mngr_host_dir)
+    studio_profile_dir = read_active_profile_dir(mngr_host_dir)
+    assert studio_profile_dir is not None and studio_profile_dir.is_dir()
+    config_path = mngr_host_dir / "config.toml"
+    stat_before = config_path.stat()
+
+    assert find_profile_dir_lightweight(mngr_host_dir) == studio_profile_dir
+    assert get_or_create_profile_dir(mngr_host_dir) == studio_profile_dir
+    stat_after = config_path.stat()
+    assert (stat_after.st_ino, stat_after.st_mtime_ns) == (stat_before.st_ino, stat_before.st_mtime_ns)
+
+
+def test_studio_reuses_the_profile_mngr_created() -> None:
+    mngr_host_dir = mngr_host_dir_for(_ROOT_NAME)
+    mngr_profile_dir = get_or_create_profile_dir(mngr_host_dir)
+    config_text = (mngr_host_dir / "config.toml").read_text()
+
+    ensure_active_profile_dir(mngr_host_dir)
+
+    assert read_active_profile_dir(mngr_host_dir) == mngr_profile_dir
+    assert (mngr_host_dir / "config.toml").read_text() == config_text
+
+
+def _profile_tree(mngr_host_dir: Path, profile_dir: Path) -> dict[str, tuple[int, str | None]]:
+    """Each path under ``mngr_host_dir`` mapped to its lstat mode and a regular file's text, with the profile id masked."""
+    return {
+        str(path.relative_to(mngr_host_dir)).replace(profile_dir.name, "<id>"): (
+            path.lstat().st_mode,
+            None if path.is_symlink() or path.is_dir() else path.read_text().replace(profile_dir.name, "<id>"),
+        )
+        for path in mngr_host_dir.rglob("*")
+    }
+
+
+def _leave_the_host_dir_absent(mngr_host_dir: Path) -> None:
+    pass
+
+
+def _seed_a_world_readable_config_without_a_profile(mngr_host_dir: Path) -> None:
+    mngr_host_dir.mkdir(parents=True)
+    config_path = mngr_host_dir / "config.toml"
+    config_path.write_text('other = "dropped-31877"\n')
+    config_path.chmod(0o644)
+
+
+def _seed_a_symlinked_config_without_a_profile(mngr_host_dir: Path) -> None:
+    mngr_host_dir.mkdir(parents=True)
+    linked_path = mngr_host_dir / "linked-config.toml"
+    linked_path.write_text('other = "dropped-31877"\n')
+    linked_path.chmod(0o644)
+    (mngr_host_dir / "config.toml").symlink_to(linked_path.name)
+
+
+@pytest.mark.parametrize(
+    "seed_host_dir",
+    [
+        _leave_the_host_dir_absent,
+        _seed_a_world_readable_config_without_a_profile,
+        _seed_a_symlinked_config_without_a_profile,
+    ],
+)
+def test_studio_creates_the_same_profile_tree_as_mngr(tmp_path: Path, seed_host_dir: Callable[[Path], None]) -> None:
+    mngr_host_dir = tmp_path / "mngr-created"
+    studio_host_dir = tmp_path / "studio-created"
+    seed_host_dir(mngr_host_dir)
+    seed_host_dir(studio_host_dir)
+
+    mngr_profile_dir = get_or_create_profile_dir(mngr_host_dir)
+    ensure_active_profile_dir(studio_host_dir)
+
+    studio_profile_dir = read_active_profile_dir(studio_host_dir)
+    assert studio_profile_dir is not None
+    assert _profile_tree(studio_host_dir, studio_profile_dir) == _profile_tree(mngr_host_dir, mngr_profile_dir)
 
 
 def test_ensure_writes_desired_shape_into_fresh_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

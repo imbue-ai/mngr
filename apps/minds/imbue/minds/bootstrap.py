@@ -398,7 +398,7 @@ def apply_bootstrap() -> None:
 
     When ``MINDS_ROOT_NAME`` is set to an invalid value, raises ``BootstrapError`` (via :func:`resolve_minds_root_name`); ``main.py`` turns that into a clean one-line error.
 
-    The companion settings reconciliation (which must also precede any mngr import) lives in :func:`imbue.minds.mngr_settings.reconcile.ensure_mngr_settings_before_mngr_import`.
+    The companion settings reconciliation (which must also precede any mngr import) lives in :mod:`imbue.minds.mngr_settings.reconcile`.
     """
     raw_value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
     if raw_value is None:
