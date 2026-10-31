@@ -124,6 +124,8 @@ function makeContract() {
     TEAR_OUT: "minds:tear-out",
     OPEN_LINK: "minds:open-link",
     OPEN_EXTERNAL: "minds:open-external",
+    IMMERSIVE_REQUEST: "minds:immersive-request",
+    IMMERSIVE_CHANGED: "minds:immersive-changed",
     OPEN_LOCAL_FILES: "minds:open-local-files",
     HIGHLIGHT_CHROME: "minds:highlight-chrome",
     CHROME_ANCHORS: [
@@ -144,6 +146,7 @@ function makeHandlers(
     canPopOut?: boolean;
     isRelaying?: boolean;
     opensExternalLinks?: boolean;
+    canImmerse?: boolean;
   } = {},
 ) {
   const contract = makeContract();
@@ -158,6 +161,7 @@ function makeHandlers(
   let frontCount = 0;
   const readyAnnouncements: WorkspaceLinkPromises[] = [];
   const externalLinks: string[] = [];
+  const immersiveRequests: boolean[] = [];
   const highlights: (string | null)[] = [];
   const handlers = buildEmbedHandlers({
     contract,
@@ -202,6 +206,10 @@ function makeHandlers(
               popoutCalls.push(["detached", windows]),
           }
         : null,
+    immersive:
+      options.canImmerse === false
+        ? null
+        : { request: (on) => immersiveRequests.push(on) },
   });
   return {
     contract,
@@ -217,6 +225,7 @@ function makeHandlers(
     frontCount: () => frontCount,
     readyAnnouncements,
     externalLinks,
+    immersiveRequests,
     highlights,
   };
 }
@@ -260,12 +269,14 @@ describe("buildEmbedHandlers", () => {
     const browser = makeHandlers();
     browser.handlers[browser.contract.WORKSPACE_READY]({});
     expect(browser.acks).toEqual([browser.contract.EMBEDDER_CAPABILITIES]);
+    // Immersive mode needs only the Fullscreen API, so a plain browser offers it too.
     expect(browser.ackPayloads).toEqual([
       {
         canPopOut: false,
         opensExternalLinks: false,
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
+        immersive: true,
       },
     ]);
     const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
@@ -276,8 +287,32 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: true,
         opensCustomSchemeLinks: true,
         opensLocalFiles: true,
+        immersive: true,
       },
     ]);
+    const frameless = makeHandlers({ canImmerse: false });
+    frameless.handlers[frameless.contract.WORKSPACE_READY]({});
+    expect(frameless.ackPayloads).toEqual([
+      {
+        canPopOut: false,
+        opensExternalLinks: false,
+        opensCustomSchemeLinks: false,
+        opensLocalFiles: true,
+        immersive: false,
+      },
+    ]);
+  });
+
+  it("hands an immersive request on as the flag it carries, synchronously, and not where nothing can immerse", () => {
+    const { contract, handlers, immersiveRequests } = makeHandlers();
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: true });
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: false });
+    handlers[contract.IMMERSIVE_REQUEST]({ windowId: "win-0123", on: "true" });
+    expect(immersiveRequests).toEqual([true, false, false]);
+    const frameless = makeHandlers({ canImmerse: false });
+    expect(
+      frameless.handlers[frameless.contract.IMMERSIVE_REQUEST],
+    ).toBeUndefined();
   });
 
   it("opens the Permissions pane at Local files when the workspace asks, and answers nothing", () => {

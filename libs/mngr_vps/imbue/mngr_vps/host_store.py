@@ -22,6 +22,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.sizing import VpsInstanceShape
 
@@ -54,6 +55,9 @@ class VpsHostConfig(HostConfig):
         ),
     )
     start_args: tuple[str, ...] = Field(default=(), description="Docker run arguments for replay on snapshot restore")
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(), description="The --publish declarations the container was run with"
+    )
     image: str | None = Field(default=None, description="Docker image used for the container")
     container_name: str | None = Field(default=None, description="Docker container name on the VPS (None for bare)")
     volume_name: str | None = Field(

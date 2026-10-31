@@ -11,6 +11,7 @@ from imbue.mngr_imbue_cloud.errors import SliceCommandError
 from imbue.mngr_imbue_cloud.interfaces import SliceVmClientInterface
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_DISK_SUFFIX
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.sizing import VpsInstanceShape
@@ -64,6 +65,7 @@ class MockSliceVmClient(SliceVmClientInterface):
         box_total_units: int,
         box_disk_budget_gib: int,
         uplink_mbps: int | None = None,
+        published_port_declarations: Sequence[SlicePortDeclaration] = (),
     ) -> SliceProvisionResult:
         raise NotImplementedError
 

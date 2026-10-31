@@ -14,13 +14,18 @@ from pydantic import Field
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_prepare_published_ports
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.errors import ManagedResourcesExistError
+from imbue.mngr_vps.errors import VpsConfigError
 
 _TEST_BACKEND = ProviderBackendName("vps-cli-helpers-test")
 
@@ -109,3 +114,19 @@ def test_refuse_raises_unified_error_naming_blockers() -> None:
     assert "2 mngr-managed instance(s)" in message
     assert "i-abc (running), i-def (stopped)" in message
     assert "mngr fake cleanup" in message
+
+
+def test_resolve_prepare_published_ports_prefers_flags_over_the_config() -> None:
+    config = OfflineCapableVpsProviderConfig(backend=ProviderBackendName("x"), firewall_published_ports=("8080",))
+    assert resolve_prepare_published_ports(("59000/udp",), config) == (
+        PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+    )
+    assert resolve_prepare_published_ports((), config) == (
+        PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+    )
+
+
+def test_resolve_prepare_published_ports_rejects_a_bad_flag_value() -> None:
+    config = OfflineCapableVpsProviderConfig(backend=ProviderBackendName("x"))
+    with pytest.raises(VpsConfigError, match="Invalid --publish value"):
+        resolve_prepare_published_ports(("59000/sctp",), config)

@@ -10,14 +10,20 @@ thin call site.
 
 from collections.abc import Callable
 from collections.abc import Collection
+from collections.abc import Sequence
 from typing import TypeVar
 
 from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import InvalidPublishedPortError
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.errors import ManagedResourcesExistError
+from imbue.mngr_vps.errors import VpsConfigError
 
 ProviderConfigT = TypeVar("ProviderConfigT", bound=ProviderInstanceConfig)
 
@@ -66,6 +72,23 @@ def resolve_provider_config(
             override_hint,
         )
     return default_factory()
+
+
+def resolve_prepare_published_ports(
+    publish_values: Sequence[str],
+    config: OfflineCapableVpsProviderConfig,
+) -> tuple[PublishedPortDeclaration, ...]:
+    """The published ports a cloud's ``prepare`` opens: the ``--publish`` flags when given, else the config's list.
+
+    Mirrors how ``--allowed-ssh-cidr`` overrides ``allowed_ssh_cidrs``. Raises VpsConfigError
+    for a malformed or duplicated flag value (the config's own list was validated at load).
+    """
+    if not publish_values:
+        return config.firewall_published_port_declarations()
+    try:
+        return parse_published_port_declarations(publish_values)
+    except InvalidPublishedPortError as e:
+        raise VpsConfigError(f"Invalid --publish value: {e}") from e
 
 
 def refuse_if_managed_resources_exist(

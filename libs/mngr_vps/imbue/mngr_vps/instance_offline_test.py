@@ -17,6 +17,7 @@ from pydantic import PrivateAttr
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -26,10 +27,13 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
@@ -49,6 +53,7 @@ from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
 # Shared cloud stop/start lifecycle: resume mirrors the record externally
@@ -174,6 +179,42 @@ def test_offline_resume_mirrors_record_with_cleared_stop_reason(temp_mngr_ctx: M
     assert store.written.certified_host_data.stop_reason is None
     assert store.written.vps_ip == "10.0.0.9"
     assert provider._mirrored_record is store.written
+
+
+def test_offline_resume_moves_published_endpoints_to_the_fresh_address(temp_mngr_ctx: MngrContext) -> None:
+    """A resume on an ephemeral-IP cloud answers a fresh address; the published endpoints are reachable
+    at the VM's address, so the resumed record names the new one beside ``vps_ip``."""
+    host_id = HostId.generate()
+    declaration = PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)
+    config = VpsHostConfig(
+        vps_instance_id=VpsInstanceId("i-resume"), region="r", plan="p", published_ports=(declaration,)
+    )
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="resumed-host",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        stop_reason=HostState.STOPPED.value,
+        published_endpoints=tuple(vps_published_endpoints("10.0.0.1", (declaration,))),
+    )
+    store = _CapturingHostStore(VpsHostRecord(certified_host_data=certified, vps_ip=None, config=config))
+    provider = _ResumeMirrorProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))}
+
+    with pytest.raises(_MirrorCalled):
+        provider.start_host(host_id)
+
+    assert store.written is not None
+    assert store.written.vps_ip == "10.0.0.9"
+    assert store.written.certified_host_data.published_endpoints == tuple(
+        vps_published_endpoints("10.0.0.9", (declaration,))
+    )
 
 
 class _HostKeyWaitProvider(_ResumeMirrorProvider):
@@ -700,3 +741,25 @@ def test_write_files_concurrently_surfaces_worker_failure() -> None:
 
     with pytest.raises(MngrError, match="upload failed"):
         _write_files_concurrently(_FailingVolume(), files)
+
+
+def test_validate_published_ports_for_create_refuses_a_port_the_firewall_was_not_prepared_for(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    configured = _MarkerProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=OfflineCapableVpsProviderConfig(
+            backend=ProviderBackendName("offline-test"), firewall_published_ports=("59000/udp",)
+        ),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+
+    configured._validate_published_ports_for_create(
+        [PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)]
+    )
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/tcp.*mngr offline-test prepare"):
+        configured._validate_published_ports_for_create(
+            [PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP)]
+        )

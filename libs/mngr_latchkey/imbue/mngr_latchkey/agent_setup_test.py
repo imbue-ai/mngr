@@ -515,6 +515,26 @@ def test_register_agent_for_host_creates_baseline_when_file_absent(tmp_path: Pat
     assert _extract_agent_id_from_anyof_entry(any_of[0]) == str(agent_id)
 
 
+def test_register_agent_for_host_rebuilds_a_rule_less_file_from_the_baseline(tmp_path: Path) -> None:
+    """A file holding no rules is no policy, and cannot list an agent: it starts over from the baseline.
+
+    How a host whose copy here was once emptied by a read of its unprovisioned
+    machine gets its policy back on the next registration.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    save_permissions(permissions_path_for_host(tmp_path, host_id), LatchkeyPermissionsConfig())
+    write_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(0))
+
+    assert register_agent_for_host(tmp_path, host_id, agent_id) is True
+
+    any_of = _allowed_anyof_for_host(tmp_path, host_id)
+    assert [_extract_agent_id_from_anyof_entry(entry) for entry in any_of] == [str(agent_id)]
+    rebuilt = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
+    assert len(rebuilt["rules"]) == len(AGENT_BASELINE_PERMISSIONS.rules)
+    assert read_permissions_format_version(tmp_path, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
 def test_register_agent_for_host_is_idempotent(tmp_path: Path) -> None:
     """Re-registering an already-registered agent is a no-op, and says so."""
     host_id = HostId.generate()

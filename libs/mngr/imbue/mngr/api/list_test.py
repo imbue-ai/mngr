@@ -11,6 +11,7 @@ from typing import Any
 
 import pluggy
 import pytest
+from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -76,17 +77,22 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
+from imbue.mngr.providers.published_ports import record_published_endpoints_on_host
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr.utils.testing import make_test_agent_details
 
 # Helpers
 
@@ -2922,3 +2928,46 @@ def test_the_bulk_agent_lookup_reserves_the_gone_target_code_for_ids(
         )
 
     assert exc_info.value.exit_code == expected_exit_code
+
+
+def test_agent_details_json_form_carries_host_published_endpoints() -> None:
+    """The JSON listing dumps AgentDetails as JSON, so this is the shape consumers read."""
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=32768)
+    agent = make_test_agent_details(name="published", published_endpoints=[endpoint])
+
+    dumped = agent.model_dump(mode="json")
+
+    assert dumped["host"]["published_endpoints"] == snapshot(
+        [{"guest_port": 59000, "protocol": "UDP", "host": "127.0.0.1", "host_port": 32768}]
+    )
+
+
+def test_apply_cel_filters_selects_agents_on_hosts_with_published_endpoints() -> None:
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=32768)
+    agent_with_endpoints = make_test_agent_details(name="published", published_endpoints=[endpoint])
+    agent_without_endpoints = make_test_agent_details(name="plain")
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=("size(host.published_endpoints) > 0",),
+        exclude_filters=(),
+    )
+    assert _apply_cel_filters(agent_with_endpoints, include_filters, exclude_filters) is True
+    assert _apply_cel_filters(agent_without_endpoints, include_filters, exclude_filters) is False
+
+
+def test_build_host_details_reports_published_endpoints_from_certified_data(
+    local_provider: LocalProviderInstance,
+) -> None:
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.TCP, host="127.0.0.1", host_port=32768)
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    record_published_endpoints_on_host(host, [endpoint])
+    host_ref = DiscoveredHost(
+        host_id=host.id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=local_provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    host_details, _ = local_provider.get_host_and_agent_details(host_ref, [])
+
+    assert host_details.published_endpoints == [endpoint]

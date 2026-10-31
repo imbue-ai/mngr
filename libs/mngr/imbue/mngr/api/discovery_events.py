@@ -55,6 +55,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
@@ -281,6 +282,10 @@ class HostSSHInfoEvent(EventEnvelope):
     type: Literal[DiscoveryEventType.HOST_SSH_INFO] = DiscoveryEventType.HOST_SSH_INFO
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
+    published_endpoints: list[PublishedEndpoint] = Field(
+        default_factory=list,
+        description="Where each of the host's published ports is reachable from this client (additive; empty when none)",
+    )
 
 
 class DiscoveryErrorEvent(EventEnvelope):
@@ -577,8 +582,13 @@ def emit_host_destroyed(
     logger.trace("Emitted host_destroyed event for {}", host_id)
 
 
-def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> None:
-    """Build and append a host SSH info event."""
+def emit_host_ssh_info(
+    config: MngrConfig,
+    host_id: HostId,
+    ssh: SSHInfo,
+    published_endpoints: Sequence[PublishedEndpoint] = (),
+) -> None:
+    """Build and append a host SSH info event, carrying the host's published endpoints beside its SSH info."""
     timestamp, event_id = _make_envelope_fields()
     event = HostSSHInfoEvent(
         timestamp=timestamp,
@@ -586,6 +596,7 @@ def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> Non
         source=DISCOVERY_EVENT_SOURCE,
         host_id=host_id,
         ssh=ssh,
+        published_endpoints=list(published_endpoints),
     )
     append_discovery_event(config, event)
     logger.trace("Emitted host_ssh_info event for {}", host_id)
@@ -648,7 +659,7 @@ def emit_discovery_events_for_host(
         # Emit SSH info event if this is a remote host
         ssh_info = _build_ssh_info_from_host(host)
         if ssh_info is not None:
-            emit_host_ssh_info(config, host.id, ssh_info)
+            emit_host_ssh_info(config, host.id, ssh_info, published_endpoints=host.get_published_endpoints())
 
         # Emit agent events with full certified_data from the host's filesystem
         for discovered_agent in discovered_agents:
@@ -1343,22 +1354,38 @@ def resolve_candidate_hosts_for_identifiers(
     return resolved
 
 
+class HostSSHInfoEmission(FrozenModel):
+    """One host's SSH info event as a full listing emits it: the endpoint plus the host's published endpoints."""
+
+    host_id: HostId = Field(description="The host the event is about")
+    ssh: SSHInfo = Field(description="The host's SSH endpoint")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="Where the host's published ports are reachable; empty when it has none"
+    )
+
+
 def extract_agents_and_hosts_from_full_listing(
     agent_details_list: Sequence[AgentDetails],
-) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...], tuple[tuple[HostId, SSHInfo], ...]]:
-    """Extract deduplicated DiscoveredAgent, DiscoveredHost, and SSH info tuples from AgentDetails."""
+) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...], tuple[HostSSHInfoEmission, ...]]:
+    """Extract deduplicated DiscoveredAgent, DiscoveredHost, and SSH info emissions from AgentDetails."""
     discovered_agents = tuple(discovered_agent_from_agent_details(a) for a in agent_details_list)
 
     # Deduplicate hosts by host_id, collecting SSH info along the way
     seen_host_ids: set[HostId] = set()
     discovered_hosts: list[DiscoveredHost] = []
-    host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+    host_ssh_infos: list[HostSSHInfoEmission] = []
     for agent_details in agent_details_list:
         if agent_details.host.id not in seen_host_ids:
             seen_host_ids.add(agent_details.host.id)
             discovered_hosts.append(discovered_host_from_agent_details(agent_details))
             if agent_details.host.ssh is not None:
-                host_ssh_infos.append((agent_details.host.id, agent_details.host.ssh))
+                host_ssh_infos.append(
+                    HostSSHInfoEmission(
+                        host_id=agent_details.host.id,
+                        ssh=agent_details.host.ssh,
+                        published_endpoints=tuple(agent_details.host.published_endpoints),
+                    )
+                )
 
     return discovered_agents, tuple(discovered_hosts), tuple(host_ssh_infos)
 

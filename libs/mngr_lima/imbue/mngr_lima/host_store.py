@@ -19,6 +19,7 @@ from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_lima.data_types import LimaPortForward
 from imbue.mngr_lima.primitives import LimaDiskSize
 
 
@@ -31,6 +32,10 @@ class LimaHostConfig(FrozenModel):
 
     instance_name: str = Field(description="Lima instance name (e.g. mngr-my-host)")
     start_args: tuple[str, ...] = Field(default=(), description="limactl start arguments for replay")
+    published_port_forwards: tuple[LimaPortForward, ...] = Field(
+        default=(),
+        description="The published ports' portForwards rules written into the instance's lima config at create",
+    )
     image_url: str | None = Field(default=None, description="Image URL used to create the VM")
     # Locks in the host_dir layout chosen at create_host time so subsequent
     # start_host/stop_host/get_host always replay the same setup regardless

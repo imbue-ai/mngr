@@ -40,6 +40,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.progress import NullProgressReporter
 from imbue.mngr.utils.progress import ProgressReporterInterface
@@ -321,6 +322,10 @@ class AzureVpsClient(VpsClientInterface):
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the NSG)"
     )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="Published-port declarations the NSG allows from every source beside the SSH ports",
+    )
 
     # There is no per-key Azure resource (unlike an EC2 KeyPair); the public key
     # lives only in per-VM os_profile config. This in-memory map bridges the base
@@ -523,6 +528,24 @@ class AzureVpsClient(VpsClientInterface):
                     source_port_range="*",
                     destination_port_range=port,
                     source_address_prefixes=list(self.allowed_ssh_cidrs),
+                    destination_address_prefix="*",
+                    access="Allow",
+                    priority=priority,
+                    direction="Inbound",
+                )
+            )
+            priority += 10
+        # Published ports are open to every source (the listener authenticates itself), so
+        # they take Azure's wildcard prefix rather than the SSH allow-list.
+        for declaration in self.published_ports:
+            protocol = declaration.protocol.value.capitalize()
+            security_rules.append(
+                network_models.SecurityRule(
+                    name=f"mngr-allow-published-{protocol.lower()}-{declaration.guest_port}",
+                    protocol=protocol,
+                    source_port_range="*",
+                    destination_port_range=str(declaration.guest_port),
+                    source_address_prefix="*",
                     destination_address_prefix="*",
                     access="Allow",
                     priority=priority,

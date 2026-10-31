@@ -61,7 +61,7 @@ Azure nests every resource in a *resource group*, and a fresh subscription has n
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-With no `--allowed-ssh-cidr`, `prepare` falls back to the config's `allowed_ssh_cidrs` (default `0.0.0.0/0`) and logs a warning prompting you to tighten it. SSH auth is key-only, so an open NSG exposes the port but not a usable login. Setting `allowed_ssh_cidrs = []` creates no SSH allow rule, leaving instances unreachable from outside the vnet. Idempotent — re-running is a no-op when everything already exists.
+With no `--allowed-ssh-cidr`, `prepare` falls back to the config's `allowed_ssh_cidrs` (default `0.0.0.0/0`) and logs a warning prompting you to tighten it. The NSG also allows every port in the config's `firewall_published_ports` (or the `--publish PORT[/PROTOCOL]` flags) from any source, so hosts created with `mngr create --publish` are reachable there; a create declaring a port outside that list fails before any resource is created. SSH auth is key-only, so an open NSG exposes the port but not a usable login. Setting `allowed_ssh_cidrs = []` creates no SSH allow rule, leaving instances unreachable from outside the vnet. Idempotent — re-running is a no-op when everything already exists.
 
 `prepare` and `cleanup` read their defaults from the `[providers.<name>]` block selected with `--provider` (default `azure`), and CLI flags override that. For example, with a `[providers.azure-west]` block pinning a region, resource group, and CIDRs:
 

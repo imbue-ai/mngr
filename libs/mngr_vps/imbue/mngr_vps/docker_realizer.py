@@ -75,6 +75,7 @@ from imbue.mngr_vps.primitives import CONTAINER_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import CONTAINER_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
+from imbue.mngr_vps.published_ports import vps_publish_specs
 
 
 def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
@@ -401,7 +402,10 @@ class DockerRealizer(SnapshotCapableRealizer):
                 outer,
                 image=image,
                 name=container_name,
-                port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
+                publish_specs=[
+                    f"0.0.0.0:{self.config.container_ssh_port}:22",
+                    *vps_publish_specs(ctx.published_ports),
+                ],
                 volumes=[
                     f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
                     # Snapshot helper IPC volume (host_backup writes request.json / reads result.json).

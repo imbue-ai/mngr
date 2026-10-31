@@ -12,6 +12,9 @@ from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import InvalidPublishedPortError
+from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr_vps.errors import VpsConfigError
 from imbue.mngr_vps.primitives import IsolationMode
 
@@ -191,6 +194,28 @@ class OfflineCapableVpsProviderConfig(VpsProviderConfig):
             "Replaced, not merged, across config layers."
         ),
     )
+    firewall_published_ports: ScalarStrTuple = Field(
+        default=ScalarTuple(()),
+        description=(
+            "Published-port declarations (`<port>` or `<port>/<protocol>`, protocol tcp or udp) that the "
+            "provider's `prepare` command opens from every source in the security group / NSG / firewall "
+            "rule it manages, beside the SSH ports. `mngr create --publish` on this provider may declare "
+            "only ports listed here; any other declaration fails before a resource is created, since its "
+            "endpoint would be unreachable. Replaced, not merged, across config layers."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_firewall_published_ports(self) -> Self:
+        """Raises VpsConfigError for a malformed or duplicated declaration, so a bad config fails at load."""
+        try:
+            parse_published_port_declarations(self.firewall_published_ports)
+        except InvalidPublishedPortError as e:
+            raise VpsConfigError(f"Invalid firewall_published_ports entry: {e}") from e
+        return self
+
+    def firewall_published_port_declarations(self) -> tuple[PublishedPortDeclaration, ...]:
+        return parse_published_port_declarations(self.firewall_published_ports)
 
 
 # CLEANUP: drop ``fold_legacy_root_disk_size_key`` and the three deprecated

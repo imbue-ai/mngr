@@ -128,9 +128,7 @@ def _stub(outer: OuterHostInterface) -> _StubOuter:
     return cast(_StubOuter, outer)
 
 
-# =============================================================================
 # Lightweight string helpers
-# =============================================================================
 
 
 def test_redact_secret_env_replaces_depot_token() -> None:
@@ -154,9 +152,7 @@ def test_is_retryable_rsync_error_returns_false_for_other_errors() -> None:
     assert not is_retryable_rsync_error("unexpected EOF in tar header")
 
 
-# =============================================================================
 # docker_inspect_running
-# =============================================================================
 
 
 def test_is_running_container_state() -> None:
@@ -185,9 +181,7 @@ def test_docker_inspect_running_returns_false_when_command_fails() -> None:
     assert docker_inspect_running(outer, "missing-container") is False
 
 
-# =============================================================================
 # check_file_exists_on_outer
-# =============================================================================
 
 
 def test_check_file_exists_returns_true_when_test_succeeds() -> None:
@@ -201,9 +195,7 @@ def test_check_file_exists_returns_false_when_test_fails() -> None:
     assert check_file_exists_on_outer(outer, Path("/tmp/missing")) is False
 
 
-# =============================================================================
 # exec_in_container / run_docker
-# =============================================================================
 
 
 def test_exec_in_container_runs_docker_exec_with_quoted_command() -> None:
@@ -235,9 +227,7 @@ def test_run_docker_raises_on_failure() -> None:
         run_docker(outer, ["volume", "inspect", "missing-vol"])
 
 
-# =============================================================================
 # Container lifecycle helpers
-# =============================================================================
 
 
 def test_commit_container_returns_stripped_image_id() -> None:
@@ -293,9 +283,7 @@ def test_pull_image_uses_docker_pull_with_timeout() -> None:
     assert _stub(outer).recorded[0].timeout_seconds == 120.0
 
 
-# =============================================================================
 # run_container
-# =============================================================================
 
 
 def test_run_container_returns_stripped_container_id() -> None:
@@ -304,7 +292,7 @@ def test_run_container_returns_stripped_container_id() -> None:
         outer,
         image="alpine:latest",
         name="test-container",
-        port_mappings={},
+        publish_specs=[],
         volumes=[],
         labels={},
         extra_args=[],
@@ -319,7 +307,7 @@ def test_run_container_command_includes_all_pieces() -> None:
         outer,
         image="my-image:tag",
         name="my-container",
-        port_mappings={"127.0.0.1:8080": "80"},
+        publish_specs=["127.0.0.1:8080:80", "0.0.0.0:59000:59000/udp"],
         volumes=["/host/data:/data:rw"],
         labels={"com.imbue.mngr.host-id": "host-abc"},
         extra_args=["--restart", "always"],
@@ -331,16 +319,14 @@ def test_run_container_command_includes_all_pieces() -> None:
     # a service the outer binds on its docker bridge (the VPS-resident latchkey
     # gateway) is reachable from inside without an address known at create time.
     assert "--add-host host.docker.internal:host-gateway" in cmd
-    assert "-p 127.0.0.1:8080:80" in cmd
+    assert "-p 127.0.0.1:8080:80 -p 0.0.0.0:59000:59000/udp" in cmd
     assert "-v /host/data:/data:rw" in cmd
     assert "--label com.imbue.mngr.host-id=host-abc" in cmd
     assert "--restart always" in cmd
     assert "--entrypoint sh my-image:tag -c 'echo hi'" in cmd
 
 
-# =============================================================================
 # build_image_on_outer
-# =============================================================================
 
 
 def test_build_image_on_outer_with_docker_builder_streams_output() -> None:
@@ -477,9 +463,7 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     assert "my-secret-token" not in cmd
 
 
-# =============================================================================
 # _read_host_id_label_from_vps
-# =============================================================================
 
 
 def test_read_host_id_label_returns_host_id_when_container_has_label() -> None:
@@ -521,9 +505,7 @@ def test_read_host_id_label_raises_when_docker_ps_fails() -> None:
         _read_host_id_label_from_vps(outer)
 
 
-# =============================================================================
 # Btrfs helpers (probe + mutate primitives used by _prepare_btrfs_on_outer)
-# =============================================================================
 
 
 def test_is_btrfs_progs_installed_returns_true_when_command_v_succeeds() -> None:
@@ -699,14 +681,12 @@ def test_delete_btrfs_subvolume_raises_on_delete_failure() -> None:
         delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
 
 
-# =============================================================================
 # prepare_btrfs_on_outer (full setup pipeline)
 #
 # A scripted outer that picks a CommandResult per probe by matching substrings
 # in the command lets each test exercise a specific "state" of the VPS
 # (everything missing, everything already present, etc.) and assert on the
 # resulting sequence of mutating commands.
-# =============================================================================
 
 
 class _ScriptedOuter(MutableModel):
@@ -972,9 +952,7 @@ def test_prepare_btrfs_on_outer_raises_when_mount_path_is_unmounted_symlink() ->
         assert cmd.startswith(("mountpoint -q", "test -L")), f"unexpected command issued: {cmd!r}"
 
 
-# =========================================================================
 # build_ssh_transport_for_outer
-# =========================================================================
 
 
 class _SshTransportOuter(MutableModel):

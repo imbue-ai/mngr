@@ -19,6 +19,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -35,6 +36,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.published_ports import EVERY_SOURCE_CIDR
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
@@ -125,6 +127,10 @@ class AwsVpsClient(VpsClientInterface):
             "Sets EC2 InstanceInitiatedShutdownBehavior: False -> 'stop' (resumable idle-pause), "
             "True -> 'terminate' (ephemeral / self-cleaning). See AwsProviderConfig for details."
         ),
+    )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="Published-port declarations the SG opens from every source beside the SSH ports",
     )
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
@@ -383,36 +389,59 @@ class AwsVpsClient(VpsClientInterface):
                 sg_name,
             )
 
+    def _required_ingress_permissions(self) -> list[dict[str, Any]]:
+        """The ``IpPermission`` entries the SG must grant: the SSH ports per ``allowed_ssh_cidrs``, and each published port from every source.
+
+        A published port is open to the world on every provider (the listener behind it
+        authenticates itself), so its source is always ``0.0.0.0/0`` regardless of the SSH
+        allow-list. An empty ``allowed_ssh_cidrs`` contributes no SSH entries: AWS rejects an
+        ``IpPermission`` with no source set, so "no SSH ingress" is expressed by not asking.
+        """
+        permissions: list[dict[str, Any]] = []
+        if self.allowed_ssh_cidrs:
+            ssh_ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
+            for port in (22, self.container_ssh_port):
+                permissions.append({"IpProtocol": "tcp", "FromPort": port, "ToPort": port, "IpRanges": ssh_ip_ranges})
+        for declaration in self.published_ports:
+            permissions.append(
+                {
+                    "IpProtocol": declaration.protocol.value.lower(),
+                    "FromPort": declaration.guest_port,
+                    "ToPort": declaration.guest_port,
+                    "IpRanges": [{"CidrIp": EVERY_SOURCE_CIDR}],
+                }
+            )
+        return permissions
+
     def _ssh_ingress_already_authorized(self, security_group: dict[str, Any]) -> bool:
-        """Return whether the SG already permits every required SSH ingress rule.
+        """Return whether the SG already permits every required ingress rule.
 
         Lets ``ensure_security_group`` skip the privileged
         ``AuthorizeSecurityGroupIngress`` write when nothing is missing, so a
         caller with only ``ec2:DescribeSecurityGroups`` can confirm the group
         is ready (the read-only-first path minds relies on for its auto-prepare
-        with restricted-IAM keys). An empty ``allowed_ssh_cidrs`` requires no
-        ingress, so it is trivially satisfied -- matching
-        ``_authorize_ssh_ingress_idempotent``, which issues no call in that case.
+        with restricted-IAM keys). No required permissions (an empty
+        ``allowed_ssh_cidrs`` and no published ports) is trivially satisfied --
+        matching ``_authorize_ssh_ingress_idempotent``, which issues no call then.
 
-        Checks both tcp/22 and tcp/``container_ssh_port``: each required port
-        must have every CIDR in ``allowed_ssh_cidrs`` present across the group's
-        ``IpPermissions`` (rules may be split across multiple permission
-        entries, so the granted CIDRs are unioned per port before comparison).
+        Each required (protocol, port) must have every one of its CIDRs present
+        across the group's ``IpPermissions`` (rules may be split across multiple
+        permission entries, so the granted CIDRs are unioned per rule first).
         """
-        if not self.allowed_ssh_cidrs:
-            return True
-        granted_cidrs_by_port: dict[int, set[str]] = {22: set(), self.container_ssh_port: set()}
+        granted_cidrs_by_rule: dict[tuple[str, int], set[str]] = {}
         for permission in security_group.get("IpPermissions", []):
-            if permission.get("IpProtocol") != "tcp":
-                continue
             from_port = permission.get("FromPort")
             to_port = permission.get("ToPort")
+            if from_port is None or from_port != to_port:
+                continue
             cidrs = {ip_range.get("CidrIp", "") for ip_range in permission.get("IpRanges", [])}
-            for port in granted_cidrs_by_port:
-                if from_port == port and to_port == port:
-                    granted_cidrs_by_port[port].update(cidrs)
-        required_cidrs = set(self.allowed_ssh_cidrs)
-        return all(required_cidrs <= granted for granted in granted_cidrs_by_port.values())
+            granted_cidrs_by_rule.setdefault((permission.get("IpProtocol", ""), from_port), set()).update(cidrs)
+        for required in self._required_ingress_permissions():
+            required_cidrs = {ip_range["CidrIp"] for ip_range in required["IpRanges"]}
+            granted = granted_cidrs_by_rule.get((required["IpProtocol"], required["FromPort"]), set())
+            if not required_cidrs <= granted:
+                return False
+        return True
 
     def _ensure_auto_created_security_group(self, sg_name: str) -> SecurityGroupPrepareResult:
         self._warn_about_cidrs_if_needed(sg_name)
@@ -444,7 +473,7 @@ class AwsVpsClient(VpsClientInterface):
         return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=True)
 
     def _authorize_ssh_ingress_idempotent(self, sg_id: str) -> None:
-        """Authorize ingress for SSH ports on the SG, swallowing duplicate errors.
+        """Authorize the required ingress (SSH ports and published ports) on the SG, swallowing duplicate errors.
 
         Each permission is authorized in its own API call so that a duplicate
         on one port (e.g., tcp/22 already authorized from a previous run) does
@@ -453,36 +482,20 @@ class AwsVpsClient(VpsClientInterface):
         ``InvalidPermission.Duplicate`` atomically — none of the permissions in
         the batch are added if any one is a duplicate.
 
-        When ``allowed_ssh_cidrs`` is empty, skip the authorize calls entirely:
-        AWS rejects an ``IpPermission`` with no source set (no IpRanges /
-        Ipv6Ranges / UserIdGroupPairs / PrefixListIds) with
-        ``InvalidParameterValue``, so issuing the call with empty ``IpRanges``
-        is a real API error, not a no-op. The "no usable ingress" shape is the
-        SG sitting with the AWS default of zero ingress rules, which is exactly
-        what the caller gets by not issuing the call.
+        With nothing required (an empty ``allowed_ssh_cidrs`` and no published
+        ports), no call is issued: AWS rejects an ``IpPermission`` with no source
+        set with ``InvalidParameterValue``, so the "no usable ingress" shape is
+        the SG sitting with the AWS default of zero ingress rules, which is
+        exactly what the caller gets by not issuing the call.
         """
-        if not self.allowed_ssh_cidrs:
+        ip_permissions = self._required_ingress_permissions()
+        if not ip_permissions:
             logger.debug(
-                "Skipping authorize_security_group_ingress on {}: allowed_ssh_cidrs is empty "
-                "(the security group keeps its default of zero ingress rules)",
+                "Skipping authorize_security_group_ingress on {}: allowed_ssh_cidrs is empty and no ports are "
+                "published (the security group keeps its default of zero ingress rules)",
                 sg_id,
             )
             return
-        ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
-        ip_permissions = [
-            {
-                "IpProtocol": "tcp",
-                "FromPort": 22,
-                "ToPort": 22,
-                "IpRanges": ip_ranges,
-            },
-            {
-                "IpProtocol": "tcp",
-                "FromPort": self.container_ssh_port,
-                "ToPort": self.container_ssh_port,
-                "IpRanges": ip_ranges,
-            },
-        ]
         for permission in ip_permissions:
             try:
                 self._ec2().authorize_security_group_ingress(GroupId=sg_id, IpPermissions=[permission])
@@ -493,8 +506,9 @@ class AwsVpsClient(VpsClientInterface):
                     http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
                     raise VpsApiError(http_status, f"{code}: {e}") from e
                 logger.debug(
-                    "Skipping duplicate ingress rule on SG {} (tcp/{}): already authorized",
+                    "Skipping duplicate ingress rule on SG {} ({}/{}): already authorized",
                     sg_id,
+                    permission["IpProtocol"],
                     permission["FromPort"],
                 )
 

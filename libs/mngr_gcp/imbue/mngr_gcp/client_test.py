@@ -15,6 +15,8 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import compute_v1
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PortProtocol
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_gcp.client import GceInstanceName
 from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -864,3 +866,103 @@ def test_get_instance_shape_translates_an_unknown_machine_type_into_a_vps_api_er
 
     with pytest.raises(VpsApiError):
         client.get_instance_shape(VpsInstanceId("mngr-test-host"), "e2-nonexistent")
+
+
+# ensure_firewall / delete_firewall with published ports
+
+
+def _published_client(firewalls: FakeFirewallsClient) -> GcpVpsClient:
+    return _StubbedGcpVpsClient(
+        credentials=AnonymousCredentials(),
+        project_id="test-project",
+        zone="us-west1-a",
+        allowed_ssh_cidrs=("203.0.113.4/32",),
+        published_ports=(
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+            PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP),
+            PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+        ),
+        stubbed_firewalls_client=firewalls,
+    )
+
+
+def test_ensure_firewall_creates_a_published_ports_rule_open_to_every_source() -> None:
+    """Published ports get their own tag-targeted rule from every source, apart from the SSH allow-list rule."""
+    firewalls = FakeFirewallsClient()
+    client = _published_client(firewalls)
+
+    client.ensure_firewall()
+
+    rules_by_name = {rule.name: rule for rule in firewalls.inserted}
+    assert set(rules_by_name) == {"mngr-gcp-ssh", "mngr-gcp-ssh-published"}
+    published = rules_by_name["mngr-gcp-ssh-published"]
+    assert published.source_ranges == ["0.0.0.0/0"]
+    assert published.target_tags == ["mngr-ssh"]
+    assert {(allowed.I_p_protocol, tuple(allowed.ports)) for allowed in published.allowed} == {
+        ("tcp", ("59000", "8080")),
+        ("udp", ("59000",)),
+    }
+    assert rules_by_name["mngr-gcp-ssh"].source_ranges == ["203.0.113.4/32"]
+
+
+def test_ensure_firewall_patches_an_existing_published_rule_whose_ports_changed() -> None:
+    """A re-run of prepare after firewall_published_ports changed converges the rule on the config,
+    since the create-time gate admits exactly the config's ports."""
+    firewalls = _present_firewalls()
+    firewalls.existing_by_name["mngr-gcp-ssh-published"] = compute_v1.Firewall(
+        name="mngr-gcp-ssh-published",
+        allowed=[compute_v1.Allowed(I_p_protocol="udp", ports=["59000"])],
+    )
+    client = _published_client(firewalls)
+
+    client.ensure_firewall()
+
+    assert firewalls.inserted == []
+    assert [name for name, _resource in firewalls.patched] == ["mngr-gcp-ssh-published"]
+    patched = firewalls.patched[0][1]
+    assert {(allowed.I_p_protocol, tuple(allowed.ports)) for allowed in patched.allowed} == {
+        ("tcp", ("59000", "8080")),
+        ("udp", ("59000",)),
+    }
+
+
+def test_ensure_firewall_leaves_an_existing_published_rule_with_the_configured_ports_alone() -> None:
+    firewalls = _present_firewalls()
+    firewalls.existing_by_name["mngr-gcp-ssh-published"] = compute_v1.Firewall(
+        name="mngr-gcp-ssh-published",
+        allowed=[
+            compute_v1.Allowed(I_p_protocol="udp", ports=["59000"]),
+            compute_v1.Allowed(I_p_protocol="tcp", ports=["8080", "59000"]),
+        ],
+    )
+    client = _published_client(firewalls)
+
+    client.ensure_firewall()
+
+    assert firewalls.inserted == []
+    assert firewalls.patched == []
+
+
+def test_ensure_firewall_creates_no_published_rule_without_declarations() -> None:
+    firewalls = FakeFirewallsClient()
+    _make_client(firewalls=firewalls).ensure_firewall()
+    assert [rule.name for rule in firewalls.inserted] == ["mngr-gcp-ssh"]
+
+
+def test_delete_firewall_also_deletes_the_published_ports_rule() -> None:
+    firewalls = _present_firewalls()
+    firewalls.existing_by_name["mngr-gcp-ssh-published"] = compute_v1.Firewall(name="mngr-gcp-ssh-published")
+    client = _published_client(firewalls)
+
+    assert client.delete_firewall() == "mngr-gcp-ssh"
+
+    assert firewalls.deleted == ["mngr-gcp-ssh-published", "mngr-gcp-ssh"]
+
+
+def test_delete_firewall_leaves_a_missing_published_ports_rule_alone() -> None:
+    firewalls = _present_firewalls()
+    client = _published_client(firewalls)
+
+    assert client.delete_firewall() == "mngr-gcp-ssh"
+
+    assert firewalls.deleted == ["mngr-gcp-ssh"]

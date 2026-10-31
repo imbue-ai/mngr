@@ -516,9 +516,7 @@ def test_apply_create_template_second_template_unknown_raises_error(mngr_test_pr
         apply_create_template(ctx, ctx.params.copy(), config)
 
 
-# =============================================================================
 # Tests for _process_template_escapes
-# =============================================================================
 
 
 def test_process_template_escapes_tab() -> None:
@@ -551,9 +549,7 @@ def test_process_template_escapes_literal_backslash_before_t() -> None:
     assert _process_template_escapes("\\\\t") == "\\t"
 
 
-# =============================================================================
 # Tests for parse_output_options
-# =============================================================================
 
 
 def test_parse_output_options_quiet_sets_console_level_none(mngr_test_prefix: str) -> None:
@@ -690,9 +686,7 @@ def test_parse_output_options_invalid_template_raises(mngr_test_prefix: str) -> 
         )
 
 
-# =============================================================================
 # Tests for apply_config_defaults edge cases
-# =============================================================================
 
 
 def test_apply_config_defaults_raises_on_unknown_param_names(mngr_test_prefix: str) -> None:
@@ -729,9 +723,7 @@ def test_apply_config_defaults_warns_on_unknown_param_when_lax(
     )
 
 
-# =============================================================================
 # Tests for apply_create_template edge cases
-# =============================================================================
 
 
 def test_apply_create_template_unknown_template_no_templates_configured(mngr_test_prefix: str) -> None:
@@ -827,9 +819,7 @@ def test_apply_create_template_accumulates_append_system_prompt_across_stacked_r
     assert result["setting"] == ('agent_types.claude.append_system_prompt__extend=["first", "second"]',)
 
 
-# =============================================================================
 # Tests for apply_create_template list/tuple merging
-# =============================================================================
 
 
 def test_apply_create_template_narrowing_raises_against_config_defaults(mngr_test_prefix: str) -> None:
@@ -1069,9 +1059,7 @@ def test_apply_template_extend_dict_recurses_into_nested_extend() -> None:
     assert result == {"allow": ["old", "new"], "defaultMode": "acceptEdits"}
 
 
-# =============================================================================
 # Tests for _split_known_and_plugin_params
-# =============================================================================
 
 
 def test_split_known_and_plugin_params_separates_known_from_extra() -> None:
@@ -1128,9 +1116,7 @@ def test_split_known_and_plugin_params_empty_params() -> None:
     assert plugin == {}
 
 
-# =============================================================================
 # Tests for --headless flag integration with setup_command_context
-# =============================================================================
 
 
 def test_headless_flag_sets_is_interactive_false_via_setup_command_context(
@@ -1165,14 +1151,9 @@ def test_headless_flag_sets_is_interactive_false_via_setup_command_context(
     assert captured_is_interactive == [False]
 
 
-# =============================================================================
-# Tests for the shared set_at_path helper used by --setting parsing
-#
+# Tests for the shared set_at_path helper used by --setting parsing.
 # Value-parsing semantics (boolean, integer, JSON array, etc.) are exercised in
-# the dedicated key_resolver_test suite that owns ``parse_scalar_value``; we
-# don't re-test them here since ``apply_settings_to_config`` now calls that
-# shared helper directly rather than through a per-callsite wrapper.
-# =============================================================================
+# the dedicated key_resolver_test suite that owns ``parse_scalar_value``.
 
 
 def test_set_at_path_single_segment() -> None:
@@ -1203,9 +1184,7 @@ def test_set_at_path_overwrites_non_dict_intermediate() -> None:
     assert data == {"commands": {"create": {"connect": False}}}
 
 
-# =============================================================================
 # Tests for apply_settings_to_config
-# =============================================================================
 
 
 def test_apply_settings_to_config_empty_settings(mngr_test_prefix: str) -> None:
@@ -1433,9 +1412,7 @@ def test_apply_settings_to_config_unknown_field_raises() -> None:
         apply_settings_to_config(config, ("totally_bogus_key=value",), frozenset())
 
 
-# =============================================================================
 # Tests for --setting flag integration with setup_command_context
-# =============================================================================
 
 
 def test_setting_flag_overrides_config_via_setup_command_context(
@@ -1522,10 +1499,8 @@ def test_setting_flag_sets_command_defaults_in_config(
     assert captured_config[0].commands["create"].defaults["connect"] is False
 
 
-# =============================================================================
 # Tests for create-template `setting`/`setting__extend` reaching the config
 # (regression for: template-provided settings were silently dropped).
-# =============================================================================
 
 
 def _make_create_command_capturing_config() -> tuple[click.Command, list[MngrConfig]]:
@@ -1798,9 +1773,7 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
     )
 
 
-# =============================================================================
 # Integration tests: MNGR_ALLOW_UNKNOWN_CONFIG threaded through setup_command_context
-# =============================================================================
 
 
 def _make_strict_test_command() -> click.Command:
@@ -1872,9 +1845,7 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     )
 
 
-# =============================================================================
 # Tests for the narrowing guard on --setting overrides.
-# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -1897,9 +1868,7 @@ def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_settin
         apply_settings_to_config(config, (flag_setting,), frozenset())
 
 
-# =============================================================================
 # Role settings: a template stack contributing to the agent type's config
-# =============================================================================
 
 
 def _role_stack_config(
@@ -1987,3 +1956,34 @@ def test_a_role_setting_unknown_to_the_resolved_type_names_the_types_that_suppor
     """
     with pytest.raises(UserInputError, match="nor a setting of agent type 'wait'"):
         _role_stack_config(mngr_test_prefix, "wait", {"chat": {"output_style": "Engineering Subordinate"}}, ("chat",))
+
+
+def test_apply_create_template_publish_extend_stacks_across_templates(mngr_test_prefix: str) -> None:
+    """``publish__extend`` lets a base template declare a port and an overlay add another."""
+    ctx = _make_click_context(
+        params={
+            "template": ("screen", "extra-service"),
+            "publish": (),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("screen"): CreateTemplate(options={"publish__extend": ["59000/udp", "59000/tcp"]}),
+            CreateTemplateName("extra-service"): CreateTemplate(options={"publish__extend": ["8080"]}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["publish"] == ("59000/udp", "59000/tcp", "8080")
+
+
+def test_apply_create_template_publish_bare_assign_lands_as_tuple(mngr_test_prefix: str) -> None:
+    ctx = _make_click_context(params={"template": ("screen",), "publish": ()})
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("screen"): CreateTemplate(options={"publish": ["59000/udp"]}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["publish"] == ("59000/udp",)

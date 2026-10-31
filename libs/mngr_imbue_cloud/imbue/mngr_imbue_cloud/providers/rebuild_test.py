@@ -113,7 +113,7 @@ def test_slice_rebuild_config_carries_every_vps_field_but_the_slice_knobs_and_la
     assert slice_config.box_public_address == "51.81.208.81"
 
 
-def _lease(memory_units: int | None = 8) -> LeaseResult:
+def _lease(memory_units: int | None = 8, published_ports: list[dict[str, object]] | None = None) -> LeaseResult:
     body: dict[str, object] = {
         "host_db_id": "11111111-1111-1111-1111-111111111111",
         "vps_address": "51.81.208.81",
@@ -128,6 +128,8 @@ def _lease(memory_units: int | None = 8) -> LeaseResult:
     }
     if memory_units is not None:
         body["memory_units"] = memory_units
+    if published_ports is not None:
+        body["published_ports"] = published_ports
     return LeaseResult.model_validate(body)
 
 
@@ -156,6 +158,29 @@ def test_slice_rebuild_config_runs_the_container_under_the_account_runtime_with_
     # capped like the original (and like the guest's own reconcile oneshot caps it).
     assert slice_config.slice_memory_mib == 8 * 1024 - GUEST_RAM_HOLDBACK_MIB
     assert slice_config.box_public_address == "51.81.208.81"
+
+
+def test_slice_rebuild_config_republishes_the_leases_ports_inside_the_vm() -> None:
+    """The box's DNAT rules are fixed at carve, so the rebuilt container must publish the
+    same guest ports on the same numbers; a protocol this client does not know is left out."""
+    lease = _lease(
+        published_ports=[
+            {"guest_port": 59000, "protocol": "udp", "host_port": 22006},
+            {"guest_port": 59000, "protocol": "tcp", "host_port": 22006},
+            {"guest_port": 7000, "protocol": "sctp", "host_port": 22007},
+        ]
+    )
+    slice_config = build_slice_rebuild_config(_runsc_account_config(), lease)
+    assert slice_config.default_start_args == (
+        "--workdir=/",
+        "--security-opt=no-new-privileges",
+        "--tmpfs",
+        "/run",
+        "-p",
+        "0.0.0.0:59000:59000/udp",
+        "-p",
+        "0.0.0.0:59000:59000/tcp",
+    )
 
 
 def test_rebuilt_slice_container_gets_one_exec_tmp_capped_at_an_eighth_of_the_guest_ram(

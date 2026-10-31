@@ -8,6 +8,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from inline_snapshot import snapshot
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import PortProtocol
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import load_host_key_record
@@ -741,9 +743,7 @@ def test_full_verification_sweeps_bootstrap_pins_of_a_host_adopted_by_an_older_c
     assert {pin.port for pin in record.pins} == {_VM_PORT, _CONTAINER_PORT}
 
 
-# =============================================================================
 # rebind_host_key_pins_to_endpoints
-# =============================================================================
 
 
 def test_rebind_moves_both_pins_to_the_new_endpoints_and_records_them(tmp_path: Path) -> None:
@@ -792,6 +792,34 @@ def test_rebind_survives_a_new_port_reusing_the_other_endpoints_old_port(
         (target.address, new_vm_port): (vm_key, HostKeyOrigin.USER),
         (target.address, new_container_port): (container_key, HostKeyOrigin.USER),
     }
+
+
+def test_rebind_records_repicked_published_ports_beside_unchanged_ssh_endpoints(tmp_path: Path) -> None:
+    """The published ports are compared with the sshd endpoints: a record whose published ports went
+    stale is rewritten (specs/published-ports), while the pins, which have nothing to do with those
+    ports, stay exactly where they are."""
+    host_id = HostId()
+    target, _access = _adopt_fresh_slice(tmp_path, host_id)
+    pins_before = load_current_host_key_pins(target.known_hosts_path)
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host=target.address, host_port=22012)
+
+    rebind_host_key_pins_to_endpoints(
+        target.host_state_dir,
+        target.known_hosts_path,
+        target.host_id,
+        target.address,
+        _VM_PORT,
+        _CONTAINER_PORT,
+        published_endpoints=(endpoint,),
+    )
+
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address=target.address,
+        ssh_port=_VM_PORT,
+        container_ssh_port=_CONTAINER_PORT,
+        published_endpoints=(endpoint,),
+    )
+    assert load_current_host_key_pins(target.known_hosts_path) == pins_before
 
 
 def test_rebind_is_a_noop_while_the_endpoints_are_unchanged(tmp_path: Path) -> None:

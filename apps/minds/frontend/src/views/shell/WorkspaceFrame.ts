@@ -14,6 +14,8 @@ import {
   armProviderRelay,
   stopProviderRelay,
 } from "../../models/providerRelay";
+import type { ImmersiveChange } from "./immersive";
+import { ImmersiveController } from "./immersive";
 import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
 import type {
   ChromeAnchor,
@@ -60,6 +62,8 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
+  IMMERSIVE_REQUEST: string;
+  IMMERSIVE_CHANGED: string;
   OPEN_LOCAL_FILES: string;
   HIGHLIGHT_CHROME: string;
   CHROME_ANCHORS: readonly string[];
@@ -168,6 +172,11 @@ export interface EmbedHandlerDeps {
     ) => void;
     detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
   } | null;
+  /** The workspace asked to enter or leave immersive mode for one of its
+   * windows (minds:immersive-request); null in a chrome that cannot, which
+   * then never answers with the capability either. Called synchronously from
+   * the handler, so the fullscreen request keeps the click's activation. */
+  immersive: { request: (on: boolean) => void } | null;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -260,10 +269,16 @@ export function buildEmbedHandlers(
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
+      immersive: deps.immersive !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
       opensLocalFiles: true,
     });
   };
+  const immersive = deps.immersive;
+  if (immersive !== null) {
+    handlers[contract.IMMERSIVE_REQUEST] = (message) =>
+      immersive.request(message.on === true);
+  }
   const openExternalLink = deps.openExternalLink;
   if (openExternalLink !== null) {
     handlers[contract.OPEN_EXTERNAL] = (message) =>
@@ -444,6 +459,44 @@ export class FrameLinkHandling {
   }
 }
 
+/** The frame's `navigator.keyboard`, where the browser has one. Typed here
+ * because lib.dom knows no Keyboard Lock API. */
+function keyboardLockSurfaceOf(
+  nav: Navigator,
+): { lock(): Promise<void>; unlock(): void } | null {
+  const keyboard = (
+    nav as Navigator & { keyboard?: { lock?: unknown; unlock?: unknown } }
+  ).keyboard;
+  if (
+    !keyboard ||
+    typeof keyboard.lock !== "function" ||
+    typeof keyboard.unlock !== "function"
+  )
+    return null;
+  return {
+    lock: () => (keyboard.lock as () => Promise<void>).call(keyboard),
+    unlock: () => (keyboard.unlock as () => void).call(keyboard),
+  };
+}
+
+/** Immersive mode over the real frame, document and desktop bridge; null
+ * without a frame element to take fullscreen. */
+function buildImmersiveController(
+  frame: HTMLIFrameElement | null,
+  doc: Document,
+  send: (change: ImmersiveChange) => void,
+): ImmersiveController | null {
+  if (frame === null) return null;
+  return new ImmersiveController({
+    requestFullscreen: () => frame.requestFullscreen(),
+    isFullscreen: () => doc.fullscreenElement !== null,
+    exitFullscreen: () => doc.exitFullscreen(),
+    keyboard: keyboardLockSurfaceOf(navigator),
+    setDesktopImmersive: (on) => electronBridge.setImmersive(on),
+    send,
+  });
+}
+
 // electronBridge.onCloseActiveTab has no unregister, so the preload callback
 // is registered ONCE at module scope and forwards to whichever frame is
 // currently mounted; mount/unmount only swap this ref.
@@ -488,6 +541,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   );
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
+  // Immersive mode for the mounted frame (immersive.ts); built at mount so
+  // the frame element exists, and told about every navigation and the
+  // document's fullscreenchange, which is where it ends.
+  let immersive: ImmersiveController | null = null;
+  const onFullscreenChange = (): void => immersive?.fullscreenChanged();
   // Whether the page the frame currently holds has announced that its
   // endpoint is listening; a send before that is lost, so a focus-chat ask
   // waits in the shell until it arrives. Cleared at the navigation, the only
@@ -518,6 +576,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
+      immersive?.frameNavigated();
       shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
@@ -535,6 +594,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
+    immersive?.frameNavigated();
     shell.highlightedChromeAnchor = null;
     frameElement.src = shell.stores.workspaces.workspaceFrameUrl(
       armedWorkspaceAnyId,
@@ -553,6 +613,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
+      immersive = buildImmersiveController(frameElement, document, (change) => {
+        if (contract !== null)
+          endpoint?.send(contract.IMMERSIVE_CHANGED, { ...change });
+      });
+      document.addEventListener("fullscreenchange", onFullscreenChange);
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
       // The armed id, not the attr, is what the shell asks about: this frame is
       // re-armed by onupdate, and it is mounted for the workspace an app modal
@@ -624,6 +689,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
+          immersive:
+            immersive === null
+              ? null
+              : { request: (on) => immersive?.request(on) },
           highlightChrome: (anchor) => {
             shell.highlightedChromeAnchor = anchor;
             m.redraw();
@@ -793,6 +862,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         linkHandling.unmounted();
       }
       frameHandle = null;
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      immersive?.frameNavigated();
+      immersive = null;
       if (onFrameLoad !== null)
         frameElement?.removeEventListener("load", onFrameLoad);
       onFrameLoad = null;
@@ -818,8 +890,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           class: "workspace-surface bg-surface-primary pointer-events-none",
         }),
         m("iframe#content-frame", {
+          // allow-pointer-lock: a pointer lock needs it in every sandbox
+          // list on the way (the Screen's viewer takes one; the workspace
+          // shell's page frames add it too).
           sandbox:
-            "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals",
+            "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock",
           allow: WORKSPACE_FRAME_ALLOW,
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",

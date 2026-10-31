@@ -44,8 +44,12 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_PORTS_MARK
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_SPACE_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_PORT_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import assign_published_host_ports
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import gen2_disk_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import gen2_instance_dir
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import render_published_ports_env_template_value
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import render_published_ports_env_value
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GUEST_RAM_HOLDBACK_MIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_machine_guest_memory_mib
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_boot_wait_script
@@ -194,12 +198,14 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         box_total_units: int,
         box_disk_budget_gib: int,
         uplink_mbps: int | None = None,
+        published_port_declarations: Sequence[SlicePortDeclaration] = (),
     ) -> SliceProvisionResult:
         """Reserve the box's budgets + ports + an ordinal, boot the slice's unit, and wait for its sshd.
 
         Two phases: the reserve script (under the box lock) claims the
         machine's share of the box's two budgets (memory units
-        and disk), the two host ports, and the ordinal, materializes the slice
+        and disk), the two sshd host ports plus one box port per declared
+        guest port, and the ordinal, materializes the slice
         dir, and enables the unit WITHOUT starting; then the long boot runs
         unlocked (``systemctl start`` + an sshd-banner wait against the VM's
         routed address). The ordinal-dependent payloads ship as single
@@ -234,6 +240,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
             vm_ssh_host_port=GEN2_VM_SSH_PORT_PLACEHOLDER,
             container_ssh_host_port=GEN2_CONTAINER_SSH_PORT_PLACEHOLDER,
             uplink_mbps=uplink_mbps,
+            published_ports_value=render_published_ports_env_template_value(published_port_declarations),
         )
         reserve_script = build_qemu_reserve_script(
             instance_name=instance_name,
@@ -248,6 +255,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
             meta_data_text=meta_data,
             network_config_text=network_config,
             env_file_template_text=env_file_template,
+            published_port_declarations=published_port_declarations,
         )
 
         # Phase 1: reserve under the box lock (one SSH command; lock auto-releases).
@@ -282,7 +290,13 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         # marker parse sits inside the cleanup scope too: a rc-0 reserve with
         # garbled output has still claimed the slot and must not leak it.
         try:
-            vm_ssh_host_port, container_ssh_host_port, ordinal = parse_gen2_reserved_line(reserve_out)
+            reservation = parse_gen2_reserved_line(reserve_out)
+            vm_ssh_host_port = reservation.vm_ssh_host_port
+            container_ssh_host_port = reservation.container_ssh_host_port
+            ordinal = reservation.ordinal
+            published_ports = assign_published_host_ports(
+                published_port_declarations, reservation.published_host_ports
+            )
             start_rc, _start_out, start_err = self.run_on_box(
                 build_qemu_start_command(ordinal),
                 timeout=_START_TIMEOUT_SECONDS,
@@ -298,16 +312,17 @@ class QemuSliceVpsClient(SliceVmClientInterface):
             )
             if wait_rc != 0:
                 raise SliceCommandError("boot-wait", wait_rc or 1, wait_err)
-        except (SliceCommandError, BareMetalProvisioningError, OSError):
+        except (SliceCommandError, BareMetalProvisioningError, MalformedBoxOutputError, OSError):
             self._best_effort_destroy(instance_name)
             raise
 
         logger.info(
-            "Provisioned slice VM {} (ordinal {}, ports vm={}/container={}) on {}",
+            "Provisioned slice VM {} (ordinal {}, ports vm={}/container={}, published={}) on {}",
             instance_name,
             ordinal,
             vm_ssh_host_port,
             container_ssh_host_port,
+            render_published_ports_env_value(published_ports),
             self.box_address,
         )
         return SliceProvisionResult(
@@ -316,6 +331,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
             vm_ssh_host_port=vm_ssh_host_port,
             container_ssh_host_port=container_ssh_host_port,
             slice_ordinal=ordinal,
+            published_ports=published_ports,
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:

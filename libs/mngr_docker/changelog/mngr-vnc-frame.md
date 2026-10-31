@@ -1,0 +1,4 @@
+The docker provider publishes the ports declared with `mngr create --publish <port>[/<protocol>]` (`specs/published-ports/spec.md`): each declaration becomes a `docker run -p` spec beside the one for sshd, bound where sshd is bound (`127.0.0.1` for a local daemon, every interface of the daemon host for a remote one, or `ssh_bind_address` when set).
+The host port Docker picks is read back from the container's port bindings after every start and recorded on the host, so `mngr list --format json` reports it under `host.published_endpoints` for running and stopped hosts; Docker picks a fresh dynamic host port on each start, except that a guest port declared for both `tcp` and `udp` gets one chosen host port number on a local daemon that is kept across starts.
+The declarations are kept in the host record and replayed on a snapshot restore, which reports the restored container's fresh ports.
+Declaring port 22 is refused, since the provider publishes sshd there itself.
