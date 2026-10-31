@@ -83,7 +83,11 @@ def _zip_directory_contents(source_dir: Path, zip_path: Path) -> None:
                 archive.writestr(zinfo, os.readlink(entry))
             else:
                 zinfo.compress_type = zipfile.ZIP_DEFLATED
-                with entry.open("rb") as source_file, archive.open(zinfo, "w") as dest_file:
+                zinfo.file_size = info.st_size
+                # ``ZipFile.open`` decides at open time whether the entry gets ZIP64
+                # headers; without ``force_zip64`` a file over 2 GiB (or one that grew
+                # since the lstat) raises "File size too large" when the entry closes.
+                with entry.open("rb") as source_file, archive.open(zinfo, "w", force_zip64=True) as dest_file:
                     shutil.copyfileobj(source_file, dest_file)
 
 

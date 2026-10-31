@@ -322,17 +322,16 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
             },
         ),
         accounts=UiAccountsMessage(
+            account_id="user-alice",
             has_accounts=True,
-            account_email="alice@example.com",
-            extra_account_count=1,
             accounts=(
                 UiAccountEntry(
                     user_id="user-alice",
                     email="alice@example.com",
+                    display_name="Alice Nguyen",
                     workspace_count=3,
-                    is_default=True,
                 ),
-                UiAccountEntry(user_id="user-bob", email="bob@example.com", workspace_count=0, is_default=False),
+                UiAccountEntry(user_id="user-bob", email="bob@example.com", workspace_count=0),
             ),
         ),
         providers=UiProvidersMessage(
@@ -462,6 +461,7 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
         is_mac=True,
         mngr_forward_origin="https://localhost:8421",
         is_onboarding_complete=True,
+        account_id="user-alice",
     )
     return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
 

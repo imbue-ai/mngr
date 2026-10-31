@@ -42,7 +42,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -155,7 +154,6 @@ def signout_user_via_plugin(user_id: str) -> None:
         session_store=_get_session_store(),
         connection_store=state.connection_store,
         provider_materializer=state.provider_materializer,
-        minds_config=state.minds_config,
     )
     _kick_background_syncs()
     wake_ui_state_publisher()
@@ -298,7 +296,6 @@ def _run_web_login_subprocess(
     imbue_cloud_cli: ImbueCloudCli,
     session_store: MultiAccountSessionStore,
     sync_scheduler: WorkspaceSyncScheduler | None,
-    minds_config: MindsConfig | None,
     output_format: OutputFormat,
     notify_accounts_changed: Callable[[], None],
     provider_materializer: ProviderSettingsMaterializer | None,
@@ -368,7 +365,6 @@ def _run_web_login_subprocess(
             result=result,
             session_store=session_store,
             sync_scheduler=sync_scheduler,
-            minds_config=minds_config,
             output_format=output_format,
             notify_accounts_changed=notify_accounts_changed,
             provider_materializer=provider_materializer,
@@ -405,7 +401,6 @@ def _mirror_signin_result(
     result: ImbueCloudAuthSession,
     session_store: MultiAccountSessionStore,
     sync_scheduler: WorkspaceSyncScheduler | None,
-    minds_config: MindsConfig | None,
     output_format: OutputFormat,
     notify_accounts_changed: Callable[[], None],
     provider_materializer: ProviderSettingsMaterializer | None,
@@ -413,22 +408,13 @@ def _mirror_signin_result(
     """Mirror a completed plugin signin into the desktop client.
 
     Runs on the web-login background thread, so every dependency is passed in
-    explicitly -- there is no Flask app context to resolve state from.
+    explicitly -- there is no Flask app context to resolve state from. The
+    window that asked for the sign-in takes the account up itself; nothing
+    install-wide records a default.
     """
     session_store.invalidate_identity_cache()
     if sync_scheduler is not None:
         sync_scheduler.note_account_signin(str(result.user_id), str(result.email))
-    if minds_config is not None:
-        stored_default_account_id = minds_config.get_default_account_id()
-        # A stored default whose account has since signed out is as good as none. A failed
-        # account listing proves nothing about it, so the user's choice is kept then.
-        is_stored_default_signed_out = (
-            stored_default_account_id is not None
-            and session_store.get_session(stored_default_account_id) is None
-            and not session_store.is_last_identity_read_failed
-        )
-        if stored_default_account_id is None or is_stored_default_signed_out:
-            minds_config.set_default_account_id(str(result.user_id))
 
     # The session list the invalidation above refreshed is the materializer's input.
     if provider_materializer is not None:
@@ -461,7 +447,6 @@ def _handle_web_login_start() -> Response:
     imbue_cloud_cli: ImbueCloudCli | None = state.imbue_cloud_cli
     session_store = _get_session_store()
     output_format = _get_output_format()
-    minds_config: MindsConfig | None = state.minds_config
     provider_materializer: ProviderSettingsMaterializer | None = state.provider_materializer
     sync_scheduler: WorkspaceSyncScheduler | None = state.sync_scheduler
     root_cg: ConcurrencyGroup | None = state.root_concurrency_group
@@ -491,7 +476,6 @@ def _handle_web_login_start() -> Response:
             "imbue_cloud_cli": imbue_cloud_cli,
             "session_store": session_store,
             "sync_scheduler": sync_scheduler,
-            "minds_config": minds_config,
             "output_format": output_format,
             "notify_accounts_changed": _publisher_notifier(state.ui_publisher),
             "provider_materializer": provider_materializer,

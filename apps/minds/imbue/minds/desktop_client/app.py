@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -12,7 +13,7 @@ from typing import Final
 from typing import assert_never
 from urllib.parse import quote
 
-import httpx
+import httpx2
 from flask import Flask
 from flask import Response
 from flask import abort
@@ -24,9 +25,7 @@ from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
@@ -91,6 +90,7 @@ from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -107,7 +107,6 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -124,6 +123,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
@@ -137,7 +137,6 @@ from imbue.minds.desktop_client.static_pages import build_error_page_html
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
-from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -151,7 +150,6 @@ from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
-from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
 from imbue.minds.desktop_client.ui_models import AccountPanelState
@@ -177,9 +175,11 @@ from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
-from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.update_service import read_workspace_update_facts
+from imbue.minds.desktop_client.update_service import read_workspace_update_window
+from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -196,9 +196,11 @@ from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDisp
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
+from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
+from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
@@ -787,36 +789,57 @@ def _handle_help_assist() -> Response:
 
 
 def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:
-    """The `/ui/ws` ``accounts`` frame: every signed-in account, plus the launcher's label.
+    """The `/ui/ws` ``accounts`` frame: the switcher's lists, before the publisher stamps each window's account.
 
-    The home screen's bottom-left launcher and Manage Accounts both render from
-    this one frame, so a sign-in, sign-out, or default switch updates them
-    together, without a reload. The launcher names the default account and
-    counts the rest. Resolving the default also stores it (see
-    :func:`settle_default_account_id`), so the create form preselects the same
-    one. ``has_accounts`` is derived from the account list rather than the
-    email so it keeps its exact "any account at all" meaning.
+    The titlebar's account switcher and Manage Accounts both render from this
+    one frame, so a sign-in or sign-out updates them together, without a
+    reload. Beside the signed-in accounts it lists the accounts signed out on
+    this install whose workspaces are still here, so a window can switch to
+    one of those and see them. ``has_accounts`` is derived from the signed-in
+    list so it keeps its exact "any account at all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
-    default_account_id = settle_default_account_id(
-        get_state().minds_config, [str(account.user_id) for account in accounts]
-    )
     entries = tuple(
         UiAccountEntry(
             user_id=str(account.user_id),
             email=str(account.email),
+            display_name=account.display_name or "",
             workspace_count=len(account.workspace_ids),
-            is_default=str(account.user_id) == default_account_id,
         )
         for account in accounts
     )
-    launcher_entry = next((entry for entry in entries if entry.is_default), None)
-    return UiAccountsMessage(
-        has_accounts=bool(entries),
-        account_email=launcher_entry.email if launcher_entry is not None else "",
-        extra_account_count=max(len(entries) - 1, 0),
-        accounts=entries,
+    record_store = session_store.record_store if session_store is not None else None
+    signed_in_user_ids = {str(account.user_id) for account in accounts}
+    signed_out_entries = tuple(
+        UiAccountEntry(
+            user_id=user_id,
+            email=(record_store.account_email_for(user_id) if record_store is not None else None) or "",
+            workspace_count=workspace_count,
+        )
+        for user_id, workspace_count in _signed_out_account_workspace_counts(record_store, signed_in_user_ids)
     )
+    return UiAccountsMessage(
+        account_id=LOCAL_PROFILE_USER_ID,
+        has_accounts=bool(entries),
+        accounts=entries,
+        signed_out_accounts=signed_out_entries,
+    )
+
+
+def _signed_out_account_workspace_counts(
+    record_store: WorkspaceRecordStore | None, signed_in_user_ids: AbstractSet[str]
+) -> list[tuple[str, int]]:
+    """``(user id, active record count)`` for every signed-out account whose replica still holds active rows."""
+    if record_store is None:
+        return []
+    counts: list[tuple[str, int]] = []
+    for user_id, records in sorted(record_store.list_all_records().items()):
+        if user_id in signed_in_user_ids or user_id == LOCAL_PROFILE_USER_ID:
+            continue
+        active_count = sum(1 for record in records if record.state == RECORD_STATE_ACTIVE)
+        if active_count > 0:
+            counts.append((user_id, active_count))
+    return counts
 
 
 def _compute_cloud_tile_state(
@@ -1061,6 +1084,7 @@ def _finalize_and_mark_destroying(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
+    minds_config: MindsConfig | None,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
@@ -1085,7 +1109,7 @@ def _finalize_and_mark_destroying(
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli)
+            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli, minds_config)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
@@ -1096,8 +1120,9 @@ def _finalize_destroyed_workspace(
     paths: InstallationPaths,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
+    minds_config: MindsConfig | None,
 ) -> None:
-    """Tombstone a fully-destroyed workspace's record, then delete the destroying marker.
+    """Tombstone a fully-destroyed workspace's record, drop its own settings, then delete the destroying marker.
 
     Runs only once the host is confirmed gone (DONE). The workspace record is
     kept (state=DESTROYED, secrets intact) so the workspace's backups stay
@@ -1133,6 +1158,11 @@ def _finalize_destroyed_workspace(
                     agent_id,
                     owner_user_id,
                 )
+    if minds_config is not None:
+        try:
+            minds_config.set_workspace_auto_update_override(str(agent_id), None)
+        except MindsConfigError as e:
+            logger.warning("Could not drop destroyed agent {}'s auto-update setting: {}", agent_id, e)
     delete_destroying(agent_id, paths)
 
 
@@ -1460,6 +1490,8 @@ def _create_attempt_row_entry(row: CreateAttemptRow) -> dict[str, str]:
     }
     if row.account_email:
         entry["account"] = row.account_email
+    if row.account_id:
+        entry["account_user_id"] = row.account_id
     return entry
 
 
@@ -1560,6 +1592,11 @@ def _build_workspace_list(
             if stop_kind is not None:
                 entry["stop_kind"] = stop_kind
         if session_store is not None:
+            # The association names the owning account whether or not it is
+            # signed in here; the email (and the key state) need the identity.
+            owner_user_id = session_store.get_owner_user_id_for_workspace(str(aid))
+            if owner_user_id is not None:
+                entry["account_user_id"] = owner_user_id
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
                 entry["account"] = account.email
@@ -1568,6 +1605,11 @@ def _build_workspace_list(
                 key_state = _cloud_row_key_state(session_store.record_store, account, str(aid), info)
                 if key_state is not None:
                     entry["key_state"] = key_state.value
+            elif owner_user_id is not None and session_store.record_store is not None:
+                entry["account"] = session_store.record_store.account_email_for(owner_user_id) or ""
+            else:
+                # Associated with no account: the row is the device's and names none.
+                pass
         # A host that refused this device's key reads "Status unknown" on its
         # own; the chip says why, and that no restart will change it.
         if "key_state" not in entry and host_state_by_agent_id.get(aid) is HostState.UNAUTHENTICATED:
@@ -1598,6 +1640,7 @@ def _build_workspace_list(
         owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
         if owner is not None:
             remote_entry["account"] = owner.email
+            remote_entry["account_user_id"] = str(owner.user_id)
         workspaces.append(remote_entry)
     return workspaces
 
@@ -1650,12 +1693,17 @@ def _build_requests_payload(
     """
     request_ids = [req.request_id for req in displayable_requests]
     primary_ids = primary_agent_ids_by_workspace_name(backend_resolver)
-    workspace_ids = {
-        primary_id
+    workspace_id_by_request_id = {
+        req.request_id: primary_id
         for req in displayable_requests
         if (primary_id := primary_ids.get(workspace_name_for_request(req, backend_resolver))) is not None
     }
-    return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
+    return {
+        "count": len(request_ids),
+        "request_ids": request_ids,
+        "workspace_agent_ids": sorted(set(workspace_id_by_request_id.values())),
+        "workspace_agent_id_by_request_id": workspace_id_by_request_id,
+    }
 
 
 # The probe loop's own timeout is all that lives here. The recovery page's route
@@ -1882,21 +1930,6 @@ def _handle_mint_ai_key() -> Response:
     )
 
 
-def _handle_set_default_account() -> Response:
-    """Set the default account for new workspaces."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    form = request.form
-    user_id = str(form.get("user_id", ""))
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config and user_id:
-        minds_config.set_default_account_id(user_id)
-        # The home screen's account launcher shows the default account, so the
-        # open windows behind this modal need to re-read it.
-        wake_ui_state_publisher()
-    return make_response(status_code=303, headers={"Location": "/accounts"})
-
-
 def _handle_account_logout(
     user_id: str,
 ) -> Response:
@@ -2038,6 +2071,7 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         liveness=entry.get("liveness", ""),
         stop_kind=entry.get("stop_kind", ""),
         account=entry.get("account", ""),
+        account_user_id=entry.get("account_user_id", ""),
         create_attempt_state=entry.get("create_attempt_state", ""),
         is_remote=entry.get("is_remote") == "true",
         remote_kind=entry.get("remote_kind", ""),
@@ -2071,7 +2105,7 @@ def _derive_ui_workspaces_message(
         # any request handler) is what deletes the destroying marker, the
         # machine's share, and the account association once the host is gone.
         destroying_marker = _finalize_and_mark_destroying(
-            paths, backend_resolver, session_store, get_state().imbue_cloud_cli
+            paths, backend_resolver, session_store, get_state().imbue_cloud_cli, get_state().minds_config
         )
         return UiWorkspacesMessage(
             workspaces=tuple(_ui_workspace_entry_from_legacy_dict(row) for row in rows),
@@ -2115,6 +2149,7 @@ def _derive_ui_requests_and_notifications_messages(
             count=payload["count"],
             request_ids=tuple(payload["request_ids"]),
             workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
+            workspace_agent_id_by_request_id=payload["workspace_agent_id_by_request_id"],
         )
         return requests_message, _reconcile_notification_feed(state, displayable_requests, backend_resolver)
 
@@ -2261,33 +2296,40 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_workspace_updates(self) -> UiWorkspaceUpdatesMessage:
         window = self.minds_config.get_update_window() if self.minds_config is not None else DEFAULT_UPDATE_WINDOW
         if self.workspace_update_service is None:
-            return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
-        return build_workspace_updates_message(self.workspace_update_service, window)
+            return UiWorkspaceUpdatesMessage(
+                updates={},
+                update_window=format_update_window(window),
+                update_window_start_hour=window[0],
+                update_window_end_hour=window[1],
+            )
+        return build_workspace_updates_message(self.workspace_update_service, window, self.minds_config)
 
-
-def _read_default_update_window() -> tuple[int, int]:
-    """The update window for a build with no settings storage to read one from."""
-    return DEFAULT_UPDATE_WINDOW
+    def resolve_workspace_account_id(self, agent_id: str) -> str:
+        """The account a workspace's frames go to: its association, else the device."""
+        return get_owning_account_id_for_workspace(session_store=self.session_store, workspace_any_id=agent_id)
 
 
 class _UpdateRunHostLifecycle(MutableModel):
-    """Brings a machine up for an update run and puts it back down afterwards.
+    """Brings a stopped machine up for an "Update now"; it stays up afterwards.
 
-    Both halves go through :func:`perform_mind_host_action` rather than shelling
-    out to ``mngr`` directly, so an update run leaves the same host-state
-    override and unattended-recovery marks behind as a start or stop the user
-    asked for. A raw ``mngr start`` here would wake a machine the app had
-    stopped without clearing its suppression mark, leaving it excluded from
-    recovery for the rest of the process's life.
+    Goes through :func:`perform_mind_host_action` rather than shelling out to
+    ``mngr`` directly, so an update run leaves the same host-state override and
+    unattended-recovery marks behind as a start the user asked for. A raw
+    ``mngr start`` here would wake a machine the app had stopped without
+    clearing its suppression mark, leaving it excluded from recovery for the
+    rest of the process's life.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     flask_app: Flask = Field(frozen=True, description="App whose state carries the channel publisher.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the host to act on.")
-    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Told the stop was intentional.")
+    tracker: SystemInterfaceHealthTracker = Field(
+        frozen=True,
+        description="The host action's health tracker, whose recovery suppression a successful start clears.",
+    )
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the mngr commands.")
-    mngr_binary: str = Field(frozen=True, description="mngr executable both actions shell out to.")
+    mngr_binary: str = Field(frozen=True, description="mngr executable the start shells out to.")
     mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for those mngr calls.")
 
     def start_and_wait(self, agent_id: AgentId) -> MindHostActionOutcome:
@@ -2295,30 +2337,9 @@ class _UpdateRunHostLifecycle(MutableModel):
 
         Synchronous because the dispatch's next step execs into the machine.
         """
-        return self._act(agent_id, MindHostAction.START)
-
-    def stop_in_background(self, agent_id: AgentId) -> None:
-        """Stop the machine on a one-shot worker.
-
-        The caller is the shared events-reader thread and ``mngr stop --stop-host``
-        can take minutes.
-        """
-        try:
-            self.concurrency_group.start_new_thread(
-                target=self._act,
-                args=(agent_id, MindHostAction.STOP),
-                name=f"scheduled-run-host-stop-{agent_id}",
-                daemon=True,
-                is_checked=False,
-            )
-        # Any of these means the app is shutting down; an escape would kill the events reader.
-        except (OSError, RuntimeError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as exc:
-            logger.warning("Could not start the host stop for {} after its scheduled update: {}", agent_id, exc)
-
-    def _act(self, agent_id: AgentId, action: MindHostAction) -> MindHostActionOutcome:
         return perform_mind_host_action(
             workspace_agent_id=agent_id,
-            action=action,
+            action=MindHostAction.START,
             backend_resolver=self.backend_resolver,
             mngr_binary=self.mngr_binary,
             mngr_host_dir=self.mngr_host_dir,
@@ -2382,17 +2403,6 @@ def start_workspace_update_loops(app: Flask, root_concurrency_group: Concurrency
     service.detector.start()
     service.start_run_polling(root_concurrency_group)
     service.apply_window.start()
-    if state.update_scheduler is not None:
-        state.update_scheduler.start(root_concurrency_group)
-
-
-class WorkspaceUpdateMachinery(FrozenModel):
-    """The update service and the scheduler built from it, assembled together."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    service: WorkspaceUpdateService = Field(description="Dispatches and closes out update runs.")
-    scheduler: UpdateScheduler = Field(description="Runs the armed intents inside the update window.")
 
 
 def _is_recovery_declined_by_an_update(app: Flask, agent_id: AgentId) -> bool:
@@ -2406,7 +2416,40 @@ def _is_recovery_declined_by_an_update(app: Flask, agent_id: AgentId) -> bool:
     return service is not None and service.apply_window.should_decline_recovery_dispatch(agent_id)
 
 
-def _build_workspace_update_machinery(
+def _arm_for_auto_update(app: Flask, agent_id: AgentId) -> None:
+    """The sweep's auto-update arm, through the service read off the app's state.
+
+    Read at call time: the detector that asks is built before the service that arms.
+    """
+    service = get_state(app).workspace_update_service
+    if service is not None:
+        service.arm_for_auto_update(agent_id)
+
+
+def _read_auto_update_policy(minds_config: MindsConfig | None, agent_id: AgentId) -> AutoUpdatePolicy:
+    if minds_config is None:
+        return AutoUpdatePolicy(is_enabled=False, skipped_target_ref="")
+    return AutoUpdatePolicy(
+        is_enabled=minds_config.get_effective_auto_update(str(agent_id)).is_enabled,
+        skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or "",
+    )
+
+
+def _drop_retired_update_schedules(data_dir: Path) -> None:
+    """Remove the app-side schedule records an older build kept; schedules live in each workspace."""
+    # CLEANUP: drop this once every install has launched a build that owns no update_schedules dir.
+    retired_dir = data_dir / "update_schedules"
+    if not retired_dir.is_dir():
+        return
+    try:
+        shutil.rmtree(retired_dir)
+    except OSError as e:
+        logger.warning("Could not drop the retired app-side update schedules at {}: {}", retired_dir, e)
+        return
+    logger.info("Dropped the retired app-side update schedules at {}", retired_dir)
+
+
+def _build_workspace_update_service(
     app: Flask,
     backend_resolver: BackendResolverInterface,
     mngr_caller: MngrCaller | None,
@@ -2417,7 +2460,7 @@ def _build_workspace_update_machinery(
     dispatch_recovery: Callable[[AgentId], None] | None,
     mngr_binary: str,
     mngr_host_dir: Path,
-) -> WorkspaceUpdateMachinery | None:
+) -> WorkspaceUpdateService | None:
     """Assemble the update machinery, or None when this build cannot run updates.
 
     Gated as a unit: a build missing any input has no update surface (routes
@@ -2433,9 +2476,8 @@ def _build_workspace_update_machinery(
         or dispatch_recovery is None
     ):
         return None
-    schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
+    _drop_retired_update_schedules(paths.data_dir)
     state_store = WorkspaceUpdateStateStore(
-        schedule_store=schedule_store,
         dismissal_store=UpdateDismissalStore(records_dir=paths.data_dir / "update_dismissals"),
     )
     apply_window = UpdateApplyWindowManager(
@@ -2446,14 +2488,27 @@ def _build_workspace_update_machinery(
         concurrency_group=root_concurrency_group,
         dispatch_recovery=dispatch_recovery,
     )
+    settings_source = UpdateSettingsSource(
+        read_ceiling=default_workspace_template_ref,
+        read_update_window=lambda agent_id: read_workspace_update_window(minds_config, agent_id),
+        # The same reader the workspace's bootstrap asks for at boot.
+        read_zone=read_host_timezone,
+        paths=paths,
+    )
     detector = WorkspaceUpdateDetector(
         store=state_store,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
         concurrency_group=root_concurrency_group,
         read_supported_version=default_workspace_template_ref,
-        # The sweep only wants the run-record half of the probe.
-        read_run_record=lambda agent_id: apply_window.probe_run(agent_id).run_status,
+        read_update_facts=lambda agent_id, is_sign_in_checked: read_workspace_update_facts(
+            mngr_caller,
+            build_agent_address(agent_id, backend_resolver),
+            settings_source.settings_for(agent_id),
+            is_sign_in_checked=is_sign_in_checked,
+        ),
+        read_auto_update_policy=lambda agent_id: _read_auto_update_policy(minds_config, agent_id),
+        arm_for_auto_update=lambda agent_id: _arm_for_auto_update(app, agent_id),
     )
     host_lifecycle = _UpdateRunHostLifecycle(
         flask_app=app,
@@ -2463,28 +2518,16 @@ def _build_workspace_update_machinery(
         mngr_binary=mngr_binary,
         mngr_host_dir=mngr_host_dir,
     )
-    service = WorkspaceUpdateService(
+    return WorkspaceUpdateService(
         state_store=state_store,
-        schedule_store=schedule_store,
         detector=detector,
         apply_window=apply_window,
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
-        paths=paths,
+        settings_source=settings_source,
+        minds_config=minds_config,
         start_workspace=host_lifecycle.start_and_wait,
     )
-    scheduler = UpdateScheduler(
-        schedule_store=schedule_store,
-        read_update_window=(
-            minds_config.get_update_window if minds_config is not None else _read_default_update_window
-        ),
-        read_conditions=service.read_conditions,
-        read_host_state=service.read_host_state,
-        dispatch=service.dispatch_for_scheduler,
-        stop_workspace=host_lifecycle.stop_in_background,
-    )
-    service.add_on_run_finished_callback(scheduler.note_run_finished)
-    return WorkspaceUpdateMachinery(service=service, scheduler=scheduler)
 
 
 def _create_ui_state_publisher(
@@ -2523,6 +2566,7 @@ def _create_ui_state_publisher(
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
         derive_workspace_updates=deriver.derive_workspace_updates,
+        resolve_workspace_account_id=deriver.resolve_workspace_account_id,
     )
 
 
@@ -2555,7 +2599,7 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx.Client | None,
+    http_client: httpx2.Client | None,
     agent_creator: AgentCreator | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
@@ -2690,7 +2734,7 @@ def create_desktop_client(
         if system_interface_health_tracker is not None and root_concurrency_group is not None
         else None
     )
-    workspace_update_machinery = _build_workspace_update_machinery(
+    workspace_update_service = _build_workspace_update_service(
         app=app,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
@@ -2706,7 +2750,6 @@ def create_desktop_client(
         mngr_binary=mngr_binary,
         mngr_host_dir=resolved_mngr_host_dir,
     )
-    workspace_update_service = workspace_update_machinery.service if workspace_update_machinery is not None else None
     ui_publisher = _create_ui_state_publisher(
         app=app,
         broadcaster=ui_channel_broadcaster,
@@ -2819,7 +2862,6 @@ def create_desktop_client(
         notification_feed=notification_feed,
         workspace_operation_registry=workspace_operation_registry,
         workspace_update_service=workspace_update_service,
-        update_scheduler=(workspace_update_machinery.scheduler if workspace_update_machinery is not None else None),
         identity_cache=identity_cache,
         forward_identity=forward_identity,
         turn_credential_broker=turn_credential_broker,
@@ -2835,6 +2877,8 @@ def create_desktop_client(
         # A cloud machine leaving RUNNING is the moment its kind starts to
         # matter; the wake lists it at once rather than a poll later.
         backend_resolver.add_on_change_callback(machine_stop_kind_tracker.request_refresh)
+        if folder_sync_manager is not None:
+            backend_resolver.add_on_change_callback(folder_sync_manager.on_backend_changed)
     if system_interface_health_tracker is not None:
         _health_tracker_for_ui = system_interface_health_tracker
 
@@ -2865,6 +2909,8 @@ def create_desktop_client(
                 concurrency_group=root_concurrency_group,
             )
             _health_tracker_for_ui.add_on_recovery_callback(workspace_view_refresher)
+            if folder_sync_manager is not None:
+                _health_tracker_for_ui.add_on_recovery_callback(folder_sync_manager.on_workspace_recovered)
             if connectivity_detector is not None:
                 connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
             if sleep_tracker is not None:
@@ -2931,6 +2977,17 @@ def create_desktop_client(
     # ignored) by serve_spa_index so parameterized pages route here too.
     for spa_route in (
         "/",
+        # The hub pages, one set per account (a user id, or 'local' for the
+        # device); the bare spellings below them redirect in the SPA. The home
+        # page is spelled with its trailing slash by the SPA, Electron, and the
+        # switch-account route, and a rule without one is a leaf to Werkzeug,
+        # so both spellings are registered.
+        "/account/<account_id>",
+        "/account/<account_id>/",
+        "/account/<account_id>/create",
+        "/account/<account_id>/create/template",
+        "/account/<account_id>/workspaces/destroyed",
+        "/account/<account_id>/workspaces/shared",
         "/create",
         "/create/template",
         "/creating/<agent_id>",
@@ -2975,7 +3032,6 @@ def create_desktop_client(
 
     # Account management action routes
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
-    app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule(
         "/accounts/<user_id>/resend-verification",
@@ -3114,6 +3170,7 @@ def start_system_interface_health_probe_loop(
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
+    mngr_forward_ca_cert_path: Path | None,
     root_concurrency_group: ConcurrencyGroup | None,
     sleep_tracker: SleepTracker | None = None,
 ) -> None:
@@ -3134,15 +3191,21 @@ def start_system_interface_health_probe_loop(
     envelope only enrolls an agent as suspect, and STUCK is reached solely
     through probe failures observed here.
 
-    Probing is skipped entirely when the plugin port or preauth cookie are
-    unset (e.g. Imbue Studio running without the plugin) -- without a working
-    plugin route there is no way to ask whether the workspace is reachable.
+    Probing is skipped entirely when the plugin port, preauth cookie or CA
+    certificate are unset (e.g. Imbue Studio running without the plugin) --
+    without a working plugin route there is no way to ask whether the
+    workspace is reachable.
 
     Each pass ticks ``sleep_tracker`` before it reads anything, so the failure
     runs it is about to age are aged against a wake this loop has established
     for itself rather than one the heartbeat thread may not have recorded yet.
     """
-    if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
+    if (
+        mngr_forward_port == 0
+        or not mngr_forward_preauth_cookie
+        or mngr_forward_ca_cert_path is None
+        or root_concurrency_group is None
+    ):
         return
 
     root_concurrency_group.start_new_thread(
@@ -3152,6 +3215,7 @@ def start_system_interface_health_probe_loop(
             backend_resolver,
             mngr_forward_port,
             mngr_forward_preauth_cookie,
+            mngr_forward_ca_cert_path,
             root_concurrency_group,
             sleep_tracker,
         ),
@@ -3165,6 +3229,7 @@ def _run_system_interface_health_probe_loop(
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str,
+    mngr_forward_ca_cert_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     sleep_tracker: SleepTracker | None,
 ) -> None:
@@ -3183,6 +3248,7 @@ def _run_system_interface_health_probe_loop(
     with make_workspace_probe_client(
         preauth_cookie=mngr_forward_preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+        ca_cert_path=mngr_forward_ca_cert_path,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
             if sleep_tracker is not None:
@@ -3209,11 +3275,9 @@ def _run_system_interface_health_probe_loop(
                 # up, or the agent gone) answers with its 503 loader, which
                 # records as a failure below.
                 outcome = probe_workspace_through_plugin(
+                    probe_client=probe_client,
                     mngr_forward_port=mngr_forward_port,
-                    preauth_cookie=mngr_forward_preauth_cookie,
                     workspace_id=str(aid),
-                    probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-                    client=probe_client,
                 )
                 if outcome.is_ready:
                     probe_log_gate.forget(aid)

@@ -1544,3 +1544,21 @@ def test_the_failure_log_gate_logs_the_first_failure_each_change_and_a_periodic_
     # A success clears the slate, so the next failure after it logs immediately.
     gate.forget(aid)
     assert gate.should_log_failure(aid, "HTTP 503")
+
+
+def test_the_first_probe_failure_of_each_failure_run_is_reported_once() -> None:
+    """The onset is what a consumer needing to act before the stuck threshold hangs off."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=60.0)
+    onsets: list[AgentId] = []
+    tracker.add_on_failure_run_onset_callback(onsets.append)
+    agent_id = AgentId.generate()
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert onsets == [agent_id]
+
+    tracker.record_probe_success(agent_id)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert onsets == [agent_id, agent_id]

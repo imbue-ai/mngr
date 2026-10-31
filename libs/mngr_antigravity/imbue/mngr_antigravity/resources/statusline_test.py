@@ -18,11 +18,15 @@ one is composed), and loud failure on a missing state dir. (`tmux wait-for` is
 from __future__ import annotations
 
 import importlib.resources
+import json
 import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr_antigravity.resources.testing import run_statusline as _run
 
 _SCRIPT_PATH = Path(__file__).parent / "statusline.sh"
 
@@ -42,21 +46,6 @@ def _payload(*, agent_state: str | None, conversation_id: str | None = _ROOT_CON
         fields.append(f'"model":"{model}"')
     fields.append('"context_window":{"total_input_tokens":173}')
     return "{" + ",".join(fields) + "}"
-
-
-def _run(state_dir: Path, payload: str) -> subprocess.CompletedProcess[str]:
-    # Drop TMUX so the wait-for sub-shell can't reach a real tmux server during
-    # tests; the `|| true` guard makes it a no-op regardless.
-    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    env["MNGR_AGENT_STATE_DIR"] = str(state_dir)
-    return subprocess.run(
-        ["bash", str(_SCRIPT_PATH)],
-        input=payload,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
 
 
 def _marker(state_dir: Path) -> Path:
@@ -250,3 +239,49 @@ def test_working_does_not_flush(tmp_path: Path) -> None:
     _run(tmp_path, _payload(agent_state="working"))
     assert _marker(tmp_path).exists()
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("model_object", "expected_model_state"),
+    [
+        # An adjustable model: the effort is its own axis and its tier leaves the name.
+        (
+            '{"id":"Gemini 3.8 Flash (High)","display_name":"Gemini 3.8 Flash (High)","effort":"high"}',
+            {"model": "Gemini 3.8 Flash", "effort": "high"},
+        ),
+        (
+            '{"id":"Gemini 3.8 Flash (Low)","display_name":"Gemini 3.8 Flash (Low)","effort":"low"}',
+            {"model": "Gemini 3.8 Flash", "effort": "low"},
+        ),
+        # A fixed-effort model reports no effort, so its name is kept whole, tier and all.
+        ('{"id":"GPT-OSS 120B (Medium)","display_name":"GPT-OSS 120B (Medium)"}', {"model": "GPT-OSS 120B (Medium)"}),
+        (
+            '{"id":"Claude Sonnet 4.6 (Thinking)","display_name":"Claude Sonnet 4.6 (Thinking)"}',
+            {"model": "Claude Sonnet 4.6 (Thinking)"},
+        ),
+        # The tier is matched whatever case agy reports the effort in.
+        ('{"id":"Gemini 3.8 Flash (High)","effort":"High"}', {"model": "Gemini 3.8 Flash", "effort": "High"}),
+        # A name that does not end in the reported tier is left alone rather than cut.
+        ('{"id":"Gemini 3.8 Flash","effort":"xhigh"}', {"model": "Gemini 3.8 Flash", "effort": "xhigh"}),
+    ],
+)
+def test_model_state_records_model_and_effort(
+    tmp_path: Path, model_object: str, expected_model_state: dict[str, str]
+) -> None:
+    payload = '{"agent_state":"idle","model":' + model_object + "}"
+    _run(tmp_path, payload)
+    assert json.loads((tmp_path / "model_state.json").read_text()) == expected_model_state
+
+
+def test_effort_change_rewrites_model_state(tmp_path: Path) -> None:
+    """A later payload at another effort replaces the recorded effort, keeping the model."""
+    _run(tmp_path, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (High)","effort":"high"}}')
+    _run(tmp_path, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (Medium)","effort":"medium"}}')
+    assert json.loads((tmp_path / "model_state.json").read_text()) == {"model": "Gemini 3.8 Flash", "effort": "medium"}
+
+
+def test_switching_to_a_fixed_effort_model_drops_the_recorded_effort(tmp_path: Path) -> None:
+    """Moving to a model with no effort axis writes no effort, rather than keeping the old one."""
+    _run(tmp_path, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (High)","effort":"high"}}')
+    _run(tmp_path, '{"agent_state":"idle","model":{"id":"Claude Opus 4.6 (Thinking)"}}')
+    assert json.loads((tmp_path / "model_state.json").read_text()) == {"model": "Claude Opus 4.6 (Thinking)"}

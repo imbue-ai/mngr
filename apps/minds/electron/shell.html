@@ -30,9 +30,10 @@
       --fill-hover: rgb(0 0 0 / 0.06);
       --border-default: rgb(0 0 0 / 0.17);
       /* The titlebar band the SPA's start route parks the mark in: 38px tall
-         with a 20px mark centered in it. */
+         with a 24px mark, set 1px below its centre. */
       --titlebar-height: 38px;
-      --parked-mark-height: 20px;
+      --parked-mark-height: 24px;
+      --parked-mark-drop: 1px;
       /* How wide the mark itself reads on the page, and the gap between it and
          the loader under it -- both a share of the window's width, so they keep
          their proportions to each other at any size.
@@ -132,7 +133,7 @@
       /* Over the stack, which is painted after it and carries the page's own
          colour: underneath, the mark the swap reveals is simply not on screen. */
       z-index: 1;
-      top: calc((var(--titlebar-height) - var(--parked-mark-height)) / 2);
+      top: calc((var(--titlebar-height) - var(--parked-mark-height)) / 2 + var(--parked-mark-drop));
       left: 50%;
       transform: translateX(-50%);
       height: var(--parked-mark-height);
@@ -522,7 +523,8 @@
       var rootStyle = getComputedStyle(document.documentElement);
       var parkedHeight = parseFloat(rootStyle.getPropertyValue('--parked-mark-height'));
       var titlebarHeight = parseFloat(rootStyle.getPropertyValue('--titlebar-height'));
-      var parkedTop = (titlebarHeight - parkedHeight) / 2;
+      var parkedDrop = parseFloat(rootStyle.getPropertyValue('--parked-mark-drop'));
+      var parkedTop = (titlebarHeight - parkedHeight) / 2 + parkedDrop;
       // Where the element's top sits in the page with its own transform taken
       // back out, to a fraction of a pixel. offsetTop is transform-free but
       // rounds to a whole one, and that rounding is the whole of the error: the

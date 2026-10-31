@@ -3,7 +3,7 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from pydantic import AnyUrl
 from pydantic import SecretStr
@@ -37,11 +37,11 @@ def test_force_refresh_maps_the_connectors_refused_refresh_to_the_auth_error(tmp
     """The connector answers a refused refresh with ``200 {"status": "ERROR"}``; that is the sign-out class."""
     refresh_paths: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         refresh_paths.append(request.url.path)
-        return httpx.Response(200, json={"status": "ERROR", "message": "refresh token revoked"})
+        return httpx2.Response(200, json={"status": "ERROR", "message": "refresh token revoked"})
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
     store = _store_with_a_session(tmp_path)
 
     with pytest.raises(ImbueCloudAuthError, match="Refresh rejected by connector: refresh token revoked"):

@@ -556,11 +556,14 @@ def _routine_destination() -> NotificationDestination:
     return NotificationDestination.model_validate({"type": "minds:show-routine", "routine_id": "inbox-digest"})
 
 
-def _system_event(workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed") -> SystemEventCard:
+def _system_event(
+    workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed", account_id: str = ""
+) -> SystemEventCard:
     return SystemEventCard(
         title=title,
         body="Couldn't reach the backup host.",
         workspace_agent_id=workspace_agent_id,
+        account_id=account_id,
         workspace_name="alpha" if workspace_agent_id else "me@example.com",
         workspace_accent="#aabbcc",
     )
@@ -891,10 +894,25 @@ def test_an_account_level_system_event_titles_itself_with_the_account_and_links_
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)
 
+    entry = feed.append_system_event(
+        _system_event(workspace_agent_id="", title="Backup cleanup finished", account_id="user-me")
+    )
+
+    # The entry names its account, so only that account's windows hear it, and the
+    # banner opens the accounts page as that account's overlay.
+    assert entry.account_id == "user-me"
+    (request,) = dispatcher.dispatched
+    assert request.title == "me@example.com"
+    assert request.url == "/accounts?account=user-me"
+
+
+def test_an_account_level_system_event_naming_no_account_links_to_the_bare_accounts_page() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
     feed.append_system_event(_system_event(workspace_agent_id="", title="Backup cleanup finished"))
 
     (request,) = dispatcher.dispatched
-    assert request.title == "me@example.com"
     assert request.url == "/accounts"
 
 

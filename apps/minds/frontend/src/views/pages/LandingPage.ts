@@ -1,9 +1,9 @@
 // The Machines home screen: workspace rows, create-attempt rows, remote
 // records, the sync-unlock banner, the collapsed providers panel, and the
 // bottom-left app launchers. Live state comes from the channel stores; the
-// facts that do not ride the channel (destroy statuses, locked accounts) are
-// fetched from /ui/api/create/landing-extras and refetched whenever the
-// workspace list changes.
+// facts that do not ride the channel (destroy statuses, the window's
+// account's locked state) are fetched from /ui/api/create/landing-extras and
+// refetched whenever the workspace list or the window's account changes.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -21,7 +21,8 @@ import {
   recoveryRoute,
 } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
-import type { UiWorkspaceEntry } from "../../channel/messages";
+import { webLogin } from "../../models/webLogin";
+import type { UiAccountEntry, UiWorkspaceEntry } from "../../channel/messages";
 import type {
   UiAccountProvidersEntry,
   UiConnectionEntry,
@@ -65,9 +66,15 @@ import {
   rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
+import { accountSwitcherRows } from "../shell/AccountSwitcher";
 import { StatusBadge } from "../components/StatusBadge";
-import type { UpdateBadgeTone } from "../../models/updates";
-import { displayVersion, updateBadgeFor } from "../../models/updates";
+import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
+import {
+  displayVersion,
+  isBadgeOpeningRunChat,
+  updateBadgeFor,
+  updateChatAgentIdFor,
+} from "../../models/updates";
 
 const BADGE_CLASS =
   "inline-flex items-center px-2 py-0.5 rounded-md type-label";
@@ -88,6 +95,11 @@ const UPDATE_BADGE_TONES: Record<UpdateBadgeTone, string> = {
 
 interface LandingState {
   extras: LandingExtras | null;
+  /** The account `extras` answers for; null until a fetch has landed. */
+  extrasAccountId: string | null;
+  /** The account of the newest extras request, in flight or landed, so a
+   * redraw does not re-ask and a stale answer does not overwrite a newer one. */
+  requestedExtrasAccountId: string | null;
   tracker: MindLivenessTracker;
   unsubscribe: (() => void) | null;
   isUnlockPending: boolean;
@@ -113,27 +125,115 @@ interface LandingState {
 
 /**
  * An install that has never been taken past the start flow, with discovery
- * finished and nothing found, belongs on the start flow. Electron's startup
- * router lands there itself; this is the same rule for a plain browser, and
- * for a window that reaches home before the flow has completed.
+ * finished and no workspace under any account, belongs on the start flow.
+ * Electron's startup router lands there itself; this is the same rule for a
+ * plain browser, and for a window that reaches home before the flow has
+ * completed.
  */
 export function shouldRedirectToStartFlow(
   isOnboardingComplete: boolean,
-  hasRows: boolean,
+  hasWorkspacesOnInstall: boolean,
   extras: LandingExtras | null,
 ): boolean {
-  if (isOnboardingComplete || hasRows || extras === null) return false;
-  return extras.is_discovery_complete && !extras.has_restorable_workspaces;
+  if (isOnboardingComplete || hasWorkspacesOnInstall || extras === null) return false;
+  return extras.is_discovery_complete;
+}
+
+/** An account (or the device) other than the window's that has workspaces here. */
+export interface OtherAccountWithWorkspaces {
+  accountId: string;
+  label: string;
+  workspaceCount: number;
+}
+
+/** The accounts other than the window's with workspaces here, in the switcher's order. */
+export function otherAccountsWithWorkspaces(
+  windowAccountId: string,
+  workspaceCountByAccountId: Readonly<Record<string, number>>,
+  signedIn: readonly UiAccountEntry[],
+  signedOut: readonly UiAccountEntry[],
+): OtherAccountWithWorkspaces[] {
+  return accountSwitcherRows(windowAccountId, signedIn, signedOut)
+    .filter((row) => !row.isCurrent && (workspaceCountByAccountId[row.accountId] ?? 0) > 0)
+    .map((row) => ({
+      accountId: row.accountId,
+      label: row.label,
+      workspaceCount: workspaceCountByAccountId[row.accountId],
+    }));
+}
+
+function otherAccountsOfWindow(): OtherAccountWithWorkspaces[] {
+  const { stores, shell } = getAppContext();
+  return otherAccountsWithWorkspaces(
+    shell.accountId,
+    stores.workspaces.workspaceCountByAccountId,
+    stores.accounts.accounts,
+    stores.accounts.signedOutAccounts,
+  );
+}
+
+/** Offers to move the window to each account that has workspaces, for a home page with none of its own. */
+function otherAccountsNotice(others: readonly OtherAccountWithWorkspaces[]): m.Children {
+  if (others.length === 0) return null;
+  const { shell } = getAppContext();
+  return m(
+    Notice,
+    { id: "landing-other-accounts", extra: "mt-4" },
+    m("div", { class: "flex flex-col gap-2" }, [
+      m(
+        "span",
+        { class: "type-body text-primary" },
+        "Other accounts have workspaces here. Switch this window to:",
+      ),
+      m(
+        "div",
+        { class: "flex flex-wrap gap-2" },
+        others.map((other) =>
+          m(
+            Button,
+            {
+              variant: "secondary",
+              "data-account-id": other.accountId,
+              disabled: shell.isAccountSwitchPending,
+              onclick: () => void shell.switchAccount(other.accountId),
+            },
+            `${other.label} · ${other.workspaceCount} ${other.workspaceCount === 1 ? "workspace" : "workspaces"}`,
+          ),
+        ),
+      ),
+    ]),
+  );
+}
+
+/**
+ * Whether the sync-unlock banner is up: the loaded extras answer for the
+ * window's own account (a hub-to-hub navigation keeps the previous account's
+ * extras until the refetch lands) and name it as locked.
+ */
+export function isUnlockBannerDue(
+  extras: LandingExtras | null,
+  extrasAccountId: string | null,
+  windowAccountId: string,
+): boolean {
+  if (extras === null || extrasAccountId !== windowAccountId) return false;
+  return extras.locked_account_emails.length > 0;
 }
 
 function loadExtras(state: LandingState): void {
-  fetchLandingExtras()
+  const accountId = getAppContext().shell.accountId;
+  state.requestedExtrasAccountId = accountId;
+  fetchLandingExtras(accountId)
     .then((extras) => {
+      // An answer the window has navigated away from would overwrite the
+      // newer request's: drop it and let that request land.
+      if (state.requestedExtrasAccountId !== accountId) return;
       state.extras = extras;
+      state.extrasAccountId = accountId;
       state.isExtrasFailed = false;
       m.redraw();
     })
     .catch((error: unknown) => {
+      if (state.requestedExtrasAccountId !== accountId) return;
       // A failed fetch must not read as "still discovering" forever: record
       // it so the view can end the discovering state and offer a retry.
       console.error("Failed to load landing extras", error);
@@ -145,6 +245,8 @@ function loadExtras(state: LandingState): void {
 export const LandingPage: m.ClosureComponent = () => {
   const state: LandingState = {
     extras: null,
+    extrasAccountId: null,
+    requestedExtrasAccountId: null,
     tracker: new MindLivenessTracker(),
     unsubscribe: null,
     isUnlockPending: false,
@@ -167,7 +269,7 @@ export const LandingPage: m.ClosureComponent = () => {
       open(state.formDefaults);
       return;
     }
-    fetchCreateFormDefaults(null)
+    fetchCreateFormDefaults(null, getAppContext().shell.accountId)
       .then((defaults) => {
         state.formDefaults = defaults;
         open(defaults);
@@ -293,7 +395,9 @@ export const LandingPage: m.ClosureComponent = () => {
     )
       .then(async (response) => {
         if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           window.alert(body?.error ?? "Could not re-check the connection.");
         }
       })
@@ -444,14 +548,23 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The row's update badge, or null when the machine has nothing to say. */
+  function rowUpdateBadge(agentId: string): UpdateBadge | null {
+    const updates = getAppContext().stores.updates;
+    return updateBadgeFor(
+      updates.publishedFor(agentId),
+      updates.isUpdating(agentId),
+      updates.autoUpdateFor(agentId).isEnabled,
+    );
+  }
+
+  /** The row's one update control, or null when the machine has nothing to
+   * say: the Updates tab it opens, or a running update's chat, holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
-    const badge = updateBadgeFor(
-      updates.publishedFor(entry.id),
-      updates.isUpdating(entry.id),
-    );
+    const published = updates.publishedFor(entry.id);
+    const badge = rowUpdateBadge(entry.id);
     if (badge === null) return null;
+    const isOpeningRunChat = isBadgeOpeningRunChat(published, updates.isUpdating(entry.id));
     return m(
       "button",
       {
@@ -459,12 +572,15 @@ export const LandingPage: m.ClosureComponent = () => {
         class: `${UPDATE_BADGE_CLASS} ${UPDATE_BADGE_TONES[badge.tone]} landing-update-badge`,
         "data-update-state": badge.state,
         "data-tooltip": badge.tooltip,
-        "aria-haspopup": "dialog",
-        // Raised through the shell so it is one modal with one owner (Escape,
-        // navigation). The row behind is clickable, so the press stops here.
+        // The row behind is clickable, so the press stops here.
         onclick: (event: MouseEvent) => {
           event.stopPropagation();
-          getAppContext().shell.openUpdateModal(entry.id);
+          if (isOpeningRunChat)
+            getAppContext().shell.openWorkspaceChat(
+              entry.id,
+              updateChatAgentIdFor(published, updates.isUpdating(entry.id)),
+            );
+          else getAppContext().shell.openUpdatesTab(entry.id);
         },
       },
       [
@@ -475,24 +591,41 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
+  /** Into the run's chat, wherever the run was started from: a run the
+   * workspace's own schedule started never had a window the user saw. */
+  function openRunChatButton(agentId: string, chatAgentId: string): m.Children {
+    return m(
+      Button,
+      {
+        variant: "ghost",
+        extra: "landing-update-open-chat",
+        onclick: (event: MouseEvent) => {
+          event.stopPropagation();
+          getAppContext().shell.openWorkspaceChat(agentId, chatAgentId);
+        },
+      },
+      "Open chat",
+    );
+  }
+
   /** The dismissible "Updated to X" note, whether or not the run was watched.
    * Under the row rather than in it: it is news, not state. */
   function updatedNote(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
+    // A row says one thing about its updates: while it has a badge, the badge.
+    if (rowUpdateBadge(entry.id) !== null) return null;
     const update = updates.forAgent(entry.id);
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
     if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
+    // The note outlives its run: once a newer run starts, the row's chat is that run's.
+    const chatAgentId = update.verdict === "UPDATED" ? (update.chat_agent_id ?? "") : "";
     return m(
       "div",
       { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },
       [
-        m(
-          "span",
-          update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
-            ? `Updated to ${displayVersion(version)}, with a note for you.`
-            : `Updated to ${displayVersion(version)}.`,
-        ),
+        m("span", `Updated to ${displayVersion(version)}.`),
+        chatAgentId ? openRunChatButton(entry.id, chatAgentId) : null,
         m(
           Button,
           {
@@ -545,8 +678,9 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
-  /** The bulk strip, only when more than one machine is out of date: one
-   * machine has its own row action. */
+  /** The bulk strip, only when more than one machine auto-update will not
+   * handle has an update available: one machine has its own row action, and
+   * auto-update arms the rest itself. */
   function bulkUpdateActions(): m.Children {
     const updates = getAppContext().stores.updates;
     const agentIds = updates.updatableAgentIds();
@@ -1089,15 +1223,53 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
+  /**
+   * The Create button for this window's account, or the sign-in prompt that
+   * stands in for it on a signed-out account's hub: the account's workspaces
+   * are listed, and nothing new can be made under it until it signs in again.
+   */
+  function createControl(): m.Children {
+    const { shell } = getAppContext();
+    if (shell.isAccountSignedOut()) {
+      return m(
+        Button,
+        {
+          variant: "primary",
+          id: "landing-sign-in",
+          disabled: webLogin.isOpen,
+          onclick: () =>
+            void webLogin.start(
+              "Sign in again to create workspaces under this account.",
+            ),
+        },
+        "Sign in",
+      );
+    }
+    return m(
+      ButtonLink,
+      {
+        variant: "primary",
+        id: "landing-create",
+        ...routeLinkAttrs(shell.hubRoute("/create")),
+      },
+      "Create",
+    );
+  }
+
   // Every input (the extras landing, the workspace list, the onboarding copy)
   // arrives with a redraw, so the hook sees each change; view() stays free of
   // navigation.
   function redirectToStartFlowIfDue(): void {
-    const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
+    const workspaces = getAppContext().stores.workspaces;
+    // Rows under any account, or a workspace discovery has not re-listed yet.
+    const hasWorkspacesOnInstall =
+      workspaces.workspaces.length > 0 ||
+      Object.values(workspaces.workspaceCountByAccountId).some((count) => count > 0) ||
+      workspaces.restorableWorkspaceIds.length > 0;
     if (
       shouldRedirectToStartFlow(
         onboardingProgress.isComplete,
-        hasRows,
+        hasWorkspacesOnInstall,
         state.extras,
       )
     ) {
@@ -1113,13 +1285,18 @@ export const LandingPage: m.ClosureComponent = () => {
       );
     },
     onupdate() {
+      // The component instance survives a hub-to-hub navigation (same route
+      // pattern, new account segment), so the account change is caught here.
+      if (getAppContext().shell.accountId !== state.requestedExtrasAccountId) {
+        loadExtras(state);
+      }
       redirectToStartFlowIfDue();
     },
     onremove() {
       state.unsubscribe?.();
     },
     view() {
-      const { stores } = getAppContext();
+      const { stores, shell } = getAppContext();
       const entries = stores.workspaces.workspaces;
       const liveEntries = entries.filter(
         (entry) =>
@@ -1150,12 +1327,16 @@ export const LandingPage: m.ClosureComponent = () => {
           createEntries.length +
           remoteEntries.length >
         0;
+      // A hub-to-hub navigation keeps the previous account's extras until the
+      // refetch lands, and their restorable answer is that account's.
+      const windowExtras =
+        state.extrasAccountId === shell.accountId ? extras : null;
       const isDiscovering =
         !hasRows &&
         !state.isExtrasFailed &&
-        (extras === null ||
-          !extras.is_discovery_complete ||
-          extras.has_restorable_workspaces);
+        (windowExtras === null ||
+          !windowExtras.is_discovery_complete ||
+          windowExtras.has_restorable_workspaces);
       const providersStore = stores.providers;
 
       return m(PageContainer, [
@@ -1180,14 +1361,11 @@ export const LandingPage: m.ClosureComponent = () => {
           ? m("div", [
               m("div", { class: "flex items-center justify-between mb-4" }, [
                 m("h1", { class: "type-heading text-primary" }, "Workspaces"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
+                createControl(),
               ]),
               bulkUpdateActions(),
-              extras !== null && extras.locked_account_emails.length > 0
+              extras !== null &&
+              isUnlockBannerDue(extras, state.extrasAccountId, shell.accountId)
                 ? m(Notice, { extra: "mb-4", id: "sync-unlock-banner" }, [
                     m("div", { class: "flex flex-col gap-2" }, [
                       m(
@@ -1261,21 +1439,16 @@ export const LandingPage: m.ClosureComponent = () => {
                     { class: "text-tertiary text-center" },
                     "Discovering workspaces...",
                   ),
-                  m(
-                    ButtonLink,
-                    { variant: "primary", ...routeLinkAttrs("/create") },
-                    "Create",
-                  ),
+                  createControl(),
                 ],
               )
-            : m("div", { class: "text-center py-12" }, [
-                m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
-              ]),
+            : [
+                otherAccountsNotice(otherAccountsOfWindow()),
+                m("div", { class: "text-center py-12" }, [
+                  m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
+                  createControl(),
+                ]),
+              ],
         m(
           "div",
           { class: "mt-6" },
@@ -1285,7 +1458,7 @@ export const LandingPage: m.ClosureComponent = () => {
               id: "landing-destroyed",
               class:
                 "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
-              ...routeLinkAttrs("/workspaces/destroyed"),
+              ...routeLinkAttrs(shell.hubRoute("/workspaces/destroyed")),
             },
             m("span", "Recently destroyed workspaces"),
           ),
@@ -1358,7 +1531,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 id: "landing-minds-settings",
                 class:
                   "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/settings"),
+                onclick: () => m.route.set("/settings", shell.overlayQuery()),
               },
               [
                 m(Icon16, { name: "settings", extra: "shrink-0" }),
@@ -1370,21 +1543,21 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 type: "button",
                 id: "landing-account",
-                "data-signed-in": stores.accounts.accountEmail
+                "data-signed-in": stores.accounts.isSignedIn(shell.accountId)
                   ? "true"
                   : "false",
                 class:
                   "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/accounts"),
+                onclick: () => m.route.set("/accounts", shell.overlayQuery()),
               },
               [
                 m(Icon16, { name: "user", extra: "shrink-0" }),
+                // The window's account: its name when it is signed in; the
+                // device and a signed-out account offer the sign-in instead.
                 m(
                   "span",
-                  stores.accounts.accountEmail
-                    ? stores.accounts.extraAccountCount > 0
-                      ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
-                      : stores.accounts.accountEmail
+                  stores.accounts.isSignedIn(shell.accountId)
+                    ? stores.accounts.labelFor(shell.accountId)
                     : "Log in",
                 ),
               ],

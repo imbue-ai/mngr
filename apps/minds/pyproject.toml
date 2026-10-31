@@ -14,7 +14,7 @@ dependencies = [
     "concurrency-group",
     "cryptography>=42.0",
     "flask>=3.0",
-    "httpx>=0.27.0",
+    "httpx2>=2.13.1",
     "imbue-common",
     "itsdangerous>=2.2.0",
     "loguru",
@@ -115,6 +115,7 @@ exclude = [
   "**/conftest.py",
   "**/testing.py",
   "**/utils/snapshot_container_states_testing.py",
+  "**/desktop_client/update_program_stubs_testing.py",
 ]
 
 # Build the frontend bundle (frontend/ -> static/ui/) when packaging a real
@@ -171,6 +172,9 @@ omit = [
   # pure orchestration (ensure.py) is covered via mock_lima_image_test.
   "*/imbue/minds/lima_image/desync.py",
   "*/imbue/minds/lima_image/manifest_fetcher.py",
+  # The workspace programs run inside a workspace, as a zip application in a
+  # subprocess that coverage cannot trace; their tests run them exactly that way.
+  "*/imbue/minds/workspace_programs/*",
 ]
 
 [tool.inline-snapshot]

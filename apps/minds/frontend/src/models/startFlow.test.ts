@@ -8,6 +8,7 @@ import {
   FLOW,
   FLOW_OPTIONS_GAP_MS,
   MANIFESTO_ANSWER,
+  NO_WORKSPACES_ACK,
   MANIFESTO_OPENER,
   REPORTING_ACCEPT_LABEL,
   REPORTING_ASK,
@@ -15,6 +16,7 @@ import {
   answerStep,
   chooseExistingLogin,
   continueAsSaid,
+  continueExistingLoginWithoutWorkspaces,
   dismissPendingModal,
   finishPendingModal,
   initialStartFlowState,
@@ -93,7 +95,8 @@ describe("answering where to run", () => {
   it("cloud, signed out: the answer lands and the account question follows with the ack", () => {
     const state = answerStep(started(), 1, "cloud", SIGNED_OUT);
     expect(state.entries[1]).toMatchObject({ kind: "step", id: "run", answer: "cloud", said: "Use Imbue Cloud" });
-    expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Imbue Cloud it is.", answer: null, said: "" });
+    // Signed out, the reply opens "Great." rather than "Imbue Cloud it is.", which the signed-in reply keeps.
+    expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Great.", answer: null, said: "" });
     expect(state.isCloudCreatePending).toBe(false);
     expect(openStepIndex(state)).toBe(2);
   });
@@ -332,6 +335,70 @@ describe("the existing-account way out", () => {
     const state = chooseExistingLogin(started());
     expect(state.pending).toBe("existing-login");
     expect(state.entries).toHaveLength(2);
+  });
+
+  it("an account with no workspaces answers the question with the receipt and asks where to run again", () => {
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    expect(state.pending).toBeNull();
+    expect(state.entries[1]).toMatchObject({
+      id: "run",
+      answer: "existing-login",
+      said: signedInSaid(ALICE.email),
+    });
+    expect(state.entries.at(-1)).toEqual({
+      kind: "step",
+      id: "again",
+      ack: NO_WORKSPACES_ACK,
+      answer: null,
+      said: "",
+    });
+    expect(openStepIndex(state)).toBe(2);
+  });
+
+  it("the re-asked question's cloud answer goes on to the account step naming the signed-in account", () => {
+    const continued = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    const after = answerStep(continued, continued.entries.length - 1, "cloud", SIGNED_IN);
+    expect(after.entries.at(-1)).toMatchObject({ id: "account", email: ALICE.email });
+  });
+
+  it("undoing the receipt reopens the first question", () => {
+    const continued = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(started()), ALICE);
+    const undone = undoAnswer(continued, 1);
+    expect(undone.entries).toHaveLength(2);
+    expect(undone.entries[1]).toEqual({ kind: "step", id: "run", ack: "", answer: null, said: "" });
+    expect(openStepIndex(undone)).toBe(1);
+  });
+
+  it("at the account step, the receipt answers it and where to run is asked again with no account offered", () => {
+    const atAccount = answerStep(started(), 1, "cloud", SIGNED_IN);
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(atAccount), BOB);
+    expect(state.entries[2]).toMatchObject({ id: "account", answer: "existing-login", said: signedInSaid(BOB.email) });
+    expect(state.entries.at(-1)).toMatchObject({ id: "again", ack: NO_WORKSPACES_ACK, answer: null });
+    expect(state.offeredAccount).toBeNull();
+    expect(state.account).toBeNull();
+  });
+
+  it("while waiting on a verification, even after a re-sent email, the wait is dropped and where to run is asked again", () => {
+    const verifying = noteVerificationEmailSent(requireEmailVerification(owingCreate()), "sent");
+    expect(verifying.entries.at(-1)?.kind).toBe("note");
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(verifying), BOB);
+    const verifyAt = state.entries.findIndex((entry) => entry.kind === "step" && entry.id === "verify");
+    expect(state.entries[verifyAt]).toMatchObject({ answer: "existing-login", said: signedInSaid(BOB.email) });
+    expect(state.entries.at(-1)).toMatchObject({ id: "again", ack: NO_WORKSPACES_ACK, answer: null });
+    expect(state.verificationEmail).toBeNull();
+    expect(state.isCloudCreatePending).toBe(false);
+    expect(state.account).toBeNull();
+  });
+
+  it("before the reporting question is answered, nothing is recorded", () => {
+    const state = continueExistingLoginWithoutWorkspaces(chooseExistingLogin(initialStartFlowState()), BOB);
+    expect(state.pending).toBeNull();
+    expect(state.entries).toEqual([]);
+  });
+
+  it("continuing is ignored while the flow is not waiting on the existing-login sign-in", () => {
+    const state = started();
+    expect(continueExistingLoginWithoutWorkspaces(state, ALICE)).toBe(state);
   });
 });
 

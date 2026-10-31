@@ -80,6 +80,7 @@ Assuming the agent's [host](./hosts.md) is in the "running" state, an agent can 
 - **waiting**: the agent is waiting (e.g., for user input or an external event)
 - **replaced**: tmux session exists and a different program is running in the pane's foreground
 - **done**: the tmux session exists and the pane's foreground has dropped back to a shell prompt (the agent process exited; background helper processes may still be running under the pane)
+- **unknown**: the host's tmux panes, or the processes needed to read this agent, could not be read (e.g. on a host too loaded to answer in time), so whether the agent is running is not known. `mngr message` fails with a `state_unknown` error rather than deliver, start or revive it, `mngr destroy` needs `--force`, and `mngr archive` treats it as running. `mngr exec`, `mngr connect`, `mngr capture` and `mngr create --reuse` run their usual start, which leaves a running agent's session untouched
 
 If the host's state is not "running", then the agent inherits it state from the host (ex: paused, crashed, etc, see [host lifecycle](./hosts.md#Lifecycle) for more details)
 

@@ -955,7 +955,7 @@ function renderSharedPathRow(model: PermissionsModel, row: UiSharedPath, isSyncS
   const isSynced = isPathSyncOn(row);
   return m("div", { class: "minds-card overflow-hidden", "data-shared-path": row.path }, [
     m("div", { class: "flex items-center justify-between gap-4 px-4 py-3" }, [
-      m("code", { class: "code-pill truncate min-w-0", title: row.path }, row.path_label),
+      m("code", { class: "code-pill truncate min-w-0", "data-tooltip": row.path }, row.path_label),
       m(
         Button,
         {

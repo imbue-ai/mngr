@@ -3,6 +3,7 @@ from datetime import timedelta
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.utils.testing import ModalCleanupOutcome
 from imbue.mngr_modal.cleanup import ModalTestEnvironmentSweepResult
+from imbue.mngr_modal.cleanup import _classify_environment_delete
 from imbue.mngr_modal.cleanup import _failure_detail
 from imbue.mngr_modal.cleanup import cleanup_old_modal_test_environments
 
@@ -85,3 +86,17 @@ def test_failure_detail_prefers_stderr() -> None:
 
 def test_failure_detail_falls_back_to_stdout() -> None:
     assert _failure_detail(_finished(stdout="  something went wrong\n")) == "something went wrong"
+
+
+def test_an_environment_another_run_already_deleted_counts_as_gone() -> None:
+    stderr = (
+        "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n"
+        f"│ No such environment '{_ENV_A}'      │\n"
+        "╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    )
+    assert _classify_environment_delete(_ENV_A, _finished(stderr=stderr)) is ModalCleanupOutcome.NOT_FOUND
+
+
+def test_an_absence_error_that_does_not_name_the_environment_is_a_failure() -> None:
+    stderr = "Error: credentials not found\n"
+    assert _classify_environment_delete(_ENV_A, _finished(stderr=stderr)) is ModalCleanupOutcome.FAILED

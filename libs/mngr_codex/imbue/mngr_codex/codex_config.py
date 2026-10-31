@@ -136,7 +136,7 @@ def get_codex_app_server_socket_path(codex_home: Path) -> Path:
     client that resolves it from the same home. ~48 chars total, safely under the limit on Linux and
     macOS. The parent directory is the agent's own (see ``_APP_SERVER_SOCKET_DIR``).
     """
-    home_hash = hashlib.sha1(str(codex_home).encode("utf-8")).hexdigest()[:16]
+    home_hash = hashlib.sha1(str(codex_home).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     return Path(_APP_SERVER_SOCKET_DIR) / f"{_APP_SERVER_SOCKET_DIR_PREFIX}{home_hash}" / _APP_SERVER_SOCKET_FILENAME
 
 

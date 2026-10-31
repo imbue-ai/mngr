@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import Final
 
 from pydantic import Field
@@ -33,6 +34,16 @@ MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 BROWSER_BRIDGE_PATH: Final[str] = "/_bridge"
 
 MNGR_BINARY: Final[str] = "mngr"
+
+
+def forward_plugin_state_dir(mngr_host_dir: Path) -> Path:
+    """Where ``mngr forward`` keeps its state under a mngr host dir: its auth store, service-map cache and local CA.
+
+    Shared with host applications that pin the proxy's local CA, so
+    both sides agree on the layout without the application importing the CLI.
+    """
+    return mngr_host_dir / "plugin" / "forward"
+
 
 # A single service name usable as a hostname label: lowercase alphanumeric /
 # underscore runs joined by single hyphens (so no leading/trailing/consecutive

@@ -4,15 +4,20 @@ import threading
 from collections.abc import Iterator
 from multiprocessing.connection import Pipe
 from pathlib import Path
+from subprocess import TimeoutExpired
 from uuid import uuid4
 
 import click
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.local_process import run_background
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import MngrCallerNotInitializedError
+from imbue.minds.utils.mngr_caller import _WarmMngrProcess
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
 from imbue.minds.utils.mngr_caller import _execute_mngr_cli
 from imbue.minds.utils.mngr_caller import _serve_request
@@ -305,7 +310,36 @@ def test_warm_process_that_ignores_sigterm_is_killed_when_terminated(mngr_caller
         signal.signal(signal.SIGTERM, previous_sigterm_handler)
     held_socket_fd = os.dup(warm_process.connection.fileno())
     try:
-        warm_process.terminate()
+        warm_process.terminate(is_after_call_timeout=False)
         assert warm_process.running_process.is_finished()
     finally:
         os.close(held_socket_fd)
+
+
+class _UnstoppableRunningProcess(RunningProcess):
+    """Times out every stop without asking the reader thread to shut down, so it stays put for inspection."""
+
+    def terminate(self, force_kill_seconds: float = 5.0) -> None:
+        raise TimeoutExpired(self.command, force_kill_seconds)
+
+
+@pytest.mark.timeout(60)
+def test_warm_process_stop_timeout_reports_clocks_and_reader_stack() -> None:
+    """A stop that times out records what tells a suspend, an unreaped child and a starved thread apart."""
+    running_process = run_background(["sleep", "30"], process_class=_UnstoppableRunningProcess)
+    parent_connection, child_connection = Pipe()
+    child_connection.close()
+    with ConcurrencyGroup(name="test-warm-process-stop-timeout") as concurrency_group:
+        warm_process = _WarmMngrProcess(
+            connection=parent_connection, running_process=running_process, concurrency_group=concurrency_group
+        )
+        try:
+            with capture_error_logs() as error_records:
+                warm_process.terminate(is_after_call_timeout=True)
+        finally:
+            RunningProcess.terminate(running_process, force_kill_seconds=10.0)
+    assert len(error_records) == 1
+    record = error_records[0]
+    assert "Timed out stopping a warm mngr process (after_call_timeout=True, join_wall_seconds=" in record
+    assert "join_monotonic_seconds=" in record
+    assert "imbue.concurrency_group.subprocess_utils.run_local_command_modern_version" in record

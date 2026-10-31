@@ -53,10 +53,26 @@ function renderBody(
   return (root.attrs as unknown as { body: m.Children }).body;
 }
 
+/** The attrs the dialog hands its PermissionsShell root. */
+function renderShellAttrs(detail: FileSharingPermissionDetail): Record<string, unknown> {
+  const instance = FileSharingPermissionDetailView() as unknown as m.Component;
+  const vnode = m(instance, { model: makeModel(detail), detail } as unknown as m.Attributes) as m.Vnode;
+  const root = (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode);
+  return root.attrs as unknown as Record<string, unknown>;
+}
+
 const syncSwitches = (node: unknown): AnyVnode[] =>
   withAttr(node, "data-sync-path");
 const conflictSelects = (node: unknown): AnyVnode[] =>
   withAttr(node, "data-conflict-path");
+
+describe("FileSharingPermissionDetailView header", () => {
+  it("names the path with the home collapsed and keeps the whole path for the hover tooltip", () => {
+    const attrs = renderShellAttrs({ ...DETAIL, file_path: "/home/user/project/deeply/nested/folder" });
+    expect(attrs.headerLabel).toBe("~/project/deeply/nested/folder");
+    expect(attrs.headerTooltip).toBe("/home/user/project/deeply/nested/folder");
+  });
+});
 
 describe("FileSharingPermissionDetailView sync option", () => {
   it("offers the same sync setting the Local files card draws, switched on when the agent asked", () => {

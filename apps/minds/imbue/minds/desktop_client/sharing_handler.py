@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -1368,7 +1368,7 @@ def list_invitation_outcomes_for_workspace(
         raise SharingError(f"Could not read the invitation outcomes: {describe_connector_failure(exc)}") from exc
 
 
-def probe_share_readiness(http_client: httpx.Client, probe_host: str) -> bool:
+def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
     """Report whether the shared hostname is live end to end.
 
     ``probe_host`` must be a ROUTABLE share origin -- a ``<label>.<machine
@@ -1387,7 +1387,7 @@ def probe_share_readiness(http_client: httpx.Client, probe_host: str) -> bool:
     """
     try:
         http_client.get(f"https://{probe_host}/", timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         logger.debug("Probed share host {} but it is not ready yet: {}", probe_host, exc)
         return False
     return True

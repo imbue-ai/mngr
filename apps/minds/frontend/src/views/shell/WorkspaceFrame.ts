@@ -16,7 +16,9 @@ import {
 } from "../../models/providerRelay";
 import type { ImmersiveChange } from "./immersive";
 import { ImmersiveController } from "./immersive";
+import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
 import type {
+  ChromeAnchor,
   DetachedWindowEntry,
   OpenLinkSender,
   PermissionResolvedSender,
@@ -26,10 +28,12 @@ import type {
   WorkspaceFrameHandle,
   WorkspaceMessageSender,
 } from "./shell-state";
+import { isAppOverlayPath } from "./classify";
 import type {
   PopoutOpenRequest,
   TearOutReport,
   WorkspaceLinkHandlingReport,
+  WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
 
@@ -60,6 +64,9 @@ interface EmbedContractModule {
   OPEN_EXTERNAL: string;
   IMMERSIVE_REQUEST: string;
   IMMERSIVE_CHANGED: string;
+  OPEN_LOCAL_FILES: string;
+  HIGHLIGHT_CHROME: string;
+  CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -140,11 +147,14 @@ export interface EmbedHandlerDeps {
   workspaceAgentId: () => string;
   openRequestPopup: (requestId: string | null) => void;
   /** The mounted page announced that its endpoint is listening, and whether
-   * it opens the links main hands back (minds:open-link). */
-  onWorkspaceReady: (opensLinks: boolean) => void;
+   * it opens the links main hands back (minds:open-link), custom-scheme ones
+   * included. */
+  onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
+  /** Ring one of the chrome's own controls while the workspace's tour talks about it, or clear the ring (null). */
+  highlightChrome: (anchor: ChromeAnchor | null) => void;
   /** The workspace asked to pull one of its windows out (the pull-out-window
    * spec); null in a chrome that cannot, which then never answers with the
    * capability either. */
@@ -238,16 +248,30 @@ export function buildEmbedHandlers(
         : { tab: "share", target: serviceName },
     );
   };
+  handlers[contract.OPEN_LOCAL_FILES] = () => {
+    // Float the options panel's Permissions pane over this machine, at Local files.
+    navigate(`/workspace/${workspaceAgentId()}/options`, {
+      tab: "permissions",
+      section: LOCAL_FILES_SECTION,
+    });
+  };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
-    onWorkspaceReady(message.opensLinks === true);
+    onWorkspaceReady({
+      opensLinks: message.opensLinks === true,
+      opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,
+    });
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
+    // Every chrome that runs these handlers has the options panel, so each
+    // takes OPEN_LOCAL_FILES.
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
       immersive: deps.immersive !== null,
+      opensCustomSchemeLinks: deps.openExternalLink !== null,
+      opensLocalFiles: true,
     });
   };
   const immersive = deps.immersive;
@@ -260,6 +284,13 @@ export function buildEmbedHandlers(
     handlers[contract.OPEN_EXTERNAL] = (message) =>
       openExternalLink(String(message.url));
   }
+  handlers[contract.HIGHLIGHT_CHROME] = (message) => {
+    // The contract's list is the one source of anchor names; anything else clears the ring.
+    const anchor = message.anchor;
+    const isKnown =
+      typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
+    deps.highlightChrome(isKnown ? (anchor as ChromeAnchor) : null);
+  };
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
@@ -346,14 +377,19 @@ export async function pushResolutionSnapshot(
   if (entries !== null && entries.length > 0) send(entries);
 }
 
+const NO_LINK_PROMISES: WorkspaceLinkPromises = {
+  opensLinks: false,
+  opensCustomSchemeLinks: false,
+};
+
 /** What main is told about the mounted frame's link handling, and the gate on
  * handing its page a link main caught. Only the page's own announcement sets
- * `opensLinks`, so sending the frame to a new page forgets it until that page
- * announces: a URL sent before a page listens is lost. Repeated reports of
- * the same state are not sent again. */
+ * its promises, so sending the frame to a new page forgets them until that
+ * page announces: a URL sent before a page listens is lost. Repeated reports
+ * of the same state are not sent again. */
 export class FrameLinkHandling {
   private workspaceId: string | null = null;
-  private opensLinks = false;
+  private promises: WorkspaceLinkPromises = NO_LINK_PROMISES;
   private lastReport: WorkspaceLinkHandlingReport | null | undefined =
     undefined;
   private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
@@ -371,27 +407,27 @@ export class FrameLinkHandling {
    * when that sent the frame to a new page. */
   frameArmed(workspaceId: string, isNavigating: boolean): void {
     this.workspaceId = workspaceId;
-    if (isNavigating) this.opensLinks = false;
+    if (isNavigating) this.promises = NO_LINK_PROMISES;
     this.publish();
   }
 
   /** The frame's page announced that it is listening. */
-  pageReady(opensLinks: boolean): void {
-    this.opensLinks = opensLinks;
+  pageReady(promises: WorkspaceLinkPromises): void {
+    this.promises = promises;
     this.publish();
   }
 
   /** The frame is no longer mounted. */
   unmounted(): void {
     this.workspaceId = null;
-    this.opensLinks = false;
+    this.promises = NO_LINK_PROMISES;
     this.publish();
   }
 
   /** Main handed back a link (a popup's or a frame navigation's URL): it goes
    * to a page that announced it opens links, and nowhere otherwise. */
   openLink(url: string): void {
-    if (this.workspaceId === null || !this.opensLinks) {
+    if (this.workspaceId === null || !this.promises.opensLinks) {
       const why =
         this.workspaceId === null
           ? "no workspace is mounted"
@@ -408,14 +444,15 @@ export class FrameLinkHandling {
     const next =
       this.workspaceId === null
         ? null
-        : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
+        : { workspaceId: this.workspaceId, ...this.promises };
     const last = this.lastReport;
     const isUnchanged =
       last !== undefined &&
       (last === null || next === null
         ? last === next
         : last.workspaceId === next.workspaceId &&
-          last.opensLinks === next.opensLinks);
+          last.opensLinks === next.opensLinks &&
+          last.opensCustomSchemeLinks === next.opensCustomSchemeLinks);
     if (isUnchanged) return;
     this.lastReport = next;
     this.report(next);
@@ -540,6 +577,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     if (isNavigating) {
       isMountedPageReady = false;
       immersive?.frameNavigated();
+      shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
     linkHandling.frameArmed(
@@ -557,6 +595,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
     immersive?.frameNavigated();
+    shell.highlightedChromeAnchor = null;
     frameElement.src = shell.stores.workspaces.workspaceFrameUrl(
       armedWorkspaceAnyId,
       armedSoloWindowId,
@@ -614,7 +653,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           armedWorkspaceAnyId ?? workspaceAnyId;
         const handlers = buildEmbedHandlers({
           contract: loaded,
-          navigate: (path, params) => m.route.set(path, params),
+          // An overlay floated over the frame carries the window's account,
+          // so a reload keeps it; a workspace sub-page names the workspace.
+          navigate: (path, params) =>
+            m.route.set(
+              path,
+              isAppOverlayPath(path) ? shell.overlayQuery(params ?? {}) : params,
+            ),
           sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
           armProviderRelay: (flowId, url) =>
@@ -634,9 +679,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
           },
-          onWorkspaceReady: (opensLinks) => {
+          onWorkspaceReady: (promises) => {
             isMountedPageReady = true;
-            linkHandling.pageReady(opensLinks);
+            linkHandling.pageReady(promises);
             // A message held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingWorkspaceMessage();
@@ -648,6 +693,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             immersive === null
               ? null
               : { request: (on) => immersive?.request(on) },
+          highlightChrome: (anchor) => {
+            shell.highlightedChromeAnchor = anchor;
+            m.redraw();
+          },
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
@@ -709,7 +758,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           if (!isMountedPageReady) return false;
           switch (message.kind) {
             case "focus-chat":
-              endpoint?.send(loaded.FOCUS_CHAT, { chatId: message.chatAgentId });
+              endpoint?.send(loaded.FOCUS_CHAT, {
+                chatId: message.chatAgentId,
+              });
               return true;
             case "app-message":
               // The workspace shell routes the type to the app whose
@@ -719,11 +770,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           }
         };
         shell.registerWorkspaceMessageSender(workspaceMessageSender);
-        reattachWindowSender = (windowId, frame) => {
-          endpoint?.send(
-            loaded.REATTACH_WINDOW,
-            frame === null ? { windowId } : { windowId, frame },
-          );
+        reattachWindowSender = (windowId) => {
+          endpoint?.send(loaded.REATTACH_WINDOW, { windowId });
         };
         shell.registerReattachWindowSender(reattachWindowSender);
         tearOutSender = (report: TearOutReport) => {
@@ -755,6 +803,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           );
         };
         onFrameLoad = () => {
+          // A page the workspace itself reloaded is a fresh page with no tour on it. The load listener is
+          // a DOM one, outside Mithril's redraw, so the ring is redrawn away here.
+          if (shell.highlightedChromeAnchor !== null) {
+            shell.highlightedChromeAnchor = null;
+            m.redraw();
+          }
           sendSnapshot();
           if (snapshotResendTimer !== null) clearTimeout(snapshotResendTimer);
           snapshotResendTimer = setTimeout(sendSnapshot, 2000);
@@ -782,7 +836,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         permissionResolvedSender = null;
       }
       if (workspaceMessageSender !== null) {
-        vnode.attrs.shell.unregisterWorkspaceMessageSender(workspaceMessageSender);
+        vnode.attrs.shell.unregisterWorkspaceMessageSender(
+          workspaceMessageSender,
+        );
         workspaceMessageSender = null;
       }
       if (reattachWindowSender !== null) {
@@ -802,6 +858,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // frame is mounted when a successor already reported its own.
       if (vnode.attrs.shell.workspaceFrame === frameHandle) {
         vnode.attrs.shell.workspaceFrame = null;
+        vnode.attrs.shell.highlightedChromeAnchor = null;
         linkHandling.unmounted();
       }
       frameHandle = null;

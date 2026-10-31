@@ -147,7 +147,7 @@ def test_host_key_id_matches_vector_fingerprint() -> None:
     assert ssh_fingerprint(host_key) == response_vector["host_key_id"]
 
 
-# --- client-method tests against a fake HTTP seam returning signed responses ---
+# Client-method tests against a fake HTTP seam returning signed responses
 
 _NOW = 1_755_300_000
 _HOST_SEED = 9
@@ -286,7 +286,7 @@ def test_client_run_collects_streams_and_verifies_trailer() -> None:
     assert result.timed_out is False
 
 
-# --- key-loading and transport-error branches ---
+# Key-loading and transport-error branches
 
 
 def test_load_private_key_rejects_non_ssh_text() -> None:
@@ -300,7 +300,7 @@ def test_load_public_key_rejects_garbage() -> None:
 
 
 def _unreachable_client() -> OwnerExecClient:
-    # Port 1 on loopback is not listening, so the httpx call fails fast.
+    # Port 1 on loopback is not listening, so the httpx2 call fails fast.
     _host_private, host_line, _kid = _host_keypair()
     return OwnerExecClient(
         base_url="http://127.0.0.1:1",
@@ -326,7 +326,7 @@ def test_real_client_run_raises_when_unreachable() -> None:
         _unreachable_client().run(["true"], timeout_seconds=1.0)
 
 
-# --- verify-function guard-clause branches ---
+# Verify-function guard-clause branches
 
 
 def _valid_request_vector() -> dict:

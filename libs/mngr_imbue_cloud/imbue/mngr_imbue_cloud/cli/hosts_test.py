@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from click.testing import CliRunner
 from pydantic import AnyUrl
@@ -107,15 +107,15 @@ def _signed_in_store(tmp_path: Path) -> tuple[ImbueCloudSessionStore, ImbueCloud
 
 
 def _connector(release_status_code: int, released_paths: list[str]) -> ImbueCloudConnectorClient:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/auth/session/refresh":
-            return httpx.Response(
+            return httpx2.Response(
                 200, json={"status": "OK", "tokens": {"access_token": "at", "refresh_token": "rt-2"}}
             )
         released_paths.append(request.url.path)
-        return httpx.Response(release_status_code, json={"status": "released"})
+        return httpx2.Response(release_status_code, json={"status": "released"})
 
-    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
 
 
 def test_a_release_the_connector_accepts_is_reported_as_released(tmp_path: Path) -> None:

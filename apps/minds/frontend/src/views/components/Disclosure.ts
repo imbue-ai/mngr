@@ -1,6 +1,6 @@
 // A one-line toggle with a chevron that opens a detail underneath: the
-// manifesto's points and the creation page's reading material use it, so a
-// list of them reads as one idiom.
+// manifesto's points and the settings folded under the creation page's user
+// turn use it, so a list of them reads as one idiom.
 //
 // One dress for `Collapsible`, which holds the behaviour. What is here is
 // prose styling, and the marker's streaming entrance -- which belongs to the

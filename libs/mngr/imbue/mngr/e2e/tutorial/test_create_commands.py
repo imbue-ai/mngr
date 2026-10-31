@@ -5,6 +5,7 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 
@@ -81,7 +82,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
         "mngr create my-task --provider modal --type command --no-ensure-clean"
         " --idle-mode run --idle-timeout 60 --no-connect -- sleep 100077",
         comment="idle timeout requires a remote provider",
-        timeout=120.0,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(result).to_succeed()
 
@@ -96,7 +97,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="Verify the idle settings took effect on the modal host",
-        timeout=120.0,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]

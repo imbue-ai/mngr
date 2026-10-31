@@ -53,6 +53,7 @@ import io
 import os
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -286,13 +287,30 @@ class _WarmMngrProcess(MutableModel):
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def terminate(self) -> None:
-        """Close the parent socket and terminate the warm process (no-op if already exited)."""
+    def terminate(self, is_after_call_timeout: bool) -> None:
+        """Close the parent socket and terminate the warm process (no-op if already exited).
+
+        ``is_after_call_timeout`` says whether the process is being stopped because the
+        call it was serving ran out of time; it is only reported if the stop times out.
+        """
         self.connection.close()
+        wall_start = time.time()
+        monotonic_start = time.monotonic()
         try:
             self.running_process.terminate(force_kill_seconds=_STOP_TIMEOUT_SECONDS)
         except TimeoutExpired as exc:
-            logger.opt(exception=exc).error("Timed out stopping a warm mngr process")
+            # The join is timed on the wall clock on macOS, so wall time well ahead of
+            # monotonic time means the machine slept during the stop; the reader
+            # thread's stack shows which shutdown step it was still in.
+            reader_thread_stack = self.running_process.get_reader_thread_stack()
+            logger.opt(exception=exc).error(
+                "Timed out stopping a warm mngr process (after_call_timeout={}, join_wall_seconds={:.1f}, "
+                "join_monotonic_seconds={:.1f}, reader_thread_stack={})",
+                is_after_call_timeout,
+                time.time() - wall_start,
+                time.monotonic() - monotonic_start,
+                " > ".join(reader_thread_stack) if reader_thread_stack is not None else None,
+            )
 
 
 class MngrCaller(MutableModel):
@@ -413,7 +431,7 @@ class MngrCaller(MutableModel):
             else:
                 process_to_terminate = warm_process
         if process_to_terminate is not None:
-            process_to_terminate.terminate()
+            process_to_terminate.terminate(is_after_call_timeout=False)
 
     def _ensure_warm_process_exists(self) -> None:
         """Spawn an idle warm process if none is currently waiting."""
@@ -466,6 +484,7 @@ class MngrCaller(MutableModel):
         # responding; on an exec failure or a hang it must be terminated). On a
         # cold call the warm process may still be importing ``mngr`` -- the request
         # buffers in the socket and ``poll`` simply waits for the response.
+        is_timed_out = False
         try:
             connection.send(request)
             if connection.poll(resolved_timeout):
@@ -477,13 +496,14 @@ class MngrCaller(MutableModel):
                         returncode=1,
                         stderr="mngr warm process exited without returning a result",
                     )
+            is_timed_out = True
             return MngrCallResult(
                 returncode=_TIMEOUT_RETURNCODE,
                 is_timed_out=True,
                 stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
             )
         finally:
-            warm_process.terminate()
+            warm_process.terminate(is_after_call_timeout=is_timed_out)
 
     def stop(self) -> None:
         """Terminate the idle warm process and reset to the uninitialized state.
@@ -500,7 +520,7 @@ class MngrCaller(MutableModel):
             self._concurrency_group = None
             self._is_initialized = False
         if idle_process is not None:
-            idle_process.terminate()
+            idle_process.terminate(is_after_call_timeout=False)
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}

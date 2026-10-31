@@ -1,3 +1,5 @@
+import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -12,6 +14,7 @@ from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
 from imbue.minds.desktop_client.skill_chat import AUTO_OPEN_CHAT_LABELS
 from imbue.minds.desktop_client.skill_chat import AccountBindingState
 from imbue.minds.desktop_client.skill_chat import BARE_CREATE_FACTS_SENTINEL
+from imbue.minds.desktop_client.skill_chat import BARE_CREATE_VERSION_SENTINEL
 from imbue.minds.desktop_client.skill_chat import BareCreateFacts
 from imbue.minds.desktop_client.skill_chat import NEEDS_ACCOUNT_BINDING_SENTINEL
 from imbue.minds.desktop_client.skill_chat import SKIP_CLAUDE_INSTALLATION_CHECK_SETTING
@@ -65,10 +68,22 @@ def _make_workspace(tmp_path: Path, *, skill_name: str, script_exit_code: int) -
     return tmp_path
 
 
+def _isolated_env(home: Path) -> dict[str, str]:
+    """The environment for a shell the fallback's facts probe runs in: ``home`` as HOME, and no git above it.
+
+    Keeps the probe off the developer's own account store and out of any repository enclosing the test's tmp dir,
+    whatever ``GIT_DIR`` or the like the suite was run under.
+    """
+    inherited = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    return {**inherited, "HOME": str(home), "GIT_CEILING_DIRECTORIES": str(home.parent)}
+
+
 def _run_launch_command(work_dir: Path, *, skill_name: str, message: str) -> MngrCallResult:
     """Run the real launch shell in ``work_dir`` with a plain ``python3``, answering as ``mngr exec --format jsonl`` would."""
     command = build_skill_chat_launch_command(skill_name=skill_name, chat_name="chat-x", message=message)
-    completed = subprocess.run(["sh", "-c", command], cwd=work_dir, capture_output=True, text=True, check=False)
+    completed = subprocess.run(
+        ["sh", "-c", command], cwd=work_dir, env=_isolated_env(work_dir), capture_output=True, text=True, check=False
+    )
     assert completed.returncode == 0, completed.stderr
     return MngrCallResult(returncode=0, stdout=exec_result_stdout(completed.stdout, completed.stderr))
 
@@ -108,7 +123,28 @@ def test_the_launch_shell_falls_back_in_the_same_run_when_the_script_has_no_crea
     assert answer.fallback.stdout.splitlines()[-1] == NEEDS_ACCOUNT_BINDING_SENTINEL
     assert answer.fallback.exit_code == 0
     assert parse_bare_create_facts(answer.fallback.stdout) == BareCreateFacts(
-        is_local_settings_present=False, is_create_type_named=None, is_resolver_present=True
+        is_local_settings_present=False,
+        is_create_type_named=None,
+        is_resolver_present=True,
+        is_account_index_present=False,
+        account_count=None,
+        account_dirs_present_count=None,
+        template_version=None,
+    )
+
+
+def _facts(
+    *, is_local_settings_present: bool, is_create_type_named: bool | None, is_resolver_present: bool
+) -> BareCreateFacts:
+    """The facts of a workspace with no account store and no release tag."""
+    return BareCreateFacts(
+        is_local_settings_present=is_local_settings_present,
+        is_create_type_named=is_create_type_named,
+        is_resolver_present=is_resolver_present,
+        is_account_index_present=False,
+        account_count=None,
+        account_dirs_present_count=None,
+        template_version=None,
     )
 
 
@@ -118,22 +154,22 @@ def test_the_launch_shell_falls_back_in_the_same_run_when_the_script_has_no_crea
         (
             None,
             False,
-            BareCreateFacts(is_local_settings_present=False, is_create_type_named=None, is_resolver_present=False),
+            _facts(is_local_settings_present=False, is_create_type_named=None, is_resolver_present=False),
         ),
         (
             '[commands.create]\ntype = "claude"\n',
             False,
-            BareCreateFacts(is_local_settings_present=True, is_create_type_named=True, is_resolver_present=False),
+            _facts(is_local_settings_present=True, is_create_type_named=True, is_resolver_present=False),
         ),
         (
             '[commands.create]\nlabel = ["account=a1"]\n',
             True,
-            BareCreateFacts(is_local_settings_present=True, is_create_type_named=False, is_resolver_present=True),
+            _facts(is_local_settings_present=True, is_create_type_named=False, is_resolver_present=True),
         ),
         (
             "[commands.create\n",
             False,
-            BareCreateFacts(is_local_settings_present=True, is_create_type_named=None, is_resolver_present=False),
+            _facts(is_local_settings_present=True, is_create_type_named=None, is_resolver_present=False),
         ),
     ),
     ids=("no-settings", "settings-name-a-type", "settings-name-no-type", "settings-unreadable"),
@@ -151,17 +187,121 @@ def test_the_fallback_reports_what_its_bare_create_depends_on(
         (work_dir / "system" / "scripts").mkdir(parents=True)
         (work_dir / "system" / "scripts" / "default_account_args.py").write_text("")
 
-    completed = subprocess.run(
-        ["sh", "-c", build_bare_create_facts_command()], cwd=work_dir, capture_output=True, text=True, check=True
-    )
+    completed = _run_facts_command(work_dir)
 
     assert completed.stdout.startswith(BARE_CREATE_FACTS_SENTINEL)
     assert parse_bare_create_facts(completed.stdout) == facts
 
 
+def _run_facts_command(work_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the facts probe in ``work_dir``, with ``work_dir`` as the HOME whose account store it reads."""
+    return subprocess.run(
+        ["sh", "-c", build_bare_create_facts_command()],
+        cwd=work_dir,
+        env=_isolated_env(work_dir),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _write_account_store(home: Path, *, account_ids: tuple[str, ...], folder_ids: tuple[str, ...]) -> None:
+    """An account store as the template's ``accounts.py`` writes it: an index naming ``account_ids``, and ``folder_ids``' folders."""
+    store = home / ".minds" / "accounts"
+    store.mkdir(parents=True)
+    accounts = [{"id": account_id, "lane": "claude", "seq": 1, "display": "Anthropic"} for account_id in account_ids]
+    (store / "index.json").write_text(json.dumps({"version": 2, "accounts": accounts, "mru": None}))
+    for folder_id in folder_ids:
+        (store / folder_id).mkdir()
+
+
+@pytest.mark.parametrize(
+    ("account_ids", "folder_ids", "account_count", "account_dirs_present_count"),
+    (
+        ((), (), 0, 0),
+        (("acct-a", "acct-b"), ("acct-b",), 2, 1),
+        (("acct-a",), ("acct-a",), 1, 1),
+    ),
+    ids=("index-lists-none", "one-folder-gone", "usable-account"),
+)
+def test_the_fallback_counts_the_accounts_the_chat_app_lists_and_the_folders_still_there(
+    tmp_path: Path,
+    account_ids: tuple[str, ...],
+    folder_ids: tuple[str, ...],
+    account_count: int,
+    account_dirs_present_count: int,
+) -> None:
+    """No account, or no folder left, is a refusal that is right; a usable account with no settings is the writer failing.
+
+    Counts only: the facts land in a log forwarded off the machine.
+    """
+    _write_account_store(tmp_path, account_ids=account_ids, folder_ids=folder_ids)
+
+    completed = _run_facts_command(tmp_path)
+
+    facts = parse_bare_create_facts(completed.stdout)
+    assert facts.is_account_index_present is True
+    assert facts.account_count == account_count
+    assert facts.account_dirs_present_count == account_dirs_present_count
+    for account_id in account_ids:
+        assert account_id not in completed.stdout
+
+
+def test_an_unreadable_account_index_reads_as_present_with_unknown_counts(tmp_path: Path) -> None:
+    store = tmp_path / ".minds" / "accounts"
+    store.mkdir(parents=True)
+    (store / "index.json").write_text("{not json")
+
+    facts = parse_bare_create_facts(_run_facts_command(tmp_path).stdout)
+
+    assert facts.is_account_index_present is True
+    assert facts.account_count is None
+    assert facts.account_dirs_present_count is None
+
+
+def _git(work_dir: Path, *args: str) -> None:
+    identity = {
+        f"GIT_{role}_{field}": value
+        for role in ("AUTHOR", "COMMITTER")
+        for field, value in (("NAME", "t"), ("EMAIL", "t@example.com"))
+    }
+    subprocess.run(["git", *args], cwd=work_dir, env={**_isolated_env(work_dir), **identity}, check=True)
+
+
+def test_the_fallback_names_the_nearest_release_tag(tmp_path: Path) -> None:
+    """The version names the template range whose settings writer the workspace runs."""
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "base")
+    _git(tmp_path, "tag", "minds-v0.8.6")
+    _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "later")
+
+    completed = _run_facts_command(tmp_path)
+
+    assert parse_bare_create_facts(completed.stdout).template_version == "minds-v0.8.6"
+    assert completed.stderr == ""
+
+
+def test_the_fallback_names_the_version_update_self_landed_over_the_tag_it_was_created_at(tmp_path: Path) -> None:
+    """A workspace updated in place still describes the release it was created at; its marker names what it runs."""
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "base")
+    _git(tmp_path, "tag", "minds-v0.8.0")
+    _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "update-self: merge upstream template (minds-v0.8.6)")
+
+    facts = parse_bare_create_facts(_run_facts_command(tmp_path).stdout)
+
+    assert facts.template_version == "minds-v0.8.6"
+
+
 def test_a_fallback_that_echoed_no_facts_reads_as_unknown_rather_than_absent() -> None:
     assert parse_bare_create_facts("") == BareCreateFacts(
-        is_local_settings_present=None, is_create_type_named=None, is_resolver_present=None
+        is_local_settings_present=None,
+        is_create_type_named=None,
+        is_resolver_present=None,
+        is_account_index_present=None,
+        account_count=None,
+        account_dirs_present_count=None,
+        template_version=None,
     )
 
 
@@ -414,7 +554,10 @@ def test_a_refused_bare_create_on_a_template_without_the_resolver_spends_no_prob
                 stdout=skill_chat_launch_stdout(
                     "update-self",
                     script_exit_code=2,
-                    fallback_stdout=f"{BARE_CREATE_FACTS_SENTINEL} local_settings=0 create_type= resolver=0\n",
+                    fallback_stdout=(
+                        f"{BARE_CREATE_FACTS_SENTINEL} local_settings=0 create_type= resolver=0 account_index=1 "
+                        f"account_count=1 account_dirs_present=1\n{BARE_CREATE_VERSION_SENTINEL}\n\nminds-v0.8.6\n"
+                    ),
                     fallback_exit_code=1,
                     fallback_stderr=_PRE_COMMAND_REFUSAL,
                 ),
@@ -430,6 +573,10 @@ def test_a_refused_bare_create_on_a_template_without_the_resolver_spends_no_prob
     assert len(errors) == 1
     assert "local settings present: False; create type named: None; resolver present: False" in errors[0]
     assert "resolver binding: None" in errors[0]
+    assert (
+        "account index present: True; accounts listed: 1; account folders present: 1; template version: minds-v0.8.6"
+        in errors[0]
+    )
 
 
 # CLEANUP: the resolver tests below go with the resolver (see skill_chat.py).

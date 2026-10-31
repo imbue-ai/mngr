@@ -20,12 +20,21 @@ Derivation logic stays where it lives today (``app.py``'s ``_build_*``
 helpers); the publisher receives them as injected callables that must be
 callable from a bare background thread (``create_desktop_client`` wraps them
 in an app context).
+
+Every window shows one account, so the install's state is derived once per
+pass and projected for each account a connected window reports
+(``ui_account_scope.py``); the diff is kept per account and frame type, and
+each projection goes only to that account's connections. The frames that are
+not about any account (discovery health, the device's condition, the one-shot
+events) go to every connection as before.
 """
 
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from typing import Final
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -33,8 +42,17 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.ui_account_scope import account_workspace_scope
+from imbue.minds.desktop_client.ui_account_scope import project_accounts
+from imbue.minds.desktop_client.ui_account_scope import project_notifications
+from imbue.minds.desktop_client.ui_account_scope import project_providers
+from imbue.minds.desktop_client.ui_account_scope import project_requests
+from imbue.minds.desktop_client.ui_account_scope import project_snapshot
+from imbue.minds.desktop_client.ui_account_scope import project_workspace_updates
+from imbue.minds.desktop_client.ui_account_scope import project_workspaces
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
@@ -80,6 +98,24 @@ _UiDiffedMessage = (
 
 DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES: Final[float] = 0.1
 
+_DerivedT = TypeVar("_DerivedT")
+
+# The diff key of the frames that belong to no account and go to every connection.
+_INSTALL_WIDE_SCOPE: Final[str] = ""
+
+
+class _DerivedInstallState(FrozenModel):
+    """One pass's install-wide derivation; a frame whose derive failed this pass is None and is skipped."""
+
+    workspaces: UiWorkspacesMessage | None = Field(description="The install's workspace list")
+    accounts: UiAccountsMessage | None = Field(description="The switcher's account lists")
+    providers: UiProvidersMessage | None = Field(description="Every account's providers section")
+    requests: UiRequestsMessage | None = Field(description="Every pending request")
+    notifications: UiNotificationsMessage | None = Field(description="The whole feed")
+    discovery_health: UiDiscoveryHealthMessage | None = Field(description="Discovery pipeline health")
+    workspace_updates: UiWorkspaceUpdatesMessage | None = Field(description="Every workspace's update state")
+    environment: UiEnvironmentMessage | None = Field(description="This device's condition")
+
 
 class UiStatePublisher(MutableModel):
     """One background strand deriving + diffing + broadcasting chrome state."""
@@ -110,6 +146,10 @@ class UiStatePublisher(MutableModel):
     derive_workspace_updates: Callable[[], UiWorkspaceUpdatesMessage] = Field(
         frozen=True, description="Current per-workspace update state"
     )
+    resolve_workspace_account_id: Callable[[str], str] = Field(
+        frozen=True,
+        description="The account id a workspace's health edge belongs to ('local' for one associated with none)",
+    )
     min_seconds_between_passes: float = Field(
         default=DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
         frozen=True,
@@ -118,7 +158,8 @@ class UiStatePublisher(MutableModel):
 
     _wake_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
-    _last_frame_by_type: dict[str, str] = PrivateAttr(default_factory=dict)
+    # (account id, frame type) -> the last frame broadcast to that account's connections.
+    _last_frame_by_scope_and_type: dict[tuple[str, str], str] = PrivateAttr(default_factory=dict)
     _is_started: bool = PrivateAttr(default=False)
     _last_pass_started_at_monotonic: float | None = PrivateAttr(default=None)
 
@@ -147,17 +188,19 @@ class UiStatePublisher(MutableModel):
         self._wake_event.set()
 
     def publish_health(self, message: UiHealthMessage) -> None:
-        """Broadcast one workspace's health edge immediately (no diffing)."""
-        self.broadcaster.broadcast(message.model_dump_json())
+        """Send one workspace's health edge to its account's windows immediately (no diffing)."""
+        self.broadcaster.broadcast_to_account(
+            self.resolve_workspace_account_id(message.agent_id), message.model_dump_json()
+        )
 
     def publish_one_shot(self, message: UiOneShotMessage) -> None:
         """Broadcast a fire-and-forget event frame."""
         self.broadcaster.broadcast(message.model_dump_json())
 
-    def build_snapshot(self) -> UiSnapshot:
-        """Derive the complete current state (shared by WS connect and bootstrap JSON)."""
+    def build_snapshot(self, account_id: str) -> UiSnapshot:
+        """Derive the complete current state as ``account_id``'s windows see it (WS connect and bootstrap JSON)."""
         requests, notifications = self.derive_requests_and_notifications()
-        return UiSnapshot(
+        install_snapshot = UiSnapshot(
             workspaces=self.derive_workspaces(),
             accounts=self.derive_accounts(),
             providers=self.derive_providers(),
@@ -168,10 +211,11 @@ class UiStatePublisher(MutableModel):
             workspace_updates=self.derive_workspace_updates(),
             environment=self.derive_environment(),
         )
+        return project_snapshot(install_snapshot, account_id)
 
-    def build_snapshot_frames(self) -> list[str]:
-        """Serialize the connect sequence: hello, then one frame per snapshot type."""
-        snapshot = self.build_snapshot()
+    def build_snapshot_frames(self, account_id: str) -> list[str]:
+        """Serialize one account's connect sequence: hello, then one frame per snapshot type."""
+        snapshot = self.build_snapshot(account_id)
         frames = [UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()]
         frames.append(snapshot.workspaces.model_dump_json())
         frames.append(snapshot.accounts.model_dump_json())
@@ -193,29 +237,80 @@ class UiStatePublisher(MutableModel):
         return frames
 
     def publish_now(self) -> None:
-        """One synchronous derive+diff+broadcast pass (also the loop body; exposed for tests)."""
-        derives: tuple[Callable[[], tuple[_UiDiffedMessage, ...]], ...] = (
-            lambda: (self.derive_workspaces(),),
-            lambda: (self.derive_accounts(),),
-            lambda: (self.derive_providers(),),
-            self.derive_requests_and_notifications,
-            lambda: (self.derive_discovery_health(),),
-            lambda: (self.derive_workspace_updates(),),
-            lambda: (self.derive_environment(),),
+        """One synchronous derive+project+diff+broadcast pass (also the loop body; exposed for tests)."""
+        derived = self._derive_install_state()
+        account_ids = self.broadcaster.connected_account_ids()
+        self._forget_departed_scopes(account_ids)
+        for install_wide in (derived.discovery_health, derived.environment):
+            if install_wide is not None:
+                self._broadcast_if_changed(_INSTALL_WIDE_SCOPE, install_wide)
+        for account_id in sorted(account_ids):
+            self._publish_account_projection(account_id, derived)
+
+    def _publish_account_projection(self, account_id: str, derived: _DerivedInstallState) -> None:
+        if derived.accounts is not None:
+            self._broadcast_if_changed(account_id, project_accounts(derived.accounts, account_id))
+        if derived.providers is not None:
+            self._broadcast_if_changed(account_id, project_providers(derived.providers, account_id))
+        # The workspace-keyed frames are projected through the account's rows, so a
+        # pass whose workspace derive failed says nothing about them this tick.
+        if derived.workspaces is None:
+            return
+        scope = account_workspace_scope(derived.workspaces, account_id)
+        self._broadcast_if_changed(account_id, project_workspaces(derived.workspaces, account_id))
+        if derived.requests is not None:
+            self._broadcast_if_changed(account_id, project_requests(derived.requests, scope))
+        if derived.notifications is not None:
+            self._broadcast_if_changed(account_id, project_notifications(derived.notifications, scope))
+        if derived.workspace_updates is not None:
+            self._broadcast_if_changed(account_id, project_workspace_updates(derived.workspace_updates, scope))
+
+    def _broadcast_if_changed(self, scope: str, message: _UiDiffedMessage) -> None:
+        """Send the frame to the scope's windows (every window for the install-wide scope) unless it is unchanged."""
+        frame = message.model_dump_json()
+        key = (scope, message.type)
+        if self._last_frame_by_scope_and_type.get(key) == frame:
+            return
+        self._last_frame_by_scope_and_type[key] = frame
+        if scope == _INSTALL_WIDE_SCOPE:
+            self.broadcaster.broadcast(frame)
+        else:
+            self.broadcaster.broadcast_to_account(scope, frame)
+
+    def _forget_departed_scopes(self, account_ids: AbstractSet[str]) -> None:
+        """Drop the diff state of accounts no window shows: their next window gets a snapshot anyway."""
+        for key in list(self._last_frame_by_scope_and_type):
+            if key[0] != _INSTALL_WIDE_SCOPE and key[0] not in account_ids:
+                del self._last_frame_by_scope_and_type[key]
+
+    def _derive_install_state(self) -> _DerivedInstallState:
+        """Run every derive once, each on its own so one failing (a settings file mid-write) skips only its frames."""
+        workspaces = self._derive_or_none("workspaces", self.derive_workspaces)
+        accounts = self._derive_or_none("accounts", self.derive_accounts)
+        providers = self._derive_or_none("providers", self.derive_providers)
+        requests_and_notifications = self._derive_or_none(
+            "requests and notifications", self.derive_requests_and_notifications
         )
-        for derive in derives:
-            try:
-                messages = derive()
-            except (MindError, MngrError, OSError, RuntimeError) as e:
-                # A single failing derive (e.g. a settings file mid-write) must
-                # not stop the other message types from publishing this tick.
-                logger.warning("Skipped one /ui/ws publish tick derive: {}", e)
-                continue
-            for message in messages:
-                frame = message.model_dump_json()
-                if self._last_frame_by_type.get(message.type) != frame:
-                    self._last_frame_by_type[message.type] = frame
-                    self.broadcaster.broadcast(frame)
+        discovery_health = self._derive_or_none("discovery_health", self.derive_discovery_health)
+        workspace_updates = self._derive_or_none("workspace_updates", self.derive_workspace_updates)
+        environment = self._derive_or_none("environment", self.derive_environment)
+        return _DerivedInstallState(
+            workspaces=workspaces,
+            accounts=accounts,
+            providers=providers,
+            requests=requests_and_notifications[0] if requests_and_notifications is not None else None,
+            notifications=requests_and_notifications[1] if requests_and_notifications is not None else None,
+            discovery_health=discovery_health,
+            workspace_updates=workspace_updates,
+            environment=environment,
+        )
+
+    def _derive_or_none(self, name: str, derive: Callable[[], _DerivedT]) -> _DerivedT | None:
+        try:
+            return derive()
+        except (MindError, MngrError, OSError, RuntimeError) as e:
+            logger.warning("Skipped the {} derive of one /ui/ws publish tick: {}", name, e)
+            return None
 
     def _wait_out_min_gap_since_last_pass(self) -> None:
         if self._last_pass_started_at_monotonic is None:

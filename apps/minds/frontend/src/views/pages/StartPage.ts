@@ -4,19 +4,24 @@
 // asked one at a time as a chat (see models/startFlow.ts for the transcript
 // and its transitions). The cloud answer submits the create form's remote
 // preset directly; the two quieter answers open the create form itself as a
-// modal, on their own preset; "I already have a workspace (log in)" signs in
-// and leaves for the home page. A cloud create waits for the account's email to be
-// verified (the connector refuses it otherwise), polling and offering a resend
-// meanwhile. Submitting a create routes to the creation page, which renders
-// this transcript above its own turns.
+// modal, on their own preset; the title bar's "Already set up? Log in", offered
+// throughout the flow, signs in and, when
+// the account has workspaces, leaves for its home page -- with none, the
+// conversation continues under the signed-in account, since the first
+// workspace still needs to be made. A cloud create waits for the account's
+// email to be verified (the connector refuses it otherwise), polling and
+// offering a resend meanwhile. Submitting a create routes to the creation
+// page, which renders this transcript above its own turns.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
+import { accountHubRoute } from "../shell/classify";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
-import { markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
+import { fetchSigninLanding, markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
+import type { SigninLanding } from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
   FLOW,
@@ -35,6 +40,7 @@ import {
   SIGN_IN_INTRO_BY_CHOICE,
   answerStep,
   chooseExistingLogin,
+  continueExistingLoginWithoutWorkspaces,
   dismissPendingModal,
   finishPendingModal,
   isFormChoice,
@@ -82,6 +88,12 @@ const FORM_PRESET_BY_CHOICE: Record<FormChoiceId, PresetName> = { local: "local"
 /** How long "I verified it" keeps checking before the agent says it is not verified yet. */
 export const VERIFICATION_PRESS_WAIT_MS = 10000;
 export const VERIFICATION_PRESS_STEP_MS = 2000;
+
+/** How long the existing-login landing waits on the first record fetch before treating the account as new. */
+export const SIGNIN_LANDING_WAIT_MS = 15000;
+export const SIGNIN_LANDING_POLL_MS = 1000;
+/** What the agent shows while the landing decision is in flight. */
+export const SIGNIN_LANDING_CHECKING_TEXT = "Checking your account for existing workspaces...";
 
 /**
  * The turns of a start-flow transcript, rendered. Shared with the creation
@@ -172,28 +184,46 @@ export function transcriptTurns(
 /**
  * Whether a cached defaults payload can still back a cloud create under the
  * flow's account. The route reads the defaults when it mounts, which on a
- * first run is before the user has an account; a payload that does not list
- * the account cannot name it for the create to run under.
+ * first run is before the user has an account; a payload read under another
+ * account (or none) cannot name this one for the create to run under.
  */
-export function areDefaultsStale(defaults: CreateFormDefaults | null, accountId: string): boolean {
-  return defaults === null || !defaults.accounts.some((account) => account.user_id === accountId);
+export function areDefaultsStale(
+  defaults: CreateFormDefaults | null,
+  accountId: string,
+): boolean {
+  return defaults === null || defaults.account?.user_id !== accountId;
 }
 
-/** The create form's remote preset under the flow's account, submitted without the form. */
+/**
+ * The create form's remote preset under the flow's account, submitted without the form. The first workspace's
+ * creation page shows the onboarding examples, as it does for the flow's form answers.
+ */
 export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
   model.accountId = accountId;
   model.applyPreset("remote");
+  model.isOnboardingDrivenByAgent = true;
   return { ...model.submitBody() };
 }
 
-/** The signed-in accounts as the flow names them, and the default one among them. */
-function signedInAccounts(): { all: FlowAccount[]; default: FlowAccount | null } {
-  const entries = getAppContext().stores.accounts.accounts;
-  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({ userId: entry.user_id, email: entry.email });
-  const defaultEntry = entries.find((entry) => entry.is_default);
-  return { all: entries.map(toFlowAccount), default: defaultEntry === undefined ? null : toFlowAccount(defaultEntry) };
+/** The signed-in accounts as the flow names them, and the one it offers to continue as: the window's, else the first. */
+function signedInAccounts(): {
+  all: FlowAccount[];
+  default: FlowAccount | null;
+} {
+  const { stores, shell } = getAppContext();
+  const entries = stores.accounts.accounts;
+  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({
+    userId: entry.user_id,
+    email: entry.email,
+  });
+  const offered =
+    stores.accounts.signedInAccount(shell.accountId) ?? entries[0];
+  return {
+    all: entries.map(toFlowAccount),
+    default: offered === undefined ? null : toFlowAccount(offered),
+  };
 }
 
 /** The account a cloud create is owed under; the flow only owes one once its account step has settled. */
@@ -225,6 +255,16 @@ export const StartPage: m.ClosureComponent = () => {
   // The reporting question re-opened by taking its answer back: it has been
   // read, so it and its buttons come back at once instead of on the opening's clock.
   let isReportingReopened = false;
+  // The existing-login landing decision in flight: the sign-in finished and
+  // the flow is waiting to hear whether the account has workspaces (its home
+  // page) or none (the conversation continues). Null while no sign-in is
+  // being landed.
+  let signinLanding: {
+    accountId: string;
+    email: string;
+    deadline: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null = null;
   // A window that already reached the creation page from this flow and came
   // back here starts the conversation afresh.
   flow.reset();
@@ -235,7 +275,7 @@ export const StartPage: m.ClosureComponent = () => {
 
   function loadDefaults(): void {
     if (defaults !== null) return;
-    fetchCreateFormDefaults(null)
+    fetchCreateFormDefaults(null, getAppContext().shell.accountId)
       .then((loaded) => {
         defaults = loaded;
       })
@@ -309,13 +349,20 @@ export const StartPage: m.ClosureComponent = () => {
     );
   }
 
-  /** One quiet poll while the flow waits on the link; a failed check simply waits for the next. */
+  /**
+   * One quiet poll while the flow waits on the link; a failed check simply
+   * waits for the next. Polls hold off while the title bar's log-in is
+   * signing in, which may replace this account.
+   */
   async function pollVerification(): Promise<void> {
-    if (flow.state.verificationEmail === null || isCheckingVerification) return;
+    const isPollHeld = (): boolean => flow.state.pending === "existing-login";
+    if (flow.state.verificationEmail === null || isCheckingVerification || isPollHeld()) return;
     const email = flow.state.verificationEmail;
     isCheckingVerification = true;
     try {
-      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email) finishVerification();
+      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email && !isPollHeld()) {
+        finishVerification();
+      }
     } catch {
       // Left for the next poll.
     } finally {
@@ -383,6 +430,10 @@ export const StartPage: m.ClosureComponent = () => {
     }
     isSubmittingCloud = true;
     const accountId = flowAccount(flow).userId;
+    // The create is submitted under the flow's account, so the window becomes
+    // that account's (its creation page and first workspace belong to it) --
+    // without a navigation, the start flow being the device's route.
+    getAppContext().shell.adoptAccount(accountId);
     // Async so that a body that fails to build rejects rather than throwing past the caller's catch.
     const submit = async (loaded: CreateFormDefaults): Promise<void> => {
       const result = await submitCreateRequest(cloudCreateBody(loaded, accountId));
@@ -401,7 +452,7 @@ export const StartPage: m.ClosureComponent = () => {
     const ready =
       cached !== null && !areDefaultsStale(cached, accountId)
         ? Promise.resolve(cached)
-        : fetchCreateFormDefaults(null);
+        : fetchCreateFormDefaults(null, accountId);
     const fail = (message: string): void => {
       isSubmittingCloud = false;
       flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
@@ -418,6 +469,65 @@ export const StartPage: m.ClosureComponent = () => {
     );
   }
 
+  /** Drop a landing decision still in flight: an undo or another answer has replaced the wait. */
+  function cancelSigninLanding(): void {
+    if (signinLanding === null) return;
+    if (signinLanding.timer !== null) clearTimeout(signinLanding.timer);
+    signinLanding = null;
+  }
+
+  /** The landing verdict arrived (or the wait ran out): leave for the account's home page, or continue the conversation. */
+  function settleSigninLanding(hasWorkspaces: boolean): void {
+    const landing = signinLanding;
+    cancelSigninLanding();
+    // An answer given while the check ran has replaced the wait; its own path governs.
+    if (landing === null || flow.state.pending !== "existing-login") {
+      redraw();
+      return;
+    }
+    if (hasWorkspaces) {
+      flow.state = dismissPendingModal(flow.state);
+      void markOnboardingComplete();
+      m.route.set(accountHubRoute(landing.accountId));
+      return;
+    }
+    flow.state = continueExistingLoginWithoutWorkspaces(flow.state, {
+      userId: landing.accountId,
+      email: landing.email,
+    });
+    if (flow.state.verificationEmail === null) stopVerificationTimers();
+    redraw();
+  }
+
+  /** One quiet ask per second until the record fetch settles or the wait runs out. */
+  async function pollSigninLanding(): Promise<void> {
+    const landing = signinLanding;
+    if (landing === null) return;
+    if (flow.state.pending !== "existing-login") {
+      cancelSigninLanding();
+      return;
+    }
+    let verdict: SigninLanding | null = null;
+    try {
+      verdict = await fetchSigninLanding(landing.accountId);
+    } catch {
+      // An unreachable backend is asked again until the deadline.
+    }
+    if (signinLanding !== landing) return;
+    if (verdict !== null && verdict.state === "done") {
+      settleSigninLanding(verdict.workspace_count > 0);
+      return;
+    }
+    // A failed record fetch and a wait that runs out both read as a new user:
+    // the conversation continuing strands nobody, while the bare home page
+    // would skip the rest of the setup.
+    if ((verdict !== null && verdict.state === "failed") || Date.now() >= landing.deadline) {
+      settleSigninLanding(false);
+      return;
+    }
+    landing.timer = setTimeout(() => void pollSigninLanding(), SIGNIN_LANDING_POLL_MS);
+  }
+
   /** Either answer to the reporting question: it is saved, and it is what starts the questions. */
   function answerReporting(isAllowed: boolean): void {
     // A failed save is asked again on the consent screen at a later launch.
@@ -432,6 +542,7 @@ export const StartPage: m.ClosureComponent = () => {
       pressVerified();
       return;
     }
+    cancelSigninLanding();
     const accounts = signedInAccounts();
     flow.state = answerStep(flow.state, at, choiceId, {
       signedInAccount: accounts.default,
@@ -446,10 +557,17 @@ export const StartPage: m.ClosureComponent = () => {
   }
 
   function onAside(stepId: StepId): void {
-    if (stepId === "verify" || stepId === "verify-again") {
-      resendVerification();
-      return;
-    }
+    if (stepId === "verify" || stepId === "verify-again") resendVerification();
+  }
+
+  /**
+   * The title bar's log-in for a returning user, at any point of the flow but
+   * a cloud create under way: from the owed create's verification check to
+   * the request itself.
+   */
+  function logInExisting(): void {
+    if (isSubmittingCloud || flow.state.isCloudCreatePending) return;
+    cancelSigninLanding();
     flow.state = chooseExistingLogin(flow.state);
     void webLogin.start("Sign in to see your existing workspaces.");
   }
@@ -459,6 +577,7 @@ export const StartPage: m.ClosureComponent = () => {
   function onUndo(at: number): void {
     if (isSubmittingCloud) return;
     stopVerificationTimers();
+    cancelSigninLanding();
     flow.state = undoAnswer(flow.state, at);
     reopenedStepIndex = at;
     formPreset = null;
@@ -467,6 +586,7 @@ export const StartPage: m.ClosureComponent = () => {
   function onUndoReporting(): void {
     if (isSubmittingCloud) return;
     stopVerificationTimers();
+    cancelSigninLanding();
     flow.state = undoReporting(flow.state);
     reopenedStepIndex = null;
     isReportingReopened = true;
@@ -485,17 +605,41 @@ export const StartPage: m.ClosureComponent = () => {
 
   // The sign-in modals report through the accounts store: an account appearing
   // while the flow waits on one advances it, whether or not the modal is still
-  // up. The existing-login answer leaves for the home page instead.
+  // up. The existing-login answer waits for the landing verdict instead: the
+  // account's home page when it has workspaces, the conversation otherwise.
   function syncAccounts(): void {
     const accounts = getAppContext().stores.accounts;
     const pending = flow.state.pending;
     if (pending === "existing-login") {
+      if (signinLanding !== null) return;
       if (webLogin.state === "done" || (accounts.hasAccounts && !webLogin.isOpen)) {
-        flow.state = dismissPendingModal(flow.state);
-        void markOnboardingComplete();
         webLogin.noteSignedIn();
+        // The account the sign-in reported, else the one that landed. The
+        // poll can name the account before the accounts frame lists it, so
+        // its user id is taken first.
+        const reportedUserId = webLogin.userId;
+        const reportedEmail = webLogin.email;
+        const signedIn =
+          accounts.accounts.find(
+            (account) =>
+              reportedEmail !== "" && account.email === reportedEmail,
+          ) ?? accounts.accounts[0];
         webLogin.dismiss();
-        m.route.set("/");
+        const accountId = reportedUserId !== "" ? reportedUserId : (signedIn?.user_id ?? "");
+        const email = reportedEmail !== "" ? reportedEmail : (signedIn?.email ?? "");
+        if (accountId === "") {
+          // Nothing names the account that landed, so there is no account to
+          // continue the conversation under.
+          flow.state = dismissPendingModal(flow.state);
+          void markOnboardingComplete();
+          getAppContext().shell.routeToHub();
+          return;
+        }
+        // The window becomes the signed-in account's either way: the home-page
+        // landing and a continued conversation's create both belong to it.
+        getAppContext().shell.adoptAccount(accountId);
+        signinLanding = { accountId, email, deadline: Date.now() + SIGNIN_LANDING_WAIT_MS, timer: null };
+        void pollSigninLanding();
       } else if (!webLogin.isOpen) {
         flow.state = dismissPendingModal(flow.state);
       }
@@ -530,12 +674,17 @@ export const StartPage: m.ClosureComponent = () => {
   return {
     oninit() {
       loadDefaults();
+      flow.logInExisting = logInExisting;
+      // The shell drew the title bar ahead of this page, before the log-in was registered.
+      redraw();
     },
     onupdate() {
       syncAccounts();
     },
     onremove() {
       stopVerificationTimers();
+      cancelSigninLanding();
+      if (flow.logInExisting === logInExisting) flow.logInExisting = null;
     },
     view() {
       const state = flow.state;
@@ -609,8 +758,17 @@ export const StartPage: m.ClosureComponent = () => {
           onUndoReporting: isSubmittingCloud ? undefined : onUndoReporting,
           onAside,
         }),
-        scrollAnchor(state.entries.length),
       );
+      if (signinLanding !== null) {
+        children.push(
+          agentTurn({
+            key: "signin-landing-checking",
+            text: SIGNIN_LANDING_CHECKING_TEXT,
+            startAtMs: FLOW_THINK_MS,
+          }),
+        );
+      }
+      children.push(scrollAnchor(state.entries.length));
       if (formPreset !== null) {
         children.push(
           createFormModal({
@@ -618,6 +776,7 @@ export const StartPage: m.ClosureComponent = () => {
             id: "start-create-form",
             onClose: closeCreateForm,
             initialPreset: formPreset,
+            isOnboardingDrivenByAgent: true,
             onSubmitted: (operationId: string) => {
               formPreset = null;
               flow.state = finishPendingModal(flow.state);

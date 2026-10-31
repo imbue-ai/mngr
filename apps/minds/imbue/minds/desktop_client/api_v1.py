@@ -89,6 +89,8 @@ from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
 from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentFolderSync
+from imbue.minds.desktop_client.api_models import AgentFolderSyncsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AppVersionResponse
@@ -211,7 +213,6 @@ from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_pr
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
 from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -247,9 +248,12 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.ui_api_folder_syncs import folder_sync_rows
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
+from imbue.minds.desktop_client.ui_api_inbox import workspace_agent_id_for_agent
+from imbue.minds.desktop_client.ui_models import UiFolderSyncRow
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.visiting_agents import VisitingAgent
@@ -1296,6 +1300,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     is_web_access_enabled = bool(body.get("enable_web_access", False))
+    is_onboarding_driven_by_agent = bool(body.get("is_onboarding_driven_by_agent", False))
     if is_web_access_enabled and not account_id:
         # A share is registered under the owning account, so without one there
         # is nothing to publish.
@@ -1479,6 +1484,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             docker_runtime=docker_runtime,
             original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
             account_id=account_id,
+            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
     except WorkspaceNameInUseError as exc:
         # A live in-flight create attempt already holds this name on the same
@@ -2223,11 +2229,11 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     """Dispatch the idempotent 'Update backup service' operation; return a handle to poll.
 
     Body: ``{"stop_chats"?: bool}`` -- the "Stop all chats and retry" flow sets
-    it so RUNNING chat agents, and idle ones busy with a pending background
-    task, are stopped (and those tasks ended) before the code update (they
-    resume on the user's next message). One tracked operation runs per
-    workspace at a time; a second request while one (of any kind) is running is
-    rejected rather than stacked.
+    it so RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones
+    busy with a pending background task, are stopped (and those tasks ended)
+    before the code update (they resume on the user's next message). One
+    tracked operation runs per workspace at a time; a second request while one
+    (of any kind) is running is rejected rather than stacked.
     """
     context = _resolve_backup_route_context(agent_id)
     if isinstance(context, Response):
@@ -2936,6 +2942,59 @@ def _handle_workspace_refresh(agent_id: str) -> OkResponse:
     if publisher is not None:
         publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=agent_id))
     return OkResponse(ok=True)
+
+
+# Folder-sync state route
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AgentFolderSyncsResponse))
+def _handle_agent_folder_syncs(agent_id: str) -> AgentFolderSyncsResponse | Response:
+    """This desktop's folder syncs with a workspace, on behalf of an agent in it.
+
+    ``agent_id`` may be any agent of the workspace -- a chat, a service's
+    ``MNGR_AGENT_ID`` -- and is resolved to the workspace's primary agent, which
+    is what every sync is filed under. Answered from this process alone, like
+    the Permissions pane's poll it shares its rows with: a running sync reports
+    itself through its ``mngr pair`` subprocess, and a stopped one is
+    remembered on disk.
+    """
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    resolved_id = backend_resolver.resolve_agent_id(AgentId(agent_id))
+    if resolved_id not in backend_resolver.list_known_agent_ids():
+        return _json_error(f"Unknown agent {agent_id}", 404)
+    manager = state.folder_sync_manager
+    if manager is None:
+        return AgentFolderSyncsResponse(device_id=state.device_id, syncs=())
+    workspace_agent_id = workspace_agent_id_for_agent(str(resolved_id), backend_resolver)
+    return AgentFolderSyncsResponse(
+        device_id=manager.device_id,
+        syncs=tuple(
+            sync
+            for sync in (_agent_folder_sync(row) for row in folder_sync_rows(manager, workspace_agent_id))
+            if sync is not None
+        ),
+    )
+
+
+def _agent_folder_sync(row: UiFolderSyncRow) -> AgentFolderSync | None:
+    """One row of the pane's poll as an agent reads it, or None for a folder never synced."""
+    sync = row.sync
+    if sync is None:
+        return None
+    is_counted = sync.bytes_total > 0
+    return AgentFolderSync(
+        local_path=row.path,
+        workspace_path=sync.workspace_path or None,
+        activity=sync.activity,
+        state=sync.state,
+        message=sync.message or None,
+        bytes_done=sync.bytes_done if is_counted else None,
+        bytes_total=sync.bytes_total if is_counted else None,
+        direction=sync.direction,
+        conflict=sync.conflict,
+    )
 
 
 # Workspace metadata update route (color + account association)
@@ -4148,28 +4207,23 @@ def _running_connection_operation_message(registry: ConnectionOperationRegistry,
 
 
 def _resolve_connection_owner(raw_owner: object) -> tuple[str, str | None] | Response:
-    """``(owner user id, account email)`` for a registration body's ``owner``; the local profile has no email."""
-    requested_owner = str(raw_owner).strip() if raw_owner is not None else ""
-    if requested_owner == LOCAL_PROFILE_USER_ID:
+    """``(owner user id, account email)`` for a registration body's ``owner``; the local profile has no email.
+
+    The owner is always named: the window adding the connection passes its own
+    account, and there is no install-wide default to fall back on.
+    """
+    owner_user_id = str(raw_owner).strip() if raw_owner is not None else ""
+    if owner_user_id == LOCAL_PROFILE_USER_ID:
         return LOCAL_PROFILE_USER_ID, None
-    state = get_state()
-    signed_in_user_ids = (
-        [str(account.user_id) for account in state.session_store.list_accounts()]
-        if state.session_store is not None
-        else []
-    )
-    if state.session_store is not None and state.session_store.is_last_identity_read_failed:
-        # A failed listing reads like no accounts; answering "signed out" would blame the user.
-        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
-    # Settled, not read raw: a default the scheduler retired as dead would
-    # otherwise answer every ownerless registration with "signed-out account".
-    default_account_id = settle_default_account_id(state.minds_config, signed_in_user_ids)
-    owner_user_id = requested_owner or default_account_id or ""
     if not owner_user_id:
         return _json_field_error(
-            "Sign in to an account to own this connection, or add it to this device only (owner 'local').", "owner"
+            "Name the account that owns this connection, or add it to this device only (owner 'local').", "owner"
         )
+    state = get_state()
     session = state.session_store.get_session(owner_user_id) if state.session_store is not None else None
+    if session is None and state.session_store is not None and state.session_store.is_last_identity_read_failed:
+        # A failed listing reads like no accounts; answering "signed out" would blame the user.
+        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
     if session is None:
         return _json_field_error(f"Unknown or signed-out account {owner_user_id!r}.", "owner")
     return owner_user_id, str(session.email)
@@ -5384,5 +5438,9 @@ def create_api_v1_blueprint() -> Blueprint:
     # Workspace view refresh (per-agent for the same gateway-permission reason; the
     # agent_id identifies which workspace's view to rebuild).
     blueprint.add_url_rule("/agents/<agent_id>/refresh", view_func=_handle_workspace_refresh, methods=["POST"])
+
+    # Folder-sync state (per-agent for the same gateway-permission reason; the
+    # agent_id names the workspace whose syncs to report).
+    blueprint.add_url_rule("/agents/<agent_id>/folder-syncs", view_func=_handle_agent_folder_syncs, methods=["GET"])
 
     return blueprint

@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Final
 from typing import TypeVar
 
-import httpx
+import httpx2
 import pytest
 from argon2 import PasswordHasher
 from loguru import logger
@@ -186,7 +186,7 @@ def _wait_until(description: str, timeout_seconds: float, probe: Callable[[], _T
     while time.monotonic() < deadline:
         try:
             result = probe()
-        except (PlaywrightError, ImbueCloudError, httpx.HTTPError) as e:
+        except (PlaywrightError, ImbueCloudError, httpx2.HTTPError) as e:
             last_transient_error = e
             result = None
         if result is not None:
@@ -286,7 +286,7 @@ def _destroy_account_buckets_best_effort(runtime: _SyncE2ERuntime, account: Sync
     """
     try:
         buckets = runtime.connector.list_buckets(account.access_token)
-    except (ImbueCloudError, httpx.HTTPError, OSError) as e:
+    except (ImbueCloudError, httpx2.HTTPError, OSError) as e:
         # Teardown must never mask the test result; any listing failure is logged.
         logger.warning("Could not list buckets for cleanup: {}", e)
         return
@@ -294,7 +294,7 @@ def _destroy_account_buckets_best_effort(runtime: _SyncE2ERuntime, account: Sync
         try:
             runtime.connector.destroy_bucket(account.access_token, bucket.bucket_name)
             logger.info("Deleted test bucket {}", bucket.bucket_name)
-        except (ImbueCloudError, httpx.HTTPError, OSError) as e:
+        except (ImbueCloudError, httpx2.HTTPError, OSError) as e:
             # Cloudflare refuses non-empty deletes; log the leak with its name.
             logger.warning("Could not delete test bucket {} (likely non-empty): {}", bucket.bucket_name, e)
 

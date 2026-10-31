@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Final
 from typing import IO
 
-import httpx
+import httpx2
 from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
@@ -46,8 +46,11 @@ from playwright.sync_api import Page
 from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
@@ -78,12 +81,10 @@ _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^https?://(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.localhost:\d+(?:/|$)"
 )
 
-# Default env identity when nothing is activated: a dedicated, inert
-# ``ci-snapshot`` tier (committed under
-# apps/minds/imbue/minds/config/envs/ci-snapshot/) so callers can boot the
-# backend without an explicit ``minds-admin env activate`` step and without pointing
-# at any real environment.
-_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
+# Default env identity when nothing is activated: the dedicated, inert
+# ``ci-snapshot`` tier, so callers can boot the backend without an explicit
+# ``minds-admin env activate`` step and without pointing at any real environment.
+_DEFAULT_MINDS_ROOT_NAME: Final[str] = CI_SNAPSHOT_MINDS_ROOT_NAME
 # The throwaway root the Linux harnesses point MINDS_DATA_HOME at. Named here
 # so test_snapshot_resume.py can find what a baked image actually contains.
 _E2E_DATA_HOME_DIR_NAME: Final[str] = ".minds-e2e-data-home"
@@ -103,6 +104,22 @@ _ELECTRON_OUTPUT_INFO_MARKERS: Final[tuple[str, ...]] = (
     "GPU process",
     "[lifecycle] SIG",
     "exited with signal",
+)
+
+
+class ElectronLaunchTarget(FrozenModel):
+    """How to start the Imbue Studio app: a program, plus the main script a bare Electron runtime needs."""
+
+    executable: Path = Field(description="The program to run: a packaged build, or this checkout's Electron binary.")
+    main_js: Path | None = Field(
+        description="The Electron main script handed to a bare runtime; None for a packaged build, which has its own."
+    )
+    extra_arguments: tuple[str, ...] = Field(description="Chromium switches appended to every launch of this target.")
+
+
+# This checkout's Electron running this checkout's app.
+DEV_CHECKOUT_LAUNCH_TARGET: Final[ElectronLaunchTarget] = ElectronLaunchTarget(
+    executable=_ELECTRON_BINARY, main_js=_ELECTRON_MAIN_JS, extra_arguments=()
 )
 
 # Per-phase wall-clock budgets. Tight enough to fail with a useful
@@ -263,7 +280,11 @@ def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
             )
 
 
-def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
+def _build_electron_env(
+    workspace_git_url: Path | None,
+    extra_env: Mapping[str, str] | None = None,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
@@ -271,23 +292,29 @@ def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | 
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
     ``_operator_workspace_default`` in workspace_defaults.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
-    don't silently leak into every workspace we create.
+    don't silently leak into every workspace we create. A ``None`` template
+    path leaves the create form on the app's own published defaults, which is
+    what a run that tests the shipped product wants.
 
     ``extra_env`` is layered over the inherited environment first, so a caller
     that must not mutate its own ``os.environ`` (the demo harness selecting a
     data root and display) can still address the child; the prefill and scrub
-    below win over it.
+    below win over it. ``base_env`` replaces that inherited environment
+    outright, for a caller that composes the child's environment itself rather
+    than handing down its own (the smoke suite, whose app under test is a
+    shipped build that must not see this process's pytest variables).
 
     The workspace name is not prefilled: ``drive_create_flow`` types it into
     the create form's "Name" field directly, which is what pins the name the
     test later destroys by.
     """
-    env = dict(os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     if extra_env is not None:
         env.update(extra_env)
-    env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
-    # Opt into the local-worktree create-form defaults (see just minds-start).
-    env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
+    if workspace_git_url is not None:
+        env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
+        # Opt into the local-worktree create-form defaults (see just minds-start).
+        env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds DEFAULT_WORKSPACE_TEMPLATE's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The Imbue Studio
@@ -409,12 +436,16 @@ def _user_data_dir_for_launch(persistent_dir: Path | None) -> Iterator[str]:
 
 @contextmanager
 def _launched_electron(
-    workspace_git_url: Path,
+    workspace_git_url: Path | None,
     debug_port: int,
     host_config_dir: Path | None = None,
     extra_env: Mapping[str, str] | None = None,
     # A profile to keep between launches (cookies, the desktop's client identity); a throwaway one per launch when None.
     user_data_dir: Path | None = None,
+    # Which build to start.
+    launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
+    # The environment to launch from, in place of this process's own (see ``_build_electron_env``).
+    base_env: Mapping[str, str] | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
 
@@ -455,15 +486,16 @@ def _launched_electron(
     agent / Docker container. Those persist as separate host-level
     processes; cleanup of them is the caller's responsibility.
     """
-    if not _ELECTRON_BINARY.is_file():
-        raise FileNotFoundError(
-            f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
+    if not launch_target.executable.is_file():
+        install_hint = (
+            " Run `cd apps/minds && pnpm install` first." if launch_target == DEV_CHECKOUT_LAUNCH_TARGET else ""
         )
+        raise FileNotFoundError(f"Electron executable missing at {launch_target.executable}.{install_hint}")
 
     with _user_data_dir_for_launch(user_data_dir) as launch_user_data_dir:
         cmd = [
-            str(_ELECTRON_BINARY),
-            str(_ELECTRON_MAIN_JS),
+            str(launch_target.executable),
+            *([str(launch_target.main_js)] if launch_target.main_js is not None else []),
             f"--remote-debugging-port={debug_port}",
             # A fresh, throwaway profile per launch unless the caller keeps one.
             # Electron's single-instance lock is keyed on the user-data-dir;
@@ -481,12 +513,13 @@ def _launched_electron(
             # the binary we drive is a dev-mode Electron launched against
             # our own backend, not a downloaded one.
             "--no-sandbox",
+            *launch_target.extra_arguments,
         ]
         logger.info("Launching Electron: {}", " ".join(cmd))
         process = subprocess.Popen(
             cmd,
             cwd=str(host_config_dir or _REPO_ROOT),
-            env=_build_electron_env(workspace_git_url, extra_env),
+            env=_build_electron_env(workspace_git_url, extra_env, base_env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Own session/process group so teardown can signal the whole tree.
@@ -510,11 +543,11 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     last_error: str | None = None
     while time.monotonic() < deadline:
         try:
-            response = httpx.get(f"http://127.0.0.1:{debug_port}/json/version", timeout=2.0)
+            response = httpx2.get(f"http://127.0.0.1:{debug_port}/json/version", timeout=2.0)
             if response.status_code == 200:
                 return
             last_error = f"status={response.status_code}"
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx2.HTTPError, OSError) as exc:
             last_error = repr(exc)
         threading.Event().wait(timeout=0.5)
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
@@ -623,37 +656,6 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
-def destroy_agent_best_effort(workspace_name: str) -> None:
-    """Tear down the mngr agent created during a run. Always survives.
-
-    ``mngr destroy`` may legitimately fail (e.g. the run crashed before
-    create succeeded, the docker daemon stopped). We log and swallow.
-
-    The snapshot script does NOT call it -- the whole point of the snapshot
-    is to capture the sandbox with the agent alive.
-    """
-    cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
-    logger.info("Cleanup: {}", " ".join(cmd))
-    try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(_REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("mngr destroy {} raised {!r}", workspace_name, exc)
-        return
-    if completed.returncode != 0:
-        logger.warning(
-            "mngr destroy {} exited {} (stderr: {})",
-            workspace_name,
-            completed.returncode,
-            completed.stderr.strip(),
-        )
-
-
 class WorkspaceCreateAttemptFailedError(RuntimeError):
     """Raised when the Electron create flow surfaces its failure view.
 
@@ -675,7 +677,7 @@ def _read_failure_message(page: Page) -> str:
     return message or "unknown error: the '#error-message' element was empty"
 
 
-def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
+def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
     """Block until the create flow reaches the workspace or reports failure; return the workspace frame.
 
     The create flow has two mutually exclusive terminal states after the create
@@ -731,23 +733,21 @@ def drive_create_flow(
     default_workspace_template_path: Path,
     workspace_name: str,
     launch_mode: str = "DOCKER",
-    account_label: str | None = None,
     region: str | None = None,
 ) -> Frame:
     """Drive the create form to a ready workspace; return the workspace frame.
 
     ``page`` is the chrome page the form is driven on; the ready workspace
     opens inside that page's sandboxed content iframe, whose frame this
-    returns (see ``_wait_for_workspace_ready_or_failure``).
+    returns (see ``wait_for_workspace_ready_or_failure``).
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
-    LIMA, AWS, ...). ``account_label`` optionally selects an imbue_cloud account
-    (by visible option text) before submitting. ``region`` selects the machine
-    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
-    form for those modes and ignored (the row is hidden) for others.
+    LIMA, AWS, ...). ``region`` selects the machine region for region-aware
+    modes (aws/vultr/imbue_cloud); it is required by the form for those modes
+    and ignored (the row is hidden) for others.
 
     There is no AI-provider or API-key field: workspaces boot unauthenticated
     and sign in through the workspace's own provider chooser afterwards.
@@ -761,12 +761,10 @@ def drive_create_flow(
 
     # The form defaults to the "Imbue Cloud" preset (cloud compute / backup)
     # for everyone, including signed-out users. Submitting with a cloud provider
-    # but no account opens the sign-in modal instead of creating. When this run
-    # has no account, pick the "local" preset card first so the backup provider
-    # is the non-cloud set (the compute mode is overridden below);
-    # account-based modes pass ``account_label`` and keep the cloud defaults.
-    if account_label is None:
-        page.click('[data-preset="local"]')
+    # but no account opens the sign-in modal instead of creating, so pick the
+    # "local" preset card first: it switches the backup provider to the
+    # non-cloud set (the compute mode is overridden below).
+    page.click('[data-preset="local"]')
 
     # The repo field, the workspace-name field, and the compute-provider
     # controls all live in the create form's advanced configuration view,
@@ -779,10 +777,6 @@ def drive_create_flow(
 
     _ensure_field_value(page, "#host_name", workspace_name)
     _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
-    # Optionally select an imbue_cloud account (by visible label) before
-    # picking the compute mode -- some modes/tiers require a real account.
-    if account_label is not None:
-        page.select_option("#account_id", label=account_label)
     # Select the requested compute provider. With no account selected the
     # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
     # lives in the (now-open) advanced configuration view.
@@ -807,7 +801,7 @@ def drive_create_flow(
     # fails this run fast with the surfaced error rather than blocking the whole
     # navigation budget. The ready workspace opens inside the chrome page's
     # content iframe once the page routes onto /workspace/<id>.
-    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+    workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
 
     workspace_page.wait_for_selector(
@@ -830,6 +824,10 @@ def _attach_renderer_diagnostics(page: Page) -> None:
     """
     page.on("console", lambda message: logger.debug("[renderer console:{}] {}", message.type, message.text))
     page.on("pageerror", lambda error: logger.warning("[renderer pageerror] {}", error))
+    # A frame that navigates in place keeps its handle but loses its document, which a wait on it
+    # then never finds; naming each navigation is what tells that apart from a page that is slow.
+    page.on("framenavigated", lambda frame: logger.info("[renderer framenavigated] {}", frame.url))
+    page.on("framedetached", lambda frame: logger.info("[renderer framedetached] {}", frame.url))
     page.on(
         "requestfailed",
         lambda request: logger.warning("[renderer requestfailed] {} ({})", request.url, request.failure),
@@ -842,7 +840,6 @@ def _attempt_create_workspace_via_electron(
     debug_port: int,
     host_config_dir: Path | None,
     launch_mode: str = "DOCKER",
-    account_label: str | None = None,
     region: str | None = None,
     on_workspace_ready: Callable[[Frame], None] | None = None,
 ) -> None:
@@ -878,7 +875,6 @@ def _attempt_create_workspace_via_electron(
                     default_workspace_template_path,
                     workspace_name,
                     launch_mode=launch_mode,
-                    account_label=account_label,
                     region=region,
                 )
                 if on_workspace_ready is not None:
@@ -889,11 +885,13 @@ def _attempt_create_workspace_via_electron(
 
 @contextmanager
 def electron_app_session(
-    workspace_git_url: Path,
+    workspace_git_url: Path | None,
     debug_port: int,
     host_config_dir: Path | None = None,
     extra_env: Mapping[str, str] | None = None,
     user_data_dir: Path | None = None,
+    launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
+    base_env: Mapping[str, str] | None = None,
 ) -> Iterator[tuple[Browser, Page]]:
     """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
 
@@ -907,15 +905,21 @@ def electron_app_session(
     The same caller contract as :func:`create_workspace_via_electron` applies
     (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
     pytest config guard). ``workspace_git_url`` only seeds the create form's
-    repo prefill; sessions that never open the create form still need a real
-    path here. ``extra_env`` and ``user_data_dir`` are handed to every launch
-    (see :func:`_launched_electron`).
+    repo prefill; ``None`` leaves the form on the app's published defaults.
+    ``extra_env``, ``user_data_dir``, ``launch_target`` and ``base_env`` are
+    handed to every launch (see :func:`_launched_electron`).
     """
     last_error: _ElectronConnectError | None = None
     for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
         attempt_port = debug_port if attempt == 1 else find_free_port()
         with _launched_electron(
-            workspace_git_url, attempt_port, host_config_dir, extra_env=extra_env, user_data_dir=user_data_dir
+            workspace_git_url,
+            attempt_port,
+            host_config_dir,
+            extra_env=extra_env,
+            user_data_dir=user_data_dir,
+            launch_target=launch_target,
+            base_env=base_env,
         ):
             with sync_playwright() as playwright:
                 try:
@@ -949,17 +953,15 @@ def create_workspace_via_electron(
     debug_port: int,
     host_config_dir: Path | None = None,
     launch_mode: str = "DOCKER",
-    account_label: str | None = None,
     region: str | None = None,
     on_workspace_ready: Callable[[Frame], None] | None = None,
 ) -> None:
     """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
-    LIMA, AWS, ...). ``account_label`` optionally selects an imbue_cloud account
-    (by visible option text) before submitting. ``region`` selects the machine
-    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
-    form for those modes and ignored (the row is hidden) for others.
+    LIMA, AWS, ...). ``region`` selects the machine region for region-aware
+    modes (aws/vultr/imbue_cloud); it is required by the form for those modes
+    and ignored (the row is hidden) for others.
 
     ``on_workspace_ready`` is called with the workspace (content-view) page once
     the workspace has rendered, before teardown -- e.g. to send a chat message and
@@ -997,7 +999,6 @@ def create_workspace_via_electron(
                 attempt_port,
                 host_config_dir,
                 launch_mode=launch_mode,
-                account_label=account_label,
                 region=region,
                 on_workspace_ready=on_workspace_ready,
             )
@@ -1015,17 +1016,10 @@ def create_workspace_via_electron(
     )
 
 
-# Full workspace lifecycle flow (create -> message -> new chat -> terminal -> home -> destroy)
-#
-# These build on the create primitives above to drive the *entire* user journey
-# the desktop client exists for, keeping the browser attached across every step
-# so they can act on both Electron web surfaces: the workspace *content* view
-# (the desktop's chat and terminal windows) and the *chrome* view (Home button). Used by
-# ``scripts/electron_full_flow_e2e.py`` (wrapped in xvfb via
-# ``just minds-test-electron-flow``) to verify the v1 lifecycle/destroy routes
-# end-to-end against a real local-Docker workspace.
+# Helpers that drive a ready workspace's desktop, once the create primitives
+# above have opened it.
 
-_FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
+_SCREENSHOT_DIR: Final[Path] = Path("/tmp/minds-electron-e2e")
 CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # A sent message as the chat page shows it: the optimistic pending bubble, or the committed user turn.
 USER_TURN_SELECTOR: Final[str] = ".pending-message, .message.message-user"
@@ -1045,10 +1039,10 @@ _LAUNCHER_FIELD_SELECTOR: Final[str] = "[data-launcher-field]"
 _LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] textarea"
 _LAUNCHER_OVERLAY_SELECTOR: Final[str] = "[data-launcher-overlay]"
 NEW_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:new"]'
+# The chat's ``main`` launch path, "Send to main chat".
+MAIN_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:main"]'
 NEW_TERMINAL_ROW_SELECTOR: Final[str] = '[data-launch="terminal:new"]'
 _LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
-# How long the shell gets to frame the new chat's page after the row is pressed.
-_NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # Terminal windows' pages are cross-origin iframes at the terminal service's own
 # origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
 # (a random per-service suffix), so the origin is
@@ -1062,107 +1056,26 @@ TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe
 # take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
-_DESTROY_TIMEOUT_SECONDS: Final[int] = 300
-# The titlebar Home button's handler exists only once the SPA titlebar
-# (frontend/src/views/shell/Titlebar.ts) has mounted, and the page navigates
-# several times during the flow; an early click can land before the SPA is
-# mounted and silently no-op, so we re-pick the chrome view and retry,
-# allowing _NAV_SETTLE_SECONDS for each click to take.
-_HOME_CLICK_ATTEMPTS: Final[int] = 6
-_NAV_SETTLE_SECONDS: Final[int] = 12
 
 
 class WorkspaceFlowError(RuntimeError):
-    """Raised when a step of the full Electron workspace flow does not reach its expected state."""
+    """Raised when a step driving the Electron workspace does not reach its expected state."""
 
 
-def _flow_screenshot(target: Page | Frame, name: str) -> None:
-    """Save a screenshot for post-hoc debugging of a flow step; never raise.
+def _debug_screenshot(target: Page | Frame, name: str) -> None:
+    """Save a screenshot for post-hoc debugging of an e2e step; never raise.
 
     Accepts either a Page or a Frame (the workspace surface is a frame of the
-    chrome page now); a frame's screenshot is taken from its owning page.
+    chrome page); a frame's screenshot is taken from its owning page.
     """
     try:
-        _FLOW_SHOT_DIR.mkdir(parents=True, exist_ok=True)
-        path = _FLOW_SHOT_DIR / f"{name}.png"
+        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        path = _SCREENSHOT_DIR / f"{name}.png"
         page = target.page if isinstance(target, Frame) else target
         page.screenshot(path=str(path), full_page=False)
         logger.info("Saved screenshot {}", path)
     except (PlaywrightError, OSError) as exc:
         logger.warning("Could not screenshot {}: {!r}", name, exc)
-
-
-def drive_create_docker_imbue_workspace(
-    browser: Browser, page: Page, default_workspace_template_path: Path, workspace_name: str
-) -> Frame:
-    """Fill + submit the create form for a local-Docker workspace with an Imbue account.
-
-    Local Docker compute keeps the workspace on this machine; the selected
-    account only associates the workspace for compute/backups -- the create
-    flow injects no AI credentials, so a chat reply relies on the operator's
-    synced Claude subscription credentials keeping the workspace
-    authenticated. Backups are deferred to keep create fast.
-
-    ``page`` is the chrome page the form is driven on; returns the workspace
-    frame (the chrome page's content iframe) the ready workspace opens in.
-    """
-    backend_origin = backend_origin_from_page(page)
-    logger.info("Backend origin: {}", backend_origin)
-    page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
-    page.wait_for_selector("#create-form", state="attached", timeout=10_000)
-
-    # Reveal the repo field (lives in the collapsed Configure -> advanced section).
-    page.click("#configure-toggle")
-    page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
-    page.click("#toggle-advanced")
-    page.wait_for_selector("#git_url:visible", timeout=5_000)
-
-    _ensure_field_value(page, "#host_name", workspace_name)
-    _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
-
-    # An account must be selected for Imbue-Cloud compute/backup. The form
-    # pre-selects the env's default account; if it is empty, pick the first
-    # real account (we reset compute to DOCKER below).
-    account_value = page.input_value("#account_id")
-    if not account_value:
-        option_values = page.eval_on_selector_all(
-            "#account_id option", "opts => opts.map(o => o.value).filter(v => v !== '')"
-        )
-        if not option_values:
-            raise WorkspaceFlowError("No Imbue-Cloud account available; activate an env with a logged-in account.")
-        logger.info("No default account selected; choosing {!r}", option_values[0])
-        page.select_option("#account_id", option_values[0])
-
-    # Order matters: set backup first, compute (DOCKER) last so it wins.
-    page.select_option("#backup_provider", "CONFIGURE_LATER")
-    page.select_option("#launch_mode", "DOCKER")
-
-    resolved = {
-        "account": page.input_value("#account_id"),
-        "launch_mode": page.input_value("#launch_mode"),
-        "backup_provider": page.input_value("#backup_provider"),
-    }
-    logger.info("Create form resolved to: {}", resolved)
-    if resolved["launch_mode"] != "DOCKER" or not resolved["account"]:
-        raise WorkspaceFlowError(f"Create form did not settle on Docker+account: {resolved}")
-
-    _flow_screenshot(page, "01-create-form-filled")
-    logger.info("Submitting create form")
-    page.click("#create-submit")
-
-    # Submitting starts create attempt in the background and lands on the
-    # creating/loading page, which streams progress and redirects into
-    # the workspace once the create attempt completes.
-    page.wait_for_selector("#creating", state="attached", timeout=10_000)
-
-    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Machine ready at {}", workspace_page.url)
-    workspace_page.wait_for_selector(
-        DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
-    )
-    logger.info("system_interface desktop rendered")
-    _flow_screenshot(workspace_page, "02-workspace-desktop")
-    return workspace_page
 
 
 def workspace_coordinate_from_subdomain(url: str) -> str:
@@ -1178,30 +1091,6 @@ def workspace_coordinate_from_subdomain(url: str) -> str:
         if label.startswith(("host-", "agent-")):
             return label
     raise WorkspaceFlowError(f"No workspace coordinate label in workspace-origin URL: {url!r}")
-
-
-def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate: str) -> str:
-    """Resolve the agent id for a workspace-origin coordinate.
-
-    An ``agent-<hex>`` coordinate already IS the workspace's agent id; a legacy
-    ``host-<hex>`` coordinate needs the one host->agent translation (the v1 API
-    and the settings routes are agent-keyed).
-    """
-    if coordinate.startswith("agent-"):
-        return coordinate
-    content_page.goto(backend_origin + "/", wait_until="domcontentloaded")
-    rows = content_page.evaluate(
-        """(args) =>
-            fetch(args.origin + '/api/v1/workspaces')
-              .then((r) => (r.ok ? r.json() : []))
-              .then((body) => (Array.isArray(body.workspaces) ? body.workspaces : body))
-        """,
-        {"origin": backend_origin},
-    )
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict) and row.get("host_id") == coordinate and row.get("agent_id"):
-            return str(row["agent_id"])
-    raise WorkspaceFlowError(f"No workspace with host id {coordinate!r} in /api/v1/workspaces")
 
 
 def descendant_frames(frame: Frame) -> list[Frame]:
@@ -1229,6 +1118,11 @@ def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
     return matched
 
 
+def find_chat_frame(workspace: Page | Frame, chat_id: str) -> Frame | None:
+    """The frame of the page showing chat ``chat_id`` inside the workspace, or None while no page shows it."""
+    return next((frame for frame, frame_chat_id in _chat_frames_with_ids(workspace) if frame_chat_id == chat_id), None)
+
+
 def _find_chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[str]) -> Frame | None:
     """The first chat page's frame whose chat is not among ``known_chat_ids``, or None while there is none."""
     return next((frame for frame, chat_id in _chat_frames_with_ids(workspace) if chat_id not in known_chat_ids), None)
@@ -1250,50 +1144,32 @@ def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[st
     return chat
 
 
-def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
+def chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
     """The first chat page's frame inside the workspace, once the workspace has opened one.
+
+    A fresh workspace opens on the welcome chat the creation page seeded, so
+    that is the frame this returns -- and it returns before the composer
+    renders, which is what a caller that has to sign the chat in first needs.
 
     Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
     """
     return _chat_frame_other_than(workspace, frozenset(), timeout_seconds)
 
 
-def start_new_chat_from_launcher(
-    workspace: Page | Frame, timeout_seconds: float = _NEW_CHAT_FRAME_TIMEOUT_SECONDS
-) -> Frame:
-    """Run the chat app's ``new`` launch path from the launcher's row and return the frame of the chat it opened.
+def send_to_main_chat_from_launcher(workspace: Page | Frame, text: str) -> None:
+    """Type ``text`` into the taskbar's launcher field and press Enter, which sends it to the workspace's main chat.
 
-    The desktop points the chat's pinned window at the launch path (or opens a window there when the
-    desktop has none); the chat root there mints a chat (or offers the provider chooser when nothing
-    is signed in) and frames its page. A workspace opens on the welcome chat the creation page
-    seeded, so the new chat is the frame that was not there before the press.
+    Focusing the field opens the launcher; Enter runs the highlighted row, so the press waits until that is the
+    main chat's row.
     """
-    # The row arrives with the shell's app list, which is also what frames the welcome chat, so
-    # the chats already open are counted only once the row is on screen.
-    visible_row_selector = _reveal_launcher_row(workspace, NEW_CHAT_ROW_SELECTOR)
-    known_chat_ids = frozenset(chat_id for _frame, chat_id in _chat_frames_with_ids(workspace))
-    workspace.click(visible_row_selector)
-    logger.info("Started a new chat from the launcher; waiting up to {:.0f}s for its frame", timeout_seconds)
-    return _chat_frame_other_than(workspace, known_chat_ids, timeout_seconds)
-
-
-def _message_welcome_chat(page: Page | Frame, token: str) -> None:
-    """The full flow's message step: message the welcome chat the workspace opened on and wait for the reply.
-
-    The creation page seeded that chat with the onboarding conversation, so its composer is the
-    workspace's first chat input, and the message sent there launches the chat's first agent.
-    The full flow signs nothing in (its workspace runs on synced account credentials), so no
-    provider chooser opens and the reply is the next thing to wait for.
-    """
-    _send_message_and_await_reply(page, token)
-
-
-def _start_new_chat(page: Page | Frame) -> None:
-    """The full flow's launcher step: start a second chat from the launcher's row and wait for its composer."""
-    chat = start_new_chat_from_launcher(page)
-    chat.wait_for_selector(CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
-    logger.info("The chat started from the launcher shows its composer at {}", chat.url)
-    _flow_screenshot(page, "04b-new-chat-from-launcher")
+    workspace.fill(_LAUNCHER_INPUT_SELECTOR, text)
+    workspace.wait_for_selector(
+        f'{visible_launcher_row_selector(MAIN_CHAT_ROW_SELECTOR)}[data-highlighted="true"]',
+        state="visible",
+        timeout=_LAUNCHER_ROW_TIMEOUT_SECONDS * 1000,
+    )
+    workspace.press(_LAUNCHER_INPUT_SELECTOR, "Enter")
+    logger.info("Sent a text to the main chat from the launcher")
 
 
 # The welcome chat's window in the desktop shell: the chat app's pinned window, the one
@@ -1307,9 +1183,10 @@ def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
     The shell shields every window but the focused one and makes the pages under the
     shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
     intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
-    that would raise it. A fresh workspace opens two windows -- the welcome chat and the
-    Getting Started app -- and which lands on top is a race, so take the shell's own
-    two-step: press the shield, then act on the page.
+    that would raise it. A fresh workspace opens on the welcome chat alone and focused, so
+    the chat is normally unshielded and this returns at once; the shell shields it when
+    another window is shown above it or a menu or the launcher is open, and then the
+    shell's own two-step raises it: press the shield, then act on the page.
     """
     shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
     if shield is None:
@@ -1319,13 +1196,30 @@ def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
     workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
 
 
+def _describe_chat_frame(chat: Frame) -> str:
+    """The chat frame's URL and the start of its document's text, for a failure that found nothing in it."""
+    try:
+        body = chat.evaluate(
+            "() => document.title + ' | ' + (document.body ? document.body.innerText : '').slice(0, 400)"
+        )
+    except PlaywrightError as exc:
+        body = f"<unreadable: {exc}>"
+    return f"url={chat.url} detached={chat.is_detached()} document={body!r}"
+
+
 def _click_in_chat(workspace: Page | Frame, chat: Frame, selector: str, *, label: str) -> None:
     """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
     try:
         chat.click(selector, timeout=10_000)
     except PlaywrightTimeoutError:
         _raise_chat_window(workspace, label=label)
-        chat.click(selector, timeout=20_000)
+        try:
+            chat.click(selector, timeout=20_000)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "[{}] could not click {} in the chat's page: {}", label, selector, _describe_chat_frame(chat)
+            )
+            raise
 
 
 def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
@@ -1334,8 +1228,9 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     A freshly created workspace has no provider accounts, so its welcome chat (the
     conversation the creation page seeded) disables its composer and opens the chooser in
     that chat's page -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, and enables the composer;
-    the chat's first send then launches its agent on that account.
+    holding the key rather than writing a shared settings block, launches the chat's agent on
+    that account, and enables the composer; a message sent before the chat app has reported
+    the chat creating waits for the chat and goes to it.
 
     Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
     tailwind class: this drives the template's dialog from the other repo, so it has to
@@ -1344,6 +1239,16 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
     chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
     _raise_chat_window(workspace, label=label)
+    # Try again shows only once the chooser has stopped asking for its provider list by itself;
+    # press it the way a user would.
+    chat.wait_for_selector("[data-e2e=lane-anthropic], [data-e2e=retry-providers]", timeout=60_000)
+    if chat.query_selector("[data-e2e=lane-anthropic]") is None:
+        logger.warning(
+            "[{}] the chooser could not load its providers; pressing Try again: {!r}",
+            label,
+            chat.inner_text("[data-e2e=provider-chooser]"),
+        )
+        _click_in_chat(workspace, chat, "[data-e2e=retry-providers]", label=label)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
     # the lane's primary method is the browser sign-in, which needs a human. When the
     # desktop app relays that sign-in, the chooser waits on the browser, and the other
@@ -1358,16 +1263,9 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
     _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
-    # A sign-in with nothing more to say closes the chooser by itself; one whose success carries a
-    # detail stays on its success screen until Done.
-    chat.wait_for_function(
-        "() => document.querySelector('[data-e2e=provider-chooser]') === null"
-        " || document.querySelector('[data-e2e=status-success]') !== null",
-        timeout=300_000,
-    )
-    if chat.query_selector("[data-e2e=status-success]") is not None:
-        _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
-        chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
+    # An accepted key closes the chooser by itself, which ends the sign-in. The success screen it
+    # can show on the way out is not a step: its Done may be gone before a click lands.
+    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=300_000)
     logger.info("[{}] signed in via the chooser", label)
 
 
@@ -1375,7 +1273,7 @@ def wait_for_chat_input(page: Page | Frame) -> Frame:
     """The first chat's frame inside the workspace, once its composer is visible."""
     logger.info("Waiting up to {}s for the first chat's frame and its input", _CHAT_INPUT_TIMEOUT_SECONDS)
     input_deadline = time.monotonic() + _CHAT_INPUT_TIMEOUT_SECONDS
-    chat = _chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
+    chat = chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
     # Playwright reads a zero timeout as "wait forever", so the remainder is floored.
     input_wait_seconds = max(input_deadline - time.monotonic(), 1.0)
     logger.info("Chat frame at {}; waiting up to {:.0f}s for its input", chat.url, input_wait_seconds)
@@ -1391,8 +1289,12 @@ def send_chat_message(chat: Frame, page: Page | Frame, token: str) -> None:
     logger.info("Sent chat message with token {}", token)
     # The user turn should render (optimistic pending bubble or a committed user
     # message) almost immediately -- proves the chat round-trips through the proxy.
-    chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=30_000)
-    _flow_screenshot(page, "03-message-sent")
+    try:
+        chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=30_000)
+    except PlaywrightTimeoutError:
+        logger.warning("The sent message never rendered in the chat's page: {}", _describe_chat_frame(chat))
+        raise
+    _debug_screenshot(page, "message-sent")
 
 
 def await_chat_reply(chat: Frame, page: Page | Frame, token: str) -> None:
@@ -1410,14 +1312,7 @@ def await_chat_reply(chat: Frame, page: Page | Frame, token: str) -> None:
         timeout=_CHAT_REPLY_TIMEOUT_SECONDS * 1000,
     )
     logger.info("Agent reply echoed the token; chat works end-to-end")
-    _flow_screenshot(page, "04-reply-received")
-
-
-def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
-    """Type a unique-token prompt into the workspace's chat and wait for the reply to echo it."""
-    chat = wait_for_chat_input(page)
-    send_chat_message(chat, page, token)
-    await_chat_reply(chat, page, token)
+    _debug_screenshot(page, "reply-received")
 
 
 def launcher_opener_selector(workspace: Page | Frame) -> str:
@@ -1435,247 +1330,3 @@ def visible_launcher_row_selector(row_selector: str) -> str:
     """The row as it is found inside the showing launcher; rows render only inside the menu, so a wait
     scoped this way also confirms the launcher came up."""
     return f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {row_selector}"
-
-
-def _reveal_launcher_row(workspace: Page | Frame, row_selector: str) -> str:
-    """Bring a launcher row on screen, opening the launcher first when it is not showing; returns the selector
-    naming the row there."""
-    if workspace.query_selector(f"{_LAUNCHER_OVERLAY_SELECTOR}:visible") is None:
-        workspace.click(launcher_opener_selector(workspace))
-    visible_row_selector = visible_launcher_row_selector(row_selector)
-    workspace.wait_for_selector(visible_row_selector, state="visible", timeout=_LAUNCHER_ROW_TIMEOUT_SECONDS * 1000)
-    return visible_row_selector
-
-
-def _press_launcher_row(workspace: Page | Frame, row_selector: str) -> None:
-    """Run an app launch path from the launcher's row, opening the launcher first when it is not showing."""
-    workspace.click(_reveal_launcher_row(workspace, row_selector))
-
-
-def open_terminal_from_launcher(workspace: Page | Frame) -> None:
-    """Run the terminal app's ``new`` launch path from the launcher and wait for the terminal's frame."""
-    _press_launcher_row(workspace, NEW_TERMINAL_ROW_SELECTOR)
-    workspace.wait_for_selector(TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
-    logger.info("Terminal iframe present")
-
-
-def _open_terminal(page: Page | Frame) -> None:
-    """The full flow's terminal step: open a terminal from the launcher and record the screenshot."""
-    open_terminal_from_launcher(page)
-    _flow_screenshot(page, "05-terminal-open")
-
-
-def _verify_v1_lifecycle(content_page: Page, backend_origin: str, agent_id: str) -> None:
-    """Round-trip the v1 stop/start lifecycle, exercising ``perform_mind_host_action``.
-
-    POSTs ``/api/v1/workspaces/<id>/stop`` then ``/start`` (same-origin fetch so
-    the session cookie authenticates), asserting each returns 200 with the
-    expected optimistic ``host_state`` and leaving the host RUNNING for the
-    subsequent home + destroy steps.
-    """
-    # Be on the backend origin so the relative fetch is same-origin (cookie auth).
-    content_page.goto(backend_origin + "/", wait_until="domcontentloaded")
-    for verb, expected_state in (("stop", "STOPPED"), ("start", "RUNNING")):
-        logger.info("v1 lifecycle: POST /api/v1/workspaces/<id>/{}", verb)
-        result = content_page.evaluate(
-            """async (args) => {
-                const r = await fetch(args.origin + '/api/v1/workspaces/' + args.aid + '/' + args.verb,
-                                      {method: 'POST'});
-                return {status: r.status, body: await r.text()};
-            }""",
-            {"origin": backend_origin, "aid": agent_id, "verb": verb},
-        )
-        if result["status"] != 200:
-            raise WorkspaceFlowError(f"v1 {verb} returned HTTP {result['status']}: {result['body']}")
-        if expected_state not in result["body"]:
-            raise WorkspaceFlowError(f"v1 {verb} did not report {expected_state}: {result['body']}")
-        logger.info("v1 {} -> {}", verb, result["body"])
-    _flow_screenshot(content_page, "05b-lifecycle")
-
-
-def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, workspace_name: str) -> None:
-    """Click the titlebar Home button (retrying) and confirm the window lands home.
-
-    The Home button lives on the same chrome page as everything else now; its
-    handler exists once the SPA titlebar has mounted, and the page can be
-    mid-navigation when we click, so we retry, polling the page URL for the
-    landing navigation.
-    """
-    del browser
-    landing_targets = (backend_origin + "/", backend_origin)
-    for attempt in range(1, _HOME_CLICK_ATTEMPTS + 1):
-        chrome_page = content_page
-        try:
-            chrome_page.wait_for_selector("#home-btn", state="visible", timeout=10_000)
-            chrome_page.click("#home-btn")
-        except (PlaywrightError, TimeoutError) as exc:
-            logger.warning("Home-button click attempt {} failed: {!r}", attempt, exc)
-            continue
-        logger.info("Clicked chrome Home button (attempt {})", attempt)
-        deadline = time.monotonic() + _NAV_SETTLE_SECONDS
-        while time.monotonic() < deadline:
-            if content_page.url in landing_targets:
-                # The workspace still exists at this point, so home is the
-                # populated landing list (not the empty-state create page).
-                content_page.wait_for_function(
-                    "(name) => document.body && document.body.innerText.includes(name)",
-                    arg=workspace_name,
-                    timeout=20_000,
-                )
-                logger.info("Landed on home; machine {!r} is listed", workspace_name)
-                _flow_screenshot(content_page, "06-home-landing")
-                return
-            threading.Event().wait(timeout=0.5)
-        logger.warning("Home click attempt {} did not navigate content (at {}); retrying", attempt, content_page.url)
-    raise WorkspaceFlowError(f"Content view did not navigate home after {_HOME_CLICK_ATTEMPTS} Home-button clicks")
-
-
-def _resolve_workspace_agent_id(content_page: Page, workspace_name: str) -> str:
-    """Read the canonical agent id of our workspace from its landing-page row."""
-    agent_id = content_page.eval_on_selector_all(
-        "[data-agent-id]",
-        """(els, name) => {
-            for (const el of els) {
-                if (el.innerText && el.innerText.includes(name)) return el.getAttribute('data-agent-id');
-            }
-            return null;
-        }""",
-        workspace_name,
-    )
-    if not agent_id:
-        raise WorkspaceFlowError(f"No landing row with data-agent-id for workspace {workspace_name!r}")
-    logger.info("Resolved machine {!r} -> agent id {}", workspace_name, agent_id)
-    return agent_id
-
-
-def _destroy_via_settings(content_page: Page, backend_origin: str, agent_id: str, workspace_name: str) -> None:
-    """Open the machine-settings overlay and run the destroy flow; confirm it leaves the list."""
-    settings_url = f"{backend_origin}/workspace/{agent_id}/options?tab=settings"
-    logger.info("Navigating to settings: {}", settings_url)
-    content_page.goto(settings_url, wait_until="domcontentloaded")
-    content_page.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
-    _flow_screenshot(content_page, "07-settings")
-    # Click Destroy -> Confirm, which POSTs the v1 destroy. We do NOT gate on the
-    # confirm handler's ``window.location.href = '/'`` redirect: in the Electron
-    # managed content view that in-page navigation is intercepted/flaky (the POST
-    # still fires server-side -- "Started detached destroy ..." in the backend
-    # log). The authoritative success signal is the workspace leaving the landing
-    # list, which we verify by re-navigating there ourselves below.
-    content_page.click("#destroy-btn")
-    content_page.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
-    content_page.click("#destroy-confirm-btn")
-    logger.info("Confirmed destroy (v1 POST fired); polling for the machine to leave the landing list")
-    _flow_screenshot(content_page, "08-after-destroy-initiated")
-    # Brief settle so the detached destroy is registered before the first poll
-    # (and so we don't navigate away before the confirm handler's POST is sent).
-    threading.Event().wait(timeout=3)
-    logger.info("Waiting up to {}s for the machine to leave the landing list", _DESTROY_TIMEOUT_SECONDS)
-    landing_url = backend_origin + "/"
-    deadline = time.monotonic() + _DESTROY_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        content_page.goto(landing_url, wait_until="domcontentloaded")
-        still_present = content_page.eval_on_selector_all(
-            "[data-agent-id]",
-            "(els, aid) => els.some(el => el.getAttribute('data-agent-id') === aid)",
-            agent_id,
-        )
-        if not still_present:
-            logger.info("Machine {} no longer on the landing page; destroy complete", agent_id)
-            _flow_screenshot(content_page, "09-destroy-complete")
-            return
-        threading.Event().wait(timeout=5)
-    raise WorkspaceFlowError(f"Workspace {agent_id} still listed after {_DESTROY_TIMEOUT_SECONDS}s")
-
-
-def _run_flow_step(results: dict[str, str], name: str, page: Page | Frame, action: Callable[[], None]) -> None:
-    """Run one flow step, recording PASS/FAIL and screenshotting on failure."""
-    logger.info("=== {} ===", name)
-    try:
-        action()
-    except (PlaywrightError, RuntimeError, TimeoutError, AssertionError) as exc:
-        logger.opt(exception=exc).error("STEP FAILED: {}", name)
-        _flow_screenshot(page, f"FAIL-{name.replace(' ', '_').replace(':', '')}")
-        results[name] = f"FAIL: {exc!r}"
-        return
-    results[name] = "PASS"
-
-
-def run_full_workspace_flow(
-    default_workspace_template_path: Path, workspace_name: str, token: str, debug_port: int
-) -> tuple[dict[str, str], str | None]:
-    """Drive create -> message -> new chat -> terminal -> home -> destroy; return per-step results + agent id.
-
-    The returned agent id (canonical ``agent-<hex>``) lets the caller's cleanup
-    tear the host down even when the in-flow destroy step did not run.
-
-    Create is fatal -- the rest need a live workspace. The remaining steps each
-    run independently and record their own PASS/FAIL, so a single run surfaces
-    the full picture (they only need the workspace to exist, not the prior step
-    to have passed).
-    """
-    results: dict[str, str] = {}
-    agent_id: str | None = None
-    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir=None):
-        with sync_playwright() as playwright:
-            _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-            browser = playwright.chromium.connect_over_cdp(
-                f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
-            )
-            try:
-                content_page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                backend_origin = backend_origin_from_page(content_page)
-
-                logger.info("=== STEP 1: create local Docker machine ===")
-                # The create form is driven on the chrome view (content_page); the
-                # ready workspace opens on the content view (workspace_page). The
-                # desktop steps (message, new chat, terminal) and the agent-id read run
-                # on workspace_page; the chrome-surface steps below (home, landing,
-                # settings/destroy) stay on content_page.
-                workspace_page = drive_create_docker_imbue_workspace(
-                    browser, content_page, default_workspace_template_path, workspace_name
-                )
-                results["STEP 1 create"] = "PASS"
-                workspace_coordinate = workspace_coordinate_from_subdomain(workspace_page.url)
-                logger.info("Workspace coordinate (from subdomain): {}", workspace_coordinate)
-                agent_id = _agent_id_for_coordinate(content_page, backend_origin, workspace_coordinate)
-                logger.info("Workspace agent id: {}", agent_id)
-
-                _run_flow_step(
-                    results,
-                    "STEP 2 message",
-                    workspace_page,
-                    lambda: _message_welcome_chat(workspace_page, token),
-                )
-                _run_flow_step(results, "STEP 3 new chat", workspace_page, lambda: _start_new_chat(workspace_page))
-                _run_flow_step(results, "STEP 4 terminal", workspace_page, lambda: _open_terminal(workspace_page))
-                _run_flow_step(
-                    results,
-                    "STEP 5 lifecycle",
-                    content_page,
-                    lambda: _verify_v1_lifecycle(content_page, backend_origin, agent_id),
-                )
-                _run_flow_step(
-                    results,
-                    "STEP 6 home",
-                    content_page,
-                    lambda: _navigate_home(browser, content_page, backend_origin, workspace_name),
-                )
-                try:
-                    landing_id = _resolve_workspace_agent_id(content_page, workspace_name)
-                    if landing_id != agent_id:
-                        logger.warning("Landing row id {} != subdomain id {}", landing_id, agent_id)
-                    agent_id = landing_id
-                except (PlaywrightError, WorkspaceFlowError) as exc:
-                    logger.warning(
-                        "Could not resolve landing-row agent id ({!r}); using subdomain id {}", exc, agent_id
-                    )
-                resolved_agent_id = agent_id
-                _run_flow_step(
-                    results,
-                    "STEP 7 destroy",
-                    content_page,
-                    lambda: _destroy_via_settings(content_page, backend_origin, resolved_agent_id, workspace_name),
-                )
-            finally:
-                browser.close()
-    return results, agent_id

@@ -132,6 +132,73 @@ def test_user_data_installs_the_every_boot_units() -> None:
     )
 
 
+_FIRSTBOOT_PACKAGE_TOOLS = ("tmux", "git", "jq", "rsync", "curl", "xxd", "flock", "mkfs.btrfs", "inotifywait")
+
+
+def _run_firstboot_package_block(
+    tmp_path: Path, apt_get_exit_code: int
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the first-boot package steps on a guest that already has every package; returns the run and its apt-get calls.
+
+    The surrounding script cannot run in a test (mkfs, mount, systemctl), so the
+    block is sliced out and run verbatim, with the two absolute paths it probes
+    redirected into ``tmp_path`` and every tool it probes for stubbed as present.
+    """
+    user_data = build_qemu_slice_user_data(
+        host_dir="/home/user/.mngr",
+        host_private_key_pem="pem",
+        host_public_key_openssh="ssh-ed25519 AAAAhost",
+        trusted_user_ca_public_key="ssh-ed25519 AAAAtierca minds-dev-ca",
+    )
+    content_by_path = {entry["path"]: entry["content"] for entry in _parse_user_data(user_data)["write_files"]}
+    firstboot = content_by_path["/usr/local/sbin/mngr-slice-firstboot.sh"]
+    end_marker = 'the VM keeps its staged CA bundle" >&2\nfi\n'
+    block = firstboot[firstboot.index('PKGS_TO_INSTALL=""') : firstboot.index(end_marker) + len(end_marker)]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in _FIRSTBOOT_PACKAGE_TOOLS:
+        (bin_dir / tool).write_text("#!/bin/sh\n")
+        (bin_dir / tool).chmod(0o755)
+    apt_calls = tmp_path / "apt-calls"
+    (bin_dir / "apt-get").write_text(f'#!/bin/sh\necho "$*" >> "{apt_calls}"\nexit {apt_get_exit_code}\n')
+    (bin_dir / "apt-get").chmod(0o755)
+    sshd = tmp_path / "sshd"
+    sshd.write_text("#!/bin/sh\n")
+    sshd.chmod(0o755)
+    ca_bundle = tmp_path / "ca-certificates.crt"
+    ca_bundle.write_text("bundle\n")
+    block = block.replace("/usr/sbin/sshd", str(sshd)).replace("/etc/ssl/certs/ca-certificates.crt", str(ca_bundle))
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -eu -o pipefail\napt_get_retry() { apt-get "$@"; }\n' + block + "echo FIRSTBOOT_CONTINUED\n",
+        ],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    return result, apt_calls.read_text().splitlines() if apt_calls.exists() else []
+
+
+def test_firstboot_upgrades_ca_certificates_even_when_every_package_is_present(tmp_path: Path) -> None:
+    # A staged image already carries ca-certificates, so an install-if-missing
+    # step alone would leave a VM on the bundle it was staged with.
+    result, apt_calls = _run_firstboot_package_block(tmp_path, apt_get_exit_code=0)
+
+    assert result.returncode == 0, result.stderr
+    assert apt_calls == ["update -qq", "install -y -qq --only-upgrade ca-certificates"]
+
+
+def test_firstboot_continues_when_the_ca_certificates_upgrade_fails(tmp_path: Path) -> None:
+    result, apt_calls = _run_firstboot_package_block(tmp_path, apt_get_exit_code=100)
+
+    assert result.returncode == 0, result.stderr
+    assert "FIRSTBOOT_CONTINUED" in result.stdout
+    assert "could not upgrade ca-certificates" in result.stderr
+    assert apt_calls == ["update -qq"]
+
+
 def test_meta_data_has_a_stable_instance_id_and_a_valid_hostname() -> None:
     # The stable instance-id is the load-bearing difference from lima: cloud-init
     # must never replay on later boots. Underscored env names must still yield a

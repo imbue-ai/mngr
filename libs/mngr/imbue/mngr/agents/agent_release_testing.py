@@ -37,6 +37,7 @@ from __future__ import annotations
 import abc
 import json
 import subprocess
+from collections import Counter
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -448,7 +449,10 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         _assert_records_conform(records)
         # Every record carries the emitting source, the header included.
         assert all(r["emitter"] == f"{subdir}/common_transcript" for r in records), records
-        assert len({r["event_id"] for r in records}) == len(records), "event_ids must be unique"
+        repeated_event_ids = [
+            event_id for event_id, count in Counter(r["event_id"] for r in records).items() if count > 1
+        ]
+        assert not repeated_event_ids, f"event_ids must be unique; repeated: {repeated_event_ids}"
         if profile.forces_tool_call:
             assert any(
                 c.get("function_name") for r in records if _is_step_from(r, "agent") for c in r.get("tool_calls") or []
@@ -547,8 +551,12 @@ def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str)
     return _read_common_records_in_state_dir(_agent_state_dir_by_name(host_dir, agent_name), subdir)
 
 
+def _user_steps_containing(records: list[dict[str, Any]], token: str) -> list[dict[str, Any]]:
+    return [r for r in records if _is_step_from(r, "user") and token in _step_message(r)]
+
+
 def _count_user_steps_containing(records: list[dict[str, Any]], token: str) -> int:
-    return sum(1 for r in records if _is_step_from(r, "user") and token in _step_message(r))
+    return len(_user_steps_containing(records, token))
 
 
 def _is_delivered_exactly_once(host_dir: Path, subdir: str, agent_name: str, token: str) -> bool:
@@ -731,15 +739,19 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             _send_expecting_success(profile, ctx, agent_name, profile.unknown_slash_command)
             _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
-        # Exactly-once: no token was delivered twice (the engine re-sends Enter,
-        # never the text, so duplicate user steps would mean the gating is
-        # broken). A queued message the TUI injected into the running turn has
-        # no user step at all; one injected delivery counts instead.
+        # Exactly-once: no token was delivered twice. The engine re-sends Enter,
+        # never the text. A queued message the TUI injected into the running turn
+        # has no user step at all; one injected delivery counts instead.
         final_records = _read_common_records(host_dir, subdir)
         for token in [idle_token, busy_token, *rapid_tokens, long_head_token, long_token]:
-            count = _count_user_steps_containing(final_records, token)
-            assert count <= 1, f"expected at most one user-step delivery of {token}, found {count}"
-            if count == 0:
+            deliveries = _user_steps_containing(final_records, token)
+            # The event_ids separate the two causes: one id twice is the transcript
+            # recording a line twice, two ids is the token really being sent twice.
+            assert len(deliveries) <= 1, (
+                f"expected at most one user-step delivery of {token}, found {len(deliveries)}: "
+                f"{[(r['event_id'], r.get('timestamp')) for r in deliveries]}"
+            )
+            if not deliveries:
                 injected = profile.count_injected_deliveries(host_dir, token)
                 assert injected == 1, (
                     f"expected exactly one delivery of {token}, found no user step and {injected} injected deliveries"

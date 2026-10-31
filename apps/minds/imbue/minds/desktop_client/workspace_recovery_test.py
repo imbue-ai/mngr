@@ -22,10 +22,13 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.provider_settings import legacy_imbue_cloud_provider_name_for_account
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
@@ -52,6 +55,7 @@ from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -70,6 +74,7 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
+from imbue.minds.desktop_client.workspace_recovery import _log_recovery_step_failure_context
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_recovery_step_failure
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
@@ -82,6 +87,8 @@ from imbue.minds.desktop_client.workspace_recovery import run_host_recovery_sequ
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
+from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.testing import write_imbue_cloud_accounts_index
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
@@ -99,6 +106,7 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
@@ -544,6 +552,137 @@ def test_run_host_recovery_sequence_fails_when_stop_command_errors(tmp_path: Pat
     assert len(error_records) == 1, error_records
 
 
+_DIAGNOSTICS_ROOT_NAME = "minds-dev-recovery-diag"
+_DIAGNOSTICS_USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
+_DIAGNOSTICS_EMAIL = "user@example.com"
+
+
+def test_a_failed_step_logs_whether_its_pinned_instance_was_still_configured_and_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``Unknown provider backend`` shape: pinned to an account instance whose block and session are gone.
+
+    Logged before the step's error record, by class rather than by name, so the
+    account's user id never reaches the line.
+    """
+    stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    write_imbue_cloud_accounts_index(_DIAGNOSTICS_ROOT_NAME, [])
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
+    resolver = build_resolver_with_system_services(
+        workspace_agent,
+        services_agent,
+        provider_name=ProviderInstanceName(imbue_cloud_provider_name_for_user(_DIAGNOSTICS_USER_ID)),
+    )
+
+    with (
+        capture_loguru(level="INFO") as log_output,
+        ConcurrencyGroup(name="test-restart-diagnostics") as cg,
+        capture_error_logs() as error_records,
+    ):
+        run_host_recovery_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
+            mngr_host_dir=mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
+        )
+
+    assert len(error_records) == 1, error_records
+    context_lines = [line for line in log_output.getvalue().splitlines() if "address pinned to" in line]
+    assert len(context_lines) == 1, log_output.getvalue()
+    context = context_lines[0]
+    assert f"Stop step of host recovery for {workspace_agent}" in context
+    assert "an account instance (user-id name)" in context
+    assert "placed from the live discovery snapshot" in context
+    assert "settings block: absent" in context
+    assert "owning account signed in: no" in context
+    assert "signed-in accounts: 0" in context
+    assert _DIAGNOSTICS_USER_ID not in context
+
+
+def test_failed_step_context_names_a_retained_legacy_placement_without_its_email_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pin from a transition retention onto a legacy email-slug instance whose block and account are present."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    legacy_instance = legacy_imbue_cloud_provider_name_for_account(_DIAGNOSTICS_EMAIL)
+    settings_path.write_text(f'[providers.{legacy_instance}]\nbackend = "imbue_cloud"\n')
+    write_imbue_cloud_accounts_index(
+        _DIAGNOSTICS_ROOT_NAME, [{"email": _DIAGNOSTICS_EMAIL, "user_id": _DIAGNOSTICS_USER_ID}]
+    )
+    workspace_agent = AgentId.generate()
+    pinned_instance = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName(legacy_instance),
+    )
+
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context(
+            "Start",
+            workspace_agent,
+            pinned_instance,
+            False,
+            MngrCliBackendResolver(),
+            mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+        )
+
+    context = log_output.getvalue()
+    assert "an imbue_cloud_-prefixed instance not in the user-id form" in context
+    assert "placed from a lifecycle-transition retention" in context
+    assert "settings block: present, enabled" in context
+    assert "owning account signed in: yes" in context
+    assert "signed-in accounts: 1" in context
+    assert "host state: unknown" in context
+    assert "provider's last completed poll: never" in context
+    assert legacy_instance not in context
+
+
+def test_failed_step_context_survives_an_unslugifiable_account_and_an_undecodable_settings_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The context runs before the step's error record, so nothing it reads may raise past it."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _DIAGNOSTICS_ROOT_NAME)
+    settings_path.write_bytes(b"\xff\xfe not utf-8")
+    write_imbue_cloud_accounts_index(_DIAGNOSTICS_ROOT_NAME, [{"email": "---", "user_id": _DIAGNOSTICS_USER_ID}])
+    pinned_instance = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName("imbue_cloud_slice"),
+    )
+
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context(
+            "Stop",
+            AgentId.generate(),
+            pinned_instance,
+            True,
+            MngrCliBackendResolver(),
+            mngr_host_dir_for(_DIAGNOSTICS_ROOT_NAME),
+        )
+
+    context = log_output.getvalue()
+    assert "settings block: unreadable (UnicodeDecodeError)" in context
+    assert "owning account signed in: no" in context
+
+
+def test_failed_step_context_reports_an_unpinned_address(tmp_path: Path) -> None:
+    with capture_loguru(level="INFO") as log_output:
+        _log_recovery_step_failure_context("Stop", AgentId.generate(), None, False, MngrCliBackendResolver(), tmp_path)
+
+    assert "failed with an unpinned address" in log_output.getvalue()
+
+
 def test_run_host_recovery_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:
     """A non-zero ``mngr start`` ends the sequence in RECOVERY_FAILED naming the start step."""
     tracker = SystemInterfaceHealthTracker()
@@ -584,6 +723,7 @@ def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answe
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with (
         ConcurrencyGroup(name="test-restart") as cg,
         capture_error_logs() as error_records,
@@ -641,6 +781,7 @@ def test_run_host_recovery_sequence_completes_when_the_shell_is_seen_answering_t
         )
         tracker.record_forwarded_answer(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-answered") as cg, capture_error_logs() as error_records:
         cg.start_new_thread(target=_answer_once_the_wait_begins, name="test-forwarded-answer")
         started = time.monotonic()
@@ -683,6 +824,7 @@ def test_run_host_recovery_sequence_ignores_an_answer_from_before_its_commands_r
     # The renderer's traffic during the stop, reported by the plugin before the worker runs.
     tracker.record_forwarded_answer(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-early-answer") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2033,6 +2175,7 @@ def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: P
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2061,6 +2204,7 @@ def test_a_start_that_really_booted_the_host_keeps_the_restart_framing(tmp_path:
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2096,6 +2240,7 @@ def test_a_failure_the_probe_outranked_ends_the_operation_as_a_caveat(tmp_path: 
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
     registry = _started_registry(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2151,7 +2296,7 @@ def test_run_host_recovery_sequence_recovers_a_workspace_that_boots_slowly(tmp_p
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    with scripted_workspace_probe_server(not_ready_count=2, ca_cert_path=local_ca_cert_path(tmp_path)) as port:
         with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
             run_host_recovery_sequence(
                 workspace_agent_id=workspace_agent,
@@ -2175,30 +2320,33 @@ def test_run_host_recovery_sequence_recovers_a_workspace_that_boots_slowly(tmp_p
     assert error_records == []
 
 
-def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None:
+def test_await_system_interface_ready_reports_a_slow_boot_that_answers(tmp_path: Path) -> None:
     """The wait polls past not-ready responses and reports READY on the first 200."""
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    with scripted_workspace_probe_server(not_ready_count=2, ca_cert_path=ca_cert_path) as port:
         with ConcurrencyGroup(name="test-wait") as cg:
             readiness = _await_system_interface_ready(
-                AgentId.generate(), SystemInterfaceHealthTracker(), port, "cookie", 30.0, concurrency_group=cg
+                AgentId.generate(), SystemInterfaceHealthTracker(), port, "cookie", ca_cert_path, 30.0, cg
             )
     assert readiness.outcome is RecoveryReadinessOutcome.READY
     assert readiness.last_probe_summary == "HTTP 200"
 
 
-def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> None:
+def test_await_system_interface_ready_times_out_when_nothing_ever_answers(tmp_path: Path) -> None:
     """A budget that elapses with no answer is a TIMED_OUT verdict (the real failure)."""
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with ConcurrencyGroup(name="test-wait") as cg:
         # Port 1 refuses connections, so every poll fails fast.
         readiness = _await_system_interface_ready(
-            AgentId.generate(), SystemInterfaceHealthTracker(), 1, "cookie", 0.1, concurrency_group=cg
+            AgentId.generate(), SystemInterfaceHealthTracker(), 1, "cookie", ca_cert_path, 0.1, cg
         )
     assert readiness.outcome is RecoveryReadinessOutcome.TIMED_OUT
     # The refused connection is the whole diagnosis, and rides on the verdict.
     assert readiness.last_probe_summary.startswith("ConnectError"), readiness.last_probe_summary
 
 
-def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
+def test_await_system_interface_ready_gives_up_promptly_on_shutdown(tmp_path: Path) -> None:
     """A shutdown cuts the wait short well inside the cold-boot budget, and is not a timeout.
 
     The budget spans a full cold boot -- far longer than the concurrency group's
@@ -2206,6 +2354,8 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
     parked until the budget expires. Sleeping on the shutdown event rather than a
     bare timer is what bounds it.
     """
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with ConcurrencyGroup(name="test-wait") as cg:
         cg.shutdown()
         started = time.monotonic()
@@ -2215,6 +2365,7 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
             SystemInterfaceHealthTracker(),
             1,
             "cookie",
+            ca_cert_path,
             _HOST_RECOVERY_STARTUP_WAIT_SECONDS,
             concurrency_group=cg,
         )
@@ -2224,7 +2375,7 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
     assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s past a shutdown"
 
 
-def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_elsewhere() -> None:
+def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_elsewhere(tmp_path: Path) -> None:
     """A shell answer the plugin reported ends the wait at once, whatever its own probes are getting back.
 
     The wait's probes and the renderer's traffic go through the same plugin,
@@ -2237,12 +2388,14 @@ def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_el
     tracker.mark_recovering(agent_id, HostRecoveryKind.RESTART)
     tracker.mark_awaiting_readiness(agent_id)
     results: list[RecoveryReadinessResult] = []
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
 
     with capture_loguru(level="INFO") as log_output, ConcurrencyGroup(name="test-wait-answered") as cg:
         cg.start_new_thread(
             # Port 1 refuses connections, so only the tracker can end this inside the budget.
             target=lambda: results.append(
-                _await_system_interface_ready(agent_id, tracker, 1, "cookie", 30.0, concurrency_group=cg)
+                _await_system_interface_ready(agent_id, tracker, 1, "cookie", ca_cert_path, 30.0, cg)
             ),
             name="test-readiness-wait",
         )
@@ -2279,7 +2432,9 @@ def test_run_host_recovery_sequence_does_not_report_a_failure_when_shutdown_cuts
         # Quit at the first readiness probe: by then ``mngr start`` has already
         # run, so this lands the shutdown inside the wait -- the real ordering --
         # rather than before the sequence's subprocess steps.
-        with scripted_workspace_probe_server(not_ready_count=10**6, on_first_request=cg.shutdown) as port:
+        with scripted_workspace_probe_server(
+            not_ready_count=10**6, ca_cert_path=local_ca_cert_path(tmp_path), on_first_request=cg.shutdown
+        ) as port:
             with capture_error_logs() as error_records:
                 run_host_recovery_sequence(
                     workspace_agent_id=workspace_agent,
@@ -2777,6 +2932,7 @@ def test_a_readiness_wait_that_times_out_while_offline_is_downgraded_too(
     resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-offline-wait") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
@@ -2811,6 +2967,7 @@ def test_a_readiness_wait_that_times_out_on_a_working_network_still_error_logs(
     detector, _prober = build_stub_connectivity_detector(root_concurrency_group)
     assert detector.probe_now().environment_block is EnvironmentBlock.NONE
 
+    write_forward_ca_for_test(local_ca_cert_path(tmp_path))
     with ConcurrencyGroup(name="test-restart-online-wait") as cg, capture_error_logs() as error_records:
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,

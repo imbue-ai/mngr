@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-28
+
+The statusline now records agy's reasoning effort in `model_state.json` alongside the model. As of agy 1.1.5, effort is its own setting (`/effort`, `--effort`), and the statusline payload reports it. When it does, the effort is written as `effort` and the matching tier suffix is dropped from the model name, so `Gemini 3.8 Flash (High)` is recorded as `{"model": "Gemini 3.8 Flash", "effort": "high"}`. A model whose effort cannot be changed reports no effort and is recorded under its full name, for example `Claude Sonnet 4.6 (Thinking)` or `GPT-OSS 120B (Medium)`.
+
+Sending a slash command such as `/model` to an antigravity agent now returns as soon as agy has handled it. agy never goes busy for a slash command, so the send used to wait out the full 15-second relaxed confirmation window every time. Such sends now also count as confirmed once agy's statusline rewrites `model_state.json`.
+
+The README's `model` example now names a current model (`Gemini 3.8 Flash (Medium)`).
+
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+The antigravity agent type declares its own paste placeholder (`[Pasted text `, which agy 1.4 shows as `[Pasted text #N +M lines]` or `[Pasted text #N K chars]`) and Enter-retry test, which `InteractiveTuiAgent` now requires of every TUI agent type. Sending behaves exactly as before.
+
+## 2026-10-26
+
+Antigravity agents now declare their process name (`agy`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.
+
+## 2026-10-22
+
+Fixed: the agy protobuf schema release test (`test_decoder_field_map_matches_installed_antigravity_binary`) passes again against agy 1.4.5. agy 1.4.5 did not change the schema the transcript decoder reads: `gemini_coder.Step`'s descriptor is byte-identical to the one in 1.4.4, and the `cortex.proto` messages and enums the decoder uses are unchanged. The test failed because the extractor dropped `gemini_coder.Step`, and that is now fixed. The test now also checks `ChatToolCall`'s `name` and `arguments_json` field numbers, which the decoder uses for tool calls. `regenerating_protobuf_schema.md` now says how to tell a descriptor the extractor missed from one agy renamed.
+
 ## 2026-10-16
 
 An antigravity agent's transcript streamer and common transcript converter keep running after the agent is renamed, including after it restarts. The background-tasks supervisor tracks the agent's tmux session by its session id, which a rename does not change, and new launch commands no longer carry the session name. For an agent created by an older mngr, `mngr start` rewrites the session name out of its stored launch command, so its transcript runs again after its next restart.

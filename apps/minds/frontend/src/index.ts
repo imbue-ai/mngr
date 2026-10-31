@@ -9,6 +9,7 @@ import { electronBridge } from "./electron-bridge";
 import { installCursorHidingWhileTyping } from "./hide-cursor-while-typing";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { onboardingProgress } from "./models/onboarding";
+import { LOCAL_PROFILE_USER_ID } from "./models/providers";
 import {
   NotificationGestures,
   NotificationsUiController,
@@ -33,6 +34,8 @@ function main(): void {
           // No bootstrap means no server verdict; treat the install as past
           // onboarding so a bare page never bounces to the start flow.
           isOnboardingComplete: true,
+          // And no account named: the device's.
+          accountId: LOCAL_PROFILE_USER_ID,
         },
         // No inline bootstrap means no version to compare; null disables the
         // mismatch reload instead of guaranteeing one on the first hello.
@@ -43,6 +46,7 @@ function main(): void {
   shell.isMac = bootContext.seed.isMac;
   shell.isTrafficLightsDrawn = electronBridge.isTrafficLightsDrawn;
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
+  shell.accountId = bootContext.seed.accountId;
   onboardingProgress.seed(bootContext.seed.isOnboardingComplete);
 
   // Arrival behavior for the notification feed (toasts, dock badge); the
@@ -65,6 +69,7 @@ function main(): void {
         : bootContext.stores.workspaces.toAgentScopedId(displayed);
     },
     openInPlace: (requestId) => shell.openInbox({ selected: requestId }),
+    overlayQuery: (params) => shell.overlayQuery(params),
     currentRoutePath: () => shell.currentRoutePath(),
     sendWorkspaceMessage: (workspaceAgentId, message) =>
       shell.requestWorkspaceMessage(workspaceAgentId, message),
@@ -117,7 +122,7 @@ function main(): void {
         displayed !== null &&
         shell.stores.workspaces.toAgentScopedId(displayed) === message.agent_id
       ) {
-        m.route.set("/");
+        shell.routeToHub();
       }
     },
     onHealthChanged: (message) => {
@@ -203,23 +208,18 @@ function main(): void {
     m.redraw();
   });
   // The pull-out-window spec's asks from main. To a main window: return a
-  // popout's window to the desktop this window shows (the popout was dropped
-  // onto it, or is closing), answering once the desktop has it back; a popout
-  // is being dragged over this window, so the drop is offered here. To a
-  // popout with no desktop window to take its window back: the OS close was
-  // pressed, so the window goes back to the desktop through this popout's own
-  // page before the window is destroyed.
+  // popout's window to the desktop this window shows (the popout is closing),
+  // answering once the desktop has it back. To a popout with no desktop
+  // window to take its window back: the OS close was pressed, so the window
+  // goes back to the desktop through this popout's own page before the
+  // window is destroyed.
   electronBridge.onReattachPopoutWindow((ask) => {
     void shell.handleReattachPopoutWindow(ask).then((isReportedBack) => {
       if (isReportedBack) electronBridge.popoutWindowReturned(ask.workspaceId, ask.windowId);
     });
   });
   electronBridge.onPopoutReattachRequest(() => {
-    void shell.returnPopoutToDesktop(null).then(() => electronBridge.popoutReattached());
-  });
-  electronBridge.onPopoutDropTarget((isOver) => {
-    shell.setPopoutDropTarget(isOver);
-    m.redraw();
+    void shell.returnPopoutToDesktop().then(() => electronBridge.popoutReattached());
   });
   electronBridge.onTearOut((report) => shell.handleTearOut(report));
   electronBridge.onOpenLink((url) => shell.handleOpenLink(url));

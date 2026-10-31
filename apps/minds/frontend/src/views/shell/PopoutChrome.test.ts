@@ -73,6 +73,8 @@ describe("PopoutChrome", () => {
     expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
     const spacer = collectVnodes(bar).find((vnode) => classTokensOf(vnode).includes("w-[72px]"));
     expect(spacer).toBeDefined();
+    // The native lights take their cursor from the page under them, not the bar's grab.
+    expect(classTokensOf(spacer!)).toContain("cursor-default");
     const elsewhere = collectVnodes(renderBar("#aabbcc", "Notes", false));
     expect(elsewhere.find((vnode) => classTokensOf(vnode).includes("w-[72px]"))).toBeUndefined();
   });

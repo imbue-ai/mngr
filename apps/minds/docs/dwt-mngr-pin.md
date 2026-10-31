@@ -103,6 +103,9 @@ the recipe whenever the mngr branch changes before it merges.
    resolves mngr `HEAD` to its mirror commit, rewrites every pin in
    DEFAULT_WORKSPACE_TEMPLATE (an internal or export pin included), runs `uv lock`
    there, and commits. Position the mngr checkout at the exact commit you want first.
+   The relock runs the uv the template pins (`UV_VERSION` in its
+   `system/scripts/setup_system.sh`) through `uvx`, whatever uv you have, so the
+   lock matches what workspaces and the template's CI write.
 4. Open the DEFAULT_WORKSPACE_TEMPLATE PR; its CI builds against the new pin.
 
 Internal commits are not on the mirror; each mirrored commit carries a
@@ -140,7 +143,7 @@ internal pin nor an export can be tagged) -- is in `apps/minds/docs/deploy/ops/a
 
 `materialize_paired_default_workspace_template_worktree`
 (`apps/minds/imbue/minds/desktop_client/default_workspace_template_worktree.py`) gives
-the snapshot bake, the full-flow e2e and `just minds-test-electron*` a throwaway
+the snapshot bake and `just minds-test-electron` a throwaway
 clone of the DEFAULT_WORKSPACE_TEMPLATE branch named like the current mngr branch
 (else `main`). The workspace it builds runs the mngr that clone pins. With the paired
 branch pinned to this branch's commit on mngr-internal, or to its public export, that

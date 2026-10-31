@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -31,6 +32,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -62,16 +64,19 @@ from imbue.minds.desktop_client.connections.provider_settings import read_signed
 from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_or_none
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
 from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import SESSION_EXPIRED_ERROR_TYPE_NAMES
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.mngr_settings.profile_paths import ensure_active_profile_dir
+from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.testing import write_imbue_cloud_accounts_index
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.config.loader import get_or_create_profile_dir
+from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
@@ -118,6 +123,98 @@ def test_ensure_skips_silently_when_mngr_uninitialized(monkeypatch: pytest.Monke
     monkeypatch.setenv("HOME", str(tmp_path))
     assert ensure_mngr_settings(_ROOT) is False
     assert not mngr_host_dir_for(_ROOT_NAME).exists()
+
+
+def test_importing_the_minds_entry_point_creates_the_mngr_profile_with_the_overrides() -> None:
+    """``imbue.minds.main`` runs its bootstrap at import time, so only a fresh interpreter exercises it."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import imbue.minds.main"],
+        env={**os.environ, MINDS_ROOT_NAME_ENV_VAR: _ROOT_NAME},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    profile_dir = find_profile_dir_lightweight(mngr_host_dir_for(_ROOT_NAME))
+    assert profile_dir is not None
+    assert _parsed(profile_dir / "settings.toml") == _BASE_RECONCILED_SHAPE
+
+
+def test_mngr_resolves_the_profile_studio_created_without_rewriting_its_config() -> None:
+    mngr_host_dir = mngr_host_dir_for(_ROOT_NAME)
+    ensure_active_profile_dir(mngr_host_dir)
+    studio_profile_dir = read_active_profile_dir(mngr_host_dir)
+    assert studio_profile_dir is not None and studio_profile_dir.is_dir()
+    config_path = mngr_host_dir / "config.toml"
+    stat_before = config_path.stat()
+
+    assert find_profile_dir_lightweight(mngr_host_dir) == studio_profile_dir
+    assert get_or_create_profile_dir(mngr_host_dir) == studio_profile_dir
+    stat_after = config_path.stat()
+    assert (stat_after.st_ino, stat_after.st_mtime_ns) == (stat_before.st_ino, stat_before.st_mtime_ns)
+
+
+def test_studio_reuses_the_profile_mngr_created() -> None:
+    mngr_host_dir = mngr_host_dir_for(_ROOT_NAME)
+    mngr_profile_dir = get_or_create_profile_dir(mngr_host_dir)
+    config_text = (mngr_host_dir / "config.toml").read_text()
+
+    ensure_active_profile_dir(mngr_host_dir)
+
+    assert read_active_profile_dir(mngr_host_dir) == mngr_profile_dir
+    assert (mngr_host_dir / "config.toml").read_text() == config_text
+
+
+def _profile_tree(mngr_host_dir: Path, profile_dir: Path) -> dict[str, tuple[int, str | None]]:
+    """Each path under ``mngr_host_dir`` mapped to its lstat mode and a regular file's text, with the profile id masked."""
+    return {
+        str(path.relative_to(mngr_host_dir)).replace(profile_dir.name, "<id>"): (
+            path.lstat().st_mode,
+            None if path.is_symlink() or path.is_dir() else path.read_text().replace(profile_dir.name, "<id>"),
+        )
+        for path in mngr_host_dir.rglob("*")
+    }
+
+
+def _leave_the_host_dir_absent(mngr_host_dir: Path) -> None:
+    pass
+
+
+def _seed_a_world_readable_config_without_a_profile(mngr_host_dir: Path) -> None:
+    mngr_host_dir.mkdir(parents=True)
+    config_path = mngr_host_dir / "config.toml"
+    config_path.write_text('other = "dropped-31877"\n')
+    config_path.chmod(0o644)
+
+
+def _seed_a_symlinked_config_without_a_profile(mngr_host_dir: Path) -> None:
+    mngr_host_dir.mkdir(parents=True)
+    linked_path = mngr_host_dir / "linked-config.toml"
+    linked_path.write_text('other = "dropped-31877"\n')
+    linked_path.chmod(0o644)
+    (mngr_host_dir / "config.toml").symlink_to(linked_path.name)
+
+
+@pytest.mark.parametrize(
+    "seed_host_dir",
+    [
+        _leave_the_host_dir_absent,
+        _seed_a_world_readable_config_without_a_profile,
+        _seed_a_symlinked_config_without_a_profile,
+    ],
+)
+def test_studio_creates_the_same_profile_tree_as_mngr(tmp_path: Path, seed_host_dir: Callable[[Path], None]) -> None:
+    mngr_host_dir = tmp_path / "mngr-created"
+    studio_host_dir = tmp_path / "studio-created"
+    seed_host_dir(mngr_host_dir)
+    seed_host_dir(studio_host_dir)
+
+    mngr_profile_dir = get_or_create_profile_dir(mngr_host_dir)
+    ensure_active_profile_dir(studio_host_dir)
+
+    studio_profile_dir = read_active_profile_dir(studio_host_dir)
+    assert studio_profile_dir is not None
+    assert _profile_tree(studio_host_dir, studio_profile_dir) == _profile_tree(mngr_host_dir, mngr_profile_dir)
 
 
 def test_ensure_writes_desired_shape_into_fresh_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -355,7 +452,6 @@ def test_signout_pushes_a_connection_removal_still_queued_from_offline(
         session_store=device.session_store,
         connection_store=device.store,
         provider_materializer=device.materializer,
-        minds_config=None,
     )
 
     stored = device.cli.sync_documents_by_email[_EMAIL][CONNECTION_DOCUMENT_KIND][str(_CONNECTION_ID)]
@@ -381,7 +477,6 @@ def test_signout_leaves_the_account_alone_when_the_listing_fails(
         session_store=device.session_store,
         connection_store=device.store,
         provider_materializer=device.materializer,
-        minds_config=None,
     )
 
     assert device.cli.signed_out_accounts == []
@@ -413,8 +508,6 @@ def _scheduler_with_expired_session(
     )
     cli.auth_refresh_outcome_to_return = outcome
     assert session_store.record_store is not None
-    minds_config = MindsConfig(data_dir=device.data_dir)
-    minds_config.set_default_account_id(_USER_ID)
     resolver = MngrCliBackendResolver()
     instance = ProviderInstanceName(imbue_cloud_provider_name_for_user(_USER_ID))
     seed_provider_snapshots(
@@ -439,7 +532,7 @@ def _scheduler_with_expired_session(
         imbue_cloud_cli=cli,
         agent_creator=agent_creator,
         on_account_session_dead=lambda user_id: sign_out_dead_account(
-            user_id, cli, session_store, store, materializer, minds_config, _record_wake
+            user_id, cli, session_store, store, materializer, _record_wake
         ),
     )
     return scheduler, cli, settings_path, is_provider_gone_at_wake
@@ -463,8 +556,6 @@ def test_sync_pass_signs_out_an_account_whose_refresh_the_connector_refuses(
     assert cli.signed_out_accounts == [_EMAIL]
     assert imbue_cloud_provider_name_for_user(_USER_ID) not in _parsed(settings_path)["providers"]
     assert is_provider_gone_at_wake == [True]
-    # The retired account was the default; nothing is left to take over.
-    assert MindsConfig(data_dir=tmp_path / f".{_ROOT_NAME}").get_default_account_id() is None
 
 
 @pytest.mark.parametrize("is_create_on_the_account", [True, False])
@@ -521,7 +612,6 @@ def test_sync_pass_keeps_an_account_whose_refresh_did_not_prove_the_session_dead
     assert cli.signed_out_accounts == []
     assert is_provider_gone_at_wake == []
     assert imbue_cloud_provider_name_for_user(_USER_ID) in _parsed(settings_path)["providers"]
-    assert MindsConfig(data_dir=tmp_path / f".{_ROOT_NAME}").get_default_account_id() == _USER_ID
 
 
 def test_sync_pass_pulls_connections_and_materializes_when_a_row_changed(
@@ -584,7 +674,6 @@ def test_sync_pass_does_not_write_back_an_account_that_signed_out_during_its_pul
         _EMAIL, str(_CONNECTION_ID), {"backend": "modal", "alias": "synced modal", "identifier": "", "placement": {}}
     )
     assert device.session_store.record_store is not None
-    minds_config = MindsConfig(data_dir=device.data_dir)
 
     def _sign_out_bob_mid_pull(account: str) -> None:
         if account == _EMAIL:
@@ -594,7 +683,6 @@ def test_sync_pass_does_not_write_back_an_account_that_signed_out_during_its_pul
                 session_store=device.session_store,
                 connection_store=device.store,
                 provider_materializer=device.materializer,
-                minds_config=minds_config,
             )
 
     device.cli.on_sync_documents_pull = _sign_out_bob_mid_pull
@@ -765,8 +853,6 @@ def test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_
         assert error.type_name == "ImbueCloudAuthError"
         assert _RefusingRefreshConnectorHandler.refresh_count >= 1
 
-        minds_config = MindsConfig(data_dir=data_dir)
-        minds_config.set_default_account_id(_USER_ID)
         assert session_store.record_store is not None
         scheduler = WorkspaceSyncScheduler(
             record_store=session_store.record_store,
@@ -776,7 +862,7 @@ def test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_
             provider_materializer=materializer,
             imbue_cloud_cli=cli,
             on_account_session_dead=lambda user_id: sign_out_dead_account(
-                user_id, cli, session_store, store, materializer, minds_config, lambda: None
+                user_id, cli, session_store, store, materializer, lambda: None
             ),
         )
 

@@ -522,3 +522,49 @@ def test_progress_in_bytes_is_read_without_a_unit_prefix() -> None:
 def test_lines_that_carry_no_progress_are_ignored(line: str) -> None:
     """Nearly every line, so this must be cheap and quiet rather than a parse failure."""
     assert parse_transfer_progress(line) is None
+
+
+def _recording_syncer(tmp_path: Path, cg: ConcurrencyGroup, reports: list[bool]) -> UnisonSyncer:
+    return UnisonSyncer(
+        source_root=UnisonRoot(path=tmp_path / "source"),
+        target_root=UnisonRoot(path=tmp_path / "target"),
+        sync_direction=SyncDirection.BOTH,
+        conflict_mode=ConflictMode.NEWER,
+        on_transfer_change=lambda is_transferring, _progress: reports.append(is_transferring),
+        cg=cg,
+    )
+
+
+def test_a_first_pass_with_nothing_to_move_still_reports_that_it_settled(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Without it a caller never learns that two already-level replicas were compared."""
+    reports: list[bool] = []
+    syncer = _recording_syncer(tmp_path, cg, reports)
+
+    syncer._on_output("Looking for changes", True)
+    syncer._on_output("Nothing to do: replicas have not changed since last sync.", True)
+
+    assert reports == [False]
+
+
+def test_later_passes_with_nothing_to_move_report_nothing(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Only the first quiet pass is news; after it a consumer wants the edges alone."""
+    reports: list[bool] = []
+    syncer = _recording_syncer(tmp_path, cg, reports)
+
+    syncer._on_output("Nothing to do: replicas have not changed since last sync.", True)
+    syncer._on_output("Nothing to do: replicas have not changed since last sync.", True)
+    syncer._on_output("Propagating updates", True)
+    syncer._on_output("Synchronization complete at 13:09:34  (1 item transferred, 0 skipped, 0 failed)", True)
+    syncer._on_output("Nothing to do: replicas have not changed since last sync.", True)
+
+    assert reports == [False, True, False]
+
+
+def test_a_first_pass_that_moves_bytes_settles_once(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    reports: list[bool] = []
+    syncer = _recording_syncer(tmp_path, cg, reports)
+
+    syncer._on_output("Propagating updates", True)
+    syncer._on_output("Synchronization complete at 13:09:34  (3 items transferred, 0 skipped, 0 failed)", True)
+
+    assert reports == [True, False]

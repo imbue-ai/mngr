@@ -8,6 +8,7 @@ import subprocess
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import cast
 
 import pytest
@@ -554,21 +555,21 @@ class _FakePyinfraHostRecoveringOnConnect:
         self.connected = True
 
 
-class _FakePyinfraHostResettingOnCommand:
-    """Pyinfra-host stand-in whose first ``run_shell_command`` is reset by the peer.
+class _FakePyinfraHostFailingOnCommand:
+    """Pyinfra-host stand-in whose first ``run_shell_command`` raises a given error.
 
-    The shape a transport cached across a laptop sleep presents when it is next
-    used: the connection this side still believes in is gone, and the reset
-    arrives from the command rather than from the connect.
+    The shape a dead-but-believed-in transport presents: the failure arrives
+    from the command rather than from the connect.
     """
 
-    def __init__(self, failure_count: int) -> None:
+    def __init__(self, failure_count: int, error: OSError) -> None:
         self.connected = True
         self.name = "fake-ssh-host"
         self.connector_cls = type("SSHConnector", (), {})
         self.command_call_count = 0
         self.disconnect_call_count = 0
         self._failure_count = failure_count
+        self._error = error
 
     def connect(self, raise_exceptions: bool = False) -> None:
         self.connected = True
@@ -580,20 +581,26 @@ class _FakePyinfraHostResettingOnCommand:
     def run_shell_command(self, command: Any, **kwargs: Any) -> tuple[bool, Any]:
         self.command_call_count += 1
         if self.command_call_count <= self._failure_count:
-            raise ConnectionResetError(54, "Connection reset by peer")
+            raise self._error
         return True, CommandOutput([])
 
 
-def test_run_shell_command_reconnects_after_the_peer_resets_the_connection(temp_mngr_ctx: MngrContext) -> None:
-    """A reset mid-command rebuilds the connection and retries, rather than surfacing.
+_DEAD_CONNECTION_ERRORS: Final[tuple[Any, ...]] = (
+    pytest.param(ConnectionResetError(54, "Connection reset by peer"), id="connection-reset"),
+    pytest.param(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), id="local-address-lost"),
+)
 
-    Regression guard for a stale transport across a laptop sleep. The reset
-    arrives as ``ConnectionResetError``, whose message is the errno text rather
-    than "Socket is closed", so it used to miss both the transient classifier
-    and the disconnect-before-retry branch -- and escaped the CLI as a raw
-    paramiko traceback, failing a restart of a machine that was fine.
+
+@pytest.mark.parametrize("error", _DEAD_CONNECTION_ERRORS)
+def test_run_shell_command_reconnects_after_the_connection_dies(temp_mngr_ctx: MngrContext, error: OSError) -> None:
+    """A connection that dies mid-command is rebuilt and the command retried, rather than surfacing.
+
+    The death arrives as ``ConnectionResetError`` (the peer reset it) or as a
+    bare ``OSError(EADDRNOTAVAIL)`` (this machine's address for it vanished);
+    the message of each is the errno text rather than "Socket is closed", so
+    neither is caught by a message match.
     """
-    fake = _FakePyinfraHostResettingOnCommand(failure_count=1)
+    fake = _FakePyinfraHostFailingOnCommand(failure_count=1, error=error)
     outer = OuterHost(
         id=HostId.generate(),
         connector=PyinfraConnector(cast(PyinfraHost, fake)),
@@ -608,15 +615,18 @@ def test_run_shell_command_reconnects_after_the_peer_resets_the_connection(temp_
     assert fake.disconnect_call_count == 1
 
 
-def test_a_reset_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
-    """A reset that survives the retry budget leaves as a domain error, not a paramiko traceback.
+@pytest.mark.parametrize("error", _DEAD_CONNECTION_ERRORS)
+def test_a_dead_connection_that_outlives_the_retries_is_translated_not_raw(
+    local_outer_host: OuterHost, error: OSError
+) -> None:
+    """A dead connection that survives the retry budget leaves as a domain error, not a paramiko traceback.
 
     Exercised at the translation boundary rather than through the retry, which
     would spend its real ~10s backoff to reach the same assertion.
     """
     with pytest.raises(HostConnectionError, match="closed"):
         with local_outer_host._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
-            raise ConnectionResetError(54, "Connection reset by peer")
+            raise error
 
 
 def test_an_sftp_desync_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
@@ -789,6 +799,7 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
         (ConnectionResetError(54, "Connection reset by peer"), True),
+        (OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), True),
         (SFTPError("Garbage packet received"), True),
         (ValueError("not transient"), False),
     ],
@@ -801,6 +812,7 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         "eof-error",
         "timeout-error",
         "connection-reset",
+        "local-address-lost",
         "sftp-stream-desync",
         "non-os-error",
     ],
@@ -823,6 +835,10 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     next used, and the errno text ("[Errno 54] Connection reset by peer")
     slips past the "Socket is closed" match -- so `mngr start` on a machine
     that was fine died with a raw paramiko traceback instead of reconnecting.
+
+    ``EADDRNOTAVAIL`` is a third: a network switch or sleep/wake removes the
+    local address an established connection was bound to, the kernel drops it
+    with that errno, and paramiko re-raises it bare from the next channel open.
     """
     assert is_transient_ssh_error(exception) is expected
 
@@ -838,6 +854,7 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
         (OSError(errno.EHOSTDOWN, "Host is down"), True),
         (ConnectionResetError(54, "Connection reset by peer"), False),
         (OSError("Socket is closed"), False),
+        (OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), False),
         (OSError(errno.EACCES, "Permission denied"), False),
     ],
     ids=[
@@ -849,6 +866,7 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
         "host-down",
         "connection-reset",
         "socket-closed",
+        "local-address-lost",
         "permission-denied",
     ],
 )

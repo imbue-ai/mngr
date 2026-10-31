@@ -2,7 +2,7 @@
 """CLI entrypoint that bootstraps MNGR_* env vars and settings before loading the CLI.
 
 Mngr reads ``MNGR_HOST_DIR``/``MNGR_PREFIX`` and the profile settings.toml at module import time (plugin manager construction, config discovery).
-Both the env-var translation and the settings reconciliation must therefore run before any ``imbue.mngr.*`` import, which is why they run as import-time side effects here -- ordered strictly *before* the cli_entry import that transitively loads mngr.
+The env-var translation, the mngr profile creation and the settings reconciliation must therefore all run before any ``imbue.mngr.*`` import, which is why they run as import-time side effects here -- ordered strictly *before* the cli_entry import that transitively loads mngr.
 This is why E402 (import-not-at-top) is disabled for this file.
 """
 
@@ -24,9 +24,9 @@ except BootstrapError as e:
     print(f"error: {e}", file=sys.stderr)
     raise SystemExit(1) from e
 
-from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings_before_mngr_import
+from imbue.minds.mngr_settings.reconcile import ensure_mngr_profile_and_settings_before_mngr_import
 
-ensure_mngr_settings_before_mngr_import()
+ensure_mngr_profile_and_settings_before_mngr_import()
 
 from imbue.minds.cli_entry import cli
 

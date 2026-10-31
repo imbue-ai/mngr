@@ -17,6 +17,7 @@ fail before reaching the attach, so they use the plain ``e2e.run``.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 
@@ -165,6 +166,7 @@ def test_connect_explicit_host_and_provider(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr conn my-task@my-host.modal",
         comment="use the explicit host, agent and provider",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     # The provider-qualified `host.provider` syntax is accepted and resolved;
     # `my-host.modal` doesn't exist in the test env, so mngr exits with a clean

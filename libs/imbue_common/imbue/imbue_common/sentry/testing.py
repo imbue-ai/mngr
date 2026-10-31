@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 from pydantic import PrivateAttr
 from sentry_sdk import Client
+from sentry_sdk import get_current_scope
 from sentry_sdk import isolation_scope
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.transport import Transport
@@ -60,6 +61,10 @@ def capturing_sentry_client(
         send_default_pii=False,
     )
     with isolation_scope() as scope:
+        # The forked isolation and current scopes inherit whatever an earlier test in this worker left
+        # on them (tags, breadcrumbs, the dropped-breadcrumb count that surfaces as ``_meta``).
+        scope.clear()
+        get_current_scope().clear()
         scope.set_client(client)
         try:
             yield captured_events

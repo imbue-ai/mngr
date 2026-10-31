@@ -54,6 +54,12 @@ class MailtmAddress(NonEmptyStr):
     ...
 
 
+class MailtmAccountId(NonEmptyStr):
+    """Id mail.tm assigned the per-run disposable account (what a deletion names it by)."""
+
+    ...
+
+
 class MailtmJwt(NonEmptyStr):
     """JWT for the per-run mail.tm account (used as a bearer for the mail.tm HTTP API)."""
 

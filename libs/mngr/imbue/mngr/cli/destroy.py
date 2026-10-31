@@ -56,11 +56,13 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import RUNNING_AGENT_LIFECYCLE_STATES
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
@@ -698,12 +700,20 @@ def _destroy_single_online_agent(
     """Destroy a single agent on an online host. Thread-safe."""
     agent_display = f"{agent.name}@{host.get_name()}"
     try:
-        if agent.is_running() and not opts.force:
-            _output(
-                f"Agent {agent_display} is running. Use --force to destroy running agents.",
-                output_opts,
-            )
-            return
+        if not opts.force:
+            lifecycle_state = agent.get_lifecycle_state()
+            if lifecycle_state == AgentLifecycleState.UNKNOWN:
+                _output(
+                    f"Could not determine whether agent {agent_display} is running. Use --force to destroy it anyway.",
+                    output_opts,
+                )
+                return
+            if lifecycle_state in RUNNING_AGENT_LIFECYCLE_STATES:
+                _output(
+                    f"Agent {agent_display} is running. Use --force to destroy running agents.",
+                    output_opts,
+                )
+                return
 
         if opts.remove_created_branch:
             source_repo_path = find_source_repo_of_worktree(agent.work_dir)
@@ -1127,8 +1137,9 @@ by an abandoned create). The local host can never be destroyed.
 
 Use with caution! This operation is irreversible.
 
-By default, running agents cannot be destroyed. Use --force to stop and destroy
-running agents. The command will prompt for confirmation before destroying
+By default, running agents cannot be destroyed, nor can agents whose state
+could not be read (e.g. on a host too loaded to answer in time). Use --force to
+stop and destroy such agents. The command will prompt for confirmation before destroying
 agents or hosts unless --force is specified. With --force, a host address that
 matches nothing is skipped instead of failing, so cleanup scripts stay
 idempotent.

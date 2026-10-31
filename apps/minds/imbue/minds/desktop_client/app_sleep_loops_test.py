@@ -12,6 +12,7 @@ released from it at the same instant.
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.app import _run_system_interface_health_probe_loop
@@ -21,6 +22,7 @@ from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import make_sleep_tracker
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
@@ -70,7 +72,7 @@ def test_the_heartbeat_loop_drives_the_tracker() -> None:
     assert sleep_tracker.get_last_wake_at() == wakes[0]
 
 
-def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything() -> None:
+def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything(tmp_path: Path) -> None:
     """The first post-wake pass must not convict a run of the seconds nobody watched.
 
     This loop is the only authority on STUCK, and it is released from the sleep
@@ -104,10 +106,12 @@ def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything() -> No
         poll_interval=0.01,
     )
 
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with ConcurrencyGroup(name="test-health-probe-loop") as concurrency_group:
         concurrency_group.start_new_thread(
             target=_run_system_interface_health_probe_loop,
-            args=(tracker, resolver, 1, "test-cookie", concurrency_group, sleep_tracker),
+            args=(tracker, resolver, 1, "test-cookie", ca_cert_path, concurrency_group, sleep_tracker),
             name="test-system-interface-health-probe",
         )
         assert poll_until(
@@ -129,7 +133,7 @@ def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything() -> No
     assert sleep_tracker.get_last_wake_at() is not None
 
 
-def test_the_probe_loop_logs_why_a_probe_failed_once_per_outcome() -> None:
+def test_the_probe_loop_logs_why_a_probe_failed_once_per_outcome(tmp_path: Path) -> None:
     """A failing probe target gets its failure named in the log, but not on every 2s pass.
 
     ``record_probe_failure`` is silent for a machine that is already convicted,
@@ -143,11 +147,13 @@ def test_the_probe_loop_logs_why_a_probe_failed_once_per_outcome() -> None:
     resolver = MngrCliBackendResolver()
     tracker.record_failure(agent_id)
 
+    ca_cert_path = tmp_path / "forward-ca.pem"
+    write_forward_ca_for_test(ca_cert_path)
     with capture_loguru(level="INFO") as log_output, ConcurrencyGroup(name="test-health-probe-log") as cg:
         cg.start_new_thread(
             target=_run_system_interface_health_probe_loop,
             # Port 1 refuses connections, so every probe fails the same way.
-            args=(tracker, resolver, 1, "test-cookie", cg, sleep_tracker),
+            args=(tracker, resolver, 1, "test-cookie", ca_cert_path, cg, sleep_tracker),
             name="test-system-interface-health-probe-log",
         )
         # STUCK takes a run of failures longer than the threshold, so by the

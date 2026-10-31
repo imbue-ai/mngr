@@ -23,6 +23,7 @@ from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
@@ -183,6 +184,12 @@ def handle_imbue_cloud_errors(func):
                 str(exc),
                 error_class=type(exc).__name__,
                 code="account_suspended",
+            )
+        except ImbueCloudAccountDeletedError as exc:
+            fail_with_json(
+                str(exc),
+                error_class=type(exc).__name__,
+                code="account_deleted",
             )
         except ImbueCloudClientTooOldError as exc:
             fail_with_json(

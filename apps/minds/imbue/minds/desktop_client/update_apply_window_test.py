@@ -1,9 +1,12 @@
 """The apply window: what it silences, what opens and closes it, and what it hands back."""
 
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -16,10 +19,13 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
+from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import exited_process_pid
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
+from imbue.minds.desktop_client.testing import write_background_task_marker
 from imbue.minds.desktop_client.update_apply_window import APPLY_GRACE_SECONDS
 from imbue.minds.desktop_client.update_apply_window import RUN_STATUS_PATH
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
@@ -28,14 +34,19 @@ from imbue.minds.desktop_client.update_apply_window import build_update_run_prob
 from imbue.minds.desktop_client.update_apply_window import parse_update_run_probe
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs import update_workspace
+from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_until
 
 _CHAT = "update-abc123"
 
@@ -70,8 +81,9 @@ def _make_manager(
     mngr_caller: RecordingMngrCaller | None = None,
     fallback_window_seconds: float = 300.0,
     backend_resolver: MngrCliBackendResolver | None = None,
+    stuck_threshold_seconds: float = 0.0,
 ) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RecoveryRecorder]:
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=stuck_threshold_seconds)
     store = make_update_state_store(tmp_path)
     recoveries = _RecoveryRecorder()
     manager = UpdateApplyWindowManager(
@@ -86,12 +98,6 @@ def _make_manager(
         fallback_window_seconds=fallback_window_seconds,
     )
     return manager, tracker, store, recoveries
-
-
-def _begin_run(store: WorkspaceUpdateStateStore, agent_id: AgentId) -> None:
-    """Put a row in flight with the chat name the probe fixtures use."""
-    assert store.try_begin_run(agent_id, chat_agent_name=_CHAT)
-    store.set_activity(agent_id, UpdateActivity.RUNNING)
 
 
 def _is_failure_suppressed(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> bool:
@@ -143,13 +149,41 @@ def test_a_run_with_no_chat_name_reads_unknown_rather_than_gone() -> None:
     assert probe.is_run_alive is True
 
 
+@pytest.mark.parametrize("is_watchdog_installed", (True, False))
 @pytest.mark.parametrize("ended_state", ("DONE", "STOPPED"))
-def test_an_agent_positively_ended_reads_as_gone(ended_state: str) -> None:
+@pytest.mark.witnesses("workspace-updates.stopped-agent-revived", partial="the app's reading only")
+def test_a_stopped_lead_is_still_going_only_where_the_watchdog_brings_it_back(
+    ended_state: str, is_watchdog_installed: bool
+) -> None:
     """STOPPED is what an agent with no tmux session reports, i.e. what a container restart leaves behind."""
-    probe = parse_update_run_probe(update_run_probe_stdout(agents=f"{_CHAT}\t{ended_state}\n"), _CHAT)
+    stdout = update_run_probe_stdout(agents=f"{_CHAT}\t{ended_state}\n", is_watchdog_installed=is_watchdog_installed)
+    probe = parse_update_run_probe(stdout, _CHAT)
 
-    assert probe.agent_liveness is UpdateAgentLiveness.GONE
-    assert probe.is_run_alive is False
+    assert probe.agent_liveness is UpdateAgentLiveness.STOPPED
+    assert probe.is_run_alive is is_watchdog_installed
+
+
+@pytest.mark.parametrize(
+    ("agent_lines", "liveness", "listed_chat_id"),
+    (
+        ("renamed-update\tRUNNING\tagent-chat-1\t\n", UpdateAgentLiveness.ALIVE, "agent-chat-1"),
+        # A handoff leaves the ended predecessor listed beside the agent the chat moved to.
+        (
+            "renamed-update\tSTOPPED\tagent-chat-1\t\nsuccessor\tRUNNING\tagent-2\tagent-chat-1\n",
+            UpdateAgentLiveness.ALIVE,
+            "agent-chat-1",
+        ),
+        ("renamed-update\tDONE\tagent-chat-1\t\n", UpdateAgentLiveness.STOPPED, "agent-chat-1"),
+        ("unrelated\tRUNNING\tagent-other\t\n", UpdateAgentLiveness.GONE, ""),
+    ),
+)
+def test_a_lead_whose_chat_was_renamed_is_found_by_its_chat_id(
+    agent_lines: str, liveness: UpdateAgentLiveness, listed_chat_id: str
+) -> None:
+    probe = parse_update_run_probe(update_run_probe_stdout(agents=agent_lines), _CHAT, "agent-chat-1")
+
+    assert probe.agent_liveness is liveness
+    assert probe.chat_agent_id == listed_chat_id
 
 
 @pytest.mark.parametrize(
@@ -286,6 +320,31 @@ def test_the_probe_script_reads_busy_chats_from_the_templates_cli_when_it_has_on
 ) -> None:
     stdout = _run_probe_script_with_a_busy_lead(
         tmp_path, is_cli_present=is_cli_present, timeout_function=_PASS_THROUGH_TIMEOUT_FUNCTION
+    )
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is is_waiting
+
+
+# CLEANUP: drop with the probe's marker fallback in ``build_update_run_probe_args``.
+@pytest.mark.witnesses(
+    "workspace-updates.idle-lead-on-a-background-task-in-an-older-template-is-not-waiting",
+    partial="the app's reading only; not the workspace's reminder",
+)
+@pytest.mark.parametrize(("is_runner_alive", "is_waiting"), ((True, False), (False, True)), ids=["live", "exited"])
+def test_the_probe_script_reads_busy_chats_from_the_marker_files_in_a_template_without_the_cli(
+    tmp_path: Path, is_runner_alive: bool, is_waiting: bool
+) -> None:
+    """A template from before the CLI still holds the marker the update's staged ``run_in_background.py`` wrote,
+    which the dispatcher the update program installed reads instead."""
+    archive = tmp_path / DISPATCHER_ARCHIVE_PATH
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(build_workspace_program_archive(update_workspace))
+    write_background_task_marker(tmp_path, _LEAD_ID, os.getpid() if is_runner_alive else exited_process_pid())
+
+    stdout = _run_probe_script_with_a_busy_lead(
+        tmp_path, is_cli_present=False, timeout_function=_PASS_THROUGH_TIMEOUT_FUNCTION
     )
     probe = parse_update_run_probe(stdout, _CHAT)
 
@@ -490,7 +549,7 @@ def test_a_prepare_phase_outage_dispatches_recovery_normally(
 ) -> None:
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_NO_RUN_STDOUT)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is False
@@ -504,7 +563,7 @@ def test_an_apply_under_way_at_the_stuck_edge_arms_the_window_and_declines(
     """The race path: the outage lands between polls and the stuck edge fires first."""
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_APPLYING_STDOUT)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
     assert manager.is_window_open(agent_id) is True
@@ -518,7 +577,7 @@ def test_a_stuck_edge_a_machine_cannot_answer_is_declined_but_not_reported_as_ap
 ) -> None:
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout="")
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
@@ -534,7 +593,7 @@ def test_a_machine_that_answers_again_during_the_guards_probe_is_left_alone(
     caller = HookedMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout))
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, mngr_caller=caller)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
     caller.set_on_call(lambda _argv: tracker.record_probe_success(agent_id))
 
@@ -622,6 +681,21 @@ def test_expiry_with_a_healthy_machine_hands_the_row_back_without_a_recovery(
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
 
+def test_expiry_hands_a_run_whose_apply_landed_back_as_finishing(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The poll cannot move an APPLYING row to WAITING, so an idle agent's landed run is still APPLYING here."""
+    manager, _, store, _ = _make_manager(root_concurrency_group, tmp_path, fallback_window_seconds=-100.0)
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    store.adopt_run_record(agent_id, UpdateRunStatus(chat_agent_name=_CHAT, applied_at=datetime.now(timezone.utc)))
+
+    manager.run_expiry_pass()
+
+    assert store.get(agent_id).activity is UpdateActivity.FINISHING
+
+
 @pytest.mark.witnesses("workspace-updates.wedged-apply-recovered", partial="failure accounting restarts from nothing")
 def test_an_expired_window_stops_suppressing_failure_accounting(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
@@ -651,8 +725,9 @@ def test_a_workspace_reporting_no_run_and_no_agent_is_unlocked(
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.9",
         supported_version="minds-v0.4.1",
+        is_readable=True,
     )
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     assert manager.probe_run(agent_id).is_run_alive is False
 
@@ -675,10 +750,114 @@ def test_the_run_probe_reaches_its_machine_by_the_host_discovery_placed_it_on(
         tmp_path,
         backend_resolver=build_resolver_with_system_services(agent_id, AgentId.generate(), host_id=host_id),
     )
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     manager.probe_run(agent_id)
 
     caller = manager.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     assert caller.calls[0][:3] == ["exec", "--agent", f"{agent_id}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"]
+
+
+@pytest.mark.witnesses("workspace-updates.apply-seen-at-the-outage-onset")
+def test_an_apply_begun_between_polls_is_windowed_at_the_outages_first_failure(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The apply's services go down within a second of it starting, so the record is read at the first failure.
+
+    Read alone, without the agent listing or the busy-chat read, the slow parts of the probe.
+    """
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=applying_record_json()))
+    )
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=60.0
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+    assert manager.is_window_open(agent_id) is True
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    ((*_, script, _no_start),) = caller.calls
+    assert RUN_STATUS_PATH in script
+    assert "list" not in script
+
+
+@pytest.mark.witnesses("workspace-updates.prepare-outage-is-real", partial="an outage first seen while a run prepares")
+def test_an_outage_onset_with_no_apply_under_way_is_still_convicted_once_the_record_answers(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0, stdout=update_run_probe_stdout(run=json.dumps({"chat_agent_name": _CHAT}) + "\n")
+        )
+    )
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    def is_stuck_after_another_failure() -> bool:
+        tracker.record_probe_failure(agent_id)
+        return tracker.get_health(agent_id) is AgentHealth.STUCK
+
+    assert poll_until(is_stuck_after_another_failure, timeout=5.0)
+    assert manager.is_window_open(agent_id) is False
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+def test_an_outage_onset_with_no_update_in_flight_asks_the_workspace_nothing(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_APPLYING_STDOUT))
+    manager, tracker, _, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=60.0
+    )
+    agent_id = AgentId.generate()
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert caller.calls == []
+    assert manager.is_window_open(agent_id) is False
+
+
+@pytest.mark.witnesses("workspace-updates.apply-seen-at-the-outage-onset")
+def test_an_outage_outlasting_the_stuck_threshold_while_its_record_is_read_is_not_convicted(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The read can take longer than the stuck threshold on a remote workspace; the outage waits for its answer."""
+    release_read = threading.Event()
+    caller = HookedMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=applying_record_json()))
+    )
+
+    def hold_the_read(_argv: Sequence[str]) -> None:
+        release_read.wait(timeout=10.0)
+
+    caller.set_on_call(hold_the_read)
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    read_started_at = time.monotonic()
+    assert poll_until(lambda: time.monotonic() - read_started_at > 0.05, timeout=1.0)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY

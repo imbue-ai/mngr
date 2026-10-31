@@ -138,6 +138,39 @@ def test_collect_external_attachments_keeps_the_newest_file_when_a_group_caps_it
     assert swept == [newer]
 
 
+@pytest.mark.parametrize("group", [_LIVE_LOG_GROUP, _ROTATED_LOG_GROUP])
+def test_upload_callback_skips_a_log_file_that_vanished_after_selection(
+    tmp_path: Path, group: LogAttachmentGroup
+) -> None:
+    """A selected log file that is gone by the time its upload runs is skipped, not raised.
+
+    Selection only binds the path; the read happens later on the handler's executor. A size-rotated
+    live log is renamed away (and recreated a moment later) by the process's own log sink, so the
+    read can land in between. Nothing is uploaded for the missing file, and an immutable group must
+    not cache a key that no object was ever written to.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    selected = (
+        logs_folder / "events.jsonl.20250101120000123456" if group.is_immutable else logs_folder / "events.jsonl"
+    )
+    selected.write_text("line\n")
+
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(group,))
+    with recording_s3_bucket() as uploads:
+        groups, callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
+        assert len(groups[group.group_name]) == 1
+        selected.unlink()
+        for callback in callbacks:
+            callback()
+        assert uploads == []
+
+    # Swept again once the file is back: still uploaded under a fresh key rather than a cached one.
+    selected.write_text("line\n")
+    _groups, callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
+    assert len(callbacks) == 1
+
+
 def test_collect_external_attachments_globs_group_base_dir_over_logs_folder(tmp_path: Path) -> None:
     # A group with a base_dir sweeps that directory (even with no process log folder);
     # groups without one keep sweeping the log folder. A missing base_dir matches nothing.

@@ -245,6 +245,74 @@ def test_session_shutdown_clears_marker(tmp_path: Path) -> None:
     assert not (state / "active").exists()
 
 
+_REPLY_DRAFT = Path("pi_reply_draft")
+
+
+def _assistant_update(event: str, *blocks: dict[str, Any]) -> dict[str, Any]:
+    """A ``message_update``/``message_end`` event for an assistant message made of ``blocks``."""
+    return {"event": event, "payload": {"message": {"role": "assistant", "content": list(blocks), "timestamp": 5}}}
+
+
+def test_reply_draft_holds_the_text_streamed_so_far(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "agent_start"},
+            _assistant_update(
+                "message_update", {"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Hel"}
+            ),
+        ],
+    )
+    assert (state / _REPLY_DRAFT).read_text() == "Hel"
+
+
+def test_reply_draft_holds_the_finished_text_after_message_end(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "agent_start"},
+            _assistant_update("message_update", {"type": "text", "text": "Hel"}),
+            # Within the write interval of the first update, so only message_end writes it.
+            _assistant_update("message_update", {"type": "text", "text": "Hello"}),
+            _assistant_update("message_end", {"type": "text", "text": "Hello there"}),
+        ],
+    )
+    assert (state / _REPLY_DRAFT).read_text() == "Hello there"
+
+
+def test_reply_draft_ignores_messages_without_assistant_text(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "agent_start"},
+            _assistant_update("message_end", {"type": "text", "text": "first"}),
+            _message_end(role="user", content="next", timestamp=6),
+            _assistant_update("message_update", {"type": "thinking", "thinking": "only thinking so far"}),
+        ],
+    )
+    assert (state / _REPLY_DRAFT).read_text() == "first"
+
+
+def test_reply_draft_removed_when_the_turn_ends(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "agent_start"},
+            _assistant_update("message_update", {"type": "text", "text": "Hel"}),
+            {"event": "agent_end"},
+        ],
+    )
+    assert not (state / _REPLY_DRAFT).exists()
+
+
+def test_session_start_removes_a_draft_left_by_a_dead_process(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / _REPLY_DRAFT).write_text("cut off mid-reply")
+    state = _run_extension(tmp_path, [{"event": "session_start", "sessionId": "s1", "sessionFile": "/s/s1.jsonl"}])
+    assert not (state / _REPLY_DRAFT).exists()
+
+
 _EMITTER = "pi-coding/common_transcript"
 
 

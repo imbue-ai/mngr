@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-14
 
 - Added `compact_stale_agents_by_name(mngr_ctx, names, now=None)` in `imbue.mngr_autocompact.manager`, the entry point for code that embeds mngr (such as the minds chat app's periodic sweep). It compacts whichever of the named agents are stale and returns the names it compacted.

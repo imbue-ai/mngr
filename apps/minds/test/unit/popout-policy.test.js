@@ -3,8 +3,8 @@
 // Run with: pnpm --dir apps/minds test:unit   (or: node --test test/unit/)
 //
 // Pure helpers split out of main.js (which can't be required outside
-// Electron): where a popout opens, how it follows the cursor, which window a
-// re-dock drag is over, and the frame a drop names.
+// Electron): where a popout opens, how it follows the cursor, and when a
+// watched drag has pulled a window out.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,8 +18,6 @@ const {
   isTornOut,
   TEAR_OUT_DISTANCE,
   surfaceBounds,
-  dropTargetFor,
-  redockFrame,
   isReattachHandshakeNeeded,
   isNavigationTarget,
 } = require('../../electron/popout-policy');
@@ -85,38 +83,6 @@ test('the workspace surface is the content less the titlebar strip', () => {
     y: 20 + TITLEBAR_HEIGHT,
     width: 800,
     height: 600 - TITLEBAR_HEIGHT,
-  });
-});
-
-test('a re-dock drag targets the first same-workspace window whose surface holds the cursor', () => {
-  const candidates = [
-    { id: 'other', contentBounds: { x: 0, y: 0, width: 800, height: 600 }, isSameWorkspace: false },
-    { id: 'mine', contentBounds: { x: 0, y: 0, width: 800, height: 600 }, isSameWorkspace: true },
-    { id: 'mine-too', contentBounds: { x: 0, y: 0, width: 800, height: 600 }, isSameWorkspace: true },
-  ];
-  assert.equal(dropTargetFor({ x: 400, y: 300 }, candidates), 'mine');
-  // Over the titlebar strip is not over the surface.
-  assert.equal(dropTargetFor({ x: 400, y: TITLEBAR_HEIGHT - 1 }, candidates), null);
-  assert.equal(dropTargetFor({ x: 900, y: 300 }, candidates), null);
-  assert.equal(dropTargetFor({ x: 400, y: 300 }, []), null);
-});
-
-test('a drop names the popout content as fractions of the target surface, kept inside it', () => {
-  const target = { x: 100, y: 100, width: 1000, height: 500 + TITLEBAR_HEIGHT };
-  const frame = redockFrame({ x: 350, y: 100 + TITLEBAR_HEIGHT + 125, width: 500, height: 250 }, target);
-  assert.deepEqual(frame, { x: 0.25, y: 0.25, width: 0.5, height: 0.5 });
-  // Larger than the surface: full width, clamped into the square.
-  const big = redockFrame({ x: -500, y: -500, width: 3000, height: 3000 }, target);
-  assert.deepEqual(big, { x: 0, y: 0, width: 1, height: 1 });
-  // Dropped partly past the right edge: slid back in.
-  const slid = redockFrame({ x: 900, y: 100 + TITLEBAR_HEIGHT, width: 500, height: 250 }, target);
-  assert.deepEqual(slid, { x: 0.5, y: 0, width: 0.5, height: 0.5 });
-  // A degenerate target answers the whole surface rather than dividing by zero.
-  assert.deepEqual(redockFrame({ x: 0, y: 0, width: 10, height: 10 }, { x: 0, y: 0, width: 0, height: 10 }), {
-    x: 0,
-    y: 0,
-    width: 1,
-    height: 1,
   });
 });
 

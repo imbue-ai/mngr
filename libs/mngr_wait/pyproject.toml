@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-wait"
-version = "0.2.0"
+version = "0.2.1"
 description = "Wait plugin for mngr - wait for agents/hosts to reach target states"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.3.0",
+    "imbue-mngr==0.3.1",
     "click-option-group>=0.5.6",
 ]
 

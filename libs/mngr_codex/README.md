@@ -27,9 +27,12 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `auto_dismiss_dialogs_at_startup` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
 - `version` — pin the codex CLI version to install (e.g. `"0.139.0"`). When set, installation
-  runs `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches,
-  erroring on a mismatch. A pin also suppresses the provision-time update check (`update_policy`
-  is ignored), since updating would defeat the pin. Default: unset (latest).
+  runs `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches
+  (whether or not `check_installation` is set). A pin also suppresses the provision-time update
+  check (`update_policy` is ignored), since updating would defeat the pin. Default: unset (latest).
+- `version_mismatch` — what provisioning does when the installed codex does not report the pinned
+  `version`: `ERROR` fails the create, `WARN` logs a warning and continues on the installed
+  binary. Default: `ERROR`.
 - `update_policy` — how mngr handles an outdated codex CLI at provision: `AUTO` (run
   `codex update`, no prompt), `ASK` (prompt on an attended local run, else notify), or
   `NEVER` (only notify). An outdated codex still runs. Default: `ASK`. Ignored when

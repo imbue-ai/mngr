@@ -21,8 +21,11 @@ Also registers the shared plugin-test fixtures (including ``temp_mngr_ctx``) so
 backend-level unit tests can construct real provider instances.
 """
 
+import http.server
 import os
+import threading
 from collections.abc import Generator
+from collections.abc import Iterator
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -37,6 +40,7 @@ from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr_gcp.cleanup import gcp_test_created_at
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
+from imbue.mngr_gcp.config import get_gcloud_adc_file_path
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
 from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import gcp_credentials_available
@@ -69,11 +73,7 @@ def setup_test_mngr_env(
     that already survives the HOME swap, so no extra handling is needed there.
     """
     if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
-        # Mirror google.auth's well-known-file resolution: CLOUDSDK_CONFIG if
-        # set, else ~/.config/gcloud (mac/linux). Compute it against the real
-        # HOME before setup_mngr_test_environment swaps HOME.
-        cloud_sdk_config = os.environ.get("CLOUDSDK_CONFIG") or str(Path.home() / ".config" / "gcloud")
-        monkeypatch.setenv("CLOUDSDK_CONFIG", cloud_sdk_config)
+        monkeypatch.setenv("CLOUDSDK_CONFIG", str(get_gcloud_adc_file_path().parent))
     setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
     yield
 
@@ -151,3 +151,47 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     )
     logger.error(message)
     _mark_session_failed(session)
+
+
+@pytest.fixture
+def isolated_adc_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point gcloud's config dir at an empty temp dir and clear the ADC credential and project env vars."""
+    gcloud_config_dir = tmp_path / "gcloud"
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud_config_dir))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GCLOUD_PROJECT", raising=False)
+    return gcloud_config_dir
+
+
+class _GceMetadataStubHandler(http.server.BaseHTTPRequestHandler):
+    """Records every path requested of it and answers 404, which google-auth reads as "not on GCE"."""
+
+    requested_paths: list[str] = []
+
+    def do_GET(self) -> None:
+        self.requested_paths.append(self.path)
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@pytest.fixture
+def gce_metadata_server_requests(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """Point google-auth's GCE metadata-server probe at a loopback stub; yields the paths it was asked for."""
+    requested_paths: list[str] = []
+    handler_class = type(
+        "_ScopedGceMetadataStubHandler", (_GceMetadataStubHandler,), {"requested_paths": requested_paths}
+    )
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_class)
+    monkeypatch.setenv("GCE_METADATA_IP", f"127.0.0.1:{server.server_address[1]}")
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name="gce-metadata-stub-test")
+    thread.start()
+    try:
+        yield requested_paths
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)

@@ -6,6 +6,28 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped Latchkey version to 3.21.0; the bundled service catalog now includes Asana.
+
+### Fixed
+
+- Fixed: The VPS gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing truncated Slack replies for datalib.
+- Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
+
+## [v0.2.1] - 2026-10-28
+
+### Changed
+
+- Changed: A failed `latchkey auth re-encrypt` during a credential export now reports counts and flags (timeout elapsed, run duration, services requested, whether a destination key and account were given — never names), so a signal kill such as `-15` is diagnosable.
+- Changed: Bump Latchkey to 3.19.4.
+- Changed: `mngr latchkey forward` logs far more diagnostic detail for transient wiring failures (provider instance/backend, connect errnos, host-sleep), gateway spawn/bind failures (exit code, port state, last output with secrets redacted), provisioning concurrency, and a startup install baseline; its Sentry events now carry a `process_started_at` tag.
+
+### Fixed
+
+- Fixed: A device announcement that fails because pyinfra is missing its `ssh` connector no longer kills the setup thread; it is reported and retried on the next discovery cycle.
+- Fixed: `GET /permissions/self` no longer fails when the user's desktop is asleep, offline, or closed; the remote workspace gateway now answers it from the permissions file it enforces.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

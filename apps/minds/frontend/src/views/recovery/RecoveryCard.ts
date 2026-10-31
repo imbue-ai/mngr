@@ -225,8 +225,9 @@ export interface RecoveryCardAttrs {
  * machine is already the surface underneath.
  */
 function reportProblem(agentId: string): void {
-  getAppContext().shell.rememberPageBehindOverlay();
-  m.route.set("/help", { workspace: agentId, assist: "0" });
+  const { shell } = getAppContext();
+  shell.rememberPageBehindOverlay();
+  m.route.set("/help", shell.overlayQuery({ workspace: agentId, assist: "0" }));
 }
 
 /** The card's body, assuming the model has loaded. The shells handle the

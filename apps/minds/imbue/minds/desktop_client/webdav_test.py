@@ -1,12 +1,20 @@
 """Unit tests for the /api/v1/files WebDAV mount."""
 
+import errno
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 from typing import Final
 from uuid import uuid4
 
+import pytest
 from flask.testing import FlaskClient
+from werkzeug.test import Client
+from wsgidav.default_conf import DEFAULT_CONFIG
+from wsgidav.error_printer import ErrorPrinter
+from wsgidav.fs_dav_provider import FilesystemProvider
+from wsgidav.fs_dav_provider import FolderResource
 from wsgidav.wsgidav_app import WsgiDAVApp
 
 from imbue.minds.config.data_types import InstallationPaths
@@ -15,6 +23,8 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.webdav import _MIDDLEWARE_STACK
+from imbue.minds.desktop_client.webdav import _PermissionErrorAsForbidden
 from imbue.minds.desktop_client.webdav import _build_wsgidav_config
 
 _DEVICE_ID: Final[str] = str(device_id_for_test("webdav"))
@@ -260,3 +270,71 @@ def test_an_app_without_a_device_id_serves_nothing_under_a_device_id(tmp_path: P
     response = client.open("/api/v1/files//tmp", method="PROPFIND", headers={"Depth": "0", **_auth_headers(api_key)})
     assert response.status_code == 404
     assert "no device id" in response.get_json()["error"]
+
+
+class _RefusingFolderResource(FolderResource):
+    """A folder whose listing fails the way a refused ``os.listdir`` does."""
+
+    def __init__(self, path: str, environ: dict[str, Any], file_path: str, refusal: OSError) -> None:
+        super().__init__(path, environ, file_path)
+        self._refusal = refusal
+
+    def get_member_names(self) -> list[str]:
+        raise self._refusal
+
+
+class _RefusingFilesystemProvider(FilesystemProvider):
+    """Serves ``root_folder`` but refuses to list ``refused_folder`` with ``refusal``."""
+
+    def __init__(self, root_folder: Path, refused_folder: Path, refusal: OSError) -> None:
+        super().__init__(str(root_folder), readonly=True)
+        self._refused_folder = refused_folder
+        self._refusal = refusal
+
+    def get_resource_inst(self, path: str, environ: dict[str, Any]) -> Any:
+        resource = super().get_resource_inst(path, environ)
+        if (
+            isinstance(resource, FolderResource)
+            and Path(self._loc_to_file_path(path, environ)) == self._refused_folder
+        ):
+            return _RefusingFolderResource(path, environ, str(self._refused_folder), self._refusal)
+        return resource
+
+
+def _propfind_status_for_refused_listing(tmp_path: Path, refusal: OSError) -> int:
+    """PROPFIND (Depth 1) a folder whose listing fails with ``refusal``, through the WsgiDAV app minds configures."""
+    share_root = tmp_path / "share"
+    refused_folder = share_root / "Photos Library.photoslibrary"
+    refused_folder.mkdir(parents=True)
+    config = _build_wsgidav_config((share_root,))
+    config["provider_mapping"] = {
+        str(share_root).lower(): _RefusingFilesystemProvider(share_root, refused_folder, refusal)
+    }
+    client = Client(WsgiDAVApp(config))
+    response = client.open(f"{refused_folder}/", method="PROPFIND", headers={"Depth": "1"})
+    return response.status_code
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected_status"),
+    [
+        # macOS privacy protection refuses a listing with EPERM, which WsgiDAV on its own answers with a 500.
+        (
+            PermissionError(
+                errno.EPERM, "Operation not permitted", "/Users/someone/Pictures/Photos Library.photoslibrary"
+            ),
+            403,
+        ),
+        (PermissionError(errno.EACCES, "Permission denied", "/tmp/unreadable"), 403),
+        (OSError(errno.EIO, "Input/output error", "/tmp/broken"), 500),
+    ],
+    ids=["eperm", "eacces", "eio"],
+)
+def test_refused_listing_status(tmp_path: Path, refusal: OSError, expected_status: int) -> None:
+    assert _propfind_status_for_refused_listing(tmp_path, refusal) == expected_status
+
+
+def test_middleware_stack_is_wsgidavs_default_plus_the_permission_middleware() -> None:
+    without_permission_middleware = [m for m in _MIDDLEWARE_STACK if m is not _PermissionErrorAsForbidden]
+    assert without_permission_middleware == DEFAULT_CONFIG["middleware_stack"]
+    assert _MIDDLEWARE_STACK.index(_PermissionErrorAsForbidden) == _MIDDLEWARE_STACK.index(ErrorPrinter) + 1

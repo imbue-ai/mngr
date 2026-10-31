@@ -19,7 +19,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import ConfigDict
@@ -153,8 +153,8 @@ class ConnectorTurnCredentialClient(TurnCredentialClientInterface):
         default=None, frozen=True, description="Refreshes a near-expiry session token; None leaves the token as it is"
     )
     timeout_seconds: float = Field(default=TURN_MINT_TIMEOUT_SECONDS, frozen=True, description="Per-mint timeout")
-    transport: httpx.BaseTransport | None = Field(
-        default=None, frozen=True, description="httpx transport override; tests inject an httpx.MockTransport"
+    transport: httpx2.BaseTransport | None = Field(
+        default=None, frozen=True, description="httpx2 transport override; tests inject an httpx2.MockTransport"
     )
 
     def mint_credential(self, user_id: str, workspace_id: str | None) -> TurnCredential:
@@ -170,9 +170,9 @@ class ConnectorTurnCredentialClient(TurnCredentialClientInterface):
         # the account stays the customIdentifier it meters by.
         params = {} if workspace_id is None else {"workspace_id": workspace_id}
         try:
-            with httpx.Client(transport=self.transport, timeout=self.timeout_seconds) as client:
+            with httpx2.Client(transport=self.transport, timeout=self.timeout_seconds) as client:
                 response = client.get(url, headers=headers, params=params)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise TurnCredentialUnavailableError(f"could not reach the connector: {e}") from e
         return credential_from_connector_response(response.status_code, response.text, datetime.now(timezone.utc))
 

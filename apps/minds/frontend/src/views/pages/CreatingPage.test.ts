@@ -3,20 +3,39 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
-import { START_FALLBACK_LINE, readyTurnMarkdown } from "../../models/creationTranscript";
-import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/startFlow";
+import {
+  SETUP_LINE,
+  SHOWCASE_APP,
+  SHOWCASE_INTRO_LINE,
+  readyTurnMarkdown,
+  showcaseMarkdown,
+} from "../../models/creationTranscript";
+import {
+  FLOW_OPTIONS_GAP_MS,
+  FLOW_THINK_MS,
+  MANIFESTO_OPENER,
+  MANIFESTO_QUESTION,
+  REPORTING_ASK,
+  startFlow,
+  streamDurationMs,
+} from "../../models/startFlow";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
-import { allText, attrsOf, collectVnodes, jsonResponse } from "../../testing";
+import type { AnyVnode } from "../../testing";
+import { allText, byId, classTokensOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
+import { Button } from "../components/Button";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
 describe("failureGuidance", () => {
-  it("explains the two recognized authentication failures and nothing else", () => {
+  it("explains the recognized clone failures and nothing else", () => {
     expect(allText(failureGuidance("GITHUB_AUTH_REQUIRED"))).toContain(
       "Install the GitHub app",
     );
     expect(allText(failureGuidance("GIT_AUTH_REQUIRED"))).toContain(
       "rejected anonymous access",
+    );
+    expect(allText(failureGuidance("GIT_REF_NOT_FOUND"))).toContain(
+      "no branch or tag with that name",
     );
     expect(failureGuidance("")).toBeNull();
     expect(failureGuidance("SOMETHING_ELSE")).toBeNull();
@@ -51,13 +70,14 @@ describe("failureTurn", () => {
 
 describe("CreatingPage across a route change", () => {
   afterEach(() => {
+    startFlow.reset();
     vi.useRealTimers();
     clearAppContextForTests();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  function liveDetail(createAttemptId: string): CreateAttemptDetail {
+  function liveDetail(createAttemptId: string, isDriven = false): CreateAttemptDetail {
     return {
       kind: "live",
       record: null,
@@ -66,6 +86,7 @@ describe("CreatingPage across a route change", () => {
         provider_label: "",
         is_remote: false,
         request: {
+          is_onboarding_driven_by_agent: isDriven,
           display_name: `workspace-${createAttemptId}`,
           launch_mode: "LIMA",
           cloud_account: "",
@@ -96,6 +117,7 @@ describe("CreatingPage across a route change", () => {
         log_tail: [],
         provider_label: "",
         request: {
+          is_onboarding_driven_by_agent: false,
           display_name: `workspace-${createAttemptId}`,
           launch_mode: "LIMA",
           cloud_account: "",
@@ -121,6 +143,18 @@ describe("CreatingPage across a route change", () => {
     return m(CreatingPage, {
       agentId: createAttemptId,
     } as m.Attributes) as m.VnodeDOM;
+  }
+
+  /** The keys of the page's column, in order: the turns as they stand. */
+  function columnKeys(rendered: m.Vnode): string[] {
+    return (rendered.children as m.Vnode[]).map((child) => String(attrsOf(child).key));
+  }
+
+  /** The turn of the page's column keyed `key`. */
+  function columnTurn(rendered: m.Vnode, key: string): AnyVnode {
+    const turn = (rendered.children as m.Vnode[]).find((child) => attrsOf(child).key === key);
+    expect(turn, `the ${key} turn`).toBeDefined();
+    return turn as AnyVnode;
   }
 
   it("opens with the manifesto exchange even for an attempt the start flow did not submit", async () => {
@@ -156,22 +190,32 @@ describe("CreatingPage across a route change", () => {
     );
   });
 
+  /** The op-log stream as the page opens it: its `onmessage` is where a log line arrives. */
+  interface LogSource {
+    onmessage: unknown;
+  }
+
   /**
-   * A live attempt whose status polls answer `status` (DONE unless given), with every
-   * welcome-chat post held open until the returned `settleSeed` is called. Reduced motion, so
+   * A live attempt whose status polls answer `status` (DONE unless given, until `setStatus` says
+   * otherwise), with every welcome-chat post held open until the returned `settleSeed` is called. Reduced motion, so
    * the page enters directly instead of starting the wash, which measures the DOM.
    */
   function mountDoneAttempt(
     createAttemptId: string,
     status = "DONE",
+    isDriven = false,
   ): {
     page: m.Component;
     entered: string[];
     seedBodies: WelcomeChatBody[];
+    logSources: LogSource[];
     settleSeed: () => void;
+    setStatus: (next: string) => void;
   } {
     vi.useFakeTimers();
+    let currentStatus = status;
     const entered: string[] = [];
+    const logSources: LogSource[] = [];
     registerAppContext({
       stores: { workspaces: { accentEntry: () => undefined } },
       shell: { enterWorkspace: (id: string) => entered.push(id) },
@@ -186,6 +230,9 @@ describe("CreatingPage across a route change", () => {
       class {
         onmessage: unknown = null;
         onerror: unknown = null;
+        constructor() {
+          logSources.push(this);
+        }
         close(): void {}
       },
     );
@@ -199,11 +246,11 @@ describe("CreatingPage across a route change", () => {
         });
       }
       if (url.startsWith("/ui/api/create/attempts/"))
-        return Promise.resolve(jsonResponse(liveDetail(createAttemptId)));
+        return Promise.resolve(jsonResponse(liveDetail(createAttemptId, isDriven)));
       return Promise.resolve(
         jsonResponse({
-          status,
-          redirect_url: status === "DONE" ? "/goto/agent-0123abcd/" : "",
+          status: currentStatus,
+          redirect_url: currentStatus === "DONE" ? "/goto/agent-0123abcd/" : "",
         }),
       );
     });
@@ -217,9 +264,13 @@ describe("CreatingPage across a route change", () => {
       page,
       entered,
       seedBodies,
+      logSources,
       settleSeed: () => {
         for (const resolve of seedResolvers)
           resolve(jsonResponse({ chat_id: "agent-seeded" }));
+      },
+      setStatus: (next: string) => {
+        currentStatus = next;
       },
     };
   }
@@ -242,10 +293,18 @@ describe("CreatingPage across a route change", () => {
     expect(turns[3].text).toContain(REPORTING_ASK);
     expect(turns[4].text).toContain("Name — workspace-create-attempt-d");
     expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
-    const nodes = collectVnodes(render(vnodeFor("create-attempt-d")));
-    expect(nodes.some((node) => attrsOf(node).key === "creation-ready")).toBe(true);
-    expect(allText(nodes.find((node) => attrsOf(node).id === "start-options"))).toContain("Make something.");
-    expect(allText(nodes.find((node) => attrsOf(node).key === "creation-start-fallback"))).toBe(START_FALLBACK_LINE);
+    const root = render(vnodeFor("create-attempt-d"));
+    const nodes = collectVnodes(root);
+    // The settings turn, the setup line, the loading box at once (no recording), and the ready
+    // line, which stands further from the box than one turn from the next.
+    const keys = columnKeys(root);
+    expect(keys.indexOf("creation-summary")).toBeLessThan(keys.indexOf("creation-setup"));
+    expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-box"));
+    expect(keys.indexOf("creation-box")).toBeLessThan(keys.indexOf("creation-ready"));
+    expect(keys.indexOf("creation-ready")).toBeLessThan(keys.indexOf("scroll-anchor"));
+    expect(keys).not.toContain("showcase-todo-list");
+    const ready = nodes.find((node) => attrsOf(node).key === "creation-ready") as AnyVnode;
+    expect(classTokensOf(ready)).toContain("mt-20");
 
     // The ready hold passes, but the workspace is not entered while the hand-off is still in flight.
     await vi.advanceTimersByTimeAsync(30_000);
@@ -253,6 +312,152 @@ describe("CreatingPage across a route change", () => {
     settleSeed();
     await vi.advanceTimersByTimeAsync(0);
     expect(entered).toEqual(["agent-0123abcd"]);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("folds the settings behind a toggle in the user's turn, and lists them once it is opened", async () => {
+    const { page, seedBodies } = mountDoneAttempt("create-attempt-j", "CREATING_WORKSPACE");
+    const render = (vnode: m.Vnode): m.Vnode =>
+      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+
+    const closed = render(vnodeFor("create-attempt-j"));
+    expect(allText(closed)).toContain("Create a workspace with these settings:");
+    const detailsOf = (rendered: m.Vnode): AnyVnode =>
+      collectVnodes(rendered).find((node) => attrsOf(node).id === "creation-summary-details") as AnyVnode;
+    expect(attrsOf(detailsOf(closed)).isOpen).toBe(false);
+    expect(allText(detailsOf(closed))).toContain("Name — workspace-create-attempt-j");
+    (attrsOf(detailsOf(closed)).onToggle as () => void)();
+    expect(attrsOf(detailsOf(render(vnodeFor("create-attempt-j")))).isOpen).toBe(true);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("keeps the log's end in view as lines arrive, but not once the reader has scrolled up", async () => {
+    const { page, logSources } = mountDoneAttempt("create-attempt-n", "CREATING_WORKSPACE");
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-n"));
+    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-box"));
+    expect(logSources).toHaveLength(1);
+    const feedLine = (line: string): void =>
+      (logSources[0].onmessage as (event: { data: string }) => void)({ data: JSON.stringify({ log: line }) });
+    const showDetails = collectVnodes(render()).find(
+      (node) => node.tag === Button && allText(node) === "Show details",
+    ) as AnyVnode;
+    (attrsOf(showDetails).onclick as () => void)();
+
+    // The <pre> only reads and moves its own scroll position, so a bare object stands in for it.
+    const element = { scrollTop: 0, scrollHeight: 0, clientHeight: 100 };
+    const logHooks = (): {
+      oncreate: (vnode: { dom: unknown }) => void;
+      onupdate: (vnode: { dom: unknown }) => void;
+      onscroll: (event: { target: unknown }) => void;
+    } => attrsOf(byId(render(), "logs") as AnyVnode) as ReturnType<typeof logHooks>;
+
+    // Opened empty, there is nothing to pin to.
+    logHooks().oncreate({ dom: element });
+    expect(element.scrollTop).toBe(0);
+    // Lines arrive: the end comes into view.
+    feedLine("cloning");
+    feedLine("building");
+    element.scrollHeight = 400;
+    logHooks().onupdate({ dom: element });
+    expect(element.scrollTop).toBe(400);
+    // A redraw with no new line (the progress timer's) moves nothing.
+    element.scrollTop = 350;
+    logHooks().onupdate({ dom: element });
+    expect(element.scrollTop).toBe(350);
+    // The reader scrolls up to read something: new lines no longer pull the end into view.
+    element.scrollTop = 100;
+    logHooks().onscroll({ target: element });
+    feedLine("installing");
+    element.scrollHeight = 600;
+    logHooks().onupdate({ dom: element });
+    expect(element.scrollTop).toBe(100);
+    // Back at the end, the log follows the lines again.
+    element.scrollTop = 500;
+    logHooks().onscroll({ target: element });
+    feedLine("starting");
+    element.scrollHeight = 800;
+    logHooks().onupdate({ dom: element });
+    expect(element.scrollTop).toBe(800);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("shows an onboarding attempt's recording under its intro line, with no caption, before the box, and hands it over at once", async () => {
+    // Submitted by the start flow, as an onboarding create is, so its turns arrive on the agent's clock.
+    startFlow.submittedCreateAttemptId = "create-attempt-k";
+    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt("create-attempt-k", "CREATING_WORKSPACE", true);
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-k"));
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+
+    // The intro and the recording sit under the setup line, the box under them.
+    const building = render();
+    const keys = columnKeys(building);
+    expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-showcase-intro"));
+    expect(keys.indexOf("creation-showcase-intro")).toBeLessThan(keys.indexOf("showcase-todo-list"));
+    expect(keys.indexOf("showcase-todo-list")).toBeLessThan(keys.indexOf("creation-box"));
+    expect(keys).not.toContain("creation-ready");
+    expect(collectText(columnTurn(building, "creation-showcase-intro")).join("")).toContain(SHOWCASE_INTRO_LINE);
+    const showcase = columnTurn(building, "showcase-todo-list");
+    expect(collectText(showcase).join("").trim()).toBe("");
+    const image = collectVnodes(showcase).find((node) => node.tag === "img") as AnyVnode;
+    expect(attrsOf(image).src).toBe(SHOWCASE_APP.gifUrl);
+    expect(attrsOf(image).alt).toBe(SHOWCASE_APP.label);
+    // The recording arrives once its intro has landed, and the box a beat after the recording.
+    const introAt = FLOW_THINK_MS + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
+    const recordingAt = introAt + streamDurationMs(SHOWCASE_INTRO_LINE) + FLOW_OPTIONS_GAP_MS;
+    expect(String(attrsOf(showcase).style)).toContain(`--start-chat-delay: ${recordingAt}ms`);
+    expect(String(attrsOf(columnTurn(building, "creation-box")).style)).toContain(
+      `--start-chat-delay: ${recordingAt + FLOW_THINK_MS}ms`,
+    );
+
+    // The conversation went over with the recording in it, ahead of the welcome.
+    const tail = seedBodies[0].turns.slice(-3).map((turn) => turn.text);
+    expect(tail).toEqual([SETUP_LINE, showcaseMarkdown(SHOWCASE_APP), readyTurnMarkdown()]);
+
+    // The attempt finishes: the ready line lands under the box, and the entry waits for the seed.
+    setStatus("DONE");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(seedBodies).toHaveLength(2);
+    const done = columnKeys(render());
+    expect(done.indexOf("creation-box")).toBeLessThan(done.indexOf("creation-ready"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(entered).toEqual([]);
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(entered).toEqual(["agent-0123abcd"]);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("opens the recording enlarged on a click and closes it again", async () => {
+    const { page } = mountDoneAttempt("create-attempt-q", "DONE", true);
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-q"));
+    await vi.waitFor(() => expect(columnKeys(render())).toContain("showcase-todo-list"));
+
+    // The recording is a control; nothing is enlarged until it is pressed.
+    const settled = renderDeep(render());
+    expect(collectVnodes(settled).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
+    const opener = collectVnodes(settled).find(
+      (node) => attrsOf(node)["aria-label"] === "View the recording larger",
+    ) as AnyVnode;
+    expect(opener.tag).toBe("button");
+    (attrsOf(opener).onclick as () => void)();
+
+    // Enlarged: the same recording in a dialog, over the page.
+    const enlarged = renderDeep(render());
+    const dialog = collectVnodes(enlarged).find((node) => attrsOf(node).role === "dialog") as AnyVnode;
+    expect(dialog).toBeDefined();
+    expect(attrsOf(dialog)["aria-label"]).toBe(SHOWCASE_APP.label);
+    const enlargedImage = collectVnodes(dialog).find(
+      (node) => node.tag === "img" && attrsOf(node).src === SHOWCASE_APP.gifUrl,
+    );
+    expect(enlargedImage).toBeDefined();
+
+    // Its close control takes it down again.
+    const close = collectVnodes(enlarged).find(
+      (node) => attrsOf(node)["aria-label"] === "Close image viewer",
+    ) as AnyVnode;
+    (attrsOf(close).onclick as () => void)();
+    expect(collectVnodes(renderDeep(render())).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
     (page.onremove as () => void).call(page);
   });
 

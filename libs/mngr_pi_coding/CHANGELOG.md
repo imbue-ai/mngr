@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The pi lifecycle extension streams pi's in-progress assistant message to `$MNGR_AGENT_STATE_DIR/pi_reply_draft` (updated from pi's `message_update` events, cleared when the turn ends or a new session starts), so Imbue Studio can show a pi reply while it is being written.
+
+## [v0.2.1] - 2026-10-28
+
+### Added
+
+- Added: `version_mismatch` setting on the pi-coding agent type: `ERROR` (default) fails `mngr create` on a version mismatch; `WARN` logs a warning and creates on the installed binary.
+
+### Changed
+
+- Changed: The pinned-version check now runs whenever `version` is set, even with `check_installation = false` (which now only controls install-if-missing), and probes the binary itself so a wrapper command no longer skips it.
+
+### Fixed
+
+- Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer misreads a live pi agent as DONE; the agent class now declares its process name (`pi`), which that listing reads.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

@@ -1,5 +1,6 @@
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 
 
 def build_agent_address(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> str:
@@ -13,7 +14,11 @@ def build_agent_address(agent_id: AgentId, backend_resolver: BackendResolverInte
     behalf. A pin that has gone stale fails as "not found" rather than searching
     elsewhere.
     """
-    instance = backend_resolver.find_sole_agent_instance(agent_id)
+    return agent_address_for_instance(agent_id, backend_resolver.find_sole_agent_instance(agent_id))
+
+
+def agent_address_for_instance(agent_id: AgentId, instance: DiscoveredAgent | None) -> str:
+    """:func:`build_agent_address` for a caller that already read the placement and acts on it too."""
     if instance is None:
         return str(agent_id)
     return f"{agent_id}@{instance.host_id}.{instance.provider_name}"

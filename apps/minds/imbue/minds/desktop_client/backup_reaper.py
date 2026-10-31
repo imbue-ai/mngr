@@ -28,7 +28,7 @@ from datetime import timezone
 from typing import Final
 from uuid import uuid4
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -133,10 +133,10 @@ def fetch_retention_seconds(connector_url: str) -> float | None:
     """Fetch the retention window from the connector's policy endpoint, or None on any failure."""
     url = f"{connector_url.rstrip('/')}{_RETENTION_POLICY_PATH}"
     try:
-        response = httpx.get(url, timeout=_RETENTION_FETCH_TIMEOUT_SECONDS)
+        response = httpx2.get(url, timeout=_RETENTION_FETCH_TIMEOUT_SECONDS)
         response.raise_for_status()
         body = response.json()
-    except (httpx.HTTPError, ValueError) as e:
+    except (httpx2.HTTPError, ValueError) as e:
         logger.debug("Could not fetch the backup retention policy from {}: {}", url, e)
         return None
     raw_value = body.get("retention_seconds") if isinstance(body, dict) else None

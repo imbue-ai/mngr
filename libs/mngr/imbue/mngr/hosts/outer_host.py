@@ -274,19 +274,28 @@ EXEC_WRITE_STDIN_CHUNK_BYTES: Final[int] = 64 * 1024
 def is_dead_ssh_connection_error(exception: OSError) -> bool:
     """Whether this ``OSError`` is a connection this side still believes in, now dead.
 
-    The two shapes that wreckage arrives in, which every caller has to treat
-    alike: a socket pyinfra closed under us ("Socket is closed"), and a peer
-    that reset one we were still holding -- what a transport cached across a
-    laptop sleep gets when it is next used. The reset is matched on the type
-    because its message is the errno text ("[Errno 54] Connection reset by
-    peer"), which no message match for the first shape will ever catch.
+    The three shapes that wreckage arrives in, which every caller has to treat
+    alike: a socket pyinfra closed under us ("Socket is closed"); a peer that
+    reset one we were still holding -- what a transport cached across a laptop
+    sleep gets when it is next used; and a socket whose own local address
+    vanished under it (``EADDRNOTAVAIL``) -- what a network switch, VPN toggle
+    or sleep/wake does to a connection that outlives it, which the kernel then
+    drops. paramiko's reader thread saves that ``recv`` failure and re-raises it
+    bare from the next channel open. The reset is matched on the type and the
+    lost address on the errno (49 on macOS, 99 on Linux), because the message of
+    each is only the errno text, which no message match for the first shape
+    will ever catch.
 
     Whichever it was, the connection cannot be reused: a retry has to disconnect
     and rebuild rather than let ``_ensure_connected`` hand the same dead one
-    back. Shared so that a third shape of wire death is classified once instead
+    back. Shared so that a further shape of wire death is classified once instead
     of in each of the paths that have to react to it.
     """
-    return isinstance(exception, ConnectionResetError) or "Socket is closed" in str(exception)
+    return (
+        isinstance(exception, ConnectionResetError)
+        or exception.errno == errno.EADDRNOTAVAIL
+        or "Socket is closed" in str(exception)
+    )
 
 
 # The errnos a TCP connect fails with when it could not reach the host or its network at
@@ -363,7 +372,8 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
 
     Matches:
     - OSError naming a dead connection, per :func:`is_dead_ssh_connection_error`
-      (a stale socket from pyinfra, or a peer that reset the connection)
+      (a stale socket from pyinfra, a peer that reset the connection, or a
+      connection whose local address vanished)
     - SSHException (e.g. "SSH session not active" when transport dies),
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
@@ -373,7 +383,7 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
     - TimeoutError (pyinfra read_output_buffers timeout when the remote
       sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
       Note: ``TimeoutError`` is an OSError subclass on Python 3, but the
-      OSError branch above matches neither of the dead-connection shapes, so
+      OSError branch above matches none of the dead-connection shapes, so
       bare timeouts fall through and need this explicit branch to be
       classified transient.
     """

@@ -40,6 +40,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 
@@ -322,6 +323,23 @@ def test_host_ssh_info_after_discovery_re_fires_with_ssh_info(tmp_path: Path) ->
     assert second.ssh_info.port == 2222
     assert second.ssh_info.key_path == key_path
     assert second.ssh_info.known_hosts_path == known_hosts_path
+
+
+def test_host_ssh_info_logs_a_changed_endpoint_but_not_a_repeated_one(tmp_path: Path) -> None:
+    """A moved endpoint is logged with both ports; the same endpoint re-delivered every poll is not."""
+    key_path = tmp_path / "id_rsa"
+    key_path.write_text("fake")
+    host_id = HostId.generate()
+    with capture_loguru(level="DEBUG") as log_output:
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            consumer, _handlers = _make_consumer(cg)
+            for port in (50161, 50161, 50162):
+                consumer._on_observe_output(
+                    _host_ssh_info_line(host_id, _make_ssh_info("127.0.0.1", port, key_path)), is_stdout=True
+                )
+
+    endpoint_changes = [line for line in log_output.getvalue().splitlines() if "SSH endpoint for host" in line]
+    assert endpoint_changes == [f"SSH endpoint for host {host_id} changed from 127.0.0.1:50161 to 127.0.0.1:50162"]
 
 
 def test_agent_discovery_after_known_ssh_info_fires_with_ssh_info(tmp_path: Path) -> None:

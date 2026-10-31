@@ -31,6 +31,10 @@ from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
 from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -198,8 +202,8 @@ class BackupServiceUpdateRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
-            "tasks (the 'Stop all chats and retry' flow)"
+            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
+            "background task, first, ending those tasks (the 'Stop all chats and retry' flow)"
         ),
     )
 
@@ -210,8 +214,8 @@ class BackupRestoreRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
-            "tasks (the 'Stop chats and try again' flow)"
+            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
+            "background task, first, ending those tasks (the 'Stop chats and try again' flow)"
         ),
     )
     update_after: bool = Field(
@@ -382,6 +386,13 @@ class CreateWorkspaceRequest(ApiRequestModel):
             "and web access' switch would (default off). Requires an account: every row -- "
             "imbue_cloud and local docker/lima alike -- runs the desktop publish flow, which "
             "grants nobody."
+        ),
+    )
+    is_onboarding_driven_by_agent: bool | None = Field(
+        default=None,
+        description=(
+            "Show the onboarding examples on the creation page while the workspace is built "
+            "(default off; the first-run start flow turns it on for its creates)"
         ),
     )
 
@@ -985,6 +996,44 @@ class IceServersResponse(FrozenModel):
     expires_at: str | None = Field(
         description="RFC 3339 expiry of the credential the list carries; null when the list is empty"
     )
+class AgentFolderSync(FrozenModel):
+    """One folder of this desktop that the workspace has a copy of, or had."""
+
+    local_path: str = Field(description="The folder on this desktop, as an absolute path; identifies the sync")
+    workspace_path: str | None = Field(
+        description=(
+            "Where the workspace's copy is, from the workspace's home directory (``~/...``): under "
+            "``~/synced_folders/<device id>/`` while the "
+            "sync is on, ``~/inactive_synced_folders/<device id>/`` once it is off and the copy set aside, "
+            "and null once that copy was deleted"
+        )
+    )
+    activity: FolderSyncActivity = Field(
+        description="ACTIVE (kept in sync), INACTIVE (sync off, copy set aside), or DISCARDED (sync off, copy deleted)"
+    )
+    state: FolderSyncState = Field(
+        description=(
+            "How far along it is. SYNCING until the first pass has compared both sides and left them level, "
+            "and again while a later change is moving; SYNCED only once they are level"
+        )
+    )
+    message: str | None = Field(description="Why it failed, when it did; null otherwise")
+    bytes_done: int | None = Field(description="Bytes moved so far in the transfer under way; null when none is")
+    bytes_total: int | None = Field(description="Bytes that transfer set out to move; null when none is under way")
+    direction: FolderSyncDirection = Field(description="BOTH, or TO_WORKSPACE (changes only travel from the desktop)")
+    conflict: FolderSyncConflict = Field(description="Which side wins a clash; meaningful only when direction is BOTH")
+
+
+class AgentFolderSyncsResponse(FrozenModel):
+    """``GET /api/v1/agents/<agent_id>/folder-syncs``: this desktop's folder syncs with the agent's workspace."""
+
+    device_id: str = Field(
+        description=(
+            "This desktop's device id: the one its file-sharing grants name "
+            "(``minds-file-server-<access>-<device id>:<path>``) and its copies are filed under"
+        )
+    )
+    syncs: tuple[AgentFolderSync, ...] = Field(description="One entry per folder that has ever been synced")
 
 
 class WorkspaceLifecycleResponse(FrozenModel):

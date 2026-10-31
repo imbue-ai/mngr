@@ -12,7 +12,7 @@ Credentials are resolved via Azure's `DefaultAzureCredential` by default. Any of
 
 - `az login` (developer laptop) — uses your Azure CLI session
 - Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET` (CI)
-- A managed identity (when running on an Azure VM / Container App)
+- A managed identity (when running on an Azure VM / Container App), with `use_managed_identity = true`
 
 A provider instance can instead name its own credential source, so several instances can point at different Azure accounts from one process:
 

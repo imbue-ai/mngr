@@ -3,14 +3,18 @@ import type { CreateAttemptRequestSummary } from "./create";
 import {
   IMBUE_CLOUD_SUMMARY_LINE,
   READY_LINE,
-  START_FALLBACK_LINE,
-  START_OPTIONS,
+  SHOWCASE_APP,
+  SHOWCASE_INTRO_LINE,
+  SUMMARY_HEADING,
+  WELCOME_BODY,
   failureLine,
   readyTurnMarkdown,
   shortRepository,
-  startOptionsMarkdown,
+  showcaseMarkdown,
   summaryLines,
+  summarySettingLines,
 } from "./creationTranscript";
+import { ONBOARDING_MEDIA_BASE_URL } from "./onboardingMedia";
 
 function request(
   overrides: Partial<CreateAttemptRequestSummary> = {},
@@ -29,6 +33,7 @@ function request(
     disk_gb: null,
     repository: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v0.6.1",
+    is_onboarding_driven_by_agent: false,
     ...overrides,
   };
 }
@@ -153,26 +158,35 @@ describe("failureLine", () => {
   });
 });
 
-describe("startOptionsMarkdown", () => {
-  it("numbers the ways to start as markdown headings, each with its detail under it", () => {
-    const blocks = startOptionsMarkdown();
-    expect(blocks).toHaveLength(START_OPTIONS.length);
-    expect(blocks[0]).toBe(
-      `### 1. ${START_OPTIONS[0].title}\n\n${START_OPTIONS[0].detail}`,
-    );
-    expect(
-      blocks[blocks.length - 1].startsWith(`### ${START_OPTIONS.length}. `),
-    ).toBe(true);
+describe("readyTurnMarkdown", () => {
+  it("puts the ready line as a heading over the welcome", () => {
+    expect(readyTurnMarkdown()).toBe(`## ${READY_LINE}\n\n${WELCOME_BODY}`);
+    expect(WELCOME_BODY).toContain("**What’s annoying, overwhelming, or tedious");
+    expect(WELCOME_BODY.endsWith("tells me what to do next.*")).toBe(true);
+    expect(readyTurnMarkdown()).not.toContain(SHOWCASE_APP.gifUrl);
+  });
+});
+
+describe("summarySettingLines", () => {
+  it("is what summaryLines says under its heading, and nothing for the Imbue Cloud answer", () => {
+    const lines = summarySettingLines(request(), false);
+    expect(lines[0]).toBe("Name — workspace-1");
+    expect(summaryLines(request(), false)).toEqual([SUMMARY_HEADING, ...lines]);
+    expect(summarySettingLines(request(), true)).toEqual([]);
+  });
+});
+
+describe("the showcase", () => {
+  it("is the to-do list, with a hosted recording under a content-addressed name", () => {
+    expect(SHOWCASE_APP.id).toBe("todo-list");
+    expect(SHOWCASE_APP.gifUrl.startsWith(`${ONBOARDING_MEDIA_BASE_URL}/`)).toBe(true);
+    expect(SHOWCASE_APP.gifUrl).toMatch(/\/[0-9a-f]{64}\.gif$/);
+    expect(SHOWCASE_APP.label.length).toBeGreaterThan(0);
   });
 
-  it("puts the ready line one heading level above the options", () => {
-    expect(readyTurnMarkdown().startsWith(`## ${READY_LINE}\n\n### 1. `)).toBe(
-      true,
+  it("carries the recording into the chat under its intro line, with no title or description", () => {
+    expect(showcaseMarkdown({ id: "a", label: "Alpha", gifUrl: "https://cdn.example/a.gif" })).toBe(
+      `${SHOWCASE_INTRO_LINE}\n\n![Alpha](https://cdn.example/a.gif)`,
     );
-  });
-
-  it("ends the closing turn with the fallback line as a plain paragraph after the last option", () => {
-    const lastOption = startOptionsMarkdown()[START_OPTIONS.length - 1];
-    expect(readyTurnMarkdown().endsWith(`${lastOption}\n\n${START_FALLBACK_LINE}`)).toBe(true);
   });
 });

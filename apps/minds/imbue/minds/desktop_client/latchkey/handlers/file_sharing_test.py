@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
@@ -44,7 +44,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
-_HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
+_HttpxHandler: Final = Callable[[httpx2.Request], httpx2.Response]
 
 
 class _RecordingMessageSender(MngrMessageSender):
@@ -61,7 +61,7 @@ class _RecordingMessageSender(MngrMessageSender):
 
 def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
     return LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
         base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
@@ -229,13 +229,13 @@ def _syncable_setup(
 
 
 def test_handler_claims_file_sharing_request_type(tmp_path: Path) -> None:
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx2.Response(200))
     assert handler.handles_request_type() == REQUEST_TYPE_FILE_SHARING
     assert handler.kind_label() == "file sharing"
 
 
 def test_display_name_returns_path(tmp_path: Path) -> None:
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx2.Response(200))
     event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
@@ -248,10 +248,10 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
@@ -294,10 +294,10 @@ def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> No
     """Editing the path in the dialog sends an override body and reflects the new path everywhere."""
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["path"] = request.url.path
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
@@ -337,9 +337,9 @@ def test_grant_with_unchanged_path_sends_no_override_body(tmp_path: Path) -> Non
     """Submitting the original path verbatim must not send an override (gateway uses the precomputed effect)."""
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -361,11 +361,11 @@ def test_grant_rejects_relative_edited_path(tmp_path: Path) -> None:
     """A relative edited path is rejected with a 400 before the gateway is called."""
     gateway_called = False
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -390,11 +390,11 @@ def test_grant_rejects_traversal_in_edited_path(tmp_path: Path) -> None:
     """A ``..`` segment in the edited path is rejected with a 400 before the gateway is called."""
     gateway_called = False
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -416,11 +416,11 @@ def test_grant_rejects_edited_path_outside_share_roots(tmp_path: Path) -> None:
     """A path outside the WebDAV mount roots is rejected with a clean 400, not forwarded to the gateway."""
     gateway_called = False
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     in_root = str(tmp_path / "ok.txt")
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
@@ -448,9 +448,9 @@ def test_grant_rejects_edited_path_outside_share_roots(tmp_path: Path) -> None:
 def test_grant_accepts_edited_path_within_share_roots(tmp_path: Path) -> None:
     """A path nested under an allowed root is accepted."""
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
     event = create_file_sharing_permission_request(
@@ -472,9 +472,9 @@ def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
     """A ``~/...`` edited path expands to the home directory before reaching the gateway."""
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(
         tmp_path, _gateway_handler, share_roots=(tmp_path,), home_dir=tmp_path
@@ -507,11 +507,11 @@ def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
     """``~user`` (another user's home) is rejected with a 400 before the gateway is called."""
     gateway_called = False
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -530,9 +530,9 @@ def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
 
 
 def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(500, json={"error": "boom"})
+        return httpx2.Response(500, json={"error": "boom"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -555,10 +555,10 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
 def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(204)
+        return httpx2.Response(204)
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -599,9 +599,9 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
     is told.
     """
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(500, json={"error": "gateway down"})
+        return httpx2.Response(500, json={"error": "gateway down"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     event = create_file_sharing_permission_request(
@@ -621,7 +621,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 
 
 def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path) -> None:
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx2.Response(200))
     event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/important.txt",
@@ -646,7 +646,7 @@ def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path
 
 
 def test_build_request_detail_payload_labels_write_access_distinctly(tmp_path: Path) -> None:
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx2.Response(200))
     event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/notes",
@@ -670,7 +670,7 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
     carried: list[str] = []
     handler, _sender = _make_file_sharing_handler(
         tmp_path,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         push_permissions_to_machine=carried.append,
     )
     agent_id = AgentId()
@@ -704,7 +704,7 @@ def test_grant_with_sync_starts_one_and_tells_the_agent_where_the_copy_lands(
     client, manager, event, sender = _syncable_setup(
         tmp_path,
         root_concurrency_group,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         folder,
         sync=FileSharingSyncRequest(),
     )
@@ -735,10 +735,10 @@ def test_grant_refuses_a_sync_it_cannot_start_before_granting_anything(
     """A file cannot be synced; the request stays pending so the user can untick the option."""
     gateway_called = False
 
-    def _gateway_handler(_request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(_request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     shared_file = tmp_path / "notes.txt"
     shared_file.write_text("hello")
@@ -764,7 +764,7 @@ def test_grant_tells_the_agent_when_the_sync_it_asked_for_was_declined(
     client, manager, event, _sender = _syncable_setup(
         tmp_path,
         root_concurrency_group,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         folder,
         sync=FileSharingSyncRequest(),
     )
@@ -786,7 +786,7 @@ def test_grant_says_nothing_about_syncing_when_nobody_asked(
     client, _manager, event, _sender = _syncable_setup(
         tmp_path,
         root_concurrency_group,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         folder,
     )
 
@@ -805,7 +805,7 @@ def test_grant_rejects_a_sync_choice_it_cannot_read(tmp_path: Path, root_concurr
     client, _manager, event, _sender = _syncable_setup(
         tmp_path,
         root_concurrency_group,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         folder,
     )
 
@@ -821,7 +821,7 @@ def test_grant_rejects_a_sync_choice_it_cannot_read(tmp_path: Path, root_concurr
 def test_grant_refuses_a_sync_when_this_build_cannot_run_one(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(
         tmp_path,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         share_roots=(tmp_path,),
         home_dir=tmp_path,
     )
@@ -846,7 +846,7 @@ def test_detail_carries_the_sync_ask_and_whether_the_path_can_be_synced(
     client, _manager, event, _sender = _syncable_setup(
         tmp_path,
         root_concurrency_group,
-        lambda _req: httpx.Response(200),
+        lambda _req: httpx2.Response(200),
         folder,
         sync=FileSharingSyncRequest(conflict=FolderSyncConflict.THIS_COMPUTER),
     )
@@ -866,7 +866,7 @@ def test_detail_says_why_a_requested_file_cannot_be_synced(
     shared_file = tmp_path / "notes.txt"
     shared_file.write_text("hello")
     client, _manager, event, _sender = _syncable_setup(
-        tmp_path, root_concurrency_group, lambda _req: httpx.Response(200), shared_file, access="READ"
+        tmp_path, root_concurrency_group, lambda _req: httpx2.Response(200), shared_file, access="READ"
     )
 
     detail = client.get(f"/ui/api/inbox/{event.request_id}/detail").get_json()["detail"]
@@ -877,7 +877,7 @@ def test_detail_says_why_a_requested_file_cannot_be_synced(
 
 
 def test_detail_offers_no_sync_when_this_build_cannot_run_one(tmp_path: Path) -> None:
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx2.Response(200))
     event = create_file_sharing_permission_request(
         agent_id=str(AgentId()), path="/home/user/notes", access="WRITE", rationale="edit the notes"
     )
@@ -904,7 +904,7 @@ def test_a_sync_asked_for_by_a_chat_is_keyed_by_its_workspace(
     folder.mkdir()
     handler, _sender = _make_file_sharing_handler(
         tmp_path,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         share_roots=(tmp_path,),
         home_dir=tmp_path,
     )

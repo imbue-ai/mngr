@@ -4,6 +4,22 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+The pi lifecycle extension now writes the assistant message pi is streaming to `$MNGR_AGENT_STATE_DIR/pi_reply_draft` as it arrives (from pi's `message_update` events, at most every 100 ms, with the finished text on `message_end`), and removes it when the turn ends or a new session starts. The Imbue Studio chat reads it to show a pi reply while it is being written, for any model pi runs.
+
+## 2026-10-28
+
+New `version_mismatch` setting on the pi-coding agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.
+
+Behavior change: the pinned-version check now runs whenever `version` is set, even with `check_installation = false`, which now only controls install-if-missing. The version is now probed with the binary itself rather than the configured launch `command`, so a wrapper command no longer makes the check skip.
+
+## 2026-10-26
+
+Pi agents now declare their process name (`pi`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.
+
 ## 2026-10-22
 
 Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.

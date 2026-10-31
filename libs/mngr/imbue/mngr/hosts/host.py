@@ -59,11 +59,14 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
+from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_descendant_pids
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
@@ -74,8 +77,10 @@ from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
+from imbue.mngr.hosts.tmux import TMUX_NO_SERVER_STDERR_SUBSTRINGS
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import quote_tmux_text_argument
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
@@ -86,6 +91,7 @@ from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostBootInfo
+from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
@@ -487,6 +493,10 @@ _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 # before declaring a command wedged.
 _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
+# Per read (panes, then processes). Generous next to a healthy host's few milliseconds; the per-host
+# read budget can clamp it lower.
+_LIFECYCLE_SNAPSHOT_TIMEOUT_SECONDS: Final[float] = 5.0
+
 # Per-attempt bound on the single shell batch that launches one agent (tmux session
 # creation, the launch-script write and send-keys, activity recording, and the
 # backgrounded monitor). Every step is a tmux client call or a small file write, so a
@@ -531,6 +541,9 @@ _TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     # either way, so this is benign (it surfaced as a spurious LOCAL_STATE_REMAINS before).
     "no current target",
 )
+# tmux's own answers that a session does not exist: no such session on a running server, or no
+# server at all. Any other tmux failure says nothing about the session.
+_TMUX_NO_SESSION_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("can't find session", *TMUX_NO_SERVER_STDERR_SUBSTRINGS)
 # kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
 # pids routinely die between collection and the kill loop.
 _KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
@@ -559,8 +572,19 @@ _SIGWINCH_MODE_FIT: Final[str] = "fit"
 _SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
 
 # Script (at the root of the agent's state dir) holding the agent's launch command, which the
-# agent window sources rather than having it typed in. See _build_agent_launch_steps.
+# agent window sources rather than having it typed in. See _build_sourced_launch_steps.
 _AGENT_LAUNCH_SCRIPT_NAME: Final[str] = "launch_agent.sh"
+
+# Script (at the root of the agent's state dir) holding an additional window's command when that
+# command is too long to type. Named by the window's index, so a configured window name can never
+# shape a path. See _build_additional_window_steps.
+_WINDOW_LAUNCH_SCRIPT_NAME_TEMPLATE: Final[str] = "launch_window_{index}.sh"
+
+# Ceiling, in bytes, on what may be typed into a pane's shell with send-keys. A pty in canonical
+# mode -- where a just-started shell sits until its line editor takes over -- discards input past
+# its buffer while both the write and tmux report success. That buffer is 1024 bytes on macOS and
+# the terminating newline counts against it; this bound keeps margin under that.
+_MAX_SAFE_SEND_KEYS_LENGTH: Final[int] = 512
 
 # Opens each agent's data.json in the batched read.
 _AGENT_DATA_FILE_MARKER: Final[str] = "---MNGR_AGENT_DATA_FILE:"
@@ -1629,6 +1653,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         ]
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
+
+    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+        # Two reads, each with its own timeout, so a slow or failing ps leaves the panes readable.
+        panes_stdout = self._read_lifecycle_snapshot_part(TMUX_PANES_SNAPSHOT_COMMAND, "tmux panes")
+        if panes_stdout is None:
+            return None
+        return HostLifecycleSnapshot(
+            panes=parse_tmux_pane_listings(panes_stdout),
+            ps_output=self._read_lifecycle_snapshot_part(PROCESS_TABLE_SNAPSHOT_COMMAND, "process table"),
+        )
+
+    def _read_lifecycle_snapshot_part(self, command: str, description: str) -> str | None:
+        try:
+            result = self.execute_idempotent_command(command, timeout_seconds=_LIFECYCLE_SNAPSHOT_TIMEOUT_SECONDS)
+        except HostConnectionError as e:
+            logger.debug("Failed to read the {} on host {}: {}", description, self.id, e)
+            return None
+        if not result.success:
+            logger.debug("Failed to read the {} on host {}: {}", description, self.id, result.stderr)
+            return None
+        return result.stdout
 
     def load_agents_from_refs(self, agent_refs: Sequence[DiscoveredAgent]) -> list[AgentInterface]:
         for agent_ref in agent_refs:
@@ -3416,10 +3461,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Start agents by creating their tmux sessions.
 
         Creates a tmux session, writes the agent's command to a launch script, and uses
-        send-keys to source it (see _build_agent_launch_steps for why it is not typed in
+        send-keys to source it (see _build_sourced_launch_steps for why it is not typed in
         directly). This allows the user to hit ctrl-c and then up arrow to restart the
         command, and leaves the exact command that ran readable on disk. Commands for
-        additional windows are still typed in directly.
+        additional windows are typed in directly unless they are too long to survive the
+        pty, in which case they take the same script route -- see
+        _build_additional_window_steps.
 
         For an agent with no session up, the stored command first goes through the
         agent's upgrade_stored_command, and a rewritten command is saved back to the
@@ -3826,19 +3873,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Return True iff the agent's tmux session already exists (it is likely running).
 
         Raises ``CommandTimeoutError`` when the probe times out (a tmux server wedged or
-        slow under load) rather than answering: callers gate destructive actions (the
-        pre-launch process-tree reap) on a "no" answer, so an unknown must never be
-        reported as absence -- otherwise one slow probe would make an idempotent start
-        kill a live agent's entire tree.
+        slow under load), and ``HostError`` when tmux fails without saying the session is
+        absent (e.g. a lost server), rather than answering: callers gate destructive actions
+        (the pre-launch process-tree reap) on a "no" answer, so an unknown must never be
+        reported as absence -- otherwise one slow or failing probe would make an idempotent
+        start kill a live agent's entire tree.
         """
         session_name = self.mngr_ctx.config.agent_session_name(agent.name)
         target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
         result = self.execute_idempotent_command(
-            f"tmux has-session -t {target} 2>/dev/null",
+            f"tmux has-session -t {target}",
             timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
             raise_on_timeout=True,
         )
-        return result.success
+        if result.success:
+            return True
+        if any(substring in result.stderr for substring in _TMUX_NO_SESSION_STDERR_SUBSTRINGS):
+            return False
+        raise HostError(
+            f"Could not tell whether agent {agent.name}'s tmux session exists on host {self.id}: "
+            f"{result.stderr.strip() or 'tmux has-session failed without output'}"
+        )
 
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
@@ -4064,37 +4119,30 @@ def _parse_porcelain_line(line: str) -> list[str]:
 @pure
 def _build_pane_send_keys_steps(quoted_exact_window: str, typed_command: str) -> list[str]:
     return [
-        f"tmux send-keys -t {quoted_exact_window} -l -- {shlex.quote(typed_command)}",
+        f"tmux send-keys -t {quoted_exact_window} -l -- {quote_tmux_text_argument(typed_command)}",
         f"tmux send-keys -t {quoted_exact_window} Enter",
     ]
 
 
 @pure
-def _build_agent_launch_steps(
+def _build_sourced_launch_steps(
     launch_script_path: Path,
     command: str,
     quoted_exact_window: str,
 ) -> list[str]:
-    """Steps that write the agent's command to a launch script and source it in its window.
+    """Steps that write ``command`` to a launch script and source it in a tmux pane's shell.
 
-    The command cannot simply be typed. ``send-keys`` writes into the pane's pty, and a pty in
-    canonical mode -- where a just-started shell sits until its line editor takes over -- silently
-    discards input past its buffer (1KB on macOS) while both the write and tmux still report
-    success. Because the keys are sent in the same tmux batch that creates the session, they
-    routinely land inside that startup window, so a long command arrives truncated mid-token and
-    the shell blocks on an unterminated construct with nothing logged anywhere. Sourcing keeps
-    what crosses the pty to a short fixed-length line however long the command grows, and records
-    on disk exactly what ran.
+    Sourcing keeps what crosses the pty to a short fixed-length line however long the command
+    grows (see _MAX_SAFE_SEND_KEYS_LENGTH for what typing it would hit), and records on disk
+    exactly what ran.
 
-    This makes the POSIX ``.`` a requirement on the agent window's shell (the user's login shell).
-    That is not a new constraint in practice: mngr's generated launch chains already use
-    ``$(...)``, ``export``, and ``{ ... } || { ... }``, so a shell that cannot handle ``.`` could
-    not have run them typed either. The interactive harness plugins go one step further and use
-    process substitution (``2> >(tee ...)``, see ``build_stderr_tee_redirect``), which is a
-    bash/zsh/ksh feature rather than POSIX -- so the agent window's shell must be one of those,
-    which covers macOS (zsh), Linux desktops (bash), and every container image mngr ships.
-    Commands for *additional* windows are still typed directly, because those windows inherit
-    the user's tmux ``default-command``, which need not be a POSIX shell at all.
+    This makes the POSIX ``.`` a requirement on the pane's shell. That is not a new constraint in
+    practice: mngr's generated launch chains already use ``$(...)``, ``export``, and
+    ``{ ... } || { ... }``, so a shell that cannot handle ``.`` could not have run them typed
+    either. The interactive harness plugins go one step further and use process substitution
+    (``2> >(tee ...)``, see ``build_stderr_tee_redirect``), which is a bash/zsh/ksh feature rather
+    than POSIX -- so the agent window's shell must be one of those, which covers macOS (zsh), Linux
+    desktops (bash), and every container image mngr ships.
     """
     quoted_script_path = shlex.quote(str(launch_script_path))
     # printf '%s' rather than a heredoc so each step stays a single && chain link, and
@@ -4105,6 +4153,31 @@ def _build_agent_launch_steps(
     ]
     return write_steps + _build_pane_send_keys_steps(
         quoted_exact_window=quoted_exact_window, typed_command=f". {quoted_script_path}"
+    )
+
+
+@pure
+def _build_additional_window_steps(
+    launch_script_path: Path,
+    command: str,
+    quoted_exact_window: str,
+) -> list[str]:
+    """Steps that run an additional window's command, typing it when it is short enough to type.
+
+    Typing is what leaves the command visible in the pane and re-runnable with up-arrow, and it is
+    the only form that works whatever shell the pane runs -- additional windows inherit the user's
+    tmux ``default-command``, which need not be a POSIX shell at all (elvish, for one, has no ``.``
+    builtin).
+
+    Longer commands cannot be typed at all, so they are sourced instead, which does require that
+    shell to understand the POSIX ``.``.
+    """
+    if len(command.encode()) < _MAX_SAFE_SEND_KEYS_LENGTH:
+        return _build_pane_send_keys_steps(quoted_exact_window=quoted_exact_window, typed_command=command)
+    return _build_sourced_launch_steps(
+        launch_script_path=launch_script_path,
+        command=command,
+        quoted_exact_window=quoted_exact_window,
     )
 
 
@@ -4162,7 +4235,7 @@ def build_host_tmux_config(is_local: bool, host_dir: Path, additional_config_pat
         # else (a session started before the id was stamped on it) the session name.
         signals_dir = host_dir / "signals"
         # CLEANUP: drop the session-name fallback once no running session predates the
-        # AGENT_ID_OPTION stamp (the same condition as BaseAgent._build_lifecycle_probe_command's).
+        # AGENT_ID_OPTION stamp (the same condition as hosts.common.find_agent_session_name's).
         signal_key = f'$(tmux display-message -p "#{{?{AGENT_ID_OPTION},#{{{AGENT_ID_OPTION}}},#{{session_name}}}}")'
         lines.extend(
             [
@@ -4322,7 +4395,7 @@ def _build_start_agent_shell_command(
     # those format tokens at hook-set time. In "fit" mode (the default sizing policy above)
     # the script also resizes the manual-pinned window to the attaching client, so we pass
     # #{client_width}/#{client_height} -- which tmux *does* expand at hook-fire time to the
-    # attaching client's geometry (verified) -- as trailing args. `run-shell -b` backgrounds
+    # attaching client's geometry (verified) -- as trailing args. `if-shell -b` backgrounds
     # it so the attach is never blocked, and the script delays before signaling so the
     # window has settled first. This uses a distinct hook slot ([98]) from the onboarding
     # hook ([99]) and, unlike that one-shot hook, is persistent (no `set-hook -u`).
@@ -4336,7 +4409,9 @@ def _build_start_agent_shell_command(
     if sigwinch_mode == _SIGWINCH_MODE_FIT:
         # Appended raw (not shlex-quoted) so tmux expands the format tokens at hook-fire.
         sigwinch_argv += " #{client_width} #{client_height}"
-    sigwinch_hook_value = f'run-shell -b "{sigwinch_argv}"'
+    # if-shell with an empty command runs the script without tmux ever displaying its output or
+    # exit status.
+    sigwinch_hook_value = f'if-shell -b "{sigwinch_argv}" ""'
     steps.append(
         f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
     )
@@ -4378,6 +4453,7 @@ def _build_start_agent_shell_command(
     # ensures all windows exist before the agent starts, preventing a race
     # where a fast-exiting agent command destroys the session before
     # additional windows can be created.
+    agent_state_dir = get_agent_state_dir_path(host_dir, agent.id)
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
         quoted_exact_named_window = TmuxWindowTarget(session_name=session_name, window=window_name).as_shell_arg()
@@ -4388,12 +4464,11 @@ def _build_start_agent_shell_command(
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        # Typed rather than sourced: these windows inherit the user's tmux default-command,
-        # which need not be a POSIX shell (see _build_agent_launch_steps).
         steps.extend(
-            _build_pane_send_keys_steps(
+            _build_additional_window_steps(
+                launch_script_path=agent_state_dir / _WINDOW_LAUNCH_SCRIPT_NAME_TEMPLATE.format(index=idx + 1),
+                command=str(named_cmd.command),
                 quoted_exact_window=quoted_exact_named_window,
-                typed_command=str(named_cmd.command),
             )
         )
 
@@ -4406,8 +4481,8 @@ def _build_start_agent_shell_command(
     # Target the agent's primary window by name explicitly so this works even
     # after additional windows have been created (which changes the active window).
     steps.extend(
-        _build_agent_launch_steps(
-            launch_script_path=get_agent_state_dir_path(host_dir, agent.id) / _AGENT_LAUNCH_SCRIPT_NAME,
+        _build_sourced_launch_steps(
+            launch_script_path=agent_state_dir / _AGENT_LAUNCH_SCRIPT_NAME,
             command=command,
             quoted_exact_window=quoted_exact_agent_window,
         )
@@ -4415,7 +4490,7 @@ def _build_start_agent_shell_command(
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
-    activity_dir = get_agent_state_dir_path(host_dir, agent.id) / "activity"
+    activity_dir = agent_state_dir / "activity"
     activity_path = activity_dir / ActivitySource.START.value.lower()
     steps.append(f"mkdir -p {shlex.quote(str(activity_dir))}")
     activity_printf_cmd = (

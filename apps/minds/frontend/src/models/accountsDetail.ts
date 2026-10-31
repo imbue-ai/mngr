@@ -10,10 +10,10 @@
 // launch, so the page's origin (and its storage) changes with it.
 //
 // The mutating account actions reuse the legacy form-POST routes unchanged
-// (set-default, logout, plan switch, trim); their 303-redirect success
-// responses are followed by fetch and land on the SPA index, so response.ok
-// is the success signal. The server republishes the accounts frame after
-// set-default and logout, which is what updates the list.
+// (logout, plan switch, trim); their 303-redirect success responses are
+// followed by fetch and land on the SPA index, so response.ok is the success
+// signal. The server republishes the accounts frame after logout, which is
+// what updates the list.
 
 import m from "mithril";
 import type { UiAccountEntry } from "../channel/messages";
@@ -323,10 +323,6 @@ export class AccountsDetailModel {
       this.redraw();
       return false;
     }
-  }
-
-  async setDefault(userId: string): Promise<void> {
-    await this.submitAccountForm("/accounts/set-default", { user_id: userId });
   }
 
   async logOut(userId: string): Promise<void> {

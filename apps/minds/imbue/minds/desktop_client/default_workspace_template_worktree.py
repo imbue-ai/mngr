@@ -1,7 +1,6 @@
 """Materialize a paired default-workspace-template working tree for tests.
 
-Workspace-creation tests (the Imbue Studio snapshot bake + resume, the create+chat
-acceptance test, the full-flow harness) build their Docker workspace from a DEFAULT_WORKSPACE_TEMPLATE
+Workspace-creation tests build their Docker workspace from a DEFAULT_WORKSPACE_TEMPLATE
 working tree. To let an Imbue Studio change be tested against its paired DEFAULT_WORKSPACE_TEMPLATE
 change, this module clones the *paired* DEFAULT_WORKSPACE_TEMPLATE branch (the default-workspace-template-remote
 branch whose name matches the current mngr branch, else DEFAULT_WORKSPACE_TEMPLATE ``main``). The

@@ -164,6 +164,7 @@ def test_unavailable_error_help_text_is_azure_curated_not_start_docker(
     assert "Docker" not in help_text
     assert "AZURE_SUBSCRIPTION_ID" in help_text
     assert "az login" in help_text
+    assert "use_managed_identity = true" in help_text
     assert "mngr azure prepare" in help_text
 
 

@@ -2,7 +2,7 @@
 
 Runs as part of the per-workspace backups route: for an online,
 verification-enabled workspace, one ``mngr exec`` runs the stdlib-only check
-script (see ``backup_workspace_scripts``) which compares the installed
+program (``workspace_programs/backup_check.py``) which compares the installed
 backup-service code (``system/services/host_backup``, ``system/libs/host_backup``,
 or ``libs/host_backup`` on
 pre-declutter workspaces) against the *minimum required* ``minds-v*`` tag
@@ -29,6 +29,7 @@ import os
 from datetime import datetime
 from enum import auto
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -49,10 +50,14 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agent
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
+from imbue.minds.workspace_programs import backup_check
+from imbue.minds.workspace_programs.backup_protocol import BackupCodeState
+from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
+from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_code_state
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_service_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -205,23 +210,29 @@ def classify_check_payload(
     problems: list[BackupServiceProblem] = []
     details: list[str] = []
 
-    code_state = str(payload.get("code_state", "unverifiable"))
-    if code_state == "outdated":
-        problems.append(BackupServiceProblem.CODE_OUTDATED)
-    elif code_state in ("matches", "newer"):
-        pass
-    else:
-        problems.append(BackupServiceProblem.UNVERIFIABLE)
-        code_detail = str(payload.get("code_detail", ""))
-        if code_detail:
-            details.append(code_detail)
+    match parse_backup_code_state(payload.get("code_state")):
+        case BackupCodeState.OUTDATED:
+            problems.append(BackupServiceProblem.CODE_OUTDATED)
+        case BackupCodeState.MATCHES | BackupCodeState.NEWER:
+            pass
+        case BackupCodeState.UNVERIFIABLE:
+            problems.append(BackupServiceProblem.UNVERIFIABLE)
+            code_detail = str(payload.get("code_detail", ""))
+            if code_detail:
+                details.append(code_detail)
+        case _ as unreachable:
+            assert_never(unreachable)
 
-    service_state = str(payload.get("service_state", "unknown"))
-    if service_state != "running":
-        problems.append(BackupServiceProblem.SERVICE_NOT_RUNNING)
-        service_detail = str(payload.get("service_detail", ""))
-        if service_detail:
-            details.append(service_detail)
+    match parse_backup_service_state(payload.get("service_state")):
+        case BackupServiceState.RUNNING:
+            pass
+        case BackupServiceState.NOT_RUNNING | BackupServiceState.UNKNOWN:
+            problems.append(BackupServiceProblem.SERVICE_NOT_RUNNING)
+            service_detail = str(payload.get("service_detail", ""))
+            if service_detail:
+                details.append(service_detail)
+        case _ as unreachable:
+            assert_never(unreachable)
 
     env_payload = payload.get("env")
     env_info: dict[str, object] = (
@@ -287,8 +298,8 @@ def check_backup_service_for_workspace(
     if not is_workspace_online(resolver, agent_id):
         return BackupServiceCheck(state=BackupServiceCheckState.OFFLINE)
 
-    command_str = build_workspace_script_command(
-        BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
+    command_str = build_workspace_program_command(
+        backup_check, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
     )
     result = run_mngr_exec_on_agent(
         build_agent_address(agent_id, resolver),

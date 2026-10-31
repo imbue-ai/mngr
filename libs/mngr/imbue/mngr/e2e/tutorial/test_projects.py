@@ -5,6 +5,7 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 
@@ -35,7 +36,7 @@ def test_list_current_project_only(e2e: E2eSession) -> None:
             "mngr create project-filter-agent --project my-project --provider modal "
             "--type command --no-ensure-clean --no-connect -- sleep 100910",
             comment="seed an agent tagged with the project to be filtered for",
-            timeout=180.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 

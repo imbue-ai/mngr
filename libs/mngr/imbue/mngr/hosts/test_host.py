@@ -19,6 +19,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pluggy
+import psutil
 import pytest
 from loguru import logger
 from pyinfra.api.command import StringCommand
@@ -26,6 +27,7 @@ from pyinfra.api.command import StringCommand
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
@@ -38,6 +40,8 @@ from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import _AGENT_LAUNCH_SCRIPT_NAME
 from imbue.mngr.hosts.host import _DETACHED_HEAD_REF
+from imbue.mngr.hosts.host import _SIGWINCH_PANES_SCRIPT_NAME
+from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -67,6 +71,7 @@ from imbue.mngr.utils.read_deadline import reads_bounded_for
 from imbue.mngr.utils.testing import ExecOnlyParamikoServer
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import local_sshd
 from imbue.mngr.utils.testing import make_local_ssh_host_factory
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -917,6 +922,113 @@ def test_start_agent_runs_command_too_long_to_type_into_the_pane(
         # The launch script the pane sourced must hold the command byte-for-byte.
         script_path = get_agent_state_dir_path(host.host_dir, agent.id) / _AGENT_LAUNCH_SCRIPT_NAME
         assert host.read_text_file(script_path) == agent_command + "\n"
+
+
+def _create_fit_mode_agent(host: Host, temp_work_dir: Path, agent_name_prefix: str) -> AgentInterface:
+    """Create an agent that starts in the default (fit) sizing mode, with the SIGWINCH hooks installed."""
+    return host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName(f"{agent_name_prefix}-{get_short_random_string()}"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 583016"),
+        ),
+    )
+
+
+def _agent_window_target(host: Host, session_name: str) -> str:
+    return TmuxWindowTarget(
+        session_name=session_name, window=host.mngr_ctx.config.tmux.primary_window_name
+    ).as_shell_arg()
+
+
+def _fire_client_resized_hook(host: Host, session_name: str) -> None:
+    """Run the session's client-resized hook.
+
+    ``set-hook -R`` runs it from a command client that has no geometry, so the hook passes an
+    empty client width and height to the script.
+    """
+    result = host.execute_stateful_command(
+        f"tmux set-hook -R -t {_agent_window_target(host, session_name)} client-resized"
+    )
+    assert result.success, result.stderr
+
+
+@pytest.mark.tmux
+def test_sigwinch_resize_hook_fits_the_pinned_agent_window(
+    host_with_temp_dir: tuple[Host, Path],
+    temp_work_dir: Path,
+) -> None:
+    """The client-resized hook runs the installed script, which fits the pinned agent window.
+
+    The hook passes no client width, so the script floors the width to its minimum.
+    """
+    host, host_dir = host_with_temp_dir
+    install_packaged_script_on_host(
+        host,
+        module=mngr_resources,
+        filename=_SIGWINCH_PANES_SCRIPT_NAME,
+        dest=host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME,
+    )
+    agent = _create_fit_mode_agent(host, temp_work_dir, "sigwinch-fit")
+    window_target = _agent_window_target(host, agent.session_name)
+
+    def is_window_fitted() -> bool:
+        result = host.execute_idempotent_command(f"tmux display-message -p -t {window_target} '#{{window_width}}'")
+        return result.success and result.stdout.strip() == "80"
+
+    with tmux_session_cleanup(agent.session_name):
+        host.start_agents([agent.id])
+        _fire_client_resized_hook(host, agent.session_name)
+
+        wait_for(is_window_fitted, timeout=15.0, error_message="client-resized hook did not fit the agent window")
+
+
+def _processes_running_path(path: Path) -> list[psutil.Process]:
+    """Live processes with ``path`` in their command line (the hook's shell wrapper included)."""
+    return [
+        process
+        for process in psutil.process_iter(["cmdline"])
+        if any(str(path) in arg for arg in process.info["cmdline"] or ())
+    ]
+
+
+@pytest.mark.tmux
+def test_sigwinch_hook_failure_leaves_every_pane_out_of_view_mode(
+    host_with_temp_dir: tuple[Host, Path],
+    temp_work_dir: Path,
+) -> None:
+    """A failing hook script must not put any pane into tmux view mode, which covers it until dismissed."""
+    host, host_dir = host_with_temp_dir
+    script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
+    started_marker = host_dir / "sigwinch_hook_started"
+    release_marker = host_dir / "sigwinch_hook_release"
+    failing_script = (
+        "#!/usr/bin/env bash\n"
+        "echo output-that-must-stay-hidden\n"
+        f"touch {shlex.quote(str(started_marker))}\n"
+        f"while [ ! -e {shlex.quote(str(release_marker))} ]; do sleep 0.1; done\n"
+        "exit 1\n"
+    )
+    host.write_file(script_path, failing_script.encode(), mode="0755")
+    agent = _create_fit_mode_agent(host, temp_work_dir, "sigwinch-fail")
+
+    with tmux_session_cleanup(agent.session_name):
+        host.start_agents([agent.id])
+        try:
+            _fire_client_resized_hook(host, agent.session_name)
+            wait_for(started_marker.exists, timeout=15.0, error_message="client-resized hook did not run the script")
+            hook_processes = _processes_running_path(script_path)
+            assert hook_processes
+        finally:
+            release_marker.touch()
+        # Returns only once tmux has reaped the hook job, so tmux has seen it exit before the panes are read.
+        _, still_running = psutil.wait_procs(hook_processes, timeout=15.0)
+        assert not still_running
+
+        pane_modes = host.execute_idempotent_command("tmux list-panes -a -F '#{pane_in_mode}'")
+        assert pane_modes.success, pane_modes.stderr
+        assert set(pane_modes.stdout.split()) == {"0"}
 
 
 # Agent Start/Stop Process Tests

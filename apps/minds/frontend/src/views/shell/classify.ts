@@ -46,6 +46,60 @@ function pageContext(label: string): TitlebarContext {
 }
 
 const ID_SEGMENT = "((?:agent|host)-[a-f0-9]+)";
+// An account id as the hub routes carry it: a SuperTokens user id, or "local".
+const ACCOUNT_ID_SEGMENT = "([A-Za-z0-9][A-Za-z0-9_-]{0,63})";
+const HUB_PATH_RE = new RegExp(`^/account/${ACCOUNT_ID_SEGMENT}(/.*)?$`);
+const ACCOUNT_ID_RE = new RegExp(`^${ACCOUNT_ID_SEGMENT}$`);
+
+/** Whether `value` is an account id as the routes carry one (a hub segment, an overlay's `?account=`). */
+export function isAccountId(value: string): boolean {
+  return ACCOUNT_ID_RE.test(value);
+}
+
+/** The hub pages, by the path they take under `/account/<id>`: the home page is the bare `/`. */
+export type HubPage =
+  | "/"
+  | "/create"
+  | "/create/template"
+  | "/workspaces/destroyed"
+  | "/workspaces/shared";
+
+export const HUB_PAGES: readonly HubPage[] = [
+  "/",
+  "/create",
+  "/create/template",
+  "/workspaces/destroyed",
+  "/workspaces/shared",
+];
+
+/** The account a hub route names (`/account/<id>/...`), or null for any other path. */
+export function accountIdFromHubPath(path: string): string | null {
+  const match = path.match(HUB_PATH_RE);
+  return match ? match[1] : null;
+}
+
+/** The hub route of `page` on `accountId`: `/account/<id>/` for the home page, `/account/<id>/create` and so on. */
+export function accountHubRoute(
+  accountId: string,
+  page: HubPage = "/",
+): string {
+  return `/account/${encodeURIComponent(accountId)}${page === "/" ? "/" : page}`;
+}
+
+/** `path` with its `/account/<id>` prefix stripped: the hub page it shows (`/`, `/create`, ...), or the
+ * path itself when it carries no account. What the titlebar and the Shell classify on, so a hub page
+ * reads the same whichever account it is for. */
+export function hubPagePath(path: string): string {
+  const match = path.match(HUB_PATH_RE);
+  if (!match) return path;
+  const rest = match[2] ?? "/";
+  return rest === "" || rest === "/" ? "/" : rest.replace(/\/$/, "");
+}
+
+/** Whether `path` is a hub page the SPA offers under an account (the bare spellings redirect to one). */
+export function isHubPage(path: string): path is HubPage {
+  return (HUB_PAGES as readonly string[]).includes(path);
+}
 const CREATE_ATTEMPT_ID_SEGMENT = "(create-attempt-[a-f0-9]+)";
 // A workspace window id as the workspace shell mints it (`win-<hex>`).
 const WINDOW_ID_SEGMENT = "(win-[a-f0-9]+)";
@@ -63,6 +117,12 @@ export function popoutFromPath(path: string): PopoutRoute | null {
     new RegExp(`^/popout/${ID_SEGMENT}/${WINDOW_ID_SEGMENT}$`, "i"),
   );
   return match ? { workspaceAnyId: match[1], windowId: match[2] } : null;
+}
+
+/** The workspace id when `path` is the destroying page (/destroying/<id>), else null. */
+export function destroyingWorkspaceIdFromPath(path: string): string | null {
+  const match = path.match(new RegExp(`^/destroying/${ID_SEGMENT}$`, "i"));
+  return match ? match[1] : null;
 }
 
 /** The create attempt id when `path` is the creation page, else null. */
@@ -84,6 +144,16 @@ export function workspaceDisplayIdFromPath(path: string): string | null {
 export function workspaceSurfaceIdFromPath(path: string): string | null {
   const match = path.match(
     new RegExp(`^/workspace/${ID_SEGMENT}(/options)?$`, "i"),
+  );
+  return match ? match[1] : null;
+}
+
+/** The workspace id when `path` is any of the workspace's own pages: the
+ * content surface, the options overlay, or a sub-page that replaces the
+ * surface (/settings, /backups). The route implies the workspace's account. */
+export function workspacePageIdFromPath(path: string): string | null {
+  const match = path.match(
+    new RegExp(`^/workspace/${ID_SEGMENT}(/options|/settings|/backups)?$`, "i"),
   );
   return match ? match[1] : null;
 }
@@ -150,7 +220,8 @@ export function overlayBehindWorkspaceId(
   path: string,
   search = "",
 ): string | null {
-  if (!OVERLAY_BEHIND_WORKSPACE_PATHS.has(path)) return null;
+  // The template stepper is a hub page, so its route carries the account prefix.
+  if (!OVERLAY_BEHIND_WORKSPACE_PATHS.has(hubPagePath(path))) return null;
   const workspace = new URLSearchParams(search).get("workspace");
   return workspace !== null &&
     new RegExp(`^${ID_SEGMENT}$`, "i").test(workspace)
@@ -158,7 +229,9 @@ export function overlayBehindWorkspaceId(
     : null;
 }
 
-export function classifyRoute(path: string, search = ""): TitlebarContext {
+export function classifyRoute(routePath: string, search = ""): TitlebarContext {
+  // A hub route is classified by the page it shows, whichever account it is for.
+  const path = hubPagePath(routePath);
   const displayId = workspaceDisplayIdFromPath(path);
   if (displayId !== null) {
     return workspaceContext(displayId, null);
@@ -182,8 +255,8 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   }
   match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/backups$`, "i"));
   if (match) return workspaceContext(match[1], "settings");
-  match = path.match(new RegExp(`^/destroying/${ID_SEGMENT}$`, "i"));
-  if (match) return workspaceContext(match[1], null);
+  const destroyingId = destroyingWorkspaceIdFromPath(path);
+  if (destroyingId !== null) return workspaceContext(destroyingId, null);
   const recoveryId = recoveryWorkspaceIdFromPath(path);
   if (recoveryId !== null) return workspaceContext(recoveryId, null);
   if (path === "/create/template") {

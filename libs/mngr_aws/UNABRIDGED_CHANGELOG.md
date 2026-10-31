@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-20
 
 Fixed a flaky unit test, `backend_test.py::test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call`. It made a real `sts:GetCallerIdentity` call over the network, so it passed on a fast network and hit the 10-second `pytest-timeout` on a slow one.

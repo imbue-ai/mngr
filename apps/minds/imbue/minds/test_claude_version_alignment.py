@@ -4,9 +4,10 @@ default-workspace-template's .mngr/settings.toml.
 The release sandbox installs claude at image-build time using the Dockerfile's
 `ARG CLAUDE_CODE_VERSION`. Agents spawned from default-workspace-template have
 their claude agent config pinned via `[agent_types.claude].version` in that
-repo's `.mngr/settings.toml`. If the two drift, provisioning fails with
-"Claude version mismatch: installed version is X, but agent config pins
-version Y." (see `libs/mngr_claude/.../plugin.py::provision`).
+repo's `.mngr/settings.toml`. If the two drift, provisioning reports a
+"claude version mismatch" -- a warning under the template's
+`version_mismatch = "WARN"`, a failure under the default `ERROR` (see
+`libs/mngr/.../agents/installation.py::verify_pinned_cli_version`).
 
 This test reads both values and asserts they match.
 """
@@ -74,8 +75,7 @@ def test_claude_code_version_matches_default_workspace_template_pin() -> None:
     """The Dockerfile's CLAUDE_CODE_VERSION default must match the pin in
     default-workspace-template/.mngr/settings.toml [agent_types.claude].version.
 
-    A mismatch causes the Imbue Studio desktop-client e2e tests to fail during agent
-    provisioning with "Claude version mismatch".
+    A mismatch makes agent provisioning report a "claude version mismatch".
     """
     dockerfile_version = _parse_dockerfile_claude_version(_DOCKERFILE_PATH.read_text())
     template_version = _fetch_template_claude_version()

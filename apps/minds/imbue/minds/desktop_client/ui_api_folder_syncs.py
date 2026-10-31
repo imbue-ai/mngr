@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.ui_api_permissions import start_shared_path_sync
 from imbue.minds.desktop_client.ui_api_permissions import sync_overlap_warning
 from imbue.minds.desktop_client.ui_api_permissions import ui_path_sync
 from imbue.minds.desktop_client.ui_api_permissions import ui_remembered_sync
+from imbue.minds.desktop_client.ui_api_permissions import with_restore_failure
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiFolderSyncDiscardCopyRequest
 from imbue.minds.desktop_client.ui_models import UiFolderSyncRetryRequest
@@ -131,6 +132,18 @@ def _handle_folder_syncs(agent_id: str) -> Response:
     manager = get_state().folder_sync_manager
     if manager is None:
         return json_response(UiFolderSyncs(), 200)
+    return json_response(UiFolderSyncs(rows=folder_sync_rows(manager, agent_id)), 200)
+
+
+def folder_sync_rows(manager: FolderSyncManager, agent_id: str) -> tuple[UiFolderSyncRow, ...]:
+    """The sync half of every row of one workspace, from this process alone.
+
+    What is remembered on disk, overridden by a sync that is running, overlaid
+    with what one is in the middle of -- and a remembered sync that could not
+    be brought back at launch reads as the failure it is, as it does in the
+    full permissions view. ``agent_id`` is the workspace's primary agent,
+    which is what every sync is filed under.
+    """
     rows = tuple(
         UiFolderSyncRow(
             path=record.local_path,
@@ -149,6 +162,8 @@ def _handle_folder_syncs(agent_id: str) -> Response:
     merged: list[UiFolderSyncRow] = []
     for row in rows:
         sync = live.pop(row.path, None) or row.sync
+        if sync is not None and sync.activity == FolderSyncActivity.ACTIVE:
+            sync = with_restore_failure(sync, manager.restore_failure_for(agent_id, row.path))
         merged.append(
             _with_in_flight(
                 UiFolderSyncRow(path=row.path, sync=sync, overlap_warning=row.overlap_warning), manager, agent_id
@@ -162,7 +177,7 @@ def _handle_folder_syncs(agent_id: str) -> Response:
                 agent_id,
             )
         )
-    return json_response(UiFolderSyncs(rows=tuple(merged)), 200)
+    return tuple(merged)
 
 
 def _handle_path_copy_discard(agent_id: str) -> Response:

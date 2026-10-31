@@ -76,6 +76,7 @@ from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.ui_account_scope import ACCOUNT_QUERY_PARAMETER
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
@@ -159,6 +160,7 @@ class SystemEventCard(FrozenModel):
     title: str = Field(description="The event name (the entry's headline)")
     body: str = Field(description="The outcome detail")
     workspace_agent_id: str = Field(description="The workspace it concerns; '' for an account-level event")
+    account_id: str = Field(default="", description="For an account-level event, the account's user id")
     workspace_name: str = Field(description="The workspace's display name, or the account for an account-level event")
     workspace_accent: str = Field(description="The workspace's ``#rrggbb`` accent")
     link_path: str = Field(
@@ -355,6 +357,7 @@ class NotificationFeed(MutableModel):
             request_id="",
             chat_agent_id="",
             workspace_agent_id=card.workspace_agent_id,
+            account_id=card.account_id,
             workspace_name=card.workspace_name,
             workspace_accent=card.workspace_accent,
             service_name="",
@@ -646,11 +649,16 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
             elif entry.workspace_agent_id:
                 url = f"/workspace/{entry.workspace_agent_id}/backups"
             else:
-                url = "/accounts"
+                url = account_level_entry_route(entry.account_id)
             body = entry.body
         case _ as unreachable:
             assert_never(unreachable)
     return NotificationRequest(title=entry.workspace_name, subtitle=entry.title, body=body, url=url, entry=entry)
+
+
+def account_level_entry_route(account_id: str) -> str:
+    """Where an account-level event lands: the accounts page, on the account's own window when the entry names it."""
+    return f"/accounts?{ACCOUNT_QUERY_PARAMETER}={account_id}" if account_id else "/accounts"
 
 
 def _agent_message_url(entry: UiNotificationEntry) -> str | None:

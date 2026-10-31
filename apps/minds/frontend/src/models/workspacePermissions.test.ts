@@ -931,6 +931,23 @@ describe("shared paths", () => {
     });
   });
 
+  it("adds a new path read-only, and leaves one already shared as it is", async () => {
+    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [sharedPath()] })));
+    await model.load();
+    const shared = sharedPath().path;
+
+    // Adding again would re-grade it to read-only, so nothing is written.
+    await model.addSharedPath(shared);
+    expect(requests).toHaveLength(1);
+
+    await model.addSharedPath("/home/me/pictures");
+    expect(requests[requests.length - 1]).toEqual({
+      url: `${PERMISSIONS_URL}/shared-path`,
+      method: "POST",
+      body: { path: "/home/me/pictures", access: "READ" },
+    });
+  });
+
   it("posts only the path when one is removed", async () => {
     const { model, requests } = makeModel(() => okWith(permissionsView()));
     await model.load();

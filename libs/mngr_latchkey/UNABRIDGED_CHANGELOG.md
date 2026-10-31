@@ -4,6 +4,46 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-30
+
+Bump Latchkey version to 3.21.0. The bundled service catalog now includes Asana, which this Latchkey release added support for.
+
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+Bump Latchkey version to 3.20.0.
+
+The VPS gateway installs latchkey-curl-shims v0.7.1. Its curl router no longer asks curl-impersonate to decode the reply of an `X-Imbue-Impersonate` request: the reply is handed on compressed, the way the Chrome profile asked for, and the caller's own `latchkey curl --compressed` decodes it. This fixes the gateway framing a decoded body with the compressed body's `Content-Length`, which truncated Slack replies for datalib. The router also strips the caller's browser-identity headers (`Accept-Encoding`, `Accept-Language`, client hints, `Sec-Fetch-*`) on marked requests so Chrome's stand, takes the Chrome profile from the marker's value (`1` still means the default), and honors an environment proxy like the system curl does.
+
+## 2026-10-28
+
+The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection to an agent host loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake). The failure is now retried on a rebuilt connection and, if it persists, recorded as a transient wiring-step failure for the next discovery cycle to retry.
+
+## 2026-10-28
+
+When `latchkey auth re-encrypt` fails during a credential export, the error now carries the facts that explain a signal exit such as `-15`: whether its 5s timeout had passed, how long the run took, how many services were requested, and whether a destination key and an account were given. These are counts and flags only, never the service names or the account. The message therefore shows whether this process's own timeout or something outside the process killed the CLI.
+
+## 2026-10-27
+
+A wiring step's transient-failure report now also names the host's provider instance and backend, gives the errno behind each address of a refused or unreachable connect (paramiko otherwise prints these as `[Errno None]`), and says whether this machine slept during the streak. The streak's first info line carries the provider and errnos too. The discovery stream logs at debug when a host's SSH endpoint changes, with the old and new endpoint.
+
+`mngr latchkey forward` now logs a baseline at startup: the mngr install mode (package or editable) and the same pyinfra install snapshot that mngr logs if pyinfra later loses its `ssh` connector. Its Sentry events also carry a `process_started_at` tag, so an event shows how long the daemon had been running when it failed. A device announcement that fails because pyinfra is missing a connector now goes through the usual wiring-step failure reporting (logged as an error right away) and is tried again on the next discovery cycle. Before, it killed the setup thread.
+
+`mngr latchkey forward` now logs, at debug level, how many hosts are being provisioned at once whenever it starts provisioning the Latchkey gateway on a remote agent's machine. This helps tell whether a provisioning failure only happens while other hosts are being provisioned concurrently.
+
+When `mngr latchkey forward` fails to start or respawn the shared Latchkey gateway because the gateway never binds its port, the error now says what happened to the gateway: whether it had exited (and with which exit code) or was still starting when the 10s bind timeout ran out, whether the port could be bound once the attempt was cleaned up (`free` or an errno such as `EADDRINUSE`), and whether the attempt reused the dead gateway's port or took a fresh one. The gateway's last 20 output lines are now logged at WARNING when a spawn fails, with the gateway's listen password and encryption key redacted. Before, they were only logged at DEBUG to the local log. Each respawn also logs the exit code of the last gateway that was running and how many spawn attempts in a row have failed, a recovered gateway logs how many failures came before it, and every successful spawn logs how long the gateway took to bind.
+
+## 2026-10-24
+
+Bump Latchkey to 3.19.4.
+
+Documented and suppressed Bandit's B701 (`jinja2_autoescape_false`) finding on the remote package's template environment. The templates render shell scripts and system config files, never HTML, and HTML autoescaping would corrupt the `shquote`-quoted values in them, so autoescaping stays off; the reason is now recorded at the site and the finding is marked `# nosec B701`.
+
+## 2026-10-23
+
+A remote workspace's gateway now answers `GET /permissions/self` itself, from the permissions file it enforces, instead of forwarding the read to the user's desktop. Reading what an agent may do no longer fails with `Desktop <device> (<hostname>) is unreachable` while the user's computer is asleep, offline, or has Imbue Studio closed, and the answer is the policy the machine applies to the agent's requests (every desktop edit reaches the machine before the desktop reports it). It leaves out the per-agent Studio API rule, which only the desktop applies, to forwarded `/minds-api-proxy` requests. A request that names a desktop with `X-Latchkey-Device`, and every other `/permissions`, `/permission-requests` and `/minds-api-proxy` request, is still forwarded.
+
 ## 2026-10-21
 
 Bump Latchkey to 3.19.3.

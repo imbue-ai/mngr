@@ -10,7 +10,26 @@
 // quit. Each death is therefore logged with its reason and exit code, where it
 // falls relative to a termination signal and the shutdown, and how many GPU
 // deaths this run has seen -- enough to tell a GPU process crash-looping on its
-// own from one killed by a process-group signal during teardown.
+// own from one killed by a process-group signal during teardown. The free system
+// memory and the app's total working set go on the same line, to tell a GPU
+// process that died under memory pressure from one that died with plenty free.
+// The free figure is `os.freemem()`, the same one Sentry's device context
+// reports as free memory. On macOS it counts only free pages, not inactive or
+// purgeable ones the OS can reclaim, so it reads low on a healthy Mac: compare
+// it across deaths and against the app's own figure, not as an absolute.
+
+const BYTES_PER_MB = 1024 * 1024;
+
+/**
+ * Render a byte count as whole megabytes (`1234MB`), or `unavailable` when it
+ * could not be read.
+ *
+ * @param {number | null | undefined} bytes
+ * @returns {string}
+ */
+function formatMegabytes(bytes) {
+  return Number.isFinite(bytes) ? `${Math.round(bytes / BYTES_PER_MB)}MB` : 'unavailable';
+}
 
 /**
  * Render `app.getGPUFeatureStatus()` as compact `feature=status` pairs.
@@ -41,6 +60,8 @@ function formatGpuFeatureStatus(featureStatus) {
  * @param {string | null} state.terminationSignal The first SIGTERM/SIGINT received, or null.
  * @param {number} state.uptimeSeconds          Seconds since the main process started.
  * @param {Record<string, string> | null} state.featureStatus `app.getGPUFeatureStatus()`.
+ * @param {number | null} state.freeMemoryBytes `os.freemem()`.
+ * @param {number | null} state.appMemoryBytes  Summed working set of every app process, or null.
  * @returns {string}
  */
 function formatGpuProcessGone({
@@ -51,13 +72,16 @@ function formatGpuProcessGone({
   terminationSignal,
   uptimeSeconds,
   featureStatus,
+  freeMemoryBytes,
+  appMemoryBytes,
 }) {
   return (
     `[gpu] GPU process gone (reason=${reason}, exitCode=${exitCode}, ` +
     `gpuDeathCount=${gpuDeathCount}, isShuttingDown=${isShuttingDown}, ` +
     `terminationSignal=${terminationSignal || 'none'}, uptime=${uptimeSeconds.toFixed(1)}s, ` +
+    `freeMemory=${formatMegabytes(freeMemoryBytes)}, appMemory=${formatMegabytes(appMemoryBytes)}, ` +
     `features=${formatGpuFeatureStatus(featureStatus)})`
   );
 }
 
-module.exports = { formatGpuFeatureStatus, formatGpuProcessGone };
+module.exports = { formatGpuFeatureStatus, formatGpuProcessGone, formatMegabytes };

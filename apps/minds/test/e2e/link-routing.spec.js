@@ -1,8 +1,9 @@
-// End-to-end test of popup routing, driving a real Electron process
-// (Playwright's `_electron`) that runs link-routing-app.js: the shipped
-// createLinkRouter and preload.js, the real embed contract on both sides, and a
-// workspace page framed on a real `agent-<hex>.localhost` origin. `_electron`
-// is used for its main-process access: counting windows, and standing in for
+// End-to-end test of link routing (popups, in-place frame navigations and
+// server redirects), driving a real Electron process (Playwright's
+// `_electron`) that runs link-routing-app.js: the shipped createLinkRouter and
+// preload.js, the real embed contract on both sides, and a workspace page
+// framed on a real `agent-<hex>.localhost` origin. `_electron` is used for its
+// main-process access: counting windows, and standing in for
 // shell.openExternal so no real browser opens.
 
 const path = require('path');
@@ -34,8 +35,8 @@ const windowCount = (electronApp) =>
   electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
 
 // The page whose document is the stand-in Imbue Studio page for one workspace.
-async function chromePageFor(electronApp, opensLinks) {
-  const suffix = `/?opensLinks=${opensLinks ? 1 : 0}`;
+async function chromePageFor(electronApp, query) {
+  const suffix = `/?${query}`;
   const page = await waitFor(
     async () => {
       for (const candidate of electronApp.windows()) {
@@ -60,7 +61,7 @@ async function workspaceFrameOf(page) {
   );
 }
 
-test('popups from an announcing workspace go back into it, external ones back out to the browser; a silent workspace keeps its windows', async () => {
+async function withHarness(run) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minds-link-routing-'));
   const electronApp = await _electron.launch({
     executablePath: ELECTRON_BIN,
@@ -74,8 +75,18 @@ test('popups from an announcing workspace go back into it, external ones back ou
         globalThis.__openedExternally.push(url);
       };
     });
-    const announcing = await chromePageFor(electronApp, true);
-    const silent = await chromePageFor(electronApp, false);
+    await run(electronApp);
+    expect((await harness(electronApp)).uncaughtErrors).toEqual([]);
+  } finally {
+    await electronApp.close().catch(() => {});
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+}
+
+test('popups from an announcing workspace go back into it, external ones back out to the browser; a silent workspace keeps its windows', async () => {
+  await withHarness(async (electronApp) => {
+    const announcing = await chromePageFor(electronApp, 'opensLinks=1');
+    const silent = await chromePageFor(electronApp, 'opensLinks=0');
     const { port, workspaceId } = await harness(electronApp);
     await waitFor(
       async () => (await harness(electronApp)).mountReports.map((entry) => entry.report),
@@ -84,7 +95,7 @@ test('popups from an announcing workspace go back into it, external ones back ou
         reports.some((report) => report && report.opensLinks === false),
       'both windows reporting their mounted workspace',
     );
-    expect(await windowCount(electronApp)).toBe(2);
+    expect(await windowCount(electronApp)).toBe(3);
 
     const frame = await workspaceFrameOf(announcing);
     const openedInWorkspace = () => frame.evaluate(() => window.__openedLinks);
@@ -113,16 +124,16 @@ test('popups from an announcing workspace go back into it, external ones back ou
     const prompts = async () => (await harness(electronApp)).prompts;
     await frame.click('#mailto-link');
     await waitFor(prompts, (asked) => asked.length === 1, 'the mailto prompt');
-    expect(await prompts()).toEqual(['someone@example.com']);
+    expect(await prompts()).toEqual([{ detail: 'someone@example.com', canRemember: true }]);
     await electronApp.evaluate(() => {
-      globalThis.__linkRoutingHarness.isPromptAccepted = true;
+      globalThis.__linkRoutingHarness.promptAnswer = { accepted: true, remember: false };
     });
     await frame.click('#mailto-link');
     await waitFor(openedExternally, (urls) => urls.length === 2, 'the accepted mailto link');
     expect(await openedExternally()).toEqual(['https://example.com/from-workspace', 'mailto:someone@example.com']);
     // Every popup above was denied: the links have landed, so any window they
     // opened would exist by now.
-    expect(await windowCount(electronApp)).toBe(2);
+    expect(await windowCount(electronApp)).toBe(3);
 
     // A local popup the Imbue Studio page itself asked for keeps its window:
     // its referrer is the page's own origin, not the workspace's.
@@ -141,8 +152,89 @@ test('popups from an announcing workspace go back into it, external ones back ou
     await waitFor(openedExternally, (urls) => urls.length === 3, "the silent workspace's external link");
     expect(await silentFrame.evaluate(() => window.__openedLinks)).toEqual([]);
     expect(await openedInWorkspace()).toHaveLength(6);
-  } finally {
-    await electronApp.close().catch(() => {});
-    fs.rmSync(userDataDir, { recursive: true, force: true });
-  }
+  });
+});
+
+test('a custom-scheme link a workspace page launches asks first, until the user always allows it for that workspace', async () => {
+  await withHarness(async (electronApp) => {
+    const frame = await workspaceFrameOf(await chromePageFor(electronApp, 'opensLinks=1'));
+    const launchUrl = 'imbue-e2e-unhandled://open';
+    const prompts = async () => (await harness(electronApp)).prompts;
+    const openedExternally = () => electronApp.evaluate(() => globalThis.__openedExternally);
+    // As a workspace app launches one, through one hidden iframe it reuses:
+    // each launch also checks the reused frame raises nothing in main.
+    const launch = async (launches) => {
+      await frame.click('#scheme-launcher');
+      await waitFor(
+        () => harness(electronApp),
+        (state) => state.frameNavigations.filter((url) => url === launchUrl).length === launches,
+        `launch ${launches} reaching will-frame-navigate`,
+      );
+      expect((await harness(electronApp)).uncaughtErrors, `after launch ${launches}`).toEqual([]);
+    };
+
+    await launch(1);
+    await waitFor(prompts, (asked) => asked.length === 1, 'the first prompt');
+    expect(await prompts()).toEqual([{ detail: launchUrl, canRemember: true }]);
+
+    await electronApp.evaluate(() => {
+      globalThis.__linkRoutingHarness.promptAnswer = { accepted: true, remember: true };
+    });
+    await launch(2);
+    await waitFor(openedExternally, (urls) => urls.length === 1, 'the accepted launch');
+    expect(await prompts()).toHaveLength(2);
+
+    await electronApp.evaluate(() => {
+      globalThis.__linkRoutingHarness.promptAnswer = { accepted: false, remember: false };
+    });
+    await launch(3);
+    await waitFor(openedExternally, (urls) => urls.length === 2, 'the always-allowed launch');
+    expect(await openedExternally()).toEqual([launchUrl, launchUrl]);
+    expect(await prompts()).toHaveLength(2);
+  });
+});
+
+test('a custom-scheme or mailto link a workspace page reaches through a server redirect asks first too', async () => {
+  await withHarness(async (electronApp) => {
+    const frame = await workspaceFrameOf(await chromePageFor(electronApp, 'opensLinks=1'));
+    const prompts = async () => (await harness(electronApp)).prompts;
+    await frame.click('#scheme-redirector');
+    await waitFor(prompts, (asked) => asked.length === 1, 'the redirected custom-scheme link prompt');
+    await frame.click('#mailto-redirector');
+    await waitFor(prompts, (asked) => asked.length === 2, 'the redirected mailto link prompt');
+    expect(await prompts()).toEqual([
+      { detail: 'imbue-e2e-unhandled://redirected', canRemember: true },
+      { detail: 'redirected@example.com', canRemember: true },
+    ]);
+  });
+});
+
+test('a custom-scheme link goes into a workspace that takes them, and asks first once the workspace hands it back out', async () => {
+  await withHarness(async (electronApp) => {
+    const page = await chromePageFor(electronApp, 'opensLinks=1&schemes=1');
+    const frame = await workspaceFrameOf(page);
+    await waitFor(
+      async () => (await harness(electronApp)).mountReports.map((entry) => entry.report),
+      (reports) => reports.some((report) => report && report.opensCustomSchemeLinks === true),
+      'the workspace reporting it takes custom-scheme links',
+    );
+    const openedInWorkspace = () => frame.evaluate(() => window.__openedLinks);
+    const prompts = async () => (await harness(electronApp)).prompts;
+    // A target=_blank link, a launch through a hidden frame, and a server redirect each arrive as
+    // minds:open-link; the workspace stand-in takes none itself, so each comes back out and asks.
+    const cases = [
+      ['#scheme-link', 'imbue-e2e-unhandled://from-workspace'],
+      ['#scheme-launcher', 'imbue-e2e-unhandled://open'],
+      ['#scheme-redirector', 'imbue-e2e-unhandled://redirected'],
+    ];
+    for (const [index, [selector, url]] of cases.entries()) {
+      await frame.click(selector);
+      await waitFor(openedInWorkspace, (links) => links.length === index + 1, `${url} in the workspace`);
+      await waitFor(prompts, (asked) => asked.length === index + 1, `the prompt for ${url}`);
+    }
+    expect(await openedInWorkspace()).toEqual(cases.map(([, url]) => url));
+    expect(await prompts()).toEqual(cases.map(([, url]) => ({ detail: url, canRemember: true })));
+    expect(await electronApp.evaluate(() => globalThis.__openedExternally)).toEqual([]);
+    expect(await windowCount(electronApp)).toBe(3);
+  });
 });

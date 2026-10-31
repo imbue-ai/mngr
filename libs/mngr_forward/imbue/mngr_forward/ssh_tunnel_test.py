@@ -20,6 +20,7 @@ agent in one shot.
 import socket
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -66,8 +67,6 @@ from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 # a serialized implementation could release the first open and still deliver
 # the second in time, and the regression test would stop discriminating.
 _BLOCKED_OPEN_HOLD_SECONDS: Final[float] = 30.0
-
-# Test doubles
 
 
 class FakeChannelFromSocket:
@@ -206,9 +205,6 @@ def _register_reverse_tunnel(
         manager._reverse_tunnel_clients[tunnel_key] = client
 
 
-# parse_url_host_port
-
-
 @pytest.mark.parametrize(
     "url, expected",
     [
@@ -228,9 +224,6 @@ def test_parse_url_host_port_localhost_normalization() -> None:
     host, port = parse_url_host_port("http://localhost")
     assert host == "127.0.0.1"
     assert port == 80
-
-
-# RemoteSSHInfo
 
 
 def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_path: Path) -> None:
@@ -411,9 +404,6 @@ def test_remote_ssh_info_is_frozen() -> None:
         info.user = "other"
 
 
-# ReverseTunnelInfo / ReverseTunnelSpec
-
-
 def test_reverse_tunnel_info_defaults_and_optional_agent_id() -> None:
     ssh_info = RemoteSSHInfo(user="root", host="h", port=22, key_path=Path("/tmp/k"))
     bare = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=12345)
@@ -437,9 +427,6 @@ def test_reverse_tunnel_spec_remote_zero_means_dynamic() -> None:
 def test_reverse_tunnel_spec_local_must_be_positive() -> None:
     with pytest.raises(ValueError):
         ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]
-
-
-# SSHTunnelManager structural
 
 
 def test_ssh_tunnel_manager_cleanup_is_idempotent() -> None:
@@ -497,7 +484,6 @@ def test_ssh_tunnel_manager_health_check_starts_daemon_thread() -> None:
     manager.cleanup()
 
 
-# _check_and_repair_tunnels
 #
 # These tests call ``_check_and_repair_tunnels`` directly (bypassing the
 # 30-second wait in the health check loop) to exercise the repair logic.
@@ -671,9 +657,6 @@ def test_check_and_repair_tunnels_fires_on_repaired_callback(tmp_path: Path) -> 
     assert len(received) == 1
     assert received[0].local_port == 8420
     manager.cleanup()
-
-
-# Exponential backoff
 
 
 def test_repair_failure_arms_backoff_and_skips_within_window(tmp_path: Path) -> None:
@@ -936,7 +919,6 @@ def test_remove_reverse_tunnel_drops_only_the_named_endpoint(tmp_path: Path) -> 
     manager.cleanup()
 
 
-# setup_reverse_tunnel
 #
 # These tests inject a FakeSSHClient directly into _connections so that
 # setup_reverse_tunnel can run without making real SSH connections.
@@ -1197,7 +1179,6 @@ def test_forwarded_tunnel_handler_closes_channel_on_connect_failure() -> None:
     assert channel.is_closed()
 
 
-# Forward-tunnel channel opening
 #
 # A transport that has silently gone away keeps reporting ``is_active() ==
 # True``, so the only thing distinguishing it from a healthy one is that
@@ -2061,3 +2042,211 @@ def test_authentication_failure_log_survives_a_key_file_it_cannot_parse(tmp_path
     assert "offered credentials: a key file that could not be read back (" in warning
     assert "AuthenticationException: Authentication timeout." in warning
     assert "auth types the server allows: not reported" in warning
+
+
+@contextmanager
+def _loopback_server(serve_connection: Callable[[socket.socket], None], thread_name: str) -> Iterator[int]:
+    """Accept connections on a loopback port, handing each to ``serve_connection`` on one background thread.
+
+    Yields the port. The listener and its thread are torn down on exit.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    listener.settimeout(_SSHD_ACCEPT_POLL_SECONDS)
+    stop_event = threading.Event()
+
+    def accept_loop() -> None:
+        while not stop_event.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            serve_connection(connection)
+
+    thread = threading.Thread(target=accept_loop, daemon=True, name=thread_name)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+        listener.close()
+
+
+@contextmanager
+def _refusing_sshd(tmp_path: Path) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
+    """Run an sshd on loopback that refuses every ``direct-tcpip`` open.
+
+    Yields the ``RemoteSSHInfo`` that addresses it -- real key material, and a
+    known_hosts pinning this server's key, so ``_create_ssh_client`` performs a
+    real handshake rather than being handed a connection -- along with the
+    server-side transports it has accepted, which a caller closes to make the
+    host go away mid-test.
+    """
+    host_key = paramiko.ECDSAKey.generate()
+    key_path = tmp_path / "id_ecdsa"
+    paramiko.ECDSAKey.generate().write_private_key_file(str(key_path))
+    served: list[paramiko.Transport] = []
+
+    def serve(connection: socket.socket) -> None:
+        transport = paramiko.Transport(connection)
+        transport.add_server_key(host_key)
+        transport.start_server(server=_InnerPortRefusingServer())
+        served.append(transport)
+
+    try:
+        with _loopback_server(serve, "test-refusing-sshd") as port:
+            # Pinned under OpenSSH's non-default-port spelling, which is what paramiko
+            # looks the host up by. Written beside the key, the placement
+            # ``_resolve_known_hosts_path`` falls back to.
+            (tmp_path / "known_hosts").write_text(
+                f"[127.0.0.1]:{port} {host_key.get_name()} {host_key.get_base64()}\n"
+            )
+            yield RemoteSSHInfo(user="root", host="127.0.0.1", port=port, key_path=key_path), served
+    finally:
+        for transport in served:
+            transport.close()
+
+
+_HANGUP_DRAIN_TIMEOUT_SECONDS: Final[float] = 10.0
+
+
+@contextmanager
+def _sshd_that_hangs_up_after_the_banner(tmp_path: Path) -> Iterator[RemoteSSHInfo]:
+    """Run a loopback "sshd" that announces itself and then closes every connection.
+
+    Yields the ``RemoteSSHInfo`` that addresses it, with a key file and a
+    known_hosts file on disk so ``_create_ssh_client`` gets as far as dialing.
+    """
+    key_path = tmp_path / "id_ecdsa"
+    paramiko.ECDSAKey.generate().write_private_key_file(str(key_path))
+    (tmp_path / "known_hosts").write_text("")
+
+    def serve(connection: socket.socket) -> None:
+        with connection:
+            connection.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            # Half-close, then read until the client hangs up too: closing
+            # with the client's bytes still unread sends an RST rather than a
+            # FIN, which paramiko reports as ``ConnectionResetError`` instead
+            # of the ``EOFError`` under test.
+            connection.shutdown(socket.SHUT_WR)
+            connection.settimeout(_HANGUP_DRAIN_TIMEOUT_SECONDS)
+            while connection.recv(4096):
+                continue
+
+    with _loopback_server(serve, "test-hangup-sshd") as port:
+        yield RemoteSSHInfo(user="root", host="127.0.0.1", port=port, key_path=key_path)
+
+
+@pytest.mark.timeout(60)
+def test_create_ssh_client_reports_a_host_that_hangs_up_as_a_host_connect_failure(tmp_path: Path) -> None:
+    """A bare ``EOFError`` from paramiko must leave ``_create_ssh_client`` as ``SSHTunnelError``.
+
+    Every caller of the tunnel layer catches ``SSHTunnelError``, ``SSHException``
+    and ``OSError``; an ``EOFError`` is none of them, so letting it out would
+    kill whichever thread is dialing. ``HOST_CONNECT`` because the host answered and
+    then hung up, which is evidence about the host.
+    """
+    with _sshd_that_hangs_up_after_the_banner(tmp_path) as ssh_info:
+        with pytest.raises(SSHTunnelError) as exc_info:
+            _create_ssh_client(ssh_info)
+    assert exc_info.value.phase is SSHTunnelPhase.HOST_CONNECT
+    assert isinstance(exc_info.value.__cause__, EOFError)
+
+
+@pytest.mark.timeout(60)
+def test_repairing_against_a_host_that_hangs_up_records_a_failure_instead_of_raising(tmp_path: Path) -> None:
+    """The health-check tick must survive a host that hangs up during the handshake.
+
+    The tick runs on the ``reverse-tunnel-health-check`` thread, which has no
+    handler of its own: an exception escaping it ends that thread, and with it
+    every later repair in the process.
+    """
+    with _sshd_that_hangs_up_after_the_banner(tmp_path) as ssh_info:
+        manager = SSHTunnelManager()
+        conn_key = f"{ssh_info.host}:{ssh_info.port}"
+        tunnel_key = (conn_key, 8420)
+        with manager._lock:
+            manager._reverse_tunnels[tunnel_key] = ReverseTunnelInfo(
+                ssh_info=ssh_info, local_port=8420, remote_port=5000, requested_remote_port=5000
+            )
+        try:
+            manager._check_and_repair_tunnels()
+
+            with manager._lock:
+                assert tunnel_key in manager._failure_state
+        finally:
+            manager.cleanup()
+
+
+class _HungUpPortForwardTransport(FakeSSHTransport):
+    """A transport still reporting active whose peer hung up under the forward request.
+
+    paramiko raises a bare ``EOFError`` from the write in that window.
+    """
+
+    def request_port_forward(self, address: str, port: int, handler: object | None = None) -> int:
+        raise EOFError()
+
+
+def test_setup_reverse_tunnel_reports_a_host_that_hangs_up_mid_request_as_a_host_connect_failure(
+    tmp_path: Path,
+) -> None:
+    """An ``EOFError`` from ``request_port_forward`` must leave as ``SSHTunnelError``, not bare."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create()
+    object.__setattr__(fake_client, "_fake_transport", _HungUpPortForwardTransport.create())
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+    try:
+        with pytest.raises(SSHTunnelError) as exc_info:
+            manager.setup_reverse_tunnel(ssh_info, local_port=8420)
+        assert exc_info.value.phase is SSHTunnelPhase.HOST_CONNECT
+        assert isinstance(exc_info.value.__cause__, EOFError)
+        assert manager._reverse_tunnels == {}
+    finally:
+        manager.cleanup()
+
+
+class _HungUpCancelTransport(FakeSSHTransport):
+    """A transport still reporting active whose peer hung up under the cancel request."""
+
+    def cancel_port_forward(self, address: str, port: int) -> None:
+        raise EOFError()
+
+
+def _manager_with_a_tunnel_whose_cancel_hits_eof(tmp_path: Path) -> tuple[SSHTunnelManager, RemoteSSHInfo]:
+    """A manager holding one reverse tunnel (local 8420) on a transport whose cancel raises ``EOFError``."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create()
+    object.__setattr__(fake_client, "_fake_transport", _HungUpCancelTransport.create())
+    manager = SSHTunnelManager()
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+    _register_reverse_tunnel(
+        manager, (conn_key, 8420), ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=5000), fake_client
+    )
+    return manager, ssh_info
+
+
+def test_removing_a_reverse_tunnel_whose_host_hung_up_does_not_raise(tmp_path: Path) -> None:
+    """Removal is best-effort: a bare ``EOFError`` from the cancel must not escape to the caller.
+
+    Latchkey discovery removes tunnels with no handler around the call, so an
+    escaping ``EOFError`` would abort the discovery cycle.
+    """
+    manager, ssh_info = _manager_with_a_tunnel_whose_cancel_hits_eof(tmp_path)
+    try:
+        assert manager.remove_reverse_tunnel(ssh_info, 8420)
+    finally:
+        manager.cleanup()
+
+
+def test_cleanup_survives_a_host_that_hung_up_under_the_cancel(tmp_path: Path) -> None:
+    """A bare ``EOFError`` from the cancel must not stop ``cleanup`` before it closes the connections."""
+    manager, _ssh_info = _manager_with_a_tunnel_whose_cancel_hits_eof(tmp_path)
+
+    manager.cleanup()
+
+    assert manager._connections == {}

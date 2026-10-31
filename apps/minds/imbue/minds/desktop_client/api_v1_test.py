@@ -17,7 +17,7 @@ from typing import Final
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2
 import pytest
 from flask import Flask
 from flask.testing import FlaskClient
@@ -89,6 +89,10 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
@@ -113,6 +117,8 @@ from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.testing import wait_until_synced
+from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.workspace_create import CreateOnCreatedCallback
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
@@ -204,6 +210,7 @@ class _RecordingAgentCreator(AgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
@@ -222,6 +229,7 @@ class _RecordingAgentCreator(AgentCreator):
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
             "account_id": account_id,
+            "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
             "on_created": on_created,
         }
         return CreateAttemptId()
@@ -1498,7 +1506,8 @@ def test_create_workspace_ignores_stale_ai_provider_field(
     # The AI provider moved into the workspace's own sign-in modal. A stale
     # client still sending ai_provider (even a value that used to require an
     # API key) must be accepted -- the field is silently ignored.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -2110,7 +2119,7 @@ def _build_client(
     mngr_host_dir: Path | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    http_client: httpx.Client | None = None,
+    http_client: httpx2.Client | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     client_env_config: ClientEnvConfig | None = None,
     connection_store: ConnectionStore | None = None,
@@ -2537,7 +2546,7 @@ def _sharing_client(
     email: str = "owner@example.com",
     service_logs: dict[str, str] | None = None,
     mngr_binary: str = "mngr",
-    http_client: httpx.Client | None = None,
+    http_client: httpx2.Client | None = None,
     agent_labels: dict[str, str] | None = None,
 ) -> FlaskClient:
     resolver = make_resolver_with_data(make_agents_json(agent_id, labels=agent_labels), service_logs=service_logs)
@@ -3401,11 +3410,11 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     cli = _fake_sharing_cli(share=_active_share())
     probed_hosts: list[str] = []
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         probed_hosts.append(request.url.host)
-        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     # The shell's label must be known for readiness -- the probe hits the shell's
     # label origin, not the bare machine domain (which does not route on a share).
     client = _sharing_client(
@@ -3441,10 +3450,10 @@ def test_machine_sharing_readiness_polls_reuse_the_cached_share_lookup(tmp_path:
     agent_id = AgentId()
     cli = _fake_sharing_cli(share=_active_share())
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3474,7 +3483,7 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         to_update(bare_share.field_ref().last_tunnel_login_at, "2026-08-13 12:00:00+00:00"),
     )
     cli = _fake_sharing_cli(share=share)
-    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx.Client())
+    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx2.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
@@ -3505,10 +3514,10 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
     caller = _GatewayStatusCaller(status_json=status_json)
     cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route to host")
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route to host")
 
-    http_client = httpx.Client(transport=httpx.MockTransport(_handler))
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler))
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3535,7 +3544,7 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
 
 def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
     agent_id = AgentId()
-    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx.Client())
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx2.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
@@ -4401,6 +4410,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
         detection=UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION),
         current_version="minds-v0.3.9",
         supported_version="",
+        is_readable=True,
     )
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
@@ -5399,29 +5409,25 @@ def test_create_synced_connection_rolls_back_when_the_push_fails(
     )
 
 
-def test_create_connection_without_an_owner_lands_on_the_settled_default_account(
+def test_create_connection_without_an_owner_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A stored default the scheduler retired as dead must not refuse every ownerless registration."""
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    minds_config.set_default_account_id(str(uuid4()))
+    """There is no install-wide default account: the window adding a connection names the owner itself."""
     parts = _connection_client(
         tmp_path,
         monkeypatch,
         root_concurrency_group,
         StaticBackendResolver(url_by_agent_and_service={}),
         0,
-        minds_config=minds_config,
     )
     unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
     body = {key: value for key, value in _modal_connection_body("").items() if key != "owner"}
 
     response = _post_connection(parts, body)
 
-    assert response.status_code == 200, response.data
-    (view,) = parts.connection_store.list_all_views()
-    assert view.owner_user_id == _CONNECTION_OWNER_ID
-    assert minds_config.get_default_account_id() == _CONNECTION_OWNER_ID
+    assert response.status_code == 400, response.data
+    assert json.loads(response.data)["field"] == "owner"
+    assert parts.connection_store.list_all_views() == []
 
 
 def test_create_connection_rejects_an_unknown_owner_a_missing_token_a_blank_alias_and_a_blank_region(
@@ -5986,6 +5992,7 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
             "A machine named 'contended' is already being created. "
@@ -6076,6 +6083,32 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
+
+
+def test_create_workspace_threads_the_onboarding_examples_flag_off_unless_the_body_turns_it_on(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    # The creation page reads the flag back from the attempt's record, so it must reach the creator;
+    # the form leaves it off, and the start flow's creates (and the form's switch) turn it on.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    quiet = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "quiet-create"},
+    )
+    assert quiet.status_code == 202
+    assert creator.last_call["is_onboarding_driven_by_agent"] is False
+
+    asked = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "asked-create", "is_onboarding_driven_by_agent": True},
+    )
+    assert asked.status_code == 202
+    assert creator.last_call["is_onboarding_driven_by_agent"] is True
 
 
 def test_create_workspace_marks_onboarding_complete(
@@ -6501,6 +6534,114 @@ def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_im
     assert json.loads(response.data)["error"] == "not_published"
     (call,) = cli.mobile_access_link_calls
     assert call["link"] is None
+
+
+_FOLDER_SYNC_DEVICE_ID: Final[str] = "host-0f0e0d0c0b0a09080706050403020100"
+_FOLDER_SYNC_START_TIMEOUT_SECONDS: Final[float] = 20.0
+
+
+def _client_with_folder_syncs(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    workspace_agent_id: AgentId,
+    chat_agent_id: AgentId,
+) -> tuple[FlaskClient, FolderSyncManager]:
+    """A client whose folder syncs run against the stand-in ``mngr`` and a workspace with a chat in it."""
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={}, workspace_agent_id=workspace_agent_id, chat_agent_id=chat_agent_id
+    )
+    manager = FolderSyncManager(
+        concurrency_group=root_concurrency_group,
+        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id=_FOLDER_SYNC_DEVICE_ID,
+        backend_resolver=resolver,
+        store=FolderSyncStore(records_dir=tmp_path / "folder_syncs"),
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+        folder_sync_manager=manager,
+        device_id=_FOLDER_SYNC_DEVICE_ID,
+    )
+    return app.test_client(), manager
+
+
+def test_folder_syncs_answers_any_agent_of_the_workspace_with_the_workspaces_syncs(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A chat asks under its own id, and is answered with what is filed under the primary's."""
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
+    try:
+        manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+        wait_until_synced(manager, str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+
+        response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
+    finally:
+        manager.stop_all()
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["device_id"] == _FOLDER_SYNC_DEVICE_ID
+    (sync,) = body["syncs"]
+    assert sync["local_path"] == str(local_folder)
+    assert sync["workspace_path"] == f"~/synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
+    assert sync["activity"] == "ACTIVE"
+    assert sync["state"] == "SYNCED"
+    assert sync["message"] is None
+    assert sync["bytes_done"] is None and sync["bytes_total"] is None
+    assert sync["direction"] == "BOTH"
+    assert sync["conflict"] == "NEWER"
+
+
+def test_folder_syncs_reports_where_a_turned_off_syncs_copy_was_set_aside(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
+    local_folder = tmp_path / "notes"
+    local_folder.mkdir()
+    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
+    manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+    manager.stop(str(workspace_agent_id), str(local_folder))
+    assert manager.wait_until_settled(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
+    manager.forget(str(workspace_agent_id), str(local_folder))
+
+    response = client.get(f"/api/v1/agents/{workspace_agent_id}/folder-syncs", headers=_auth_header())
+
+    (sync,) = json.loads(response.data)["syncs"]
+    assert sync["activity"] == "INACTIVE"
+    assert sync["state"] == "STOPPED"
+    assert sync["workspace_path"] == f"~/inactive_synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
+
+
+def test_folder_syncs_refuses_an_agent_this_desktop_does_not_know(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    client, _manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, AgentId(), AgentId())
+
+    response = client.get(f"/api/v1/agents/{AgentId()}/folder-syncs", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_folder_syncs_answers_with_none_in_a_build_that_cannot_sync(tmp_path: Path) -> None:
+    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
+    client, _app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["syncs"] == []
 
 
 # Visiting agents: the Share panel's routes onto the workspace's agent-access CLI.

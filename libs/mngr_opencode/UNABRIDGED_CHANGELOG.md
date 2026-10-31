@@ -4,6 +4,24 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-28
+
+New `version_mismatch` setting on the opencode agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.
+
+Behavior change: the pinned-version check now runs whenever `version` is set, even with `check_installation = false`, which now only controls install-if-missing. The version is now probed with the binary itself rather than the configured launch `command`, so a wrapper command no longer makes the check skip.
+
+## 2026-10-26
+
+OpenCode agents now declare their process name (`opencode`) on the agent class instead of in a method override, so a laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud), which knows only an agent's type, reads it too. Before, that listing knew only claude's name and fell back to the first word of the launch command for every other type, which could read a live agent as DONE.
+
+## 2026-10-23
+
+The `update_policy` help text (and the README table generated from it) now says what `"autoupdate": false` does on current opencode. From opencode 1.19.0 updates are never installed automatically, so NEVER only turns off the update check and its notice; on earlier versions it also stops opencode updating itself on launch. Behavior is unchanged.
+
 ## 2026-10-20
 
 `mngr list` no longer reports a `plugin.opencode.waiting_reason` field on agents of other types. The opencode field generator ran for every listed agent, so a `command` or `codex` agent showed `END_OF_TURN` under `plugin.opencode` (the marker it reads is one such an agent never writes), at the cost of one remote `path_exists` call per agent per `mngr list`. The generator now returns nothing for an agent that is not a OpenCodeAgent, as the codex generator already did. Reported by 19 mappers in the 2026-10-13 TMR run.

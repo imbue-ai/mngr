@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-vps"
-version = "0.1.10"
+version = "0.1.11"
 description = "VPS provider base classes for mngr (container and bare placement)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.3.0",
+    "imbue-mngr==0.3.1",
     "tenacity>=8.0",
 ]
 

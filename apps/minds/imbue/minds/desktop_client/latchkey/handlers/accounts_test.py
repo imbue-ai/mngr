@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
@@ -33,7 +33,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
-_HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
+_HttpxHandler: Final = Callable[[httpx2.Request], httpx2.Response]
 
 
 class _RecordingMessageSender(MngrMessageSender):
@@ -50,7 +50,7 @@ class _RecordingMessageSender(MngrMessageSender):
 
 def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
     return LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
         base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
@@ -98,18 +98,18 @@ def _build_authenticated_client(
 
 
 def test_handler_claims_accounts_request_type(tmp_path: Path) -> None:
-    handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx.Response(200))
+    handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx2.Response(200))
     assert handler.handles_request_type() == REQUEST_TYPE_ACCOUNTS
 
 
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_accounts_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
@@ -141,10 +141,10 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 def test_deny_deletes_request_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(200)
+        return httpx2.Response(200)
 
     handler, sender = _make_accounts_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
@@ -169,7 +169,7 @@ def test_deny_deletes_request_writes_response_notifies_agent(tmp_path: Path) -> 
 
 
 def test_build_request_detail_payload_carries_the_rationale(tmp_path: Path) -> None:
-    handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx.Response(200))
+    handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx2.Response(200))
     event = create_accounts_permission_request(
         agent_id=str(AgentId()),
         rationale="needs to find the right account",
@@ -191,7 +191,7 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
     carried: list[str] = []
     handler, _sender = _make_accounts_handler(
         tmp_path,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         push_permissions_to_machine=carried.append,
     )
     agent_id = AgentId()

@@ -21,8 +21,10 @@ import type {
   UpdateState,
   UpdateStatus,
 } from "../electron-bridge";
+import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
 import { BrowserImportModel } from "./browserImport";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
+import type { UpdatesStore } from "./updates";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   applyNotificationPrefs,
@@ -43,6 +45,10 @@ export interface SettingsOverview {
   version: string;
   update_window_start_hour: number;
   update_window_end_hour: number;
+  /** Whether the app arms the update of every behind workspace without its own setting. */
+  is_auto_update_enabled: boolean;
+  /** The answer to the one-time auto-update prompt; null until it is given. */
+  auto_update_prompt_decision: AutoUpdatePromptDecision | null;
   /** Optional only for version skew with a backend from before sign-in relaying; absent reads as
    * "no browsers found" (the default browser is all there is to pick). */
   sign_in_browsers?: SignInBrowserOption[];
@@ -154,6 +160,11 @@ export class SettingsModel {
   displayZoomError = "";
   errorReportingError = "";
   updateWindowError = "";
+  autoUpdateError = "";
+  isAutoUpdateBusy = false;
+  /** The workspace being put back on Studio's auto-update setting, and why the last one could not be. */
+  workspaceResettingId: string | null = null;
+  workspaceResetError = "";
   signInBrowserError = "";
   notificationPrefsError = "";
   /** Set after a failed openNotificationOsSettings() call (e.g. no known
@@ -341,6 +352,54 @@ export class SettingsModel {
       this.updateWindowError =
         "Could not change the update window (network error).";
     }
+    this.redraw();
+  }
+
+  /** Put one workspace back on Studio's auto-update setting; the updates frame that follows drops its row. */
+  async resetWorkspaceAutoUpdate(agentId: string, updates: UpdatesStore): Promise<void> {
+    this.workspaceResettingId = agentId;
+    this.workspaceResetError = "";
+    this.redraw();
+    const result = await updates.setAutoUpdateOverride(agentId, null);
+    this.workspaceResettingId = null;
+    if (!result.isOk) this.workspaceResetError = result.error;
+    this.redraw();
+  }
+
+  /** Turn auto-update on or off for every workspace that follows Studio
+   * settings. A plain preference like the window: no If-Match. The switch
+   * shows what the backend confirmed. */
+  async setAutoUpdateEnabled(isEnabled: boolean): Promise<void> {
+    if (this.overview === null) return;
+    this.autoUpdateError = "";
+    this.isAutoUpdateBusy = true;
+    this.redraw();
+    try {
+      const response = await this.fetchImpl("/ui/api/settings/auto-update", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_enabled: isEnabled }),
+      });
+      if (response.ok) {
+        const result = (await response.json()) as { is_enabled: boolean };
+        const latest = this.overview;
+        if (latest !== null) {
+          this.overview = { ...latest, is_auto_update_enabled: result.is_enabled };
+        }
+      } else {
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        this.autoUpdateError =
+          data.error ??
+          `Could not change automatic updates (HTTP ${response.status}).`;
+      }
+    } catch {
+      this.autoUpdateError =
+        "Could not change automatic updates (network error).";
+    }
+    this.isAutoUpdateBusy = false;
     this.redraw();
   }
 

@@ -4,6 +4,172 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+Gave every e2e command that reaches a remote provider one shared timeout budget,
+sized from the per-test cap it has to fit inside.
+
+The e2e harness runs each command under a time limit, defaulting to one sized for
+local commands. Commands that provision a container, snapshot a host or list a
+provider are network round-trips and need far longer. Fifty-one of them never said
+so, running against the 30s local default, while the rest carried hand-written
+budgets of 60, 90, 120, 180 or 240 seconds for the same operation -- raised a site
+at a time as individual tests went red. Whichever remote command was slowest on a
+given run was the one that failed, so a single cause read as unrelated flakiness.
+
+All of them now use `REMOTE_COMMAND_TIMEOUT_SECONDS`, which replaces three
+identical copies of the old budget declared separately in three test modules. It
+is derived from the release marker class's own per-test cap rather than written
+out, so a command's budget can no longer quietly exceed the time its test is
+allowed in total. Measured across the 2026-10-22 and 2026-10-28 release runs
+(1246 observations), this class of test has a p99 of 92s, which the lowest of the
+old budgets did not clear.
+
+Four commands keep a budget of their own, each declaring a matching per-test
+timeout where it needs one: a custom image build, a create that waits for the
+agent to be fully ready, one already bounded to a second by `time_bounded`, and
+one create short-circuited before it provisions anything. The genuinely local
+commands keep the local default.
+
+Refreshed the `provider_release_testing` docstring, which named the `Release Tests` workflow. It is
+called `mngr Release Tests`.
+
+## 2026-10-28
+
+`mngr connect` (and `mngr create`/`mngr start` with `--connect`) recovers when its SSH session to a remote agent drops, for example after the laptop sleeps.
+
+- The terminal modes the remote session switched on are switched off again, the same set tmux's client resets when it releases a terminal: the scroll region, mouse reporting, bracketed paste, focus reporting, keypad mode, the alternate screen, text attributes and a hidden cursor. Before, a dropped session could leave the shell receiving every mouse movement as typed text.
+
+- If the host paused while disconnected (idle timeout or lifetime cap), it is restored and the agent started again before reattaching, at the host's new address. `mngr connect --no-start` leaves a paused host alone. A host that was stopped, destroyed, failed or crashed is not restored; the command stops with an error instead.
+
+- A drop that spans a sleep reconnects at once without using a retry (`connect_retry_times`).
+
+- When the session cannot be reattached, the command now exits non-zero instead of returning as if the session had ended normally, and a remote exit status other than a lost connection or a Ctrl-q/Ctrl-t action is reported as an error rather than retried.
+
+An SSH connection whose local address vanished under it (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle or sleep/wake) is now recognized as a dead connection: the operation disconnects and retries on a rebuilt connection, and a failure that outlives the retries surfaces as a `HostConnectionError` instead of a raw `OSError`. This stops the latchkey forward daemon's remote gateway provisioning from crashing on it.
+
+## 2026-10-28
+
+Added `VersionMismatchPolicy` (`ERROR` / `WARN`) and a `mismatch_policy` argument on the shared `verify_pinned_cli_version`, so an agent type can choose whether an installed CLI that does not report its pinned version fails provisioning or only logs a warning naming the harness, the installed version, and the pin.
+
+The version probe now runs `<binary> --version` (the binary `ensure_cli_installed` checks for) instead of the agent's launch `command`. A launch command can be a wrapper that only resolves inside the agent's environment, and a probe that fails is skipped silently, so a wrapped harness was never checked at all.
+
+The release test that checks the version-pinned help-topic doc URL resolves now skips a version that is not on PyPI yet: the release pipeline runs the release tests before it publishes and tags the version, so that version's tag cannot exist during the run.
+
+## 2026-10-27
+
+The agent release harness now reports the records behind its two duplicate-detection
+failures instead of only a count.
+
+The event-id uniqueness check names the repeated ids, and the exactly-once delivery
+check names each duplicated delivery's event_id and timestamp -- which separates a
+transcript that recorded one line twice (one id, twice) from a token that really was
+sent twice (two ids). Both failures previously had to be diagnosed by reading the
+transcript pipeline.
+
+Fixed: an agent's tmux pane no longer gets taken over by a message like
+`'bash .../commands/sigwinch_panes.sh ... agent fit 98 43' returned 1` (the pane sits in tmux view
+mode until Esc is pressed). The per-session `client-attached` / `client-resized` repaint hooks now
+start `sigwinch_panes.sh` with `if-shell -b` instead of `run-shell -b`. tmux shows a failed
+`run-shell -b` job's output and exit status in view mode on the most recently active pane, which is
+often a different agent's than the one whose hook fired. `if-shell -b` never displays either. The
+hook can fail without the script misbehaving: an older mngr checkout rewrites the shared script in
+place mid-run, or the tmux server is at its file-descriptor limit, so the job's process exits 1
+before the script starts. The second can happen when a burst of resize events (for example from
+dragging a terminal window) fires dozens of resize hooks, each holding a server fd during its delay,
+against a server running with the macOS default limit of 256. When the server has fewer than two
+free fds, it cannot create the job at all; tmux then shows "Failed to run command: ..." on a
+client's status line for `display-time` (750 ms by default), where it used to show nothing. tmux
+also waits for an `if-shell` job before its server exits, so after `tmux kill-server` within a few
+seconds of an attach or resize, the old server lingers until the script's delay ends and refuses new
+sessions until then.
+
+`sigwinch_panes.sh` now calls its entrypoint and `exit` on the same line, so a copy of the script
+that an older mngr rewrites in place while a run is in progress can no longer splice other bytes into
+that run. The updated script reaches a host the next time this mngr creates an agent there.
+
+Only agents started after this change get the new hook; existing sessions keep the old one until
+they are restarted, and until then a failure of an old session's hook can still take over any pane
+on that tmux server, a new agent's included.
+
+When pyinfra cannot find its `ssh` connector in `create_pyinfra_host`, the shared SSH host builder most providers use, mngr now raises `PyinfraConnectorUnavailableError` instead of letting a bare `KeyError` escape from pyinfra. The new error is both a `HostError` and a `KeyError`, so callers that handle mngr errors now catch it, and existing `KeyError` handlers keep catching it. Before raising, mngr logs an ERROR with a snapshot of the pyinfra install as the process sees it at that moment: where the imported package lives and whether it still exists, which pyinfra distribution metadata a lookup finds now and whether it sits next to the imported package, the connector entry points it lists (or why one failed to load), `sys.prefix`, the modification time of `site-packages`, and the process uptime.
+
+Every interactive TUI agent type now declares how its input box looks to `mngr message`, so a TUI that differs from Claude Code's gets the right send behaviour instead of Claude's.
+
+- `PASTE_PLACEHOLDER_PREFIXES` names the text the input box shows in place of a pasted message (for example `[Pasted text #N +M lines]`), so a paste counts as visible before its text is on screen; `()` declares a TUI that shows the pasted text. A concrete `InteractiveTuiAgent` subclass that does not declare it, or declares anything but a tuple of non-empty strings, fails when the class is defined.
+
+- Every concrete `InteractiveTuiAgent` subclass implements `_build_enter_retry_gate`, the pane test that decides whether a swallowed Enter is re-sent during the confirmation window. `tui_utils.build_unsubmitted_message_retry_gate` builds the test Claude Code and agy use: retry while the pane still shows the message's tail or a paste placeholder, which suits a TUI where an Enter on an empty input box does nothing. A TUI that keeps an accepted message on screen as a queued entry supplies its own, because there that test would press Enter again on a message the TUI already took.
+
+- For plugins that call the send helpers directly: `tui_utils.submit_message_and_confirm` and `build_confirmation_command` take `paste_placeholder_prefixes` and `enter_retry_gate` (None re-sends Enter at every retry offset without reading the pane).
+
+Behaviour for every existing agent type is unchanged.
+
+## 2026-10-26
+
+Live agents no longer read as STOPPED or DONE when their host is too loaded to answer in time. Chats used to flip to paused and "come back" a few minutes later, and a message sent in that window could restart a running agent.
+
+- **Before:** each agent ran its own tmux and `ps` probe, one after another, under the host's shared 20s read budget. Once the budget ran out, every later probe was capped at 1s. A probe killed at that cap read as STOPPED (no tmux answer) or DONE (no `ps` answer).
+
+- **Now:** a listing reads the host's tmux panes (`tmux list-panes -a`) and then its process table (`ps -e`) once per host, each read with its own 5s timeout. A single-agent probe uses the same two reads. A host with 8 agents and a 1.5s tmux call now lists in about 2s instead of about 25s, with every agent correct.
+
+- **When the tmux read fails or times out, agents read UNKNOWN,** never STOPPED or DONE. When only the `ps` read fails, tmux still settles what it can show on its own: a missing session reads STOPPED, a dead pane DONE, and a pane whose foreground is the agent's own process RUNNING or WAITING (without a PID); anything else reads UNKNOWN. A host with no tmux server (or no tmux installed) still reads its agents STOPPED. `mngr observe` emits UNKNOWN as is and keeps watching the agent's process, as it also does for a RUNNING or WAITING reading without a PID. The remote providers' batched listing (modal, vps, imbue_cloud) is unchanged: it already read once per host, and a tmux or `ps` failure inside it reads as it did before (a missing tmux answer still reads STOPPED).
+
+- **How commands treat an UNKNOWN agent:**
+
+  - `mngr message`, and a chat send, fail with a "could not determine whether the agent is running" error of the new kind `state_unknown`, instead of delivering, starting or reviving. Trying again helps once the host answers; a restart (`mngr start --restart`) does not depend on reading the state.
+
+  - `mngr destroy` without `--force` refuses.
+
+  - `mngr archive` treats the agent as running: it skips it, or with `--force` stops it before archiving it.
+
+  - `mngr exec`, `mngr connect`, `mngr capture` and `mngr create --reuse` go ahead as before: when they may start an agent they run the start, which leaves a running agent's session untouched, and otherwise they proceed without one. A start whose `tmux has-session` check fails without saying the session is absent (e.g. a lost tmux server) now fails, instead of reading as "no session" and killing the agent's processes before relaunching it.
+
+- **A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer reads live codex, antigravity, pi or opencode agents as DONE.** That listing knows only each agent's type, and looked its process name up in a table that only had claude. For other types it fell back to the first word of the launch command (for codex, `(`), which never runs. Agent classes now declare a `fixed_process_name`, which both the listing and a loaded agent read. Agent types built on claude's agent class under their own type name (code-guardian, fixme-fairy, witness) inherit `claude`, so that listing also stops misreading them as REPLACED or DONE. An agent type with no declared name now gets the same fallback in that listing as when loaded: the command's first word past any leading subshell `(`.
+
+## 2026-10-24
+
+Progress step ids derived from Dockerfile instruction text now hash it with `hashlib.sha1(..., usedforsecurity=False)`, marking the hash as an identifier rather than a security control. This resolves Bandit's B324 (`hashlib`) finding on `text_step_id`; the ids themselves are unchanged.
+
+The interactive subprocess helpers (`run_interactive_subprocess`, `popen_interactive_subprocess`) no longer accept a `shell` argument and take an argv list only; no caller ever passed `shell=True` to `run_interactive_subprocess`. The one deliberate shell invocation, running the user's configured pager for `--help` output, now goes through a dedicated `popen_interactive_shell_command` that documents why the shell is used and marks the call `# nosec B602`. This resolves Bandit's two B602 (`subprocess_popen_with_shell_equals_true`) findings without changing behavior. The `utils` direct-subprocess ratchet count rises from 13 to 14 because the new helper is a third sanctioned `subprocess.Popen` call in the same wrapper module.
+
+The SSH session-open readiness probe (`wait_for_sshd_with_retry`) now verifies the server's host key against a pinned known_hosts file instead of trusting any key it is shown (paramiko `AutoAddPolicy`). Callers pass the file as the new required `known_hosts_path` keyword. A server whose key differs from the pin fails at once with a `MngrError` instead of being retried until the timeout. This resolves Bandit's B507 (`ssh_no_host_key_verification`) finding.
+
+## 2026-10-23
+
+Messages sent to an agent now keep a trailing `;`. tmux reads an argument that ends in `;` as a command separator and drops the `;`, so `mngr message` with `hello;` used to type `hello`, and a `;` key chord typed nothing. The same applied to an additional window's command (`find . -exec ... \;` lost its backslash). Short messages, key chords and typed window commands now escape a trailing `;` the way tmux expects; long messages were never affected, since they go through a paste buffer.
+
+Added `running_in_own_process_group` to `imbue.mngr.utils.testing` (MIND-377). It is a context manager that runs a command as the leader of a new process group and, on exit, leaves nothing in that group running.
+
+On exit it sends SIGKILL to the group again and again until every process in it has exited, rather than once. CI runs tests in Modal sandboxes, which use gVisor (a user-space Linux kernel), and gVisor lets a child that is being forked at the moment of the kill join the group after the signal has gone out, so a single kill can miss it. Every process in the group inherits the write end of a pipe that nothing writes to, and that pipe reaches end-of-file only once the last of them has exited, which is how the helper knows the group is empty. The group leader is reaped only after that, because its pid is the group id and reaping it earlier would let an unrelated group reuse the number.
+
+The claude and codex `common_transcript.sh` tests use it to stop their background watchers. Test utility only; no change to `mngr` behaviour.
+
+- Regenerated `docs/commands/secondary/tmr.md` so its example minds invocation
+  excludes the new `smoke` mark, matching `mngr tmr --help`.
+
+Fixed an additional tmux window whose command is too long to type never running it. `mngr` types
+each additional window's command into the pane with `send-keys`, and a pane's pty is still in
+canonical mode when those keys arrive -- on macOS it keeps the first 1024 bytes of the line and
+discards the rest along with the newline, while tmux reports success. The command was left sitting
+truncated at the prompt with nothing logged. The `terminal` window that the ttyd plugin configures
+on every `mngr create` is 1221 bytes, so on a macOS host the web terminal never started and no
+terminal URL was ever registered. Linux hosts buffer far more and were unaffected.
+
+An additional window's command is now written to `launch_window_<n>.sh` in the agent's state dir
+and sourced when it is at or above 512 bytes, the same route the agent's own command already takes.
+Commands under that bound are still typed verbatim, so they stay visible in the pane, re-runnable
+with up-arrow, and interpreted by the pane's own shell whatever dialect that is. A command at or
+above the bound is now sourced with the POSIX `.`, so a tmux `default-command` shell without a `.`
+builtin (elvish, for instance) cannot run one -- it could not have run it typed either, since it
+never arrived intact.
+
+Already-running agents keep their truncated window until they are stopped and started again;
+`mngr start` returns early when the tmux session already exists.
+
+The mngr Docker image (offload sandboxes, the schedule image, local docker hosts) installs uv 0.13.4 from its versioned installer instead of whatever `install.sh` resolved to, Node 24.22.1 (was 24.15.0) and Claude Code 2.1.307 (was 2.1.293). It also upgrades `ca-certificates`. These drop the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-22
 
 `mngr event` reads and replays an event history a piece at a time instead of holding all of it in memory.

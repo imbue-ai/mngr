@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+The connector client's requests now use `httpx2`, Pydantic's maintained fork of the unmaintained `httpx` with the same API. The package depends on `httpx2>=2.13.1` instead of `httpx`. httpx2 verifies TLS against the operating system's trust store instead of certifi's bundle, unless `SSL_CERT_FILE` names a bundle.
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+Removed the connector client's unused `auth_get_user` method along with the unauthenticated `GET /auth/users/{user_id}` connector route it bound to. Nothing in the plugin or the minds app ever called it; `GET /users/{user_id}` (signed-in callers only) remains the way to read a user's identity record by id.
+
+## 2026-10-26
+
+Added: `ImbueCloudAccountDeletedError`, raised when the connector refuses a call with 403 `account_deleted` (a deleted account's device-token exchange, which `mngr imbue_cloud login` completes through). It carries the connector's own message, which says the account has been deleted and names the support contact, where before the client raised `ImbueCloudAuthError("Unauthenticated (403): ...")` with the JSON body as text. The CLI emits it as `code: account_deleted`, mirroring `account_suspended`, so the minds desktop client can key off the refusal structurally.
+
+## 2026-10-23
+
+Gen-2 slice VMs upgrade `ca-certificates` at provisioning (best effort, with retries) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-22
 
 Added: `ImbueCloudConnectorClient.admin_delete_account(admin_api_key, email)` and `admin_finalize_account(admin_api_key, email)`, the client's forms of the connector's two operator account-deletion routes (`POST /admin/accounts/{email}/delete` and `/finalize`, `specs/account-deletion.md`), shaped like `admin_unsuspend_account`: each returns the route's JSON answer. `scripts/delete_accounts.py` is their caller.

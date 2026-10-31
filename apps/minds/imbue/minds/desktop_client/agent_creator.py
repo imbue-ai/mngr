@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import ssl
 import tempfile
 import threading
 import time
@@ -32,7 +33,7 @@ from typing import assert_never
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -102,6 +103,7 @@ from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_def
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
+from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -125,6 +127,7 @@ from imbue.mngr.utils.progress import ProgressEvent
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.progress import parse_progress_event
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
+from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -133,13 +136,6 @@ from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-
-# Inlined to avoid pulling the ``imbue-mngr-forward`` package into Imbue Studio's
-# import graph -- Imbue Studio spawns the plugin as a subprocess and otherwise has
-# no Python-level dependency on it. The constant is a stable wire-format
-# contract; if the plugin ever renames its session cookie, both sides update
-# together.
-_MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 # Path the workspace-readiness / health probes hit through the plugin. We probe
 # ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
@@ -154,86 +150,66 @@ _WORKSPACE_PROBE_PATH: Final[str] = "/"
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
-def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
-    """Construct a reusable httpx.Client preconfigured for workspace probes.
+def make_workspace_probe_client(
+    preauth_cookie: str, probe_timeout_seconds: float, ca_cert_path: Path
+) -> httpx2.Client:
+    """Construct a reusable httpx2.Client preconfigured for workspace probes.
 
     Callers that probe in a tight poll loop should construct one of these and
-    pass it to ``probe_workspace_through_plugin`` on each iteration, instead
-    of letting the helper construct a one-shot client per call.
+    pass it to ``probe_workspace_through_plugin`` on each iteration.
 
-    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
-    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
-    hostname verification could never pass, and the cert is a self-signed
-    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
+    The proxy serves TLS (HTTP/2) under a leaf signed by its persistent local
+    CA, whose certificate is at ``ca_cert_path`` (see
+    ``imbue.mngr_forward.tls.local_ca_cert_path``). The client trusts that CA
+    and nothing else, so the preauth cookie, which the plugin accepts as the
+    owner, only ever reaches the proxy that minted the CA. The probes dial
+    ``127.0.0.1``, which the leaf names among its SANs, so hostname
+    verification stays on; the workspace vhost rides the ``Host`` header.
     """
-    return httpx.Client(
+    return httpx2.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
-        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
-        verify=False,
+        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=ssl.create_default_context(cafile=str(ca_cert_path)),
     )
 
 
-def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> WorkspaceProbeOutcome:
-    """Issue a single GET through ``probe_client`` and report what came back.
-
-    ``probe_url`` targets loopback directly; ``host_header`` carries the
-    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
-    as an explicit ``Host`` header rather than in the URL keeps the probe from
-    depending on ``*.localhost`` name resolution, which is not available on a
-    bare Linux host (only loopback ``localhost`` itself reliably resolves).
-
-    A failure at the transport layer (connect error, mid-stream EOF, read
-    timeout) is reported by name rather than swallowed: it is the only record
-    of *why* a probe never saw a 200, and a probe that fails while the
-    renderer is connected through the same plugin cannot be diagnosed without
-    it. Module-private helper used by ``probe_workspace_through_plugin``;
-    hoisted out to satisfy the Imbue Studio project's no-inner-functions ratchet.
-    """
-    try:
-        response = probe_client.get(probe_url, headers={"Host": host_header})
-    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
-        # httpx leaves ReadError and every TimeoutException without a message,
-        # so the class name is all there is to report for those.
-        message = str(e)
-        failure = f"{type(e).__name__}: {message}" if message else type(e).__name__
-        return WorkspaceProbeOutcome(status_code=None, failure=failure)
-    return WorkspaceProbeOutcome(status_code=response.status_code)
-
-
 def probe_workspace_through_plugin(
-    mngr_forward_port: int,
-    preauth_cookie: str,
-    workspace_id: str,
-    probe_timeout_seconds: float,
-    client: httpx.Client | None = None,
+    probe_client: httpx2.Client, mngr_forward_port: int, workspace_id: str
 ) -> WorkspaceProbeOutcome:
     """Issue a single probe through the plugin to the workspace's inner web server.
 
-    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Reports the HTTP status
-    observed (a 200 means some web server is up and answering on the inner
-    port), or the transport failure that produced no response (connect error,
-    mid-stream EOF, read timeout). This is the one definition of "ready" Imbue Studio
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``) with a client from
+    ``make_workspace_probe_client``. Reports the HTTP status observed (a 200
+    means some web server is up and answering on the inner port), or the
+    transport failure that produced no response (connect error, mid-stream
+    EOF, read timeout). This is the one definition of "ready" Imbue Studio
     has, which is what makes every readiness check in it agree on the answer.
 
     ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
     agent's id) -- the canonical vhost the plugin routes workspace origins on.
     Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
-    redirects or refuses those, so they can never answer 200.
+    redirects or refuses those, so they can never answer 200. The vhost rides
+    an explicit ``Host`` header while the URL targets loopback directly, which
+    keeps the probe from depending on ``*.localhost`` name resolution (not
+    available on a bare Linux host, where only ``localhost`` itself reliably
+    resolves).
 
-    Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
-    to reuse the connection pool across a tight poll loop. When omitted, a
-    one-shot client is constructed for this single probe -- fine for
-    one-off / sporadic callers but wasteful in a loop.
+    A failure at the transport layer is reported by name rather than
+    swallowed: it is the only record of *why* a probe never saw a 200, and a
+    probe that fails while the renderer is connected through the same plugin
+    cannot be diagnosed without it.
     """
     probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
-    host_header = f"{workspace_id}.localhost"
-    if client is not None:
-        return _probe_once(client, probe_url, host_header)
-    with make_workspace_probe_client(
-        preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
-    ) as one_shot:
-        return _probe_once(one_shot, probe_url, host_header)
+    try:
+        response = probe_client.get(probe_url, headers={"Host": f"{workspace_id}.localhost"})
+    except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError, httpx2.TimeoutException) as e:
+        # httpx2 leaves ReadError and every TimeoutException without a message,
+        # so the class name is all there is to report for those.
+        message = str(e)
+        failure = f"{type(e).__name__}: {message}" if message else type(e).__name__
+        return WorkspaceProbeOutcome(status_code=None, failure=failure)
+    return WorkspaceProbeOutcome(status_code=response.status_code)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -400,6 +376,12 @@ class CreateAttemptErrorKind(UpperCaseStrEnum):
     # advice, which only fits github.com. The creating page shows generic
     # git-credentials guidance for this kind.
     GIT_AUTH_REQUIRED = auto()
+
+    # The clone reached the remote, but it has no branch or tag with the name
+    # the create asked for (e.g. ``main`` on a repo whose default branch is
+    # ``master``). Not an access problem, so the creating page points at the
+    # Branch field instead of at credentials.
+    GIT_REF_NOT_FOUND = auto()
 
 
 class AgentCreateAttemptInfo(FrozenModel):
@@ -570,15 +552,18 @@ def _is_remote_git_source(repo_source: str) -> bool:
 def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
     """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
-    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
-    REMOTE git source -- the likely cause is the same (private/nonexistent,
-    no usable credentials on this machine). Deliberately no matching of git's
-    error text (git has no structured error output, and substring matching is
-    brittle across git versions and locales): a remote clone that failed at
-    all is overwhelmingly an access problem, and the creating page's guidance
-    covers it while the raw git error stays visible right above for anything
-    rarer.
+    Recognizes cases for a failed clone (``GitCloneError``). Deliberately no
+    matching of git's error text (git has no structured error output, and
+    substring matching is brittle across git versions and locales). The one
+    case told apart is a missing ref, which :func:`clone_git_repo` establishes
+    from ``git ls-remote``'s exit code and raises as ``GitRefNotFoundError``,
+    whatever the source. Any other failed clone of a REMOTE source is
+    overwhelmingly an access problem (private/nonexistent, no usable
+    credentials on this machine), and the creating page's guidance covers it
+    while the raw git error stays visible right above for anything rarer.
 
+    - ``GitRefNotFoundError`` -> ``GIT_REF_NOT_FOUND`` (the remote answered
+      but has no such branch or tag; guidance points at the Branch field).
     - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
       the GitHub CLI, which only fits github.com https).
     - any other remote git source (a URL on another host, or an ssh remote)
@@ -588,6 +573,8 @@ def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateA
     """
     if not isinstance(error, GitCloneError):
         return None
+    if isinstance(error, GitRefNotFoundError):
+        return CreateAttemptErrorKind.GIT_REF_NOT_FOUND
     if _is_github_https_url(repo_source):
         return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
     if _is_remote_git_source(repo_source):
@@ -704,8 +691,10 @@ def clone_git_repo(
     bare repo, and git rejects pushes from a shallow source with "shallow
     update not allowed" (the pushed tip's parent is missing from the pack).
 
-    Raises GitCloneError if any step fails (including when ``branch`` does
-    not exist on the remote and is not a reachable commit).
+    Raises GitCloneError if any step fails. When the explicit-ref fetch fails
+    for a ``branch`` that is not a full commit SHA, a ``git ls-remote`` probe
+    (on the failure path only) tells a missing ref apart from every other
+    failure, and raises the ``GitRefNotFoundError`` subclass for it.
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=False)
@@ -753,7 +742,43 @@ def clone_git_repo(
                 break
     if failed is not None:
         step_name, output = failed
-        raise GitCloneError("git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output)))
+        message = "git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output))
+        if (
+            step_name == "fetch"
+            and branch is not None
+            and not _FULL_SHA_RE.match(str(branch))
+            and _is_ref_missing_on_remote(clone_dir, branch, git_env, parent_cg)
+        ):
+            raise GitRefNotFoundError(message)
+        raise GitCloneError(message)
+
+
+def _is_ref_missing_on_remote(
+    clone_dir: Path, branch: GitBranch, git_env: dict[str, str], parent_cg: ConcurrencyGroup | None
+) -> bool:
+    """Whether the ``origin`` remote of ``clone_dir`` answers but has no ref named ``branch``.
+
+    ``git ls-remote --exit-code`` exits 2 exactly when it talked to the
+    remote and no ref matched; an unreachable, private or nonexistent remote
+    exits 128 instead. Full commit SHAs must not be probed: ``ls-remote``
+    lists refs, never commits, so a valid SHA would read as missing.
+
+    ``ls-remote`` matches a pattern against the trailing path components of
+    each ref, so a bare ``main`` would also match ``refs/heads/release/main``.
+    A short name is therefore probed as the branch and tag that ``git fetch``
+    would resolve it to; an already-qualified ``refs/...`` name as itself.
+    """
+    ref = str(branch)
+    patterns = [ref] if ref.startswith("refs/") else [f"refs/heads/{ref}", f"refs/tags/{ref}"]
+    cg = _make_child_cg("git-ls-remote", parent_cg)
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "ls-remote", "--exit-code", "origin", *patterns],
+            cwd=clone_dir,
+            is_checked_after=False,
+            env=git_env,
+        )
+    return result.returncode == 2
 
 
 _FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
@@ -948,10 +973,10 @@ _CHECKOUT_STEP: Final[ProgressStepId] = ProgressStepId("checkout_branch")
 _MNGR_CREATE_STEP: Final[ProgressStepId] = ProgressStepId("mngr_create")
 _READY_STEP: Final[ProgressStepId] = ProgressStepId("wait_for_ready")
 _DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
-    _CLONE_STEP: "Fetching the workspace template",
-    _CHECKOUT_STEP: "Checking out the branch",
-    _MNGR_CREATE_STEP: "Creating the workspace",
-    _READY_STEP: "Waiting for the workspace to boot",
+    _CLONE_STEP: "Getting things ready",
+    _CHECKOUT_STEP: "Building your workspace",
+    _MNGR_CREATE_STEP: "Installing your tools",
+    _READY_STEP: "Almost there",
 }
 # How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
 # bound on stopping it once the readiness wait ends; the stop must outlast the
@@ -1218,12 +1243,10 @@ def _build_mngr_create_command(
     intent and pass neither ``--reuse`` nor ``--update`` because
     mngr's ``--reuse`` matches on agent name without host scope.
 
-    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
-    flags here -- ``run_mngr_create`` populates them in the subprocess env
-    when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
-    create`` invocations from outside Imbue Studio too.
+    No Claude credentials ride the create: the workspace signs in to a provider
+    account from its own UI (an Imbue key comes from ``ai_keys``), so nothing here
+    or in DEFAULT_WORKSPACE_TEMPLATE forwards ``ANTHROPIC_API_KEY`` or
+    ``ANTHROPIC_BASE_URL``.
 
     ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
     new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
@@ -1418,7 +1441,7 @@ def _build_mngr_create_command(
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
-            # + ``pass_host_env`` for the LiteLLM creds, and the runtime-only
+            # + ``pass_host_env`` for ``MNGR_PREFIX``, and the runtime-only
             # lease-attribute ``-b`` flags stay inline because they vary per
             # invocation.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])
@@ -2172,6 +2195,15 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    mngr_forward_ca_cert_path: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The ``mngr forward`` plugin's local CA certificate, which readiness probes verify the "
+            "plugin's TLS against (see ``imbue.mngr_forward.tls.local_ca_cert_path``). None disables "
+            "readiness probing alongside ``mngr_forward_port=0``."
+        ),
+    )
     system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
         frozen=True,
         description=(
@@ -2295,6 +2327,7 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
+        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -2420,6 +2453,7 @@ class AgentCreator(MutableModel):
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
             backup_request=backup_request,
+            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
 
         thread = threading.Thread(
@@ -2556,6 +2590,7 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime,
         original_minds_version: str,
         backup_request: BackupSetupRequest | None,
+        is_onboarding_driven_by_agent: bool,
     ) -> None:
         """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
 
@@ -2594,6 +2629,7 @@ class AgentCreator(MutableModel):
                     backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
                 ),
                 backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
+                is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
             ),
         )
         try:
@@ -3204,6 +3240,17 @@ class AgentCreator(MutableModel):
                 # shows the person, not a fault for error reporting. The mngr
                 # transcript is still in the create log and the FAILED record.
                 logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
+            elif isinstance(e, GitRefNotFoundError) and not is_default_workspace_template_url(repo_source):
+                # The requested branch or tag does not exist on a remote that
+                # answered: a mistake in the create's input, which the creating
+                # page explains, not a fault for error reporting. The default
+                # template repo is excluded: its ref is the release's pinned tag,
+                # so a missing one there is a broken release and stays an error.
+                logger.info(
+                    "Failed create attempt {}: it named a branch or tag the repository does not have: {}",
+                    create_attempt_id,
+                    e,
+                )
             else:
                 logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))
@@ -3468,14 +3515,16 @@ class AgentCreator(MutableModel):
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
-        Best-effort: if probing is unconfigured (``mngr_forward_port=0`` or
-        empty preauth, e.g. tests that bypass the plugin) we return immediately.
+        Best-effort: if probing is unconfigured (``mngr_forward_port=0``, empty
+        preauth or no CA certificate, e.g. tests that bypass the plugin) we
+        return immediately.
         On timeout we log + emit to the log queue and let the caller publish
         the redirect anyway -- the user lands on the plugin's auto-refresh
         retry page, which is better than spinning forever in the create attempt UI.
         """
-        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie:
-            logger.debug("Machine readiness probe disabled (port=0 or empty preauth); skipping")
+        ca_cert_path = self.mngr_forward_ca_cert_path
+        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie or ca_cert_path is None:
+            logger.debug("Machine readiness probe disabled (port=0, empty preauth or no CA certificate); skipping")
             return
 
         deadline = time.monotonic() + timeout_seconds
@@ -3494,13 +3543,18 @@ class AgentCreator(MutableModel):
         if bootstrap_tail is not None:
             bootstrap_tail.start()
         try:
-            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds)
+            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds, ca_cert_path)
         finally:
             if bootstrap_tail is not None:
                 bootstrap_tail.stop()
 
     def _probe_until_ready(
-        self, agent_id: AgentId, log_sink: CreateAttemptLogSink, deadline: float, timeout_seconds: float
+        self,
+        agent_id: AgentId,
+        log_sink: CreateAttemptLogSink,
+        deadline: float,
+        timeout_seconds: float,
+        ca_cert_path: Path,
     ) -> None:
         """The readiness loop proper: probe the system interface until it answers 200 or the deadline passes."""
         last_outcome: WorkspaceProbeOutcome | None = None
@@ -3508,15 +3562,14 @@ class AgentCreator(MutableModel):
         with make_workspace_probe_client(
             preauth_cookie=self.mngr_forward_preauth_cookie,
             probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+            ca_cert_path=ca_cert_path,
         ) as probe_client:
             while time.monotonic() < deadline:
                 attempt += 1
                 outcome = probe_workspace_through_plugin(
+                    probe_client=probe_client,
                     mngr_forward_port=self.mngr_forward_port,
-                    preauth_cookie=self.mngr_forward_preauth_cookie,
                     workspace_id=str(agent_id),
-                    probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
-                    client=probe_client,
                 )
                 last_outcome = outcome
                 if outcome.is_ready:

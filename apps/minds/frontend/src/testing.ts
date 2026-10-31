@@ -2,12 +2,15 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
+import { getAppContext, registerAppContext } from "./app-context";
 import type {
   UiAccountEntry,
   UiAccountsMessage,
   UiNotificationEntry,
+  UiWorkspaceUpdate,
   UiWorkspacesMessage,
 } from "./channel/messages";
+import { createEmptyStores } from "./models/boot";
 import type { BrowserImportResult } from "./models/browserImport";
 import type {
   ConnectionBackendOption,
@@ -17,6 +20,7 @@ import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
+import { ShellState } from "./views/shell/shell-state";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -112,41 +116,39 @@ export function workspacesMessage(
   };
 }
 
-/** The accounts frame listing `accounts`, labelled with the default one as
- * the server labels it. */
+/** The accounts frame listing the signed-in `accounts` (and `signedOutAccounts`), as a window on `accountId` receives it. */
 export function accountsMessage(
   accounts: UiAccountEntry[] = [accountEntry()],
+  accountId = "local",
+  signedOutAccounts: UiAccountEntry[] = [],
 ): UiAccountsMessage {
-  const labelled =
-    accounts.find((account) => account.is_default) ?? accounts[0];
   return {
     type: "accounts",
+    account_id: accountId,
     has_accounts: accounts.length > 0,
-    account_email: labelled?.email ?? "",
-    extra_account_count: Math.max(accounts.length - 1, 0),
     accounts,
+    signed_out_accounts: signedOutAccounts,
   };
 }
 
-/** One signed-in account entry: alice, the default account. */
+/** One signed-in account entry: alice. */
 export function accountEntry(
   overrides: Partial<UiAccountEntry> = {},
 ): UiAccountEntry {
   return {
     user_id: "user-1",
     email: "alice@example.com",
+    display_name: "",
     workspace_count: 0,
-    is_default: true,
     ...overrides,
   };
 }
 
-/** A second, non-default account signed in beside accountEntry's. */
+/** A second account signed in beside accountEntry's. */
 export function secondAccountEntry(): UiAccountEntry {
   return accountEntry({
     user_id: "user-2",
     email: "bob@example.com",
-    is_default: false,
   });
 }
 
@@ -199,20 +201,17 @@ export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
   },
 ];
 
-/** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
+/** A create-form defaults payload for a window on accountEntry's account, with Imbue Cloud selected. */
 export function createFormDefaults(
   overrides: Partial<CreateFormDefaults> = {},
 ): CreateFormDefaults {
   return {
-    accounts: [
-      {
-        user_id: "user-1",
-        email: "alice@example.com",
-        state: "SIGNED_IN",
-        is_connection_owner_eligible: true,
-      },
-    ],
-    default_account_id: "user-1",
+    account: {
+      user_id: "user-1",
+      email: "alice@example.com",
+      state: "SIGNED_IN",
+      is_connection_owner_eligible: true,
+    },
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
     selected_launch_mode: "IMBUE_CLOUD",
     docker_runtimes: ["RUNC", "RUNSC"],
@@ -277,6 +276,8 @@ export function settingsOverview(
     version: "v-one",
     update_window_start_hour: 2,
     update_window_end_hour: 5,
+    is_auto_update_enabled: false,
+    auto_update_prompt_decision: null,
     ...overrides,
   };
 }
@@ -324,6 +325,73 @@ export function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** Publish a workspace list holding only `agentId`, at `liveness`, to the registered app context. */
+export function publishWorkspaceLiveness(
+  agentId: string,
+  liveness: UiWorkspacesMessage["workspaces"][number]["liveness"],
+): void {
+  getAppContext().stores.workspaces.applyWorkspacesMessage(
+    workspacesMessage({ workspaces: [{ ...workspacesMessage().workspaces[0], id: agentId, liveness }] }),
+  );
+}
+
+/** A workspace read as a minor release behind and idle, with backups to fall back on. */
+export const OUT_OF_DATE_UPDATE: UiWorkspaceUpdate = {
+  availability: "OUT_OF_DATE",
+  current_version: "minds-v0.3.9",
+  supported_version: "minds-v0.4.1",
+  is_workspace_readable: true,
+  activity: "IDLE",
+  is_backup_configured: true,
+};
+
+/** An armed schedule's window fields for a window that opens at `startHour`
+ * in the test machine's local time, as the workspace's file carries it (UTC):
+ * the UTC start of the window open now, else the next to open, as the app writes it. */
+export function scheduleWindowAtLocalHour(
+  startHour: number,
+  lengthHours: number,
+): Pick<UiWorkspaceUpdate, "schedule_window_start_minute_utc" | "schedule_window_length_minutes"> {
+  const now = new Date();
+  const opening = new Date(now);
+  opening.setHours(startHour, 0, 0, 0);
+  if (now.getTime() >= opening.getTime() + lengthHours * 60 * 60 * 1000) opening.setDate(opening.getDate() + 1);
+  return {
+    schedule_window_start_minute_utc: opening.getUTCHours() * 60 + opening.getUTCMinutes(),
+    schedule_window_length_minutes: lengthHours * 60,
+  };
+}
+
+/** A shell registered as the app's context, its updates store holding `updates`
+ * as a `workspace_updates` frame would leave it. */
+export function updatesShell(
+  updates: Record<string, UiWorkspaceUpdate>,
+  isAutoUpdateEnabled: boolean,
+): ShellState {
+  const shell = new ShellState(createEmptyStores());
+  registerAppContext({ stores: shell.stores, shell });
+  shell.stores.updates.applyUpdatesMessage({
+    type: "workspace_updates",
+    updates,
+    update_window: "2:00 AM-5:00 AM",
+    is_auto_update_enabled: isAutoUpdateEnabled,
+  });
+  return shell;
+}
+
+/** A `fetch` that answers with `respond` and records every URL it was asked for. */
+export function recordingFetch(
+  respond: (url: string) => Promise<Response> = () =>
+    Promise.resolve(jsonResponse({})),
+): { fetchImpl: (url: string) => Promise<Response>; requests: string[] } {
+  const requests: string[] = [];
+  const fetchImpl = (url: string): Promise<Response> => {
+    requests.push(url);
+    return respond(url);
+  };
+  return { fetchImpl, requests };
 }
 
 /** Run `run` with `globalThis.fetch` swapped for a stub that mimics the

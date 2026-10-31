@@ -99,8 +99,11 @@ update_policy = "NEVER" # disable claude's auto-updater so the pin sticks
 ```
 
 - `version` — pin the Claude Code version to install (the official installer is run
-  with `bash -s <version>`); provisioning verifies the installed binary matches and
-  errors on a mismatch. Default: unset (latest).
+  with `bash -s <version>`); provisioning verifies the installed binary matches
+  (whether or not `check_installation` is set). Default: unset (latest).
+- `version_mismatch` — what provisioning does when the installed claude does not report
+  the pinned `version`: `ERROR` fails the create, `WARN` logs a warning and continues on
+  the installed binary. Default: `ERROR`.
 - `update_policy` — govern Claude Code's background auto-updater: `NEVER` sets
   `DISABLE_AUTOUPDATER=1` in the agent environment so the installed binary stays put,
   `AUTO` leaves the auto-updater enabled, and `ASK` behaves like `AUTO` (claude has no

@@ -4,7 +4,8 @@ The Electron startup router and the SPA's home page both ask one question --
 "should a launch with no workspaces land on the start flow?" -- and this module
 is the single answer. The flag lives in ``config.toml`` (:class:`MindsConfig`)
 and is written by the create front door when an attempt starts and by the
-onboarding ``complete`` route when the user signs in from the start flow.
+onboarding ``complete`` route when the user signs in from the start flow to an
+account that already has workspaces.
 """
 
 from loguru import logger

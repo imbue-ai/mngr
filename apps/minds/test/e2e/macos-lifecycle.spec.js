@@ -143,8 +143,16 @@ test.describe('healthy app', () => {
     await expect
       .poll(countRouteComputations, { timeout: 2 * 60 * 1000 })
       .toBeGreaterThan(launchRouteComputations);
+    // Mid-navigation, liveUrl falls back to page.url(), which need not be a full URL
+    // before the new window's first commit; keep polling instead of throwing.
     await expect
-      .poll(async () => new URL(await liveUrl(reopened)).pathname, { timeout: 2 * 60 * 1000 })
+      .poll(
+        async () => {
+          const url = await liveUrl(reopened);
+          return URL.canParse(url) ? new URL(url).pathname : url;
+        },
+        { timeout: 2 * 60 * 1000 },
+      )
       .toBe(launchPath);
     expect((await reopenLoads()).slice(0, 3)).toEqual(ROUTE_AFTER_LOADING_SCREEN);
   });

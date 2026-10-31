@@ -1786,12 +1786,13 @@ Be sure to put tests in the right place (see below for the different types of te
 
 ## Types of tests
 
-There are 4 types of tests: unit tests, integration tests, acceptance tests, and release tests. Each type of test has its own purpose and its own location within the project structure:
+The types of tests are unit, integration, acceptance, release, and smoke. Each type of test has its own purpose and its own location within the project structure:
 
 1. unit tests: put them in `(src)/**/*_test.py`. They test small, isolated pieces of functionality (ex: a single function or method). They answer the question: "is this code mostly working?" Run locally and are super fast.
 2. integration tests: put them in `(src)/**/test_*.py`. They answer the question: "does our program behave in the way that we want?" by testing "end to end" functionality. Run locally with no network access, don't take too long, and are used for calculating coverage.
 3. acceptance tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.acceptance`. They answer the question: "does the application work under realistic conditions?" by testing with real dependencies (network access, credentials, etc). Run on all branches in CI.
 4. release tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.release`. They answer the question: "is the application ready for release?" These are more comprehensive acceptance-style tests that only run when pushing to release. The idea is to have them fixed up overnight/before release rather than as a precondition for merging PRs.
+5. smoke tests: mark them with `@pytest.mark.smoke`. They answer the question: "does what we just shipped work in production?" They run after a deploy or a release, against the published artifact and the deployed production environment, and never gate a release.
 
 ### Unit Tests
 
@@ -1840,7 +1841,7 @@ Never make live network requests from integration tests *unless* you are updatin
 ```python
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from pathlib import Path
@@ -1864,7 +1865,7 @@ def test_sync_todo_list_to_remote_server_handles_response_correctly(
 
     if is_updating:
         # Make a live HTTP request when updating snapshots
-        response = httpx.post(
+        response = httpx2.post(
             "https://api.example.com/v1/sync",
             headers={"Authorization": "Bearer test_api_key"},
             json={"todos": [{"id": "1", "title": "Test todo"}]},
@@ -1913,7 +1914,7 @@ Acceptance tests can sometimes be flaky. This is ok. Make it possible to easily 
 
 ### Release Tests
 
-Release tests are comprehensive tests that verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR. They do not run per-PR; instead the dedicated `Release Tests` workflow (`.github/workflows/release-tests.yml`) runs them on manual dispatch -- trigger it against `main` before cutting a release -- and automatically on `v*` tag pushes. The TMR workflow also exercises them on a daily schedule. The real-cloud provider trips (`libs/mngr_<cloud>/.../test_release_<cloud>.py`) are the exception: they self-skip without cloud credentials (and, for most clouds, an explicit `MNGR_<CLOUD>_RELEASE_TESTS=1` opt-in), so the standard jobs never boot a cloud VM. The workflow runs the AWS, GCP, Azure, Vultr, and Modal trips only when dispatched with the matching `run_<cloud>` input (one runner per opted-in cloud); the OVH trip has no dispatch input and runs only locally.
+Release tests are comprehensive tests that verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR. They do not run per-PR; instead the dedicated `mngr Release Tests` workflow (`.github/workflows/release-tests.yml`) runs them, with the `apps/minds` tree excluded by path; minds' release tests run from the minds jobs in `ci.yml`, behind its `run_minds_release_tests` dispatch input. The release pipeline (`.github/workflows/publish.yml`) runs it on the commit it releases and publishes only if it passes; dispatch it manually to test any branch. The TMR workflow also exercises them on a daily schedule. The real-cloud provider trips (`libs/mngr_<cloud>/.../test_release_<cloud>.py`) are the exception: they self-skip without cloud credentials (and, for most clouds, an explicit `MNGR_<CLOUD>_RELEASE_TESTS=1` opt-in), so the standard jobs never boot a cloud VM. The workflow runs the AWS, GCP, Azure, Vultr, and Modal trips only when dispatched with the matching `run_<cloud>` input (one runner per opted-in cloud); the OVH trip has no dispatch input and runs only locally.
 
 Create release tests in the source package folder, using files that start with "test_" (same location as integration tests).
 
@@ -1933,6 +1934,31 @@ def test_full_end_to_end_workflow_with_all_providers() -> None:
 The full release testing suite is a superset of acceptance tests. When pushing to main, both acceptance and release tests are run. The idea is to have any failures fixed up overnight or before release, rather than blocking every PR merge.
 
 Release tests can sometimes be flaky. This is ok. Make it possible to easily retry and re-run them if they fail.
+
+### Smoke Tests
+
+Smoke tests run *after* a deploy or a release, against the published artifact and the deployed production environment. They answer the question: "does what we just shipped actually work for a real user?"
+
+Smoke tests never gate a release. They run after the fact to validate it; when one fails, the CI job fails and a knock-on process alerts us in Slack.
+
+Driving the running Electron app end to end is their primary modality. They also validate API endpoints and run on the web. That reach is the point: they cover the journeys that are hard to get at any other way -- account creation, signup, workspace creation, and sharing.
+
+Always mark smoke tests with `@pytest.mark.smoke`
+
+```python
+import pytest
+
+
+@pytest.mark.smoke
+def test_published_build_creates_and_shares_a_workspace() -> None:
+    """Drive the published build against the deployed production backend."""
+    # Runs after the release is published, so a failure alerts us instead of blocking the release
+    ...
+```
+
+Their default home is `apps/minds/smoke_tests/`, but the mark is what makes a test a smoke test, so a test that lives elsewhere can opt in by carrying it. The mark is excluded from every other test selection -- offload, `just test-quick`, the release jobs, and TMR -- so a smoke test is never collected by anything but a smoke run.
+
+Everything operational about the Imbue Studio smoke suite -- which artifact and which backend it targets, what triggers it, how its CI jobs are segmented, which credentials it holds, and how to run it locally -- lives in `apps/minds/docs/testing-overview.md`.
 
 ### Ratchet Tests
 
@@ -1970,12 +1996,12 @@ If you need to add a repo-wide ratchet that scans the entire codebase, add it to
 
 # Web requests
 
-Always use `httpx` for making web requests
+Always use `httpx2` for making web requests (not `httpx`, which is unmaintained; `httpx2` is its maintained fork with the same API)
 
 Always use synchronous python code for making requests
 
 ```python
-import httpx
+import httpx2
 
 
 class TodoSyncError(TodoAppError):
@@ -2000,7 +2026,7 @@ def sync_todo_list_to_remote_server(
     url = f"{server_url}/api/v1/sync"
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = todo_list.model_dump()
-    response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+    response = httpx2.post(url, json=payload, headers=headers, timeout=30.0)
     response.raise_for_status()
     return SyncResponse.model_validate(response.json())
 ```

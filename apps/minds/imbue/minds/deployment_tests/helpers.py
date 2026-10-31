@@ -11,12 +11,13 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Iterator
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
 
-import httpx
+import httpx2
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
@@ -44,6 +45,8 @@ from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
+# Users per page of the core's listing (its own maximum).
+_SUPERTOKENS_USER_PAGE_LIMIT: Final[int] = 500
 _CONNECTOR_HTTP_TIMEOUT_SECONDS: Final[float] = 60.0
 _SUPERTOKENS_ADMIN_TIMEOUT_SECONDS: Final[float] = 30.0
 _ENV_READY_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -190,7 +193,7 @@ def signin_and_mint_litellm_key(
     (which runs the plan quota gate) for the key + proxy base URL.
     """
     base = connector_url.rstrip("/")
-    with httpx.Client(timeout=timeout_seconds) as client:
+    with httpx2.Client(timeout=timeout_seconds) as client:
         signin = client.post(f"{base}/auth/signin", json={"email": email, "password": password})
         signin.raise_for_status()
         signin_json = signin.json()
@@ -250,7 +253,7 @@ def create_verified_user_via_admin_api(
     """
     headers = {"api-key": api_key.get_secret_value(), "rid": "emailpassword"}
     base = str(connection_uri.get_secret_value()).rstrip("/")
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
         signup = client.post(
             f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/signup",
             headers=headers,
@@ -362,12 +365,12 @@ def _wait_for_url_alive(
     deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
     last_status: int | None = None
     last_body_excerpt: str = ""
-    with httpx.Client(timeout=10.0) as client:
+    with httpx2.Client(timeout=10.0) as client:
         while datetime.now(timezone.utc).timestamp() < deadline:
             try:
                 response = client.get(url)
-            except httpx.HTTPError as exc:
-                last_body_excerpt = f"httpx error: {exc}"
+            except httpx2.HTTPError as exc:
+                last_body_excerpt = f"httpx2 error: {exc}"
                 last_status = None
             else:
                 last_status = response.status_code
@@ -397,9 +400,55 @@ def delete_user_via_admin_api(
     """
     base = str(connection_uri.get_secret_value()).rstrip("/")
     headers = {"api-key": api_key.get_secret_value()}
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
         resp = client.post(f"{base}/user/remove", headers=headers, json={"userId": str(user_id)})
         resp.raise_for_status()
+
+
+class SupertokensUserRecord(FrozenModel):
+    """One account as the SuperTokens core's user listing reports it."""
+
+    user_id: NonEmptyStr = Field(description="The core's user id (its ``recipeUserId`` on older listings).")
+    emails: tuple[str, ...] = Field(description="Every address the account's login methods carry.")
+    time_joined_ms: int = Field(description="When the account was created, in epoch milliseconds.")
+
+
+def iter_supertokens_users(*, connection_uri: SecretStr, api_key: SecretStr) -> Iterator[SupertokensUserRecord]:
+    """Every user of the core's public tenant, following ``nextPaginationToken`` until exhausted.
+
+    Lazy, so a caller that deletes as it goes (the stale sweeps) does exactly
+    what the one-page-at-a-time loop did before. A listed user with no id is
+    skipped: nothing can be done with it, and the sweeps' only action is a
+    delete by id.
+    """
+    base = str(connection_uri.get_secret_value()).rstrip("/")
+    list_headers = {"api-key": api_key.get_secret_value()}
+    # ``None`` on the first iteration (no pagination token) and on the
+    # final iteration (server signalled no more pages). The loop runs
+    # until the latter; both states share the same shape so we can use
+    # a single condition variable.
+    pagination_token: str | None = None
+    has_unfetched_pages = True
+    with httpx2.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+        while has_unfetched_pages:
+            params: dict[str, str] = {"limit": str(_SUPERTOKENS_USER_PAGE_LIMIT)}
+            if pagination_token:
+                params["paginationToken"] = pagination_token
+            resp = client.get(f"{base}/{_SUPERTOKENS_TENANT_ID}/users", headers=list_headers, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            for raw_user in data.get("users", []):
+                user_info = raw_user.get("user", raw_user)
+                user_id = user_info.get("id") or user_info.get("recipeUserId")
+                if not user_id:
+                    continue
+                yield SupertokensUserRecord(
+                    user_id=NonEmptyStr(user_id),
+                    emails=tuple(str(email) for email in user_info.get("emails", [])),
+                    time_joined_ms=int(user_info.get("timeJoined", 0)),
+                )
+            pagination_token = data.get("nextPaginationToken")
+            has_unfetched_pages = bool(pagination_token)
 
 
 def sweep_stale_users(
@@ -411,10 +460,8 @@ def sweep_stale_users(
 ) -> int:
     """List + delete users in the SuperTokens app matching ``email_pattern`` older than the cutoff.
 
-    Paginates through ``GET /<tenant>/users`` until exhausted. Returns
-    the count of deleted users. Any per-user delete failure is logged
-    but does not abort the sweep -- the next session's sweep will pick
-    it up.
+    Returns the count of deleted users. Any per-user delete failure is logged
+    but does not abort the sweep -- the next session's sweep will pick it up.
 
     Used by the session-autouse ``_sweep_stale_test_users`` fixture as
     defensive cleanup against state leaked by a prior run that crashed
@@ -422,42 +469,18 @@ def sweep_stale_users(
     cutoff guards against deleting a concurrent run's freshly-created
     user.
     """
-    base = str(connection_uri.get_secret_value()).rstrip("/")
-    list_headers = {"api-key": api_key.get_secret_value()}
     cutoff_ms = (datetime.now(timezone.utc).timestamp() - max_age_seconds) * 1000
     deleted = 0
-    # ``None`` on the first iteration (no pagination token) and on the
-    # final iteration (server signalled no more pages). The loop runs
-    # until the latter; both states share the same shape so we can use
-    # a single condition variable.
-    pagination_token: str | None = None
-    has_unfetched_pages = True
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
-        while has_unfetched_pages:
-            params: dict[str, str] = {"limit": "200"}
-            if pagination_token:
-                params["paginationToken"] = pagination_token
-            resp = client.get(f"{base}/{_SUPERTOKENS_TENANT_ID}/users", headers=list_headers, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            for raw_user in data.get("users", []):
-                user_info = raw_user.get("user", raw_user)
-                emails: list[str] = user_info.get("emails", [])
-                user_id = user_info.get("id") or user_info.get("recipeUserId")
-                time_joined = user_info.get("timeJoined", 0)
-                if not user_id or not emails or time_joined > cutoff_ms:
-                    continue
-                if not any(email_pattern.match(email) for email in emails):
-                    continue
-                try:
-                    delete_user_via_admin_api(
-                        connection_uri=connection_uri, api_key=api_key, user_id=NonEmptyStr(user_id)
-                    )
-                    deleted += 1
-                except (MindError, httpx.HTTPError) as exc:
-                    logger.warning("Stale-user sweep: failed to delete {!r} ({})", user_id, exc)
-            pagination_token = data.get("nextPaginationToken")
-            has_unfetched_pages = bool(pagination_token)
+    for user in iter_supertokens_users(connection_uri=connection_uri, api_key=api_key):
+        if not user.emails or user.time_joined_ms > cutoff_ms:
+            continue
+        if not any(email_pattern.match(email) for email in user.emails):
+            continue
+        try:
+            delete_user_via_admin_api(connection_uri=connection_uri, api_key=api_key, user_id=user.user_id)
+            deleted += 1
+        except (MindError, httpx2.HTTPError) as exc:
+            logger.warning("Stale-user sweep: failed to delete {!r} ({})", str(user.user_id), exc)
     return deleted
 
 
@@ -507,7 +530,7 @@ def neon_project_exists(*, name: DevEnvName, org_id: str, api_token: SecretStr) 
     project_name = f"minds-{name}"
     url = f"https://console.neon.tech/api/v2/projects?org_id={org_id}&limit=400"
     headers = {"Authorization": f"Bearer {api_token.get_secret_value()}"}
-    with httpx.Client(timeout=_NEON_PROBE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_NEON_PROBE_TIMEOUT_SECONDS) as client:
         resp = client.get(url, headers=headers)
         resp.raise_for_status()
     payload = resp.json()
@@ -526,7 +549,7 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     """
     url = f"{core_base_url.rstrip('/')}/appid-{name}/recipe/multitenancy/tenant/list"
     headers = {"api-key": api_key.get_secret_value(), "cdi-version": "5.1", "Accept": "application/json"}
-    with httpx.Client(timeout=_SUPERTOKENS_PROBE_TIMEOUT_SECONDS) as client:
+    with httpx2.Client(timeout=_SUPERTOKENS_PROBE_TIMEOUT_SECONDS) as client:
         resp = client.get(url, headers=headers)
     if resp.status_code == 200:
         return True

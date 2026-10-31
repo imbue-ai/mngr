@@ -13,7 +13,6 @@ from datetime import timezone
 from typing import Any
 from typing import Final
 
-import google.auth
 from google.api_core import exceptions as google_api_exceptions
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -99,7 +98,7 @@ _REAPER_IMAGE: Final[str] = "projects/ubuntu-os-cloud/global/images/family/ubunt
 
 def make_gcp_reaper_client(project: str) -> GcpVpsClient:
     """Build a ``GcpVpsClient`` for the session-end hook / standalone reaper."""
-    credentials, _project = google.auth.default()
+    credentials, _project = GcpProviderConfig().get_credentials_and_resolved_project()
     return GcpVpsClient(credentials=credentials, project_id=project, zone=GCP_DEFAULT_ZONE, image=_REAPER_IMAGE)
 
 

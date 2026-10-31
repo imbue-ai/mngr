@@ -9,8 +9,9 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 2. Builds the slimmed Imbue Studio bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
-   preauth cookie value, so the Electron shell can pre-set
-   ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``
+   preauth cookie value and the path of the proxy's local CA certificate,
+   so the Electron shell can pre-set ``mngr_forward_session=<value>`` on
+   ``localhost:<mngr-forward-port>`` and pin the proxy's TLS to that CA
    before the first agent-subdomain navigation.
 
 Agents reach the Imbue Studio API via the latchkey gateway's bundled
@@ -21,6 +22,7 @@ provisioned where the container reaches it over its docker bridge).
 """
 
 import os
+import platform
 import secrets
 import tempfile
 import threading
@@ -45,6 +47,7 @@ from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.minds.cli.latchkey_bundle_diagnostics import log_latchkey_bundle_diagnostics
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import InstallationPaths
@@ -92,6 +95,7 @@ from imbue.minds.desktop_client.forward_identity import FORWARD_HEADERS_FILENAME
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
+from imbue.minds.desktop_client.full_disk_access_probe import start_full_disk_access_probe
 from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -115,6 +119,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_d
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
+from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
@@ -155,6 +160,7 @@ from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -306,7 +312,11 @@ def run(
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    latchkey.initialize()
+    try:
+        latchkey.initialize()
+    except LatchkeyError:
+        log_latchkey_bundle_diagnostics(latchkey.latchkey_binary)
+        raise
 
     # The same-machine API socket doubles as this tier's single-instance guard:
     # a second Imbue Studio for the tier is refused here, before anything below
@@ -429,6 +439,11 @@ def run(
     # staleness baseline) is downstream of it.
     sleep_tracker = SleepTracker()
     start_sleep_heartbeat_loop(sleep_tracker, root_concurrency_group)
+
+    # A read of a Full Disk Access protected file, whose refusal is what puts
+    # Imbue Studio on the System Settings list a user grants that permission
+    # from (see full_disk_access_probe.py). Nothing waits for it.
+    start_full_disk_access_probe(root_concurrency_group, host_platform_from_system(platform.system()))
 
     # Connectivity detector: answers whether this device can reach anything, and
     # whether the network it is on passes SSH at all. Probed only when a decision
@@ -797,6 +812,9 @@ def run(
     # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
     # page's route (it hands the conversation over, and waits on the seed while the page is open).
     welcome_chat_seeder = WelcomeChatSeeder(mngr_caller=mngr_caller, backend_resolver=backend_resolver)
+    # The proxy signs its TLS leaves with the local CA it keeps under this host
+    # dir, which is the one it was spawned with; every probe of it pins that CA.
+    forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -805,6 +823,7 @@ def run(
         root_concurrency_group=root_concurrency_group,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        mngr_forward_ca_cert_path=forward_ca_cert_path,
         system_interface_health_tracker=system_interface_health_tracker,
         lima_image_gate=lima_image_gate,
         pending_create_attempt_store=pending_create_attempt_store,
@@ -852,7 +871,6 @@ def run(
             session_store,
             connection_store,
             provider_materializer,
-            minds_config,
             backend_resolver.notify_change,
         ),
     )
@@ -899,14 +917,16 @@ def run(
         concurrency_group=root_concurrency_group,
     ).start()
 
-    # Emit the started event so Electron can pre-set the cookie before the
-    # first navigation. ``minds run`` itself does not open the browser at
-    # the agent subdomain — it opens the Imbue Studio bare-origin URL.
+    # Emit the started event so Electron can pre-set the cookie and pin the
+    # proxy's CA before the first navigation. ``minds run`` itself does not
+    # open the browser at the agent subdomain -- it opens the Imbue Studio
+    # bare-origin URL.
     emit_event(
         "mngr_forward_started",
         {
             "preauth_cookie": preauth_cookie,
             "mngr_forward_port": mngr_forward_port,
+            "ca_cert_path": str(forward_ca_cert_path),
         },
         output_format,
     )
@@ -993,6 +1013,7 @@ def run(
         backend_resolver=backend_resolver,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        mngr_forward_ca_cert_path=forward_ca_cert_path,
         root_concurrency_group=root_concurrency_group,
         # The same tracker the failure runs are aged against, so the first pass
         # after a wake establishes that wake before it convicts anything of the

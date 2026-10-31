@@ -58,6 +58,7 @@ from imbue.mngr_forward.errors import ForwardTrustError
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
+from imbue.mngr_forward.primitives import forward_plugin_state_dir
 from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.reverse_handler import ReverseTunnelHandler
@@ -67,12 +68,13 @@ from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
-from imbue.mngr_forward.tls import CA_CERT_FILENAME
 from imbue.mngr_forward.tls import InMemoryTLSConfig
 from imbue.mngr_forward.tls import LocalCertificateAuthority
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_forward.tls import load_or_create_local_ca
+from imbue.mngr_forward.tls import local_ca_cert_path
+from imbue.mngr_forward.tls import local_ca_dir
 from imbue.mngr_forward.trust import install_ca_into_trust_stores
 
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
@@ -128,10 +130,6 @@ def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
             )
         )
     return tuple(parsed)
-
-
-def _resolve_plugin_state_dir(mngr_host_dir: Path) -> Path:
-    return mngr_host_dir / "plugin" / "forward"
 
 
 def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
@@ -337,10 +335,10 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         # A standalone maintenance action: ensure the CA exists and install it
         # into the platform trust stores, then exit (no server is started, so
         # the --service/--forward-port requirement does not apply).
-        ca_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx)) / "ca"
-        load_or_create_local_ca(ca_dir)
+        mngr_host_dir = _resolve_mngr_host_dir(mngr_ctx)
+        load_or_create_local_ca(local_ca_dir(mngr_host_dir))
         try:
-            install_ca_into_trust_stores(mngr_ctx.concurrency_group, ca_dir / CA_CERT_FILENAME)
+            install_ca_into_trust_stores(mngr_ctx.concurrency_group, local_ca_cert_path(mngr_host_dir))
         except ForwardTrustError as e:
             raise click.ClickException(str(e)) from e
         logger.info("Local CA trusted. Browsers now accept `mngr forward --use-http2` origins.")
@@ -360,7 +358,8 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
 
     envelope_writer = EnvelopeWriter()
 
-    plugin_state_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx))
+    mngr_host_dir = _resolve_mngr_host_dir(mngr_ctx)
+    plugin_state_dir = forward_plugin_state_dir(mngr_host_dir)
     service_map_cache = ServiceMapCache(cache_path=plugin_state_dir / _SERVICE_MAP_CACHE_FILENAME)
 
     strategy = _build_strategy(opts)
@@ -458,7 +457,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         stream_manager=stream_manager,
     )
 
-    ca = load_or_create_local_ca(plugin_state_dir / "ca") if opts.use_http2 else None
+    ca = load_or_create_local_ca(local_ca_dir(mngr_host_dir)) if opts.use_http2 else None
     shutdown_signal_listener = ShutdownSignalListener()
     try:
         try:

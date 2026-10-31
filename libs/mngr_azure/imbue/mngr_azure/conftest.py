@@ -153,3 +153,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     )
     logger.error(message)
     _mark_session_failed(session)
+
+
+@pytest.fixture
+def unset_azure_token_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear AZURE_TOKEN_CREDENTIALS so ``DefaultAzureCredential`` builds its default chain."""
+    monkeypatch.delenv("AZURE_TOKEN_CREDENTIALS", raising=False)

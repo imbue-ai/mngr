@@ -208,10 +208,21 @@ def workspace_agent_id_for_request(req: StreamedPermissionRequest, backend_resol
     to be resolved to that agent before it can touch any of it. Falls back to
     the requesting agent's own id when nothing shares its workspace name.
     """
-    ws_name = backend_resolver.get_workspace_name(AgentId(req.agent_id))
+    return workspace_agent_id_for_agent(req.agent_id, backend_resolver)
+
+
+def workspace_agent_id_for_agent(agent_id: str, backend_resolver: BackendResolverInterface) -> str:
+    """The primary agent id of the workspace ``agent_id`` belongs to.
+
+    Any agent of a workspace -- a chat, the system-services sibling, the
+    primary itself -- resolves to the one agent the desktop keys that
+    workspace's state by. Falls back to ``agent_id`` itself when nothing shares
+    its workspace name.
+    """
+    ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
     if not ws_name:
-        return req.agent_id
-    return primary_agent_ids_by_workspace_name(backend_resolver).get(ws_name, req.agent_id)
+        return agent_id
+    return primary_agent_ids_by_workspace_name(backend_resolver).get(ws_name, agent_id)
 
 
 def _request_service_name(req: StreamedPermissionRequest, handler: RequestEventHandler | None) -> str:

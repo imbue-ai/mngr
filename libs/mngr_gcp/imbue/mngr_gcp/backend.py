@@ -127,9 +127,10 @@ def _resolve_credentials_project_and_zone_or_unavailable(
     ``default_zone`` is pinned -- then resolve ADC (``google.auth.default()``),
     which yields both the credentials and the project ADC
     infers from the environment (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set
-    project`` / metadata), used by ``resolve_project_id`` as the fallback when no
-    explicit ``project_id`` is set. A single ``default()`` call serves both, so we
-    never probe twice.
+    project`` / the GCE metadata server, the last only with
+    ``use_gce_metadata_server``), used by ``resolve_project_id`` as the fallback
+    when no explicit ``project_id`` is set. A single ``default()`` call serves
+    both, so we never probe twice.
 
     A failure here means we could not authenticate to GCP (or the configured
     zone/region are self-inconsistent), so the provider's state is *unknown* --

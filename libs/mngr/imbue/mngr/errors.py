@@ -127,6 +127,16 @@ class HostAuthenticationError(HostConnectionError):
     """Raised when unable to connect to a host because authentication failed."""
 
 
+class PyinfraConnectorUnavailableError(HostError, KeyError):
+    """Raised when pyinfra cannot find the connector needed to build a host object.
+
+    pyinfra looks its connectors up from installed package metadata each time,
+    so this can start happening in a process that built hosts fine earlier.
+    Still a ``KeyError``, which is what pyinfra raises here, so handlers written
+    against pyinfra's error keep catching it.
+    """
+
+
 class CorruptedAgentDataError(HostError):
     """Raised when an agent's data.json is unreadable after retries.
 
@@ -220,6 +230,10 @@ class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
+class InvalidPastePlaceholderPrefixesError(AgentError, TypeError):
+    """Raised when a concrete TUI agent type omits PASTE_PLACEHOLDER_PREFIXES, or any TUI agent type sets it to anything but a tuple of non-empty strings."""
+
+
 class TrajectoryBuildError(AgentError):
     """Raised when a common-transcript stream cannot be assembled into a valid ATIF trajectory."""
 
@@ -284,6 +298,9 @@ class SendFailureKind(StrEnum):
     NOT_READY = "not_ready"
     # There is nothing to talk to -- the pane is gone. Trying again cannot help.
     AGENT_UNREACHABLE = "agent_unreachable"
+    # Whether the agent is running could not be read (e.g. its host is too loaded to answer in time).
+    # Trying again helps once the host answers; until then nothing more is known about the agent.
+    STATE_UNKNOWN = "state_unknown"
     # The agent was not where the caller located it: that host has no such agent, or the host
     # itself could not be reached. Nothing was typed, so looking the agent up afresh and sending
     # again is safe.
@@ -291,6 +308,10 @@ class SendFailureKind(StrEnum):
     # The message was typed and Enter sent, but nothing confirmed the agent took it. It may
     # already be in the agent's input or turn, so sending it again can deliver it twice.
     SUBMISSION_UNCONFIRMED = "submission_unconfirmed"
+    # The message was typed but the agent never took it: it was left in the agent's input box (after
+    # Enter, or with Enter never sent because it had not shown in time), and it was cleared from there.
+    # Nothing was delivered, so sending it again delivers it once.
+    NOT_SUBMITTED = "not_submitted"
     # Unclassified. The default, so an unlabelled failure keeps whatever the client does today.
     UNKNOWN = "unknown"
 
@@ -303,6 +324,10 @@ class SendMessageError(AgentError):
         self.reason = reason
         self.kind = kind
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
+
+
+class PastedMessageNotShownError(SendMessageError):
+    """The typed message never showed in the agent's input box, so Enter was not sent and nothing was submitted."""
 
 
 class MessageLockTimeoutError(AgentError):
@@ -383,6 +408,18 @@ class AgentStartError(AgentError):
         self.agent_name = agent_name
         self.reason = reason
         super().__init__(f"Failed to start agent {agent_name}: {reason}")
+
+
+class AgentLifecycleUnknownError(AgentError):
+    """An agent's lifecycle state could not be read, so a send to it is not attempted."""
+
+    def __init__(self, agent_name: str) -> None:
+        self.agent_name = agent_name
+        super().__init__(
+            f"Could not determine whether agent {agent_name} is running: its host's tmux panes or "
+            "processes could not be read (a host too loaded to answer in time reads this way). "
+            "Try again once the host answers."
+        )
 
 
 class VolumeListingError(MngrError, OSError):

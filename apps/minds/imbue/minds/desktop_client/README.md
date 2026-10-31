@@ -11,7 +11,14 @@ The local desktop client is a Flask app that handles authentication and traffic 
 > providers, requests, the notification feed, per-workspace health, discovery
 > health, and one-shot events) from a single edge-driven publisher
 > (`ui_publisher.py`) through a
-> per-client-queue broadcaster (`ui_channel.py`); the handshake is driven
+> per-client-queue broadcaster (`ui_channel.py`). Every window is for one
+> account (a signed-in account's user id, or `local` for the device), named in
+> its `client_state` report: the publisher derives the install's state once per
+> pass and sends each connection the projection for its account
+> (`ui_account_scope.py`), so a window sees its account's workspaces, feed,
+> requests, health, and providers section and nothing of another account's;
+> install-wide frames (discovery health, the environment, one-shot events)
+> reach every window. The handshake is driven
 > directly with `simple_websocket` (no flask-sock, so the session check runs
 > before the socket is hijacked) on top of the cheroot gateway adapter in
 > `ws_gateway.py`. First paint is seeded from a bootstrap document inlined
@@ -52,14 +59,23 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
 
 `/` route is special:
     if you don't have a valid session cookie, shows a login prompt
-    if you are authenticated:
-        while the error-reporting consent question is unanswered, shows the consent screen
-        if any workspaces are known (discovered locally or synced from other devices), lists them all -- even when there is exactly one
-        if none are known and the initial discovery is still running, shows a self-refreshing "Discovering workspaces" page
-        once discovery completes with no workspaces, shows the agent creation form
+    if you are authenticated, the SPA redirects to `/account/<account_id>/`, the home page of the
+    install's most recently used account (``[recent].accounts`` in config.toml; `local`, the device,
+    when none was used yet)
+
+`/account/<account_id>/` route (requires auth) is an account's home page; `<account_id>` is a SuperTokens
+user id or `local` for the device. Every window is for one account, and sees that account's state:
+    while the error-reporting consent question is unanswered, shows the consent screen
+    if any of the account's workspaces are known (discovered locally or synced from other devices), lists them all -- even when there is exactly one
+    if none are known and the initial discovery is still running, shows a self-refreshing "Discovering workspaces" page
+    once discovery completes with no workspaces, shows the agent creation form (for a signed-out account, a log-in prompt)
+    The account's other hub pages are `/account/<account_id>/create`, `/create/template`,
+    `/workspaces/destroyed`, and `/workspaces/shared`; the bare paths redirect to the most recently
+    used account's. Overlays (`/settings`, `/accounts`, `/inbox`, `/help`) float over the window and
+    take the window's account from `?account=<account_id>`.
 
 `/create` route (requires auth):
-    GET: shows a form to enter a git URL for creating a new workspace
+    GET: shows a form to enter a git URL for creating a new workspace, under the window's account
     GET with ?retry={create_attempt_id}: pre-fills the form from an interrupted/failed
         create attempt's pending record (the interrupted row's Retry action); opening
         the form is non-destructive -- the dead create attempt's leftover host and
@@ -113,7 +129,7 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
 `/api/v1/desktop/cloud-accounts` (POST, cookie or bearer auth):
     registers a cloud connection: body carries the backend (aws / gcp / azure / modal), an alias,
     the credentials, the region for the pinned backends, and the owner (an account's user id, or
-    "local" for this device only; default: the default account). A this-device-only Modal connection
+    "local" for this device only; required: the providers panel and the create form pass the window's account). A this-device-only Modal connection
     may also name its Modal namespace (``modal_user_id``, the block's ``user_id`` and so the
     environment name) instead of deriving it from the connection id; 400 under an account owner. The connection is stored
     and its provider block materialized at once; then the route answers 202 with an operation handle
@@ -177,10 +193,10 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     any account's synced records, while a workspace is still being created on it, or while its
     registration or an update of its credentials is still validating.
 
-The providers panel on the home screen is fed by the `/ui/ws` channel's ``providers`` frame:
-    one section per signed-in account (its Imbue Cloud instance and its connections, each with
-    a status), a section for an account that is signed out but still hosts local machines,
-    the local profile's section, and the device providers (docker, lima, vultr).
+The providers panel on the home screen is fed by the `/ui/ws` channel's ``providers`` frame, scoped
+to the window's account: that account's section (its Imbue Cloud instance and its connections, each
+with a status; an empty signed-out section for an account that is signed out), the local profile's
+section, and the device providers (docker, lima, vultr).
 
 `[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize

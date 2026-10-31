@@ -6,7 +6,7 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
+import httpx2
 import pytest
 from pydantic import AnyUrl
 
@@ -204,18 +204,18 @@ def _profile_with_session(tmp_path: Path, user_id: str, access_token: str) -> Pa
 def test_connector_client_mints_with_the_session_bearer_and_client_headers(tmp_path: Path) -> None:
     token = _fake_jwt(datetime.now(timezone.utc) + timedelta(hours=6))
     mngr_host_dir = _profile_with_session(tmp_path, _USER_A, token)
-    seen_requests: list[httpx.Request] = []
+    seen_requests: list[httpx2.Request] = []
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
         seen_requests.append(request)
         body = dict(_CONNECTOR_BODY)
         body["expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        return httpx.Response(200, json=body)
+        return httpx2.Response(200, json=body)
 
     client = ConnectorTurnCredentialClient(
         connector_url=AnyUrl("https://connector.example.com/"),
         mngr_host_dir=mngr_host_dir,
-        transport=httpx.MockTransport(handle),
+        transport=httpx2.MockTransport(handle),
     )
 
     credential = client.mint_credential(_USER_A, _HOST_A)
@@ -236,13 +236,13 @@ def test_connector_client_reports_no_session_and_an_unreachable_connector_as_una
         tmp_path, _USER_A, _fake_jwt(datetime.now(timezone.utc) + timedelta(hours=6))
     )
 
-    def unreachable(_request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
+    def unreachable(_request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused")
 
     client = ConnectorTurnCredentialClient(
         connector_url=AnyUrl("https://connector.example.com"),
         mngr_host_dir=mngr_host_dir,
-        transport=httpx.MockTransport(unreachable),
+        transport=httpx2.MockTransport(unreachable),
     )
     with pytest.raises(TurnCredentialUnavailableError, match="no session"):
         client.mint_credential(_USER_B, _HOST_A)
@@ -252,7 +252,7 @@ def test_connector_client_reports_no_session_and_an_unreachable_connector_as_una
     bare = ConnectorTurnCredentialClient(
         connector_url=AnyUrl("https://connector.example.com"),
         mngr_host_dir=tmp_path / "empty",
-        transport=httpx.MockTransport(unreachable),
+        transport=httpx2.MockTransport(unreachable),
     )
     with pytest.raises(TurnCredentialUnavailableError, match="profile"):
         bare.mint_credential(_USER_A, _HOST_A)

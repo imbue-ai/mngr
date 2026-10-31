@@ -19,6 +19,7 @@ from datetime import timedelta
 from datetime import timezone
 from enum import auto
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -40,15 +41,24 @@ from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import parse_update_run_status
+from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
+from imbue.minds.workspace_programs.update_protocol import BUSY_CHAT_IDS_FIELD
+from imbue.minds.workspace_programs.update_protocol import BUSY_MODE
+from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
+from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
+from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
+from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # Written by ``update_self.py run-status``; relative to the work_dir ``mngr exec`` lands in.
-RUN_STATUS_PATH: Final[str] = "data/.state/update-apply/run.json"
+RUN_STATUS_PATH: Final[str] = RUN_RECORD_PATH
 
 # Mirrors ``DEFAULT_RECOVER_GRACE_SECONDS`` in the template's ``update_apply_contract.py``: how long
 # a *dead* apply may go without restamping before the workspace's own recovery rolls it back. This
@@ -80,20 +90,31 @@ AGENTS_END_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_END"
 AGENTS_FAILED_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_FAILED"
 BUSY_BEGIN_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_BEGIN"
 BUSY_END_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_END"
+# Printed when the workspace's cron runs the update dispatcher, whose watchdog restarts a stopped lead.
+WATCHDOG_INSTALLED_SENTINEL: Final[str] = "MNGR_UPDATE_WATCHDOG_INSTALLED"
 
-# The template's background-task CLI, relative to the work_dir; a template that predates it prints nothing.
+# The template's background-task CLI, relative to the work_dir; a template that predates it is read through the
+# installed dispatcher's ``busy`` mode instead.
 BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
 
 # The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
 # 10s reading before it falls back to the marker files. One cut off prints nothing, so no chat reads busy.
 _BACKGROUND_TASKS_TIMEOUT_SECONDS: Final[int] = 10
 
+# The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
+_RUN_RECORD_READ_SCRIPT: Final[str] = (
+    f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}"
+)
+
 
 class UpdateAgentLiveness(UpperCaseStrEnum):
     """Whether an update run's chat agent is still there in the workspace."""
 
     ALIVE = auto()
+    STOPPED = auto()
+    """Listed, but not running: stopped or exited, as a workspace restart leaves every chat. A message restarts it."""
     GONE = auto()
+    """Not listed at all: its chat was deleted."""
     UNKNOWN = auto()
     """The probe could not answer. Never read as GONE: that would unlock a live run's row."""
 
@@ -117,6 +138,13 @@ class UpdateRunProbe(FrozenModel):
         "worker is gone). An agent whose state could not be read reads as running rather than waiting, on the same "
         "bias as the rest",
     )
+    chat_agent_id: str = Field(
+        default="", description="The run's chat's id as the listing gives it, for opening it; '' when not listed"
+    )
+    is_watchdog_installed: bool = Field(
+        default=False,
+        description="Whether the workspace's cron runs the update watchdog, which restarts a stopped lead",
+    )
 
     @property
     def is_apply_in_progress(self) -> bool:
@@ -130,16 +158,25 @@ class UpdateRunProbe(FrozenModel):
 
     @property
     def is_run_alive(self) -> bool:
-        """Whether the evidence says a run is still going; unanswered and UNKNOWN count as alive."""
-        if not self.is_probe_answered:
+        """Whether the evidence says a run is still going; unanswered and UNKNOWN count as alive, and a stopped
+        lead does where the watchdog will restart it."""
+        if not self.is_probe_answered or self.is_apply_in_progress:
             return True
-        return self.is_apply_in_progress or self.agent_liveness is not UpdateAgentLiveness.GONE
+        match self.agent_liveness:
+            case UpdateAgentLiveness.GONE:
+                return False
+            case UpdateAgentLiveness.STOPPED:
+                return self.is_watchdog_installed
+            case UpdateAgentLiveness.ALIVE | UpdateAgentLiveness.UNKNOWN:
+                return True
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def build_update_run_probe_args(workspace_address: str) -> list[str]:
     """Build the ``mngr`` CLI args for the combined run-status + agent + busy-chat probe.
 
-    One exec for every fact because this runs on the stuck-edge callback thread. The
+    The liveness poll needs every fact for every run, so they share one exec. The
     listing is unfiltered and matched app-side so a chat name never lands in a CEL filter.
     """
     inner_list = build_in_workspace_mngr_command(["list", "--format", "{name}\t{state}\t{id}\t{labels.chat_id}"])
@@ -154,17 +191,33 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
             "tsv",
         ]
     )
-    # The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
+    # CLEANUP: drop this fallback (and the answer it prints, which ``_parse_busy_agents`` reads) once
+    # ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7, the first release that ships the CLI.
+    inner_busy_from_markers = build_in_workspace_command(
+        ["timeout", str(_BACKGROUND_TASKS_TIMEOUT_SECONDS), "python3", DISPATCHER_ARCHIVE_PATH, BUSY_MODE]
+    )
     script = (
-        f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}; "
+        f"{_RUN_RECORD_READ_SCRIPT}; "
         f"echo {AGENTS_BEGIN_SENTINEL}; "
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
         f"echo {AGENTS_END_SENTINEL}; "
         f"echo {BUSY_BEGIN_SENTINEL}; "
-        f"{inner_busy} 2>/dev/null || true; "
-        f"echo {BUSY_END_SENTINEL}"
+        f"if test -f {shlex.quote(BACKGROUND_TASKS_SCRIPT_PATH)}; then {inner_busy}; "
+        f"else {inner_busy_from_markers}; fi 2>/dev/null || true; "
+        f"echo {BUSY_END_SENTINEL}; "
+        f"test -f {shlex.quote(LIVE_CRON_DIRECTORY + '/' + DISPATCHER_CRON_NAME)} && echo {WATCHDOG_INSTALLED_SENTINEL}; true"
     )
     return ["exec", "--agent", workspace_address, script, "--no-start"]
+
+
+def build_update_run_record_args(workspace_address: str) -> list[str]:
+    """Build the ``mngr`` CLI args that read only the run record, for the reads that must be quick.
+
+    The agent listing and the busy-chat read are the slow parts of the full probe (an in-workspace
+    ``mngr`` and a chat app that may be restarting with the services), and these readers only ask
+    whether an apply is under way.
+    """
+    return ["exec", "--agent", workspace_address, _RUN_RECORD_READ_SCRIPT, "--no-start"]
 
 
 def _section(lines: list[str], begin: str, end: str) -> list[str] | None:
@@ -208,29 +261,61 @@ class _BusyAgents(FrozenModel):
         )
 
 
-def _listed_agent(listing_lines: list[str], agent_name: str) -> _ListedAgent | None:
-    """``agent_name`` as listed, or None when it is not listed."""
+def _listed_agents(listing_lines: list[str]) -> list[_ListedAgent]:
+    """Every agent the listing names, in its order."""
+    agents: list[_ListedAgent] = []
     for line in listing_lines:
         name, _, rest = line.partition("\t")
-        if name.strip() == agent_name:
-            state, _, rest = rest.partition("\t")
-            agent_id, _, chat_id = rest.partition("\t")
-            return _ListedAgent(
-                name=agent_name, state=state.strip(), agent_id=agent_id.strip(), chat_id=chat_id.strip()
-            )
+        if not name.strip():
+            continue
+        state, _, rest = rest.partition("\t")
+        agent_id, _, chat_id = rest.partition("\t")
+        agents.append(
+            _ListedAgent(name=name.strip(), state=state.strip(), agent_id=agent_id.strip(), chat_id=chat_id.strip())
+        )
+    return agents
+
+
+def _listed_agent(agents: list[_ListedAgent], agent_name: str) -> _ListedAgent | None:
+    """``agent_name`` as listed, or None when it is not listed."""
+    for agent in agents:
+        if agent.name == agent_name:
+            return agent
     return None
+
+
+def _run_lead(agents: list[_ListedAgent], chat_agent_name: str, chat_agent_id: str) -> _ListedAgent | None:
+    """The run's lead: by the name the row holds, else by the chat id the row knows for it.
+
+    Renaming a chat renames its agent, so the row's name can go stale under a live lead; its
+    chat id does not. A chat that moved to a new agent lists its ended predecessor beside it.
+    """
+    lead = _listed_agent(agents, chat_agent_name)
+    if lead is not None or not chat_agent_id:
+        return lead
+    members = [agent for agent in agents if chat_agent_id in (agent.agent_id, agent.chat_id)]
+    live = [agent for agent in members if agent.state not in _ENDED_AGENT_STATES]
+    return (live or members or [None])[0]
 
 
 def _parse_busy_agents(busy_lines: list[str] | None) -> _BusyAgents:
     """The busy agents in ``background_tasks.py list --format tsv`` output; none when it printed nothing.
 
     Each line is one chat with pending tasks: chat id, active agent id, active agent name,
-    ``true``/``false`` busy, task count. A template that predates the CLI prints nothing,
-    so its agents read as not busy.
+    ``true``/``false`` busy, task count. A template that predates the CLI gets the dispatcher's
+    ``busy`` answer instead, whose chats count the way the CLI's file fallback reports them.
     """
     names: set[str] = set()
     agent_ids: set[str] = set()
     chat_ids: set[str] = set()
+    # CLEANUP: drop this branch with the probe's marker fallback in ``build_update_run_probe_args``.
+    busy_answer = extract_marker_json("\n".join(busy_lines or []), UPDATE_COMMAND_RESULT_MARKER)
+    if busy_answer is not None:
+        busy_chat_ids = busy_answer.get(BUSY_CHAT_IDS_FIELD)
+        marker_chat_ids = (
+            frozenset(str(chat_id) for chat_id in busy_chat_ids) if isinstance(busy_chat_ids, list) else frozenset()
+        )
+        return _BusyAgents(names=frozenset(), agent_ids=marker_chat_ids, chat_ids=marker_chat_ids)
     for line in busy_lines or []:
         fields = [field.strip() for field in line.split("\t")]
         if len(fields) < 4 or fields[3] != "true":
@@ -251,37 +336,36 @@ def _is_idle(agent: _ListedAgent, busy_agents: _BusyAgents) -> bool:
 
 
 def _classify_agent_listing(
-    listing_lines: list[str], chat_agent_name: str, worker_agent_name: str, busy_agents: _BusyAgents
+    agents: list[_ListedAgent], chat_agent: _ListedAgent | None, worker_agent_name: str, busy_agents: _BusyAgents
 ) -> tuple[UpdateAgentLiveness, bool]:
     """The run's chat agent's liveness (and whether the run is WAITING) from the listing.
 
-    With no chat name to look for the answer is UNKNOWN, not GONE: nothing here can be
-    attributed to the run, and GONE would unlock a live run's row. An answered listing
-    that does not carry the name is GONE, since an ended chat stays listed.
+    An answered listing that does not carry the lead is GONE, since an ended chat stays listed (STOPPED).
 
     An idle lead is only "waiting" when it is not busy and its named worker is not moving
     either: the lead sits idle for most of the run while a background worker does the
     merge, or while a command it started in the background runs.
     """
-    stripped = [line.strip() for line in listing_lines if line.strip()]
-    if AGENTS_FAILED_SENTINEL in stripped:
-        return UpdateAgentLiveness.UNKNOWN, False
-    if not chat_agent_name:
-        return UpdateAgentLiveness.UNKNOWN, False
-    chat_agent = _listed_agent(stripped, chat_agent_name)
-    if chat_agent is None or chat_agent.state in _ENDED_AGENT_STATES:
+    if chat_agent is None:
         return UpdateAgentLiveness.GONE, False
+    if chat_agent.state in _ENDED_AGENT_STATES:
+        return UpdateAgentLiveness.STOPPED, False
     if not _is_idle(chat_agent, busy_agents):
         return UpdateAgentLiveness.ALIVE, False
-    worker = _listed_agent(stripped, worker_agent_name) if worker_agent_name else None
+    worker = _listed_agent(agents, worker_agent_name) if worker_agent_name else None
     is_worker_moving = (
         worker is not None and worker.state not in _ENDED_AGENT_STATES and not _is_idle(worker, busy_agents)
     )
     return UpdateAgentLiveness.ALIVE, not is_worker_moving
 
 
-def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
-    """Classify the probe's output; missing run sentinels mean unanswered, not "no run"."""
+def parse_update_run_probe(stdout: str, chat_agent_name: str, chat_agent_id: str = "") -> UpdateRunProbe:
+    """Classify the probe's output; missing run sentinels mean unanswered, not "no run".
+
+    ``chat_agent_id`` is the run's chat's id as the row knows it ('' for none), which finds a lead
+    whose chat was renamed. With no chat name to look for the liveness is UNKNOWN, not GONE:
+    nothing in the listing can be attributed to the run, and GONE would unlock a live run's row.
+    """
     lines = stdout.splitlines()
     run_lines = _section(lines, RUN_BEGIN_SENTINEL, RUN_END_SENTINEL)
     if run_lines is None:
@@ -292,16 +376,24 @@ def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
     is_records_run = run_status is not None and bool(chat_agent_name) and run_status.chat_agent_name == chat_agent_name
     worker_agent_name = run_status.worker_agent_name if is_records_run and run_status is not None else ""
     agent_lines = _section(lines, AGENTS_BEGIN_SENTINEL, AGENTS_END_SENTINEL)
-    if agent_lines is None:
+    listed_chat_agent_id = ""
+    stripped = [line.strip() for line in agent_lines or [] if line.strip()]
+    if agent_lines is None or AGENTS_FAILED_SENTINEL in stripped or not chat_agent_name:
         liveness, is_waiting = UpdateAgentLiveness.UNKNOWN, False
     else:
+        agents = _listed_agents(stripped)
+        lead = _run_lead(agents, chat_agent_name, chat_agent_id)
         busy_agents = _parse_busy_agents(_section(lines, BUSY_BEGIN_SENTINEL, BUSY_END_SENTINEL))
-        liveness, is_waiting = _classify_agent_listing(agent_lines, chat_agent_name, worker_agent_name, busy_agents)
+        liveness, is_waiting = _classify_agent_listing(agents, lead, worker_agent_name, busy_agents)
+        if lead is not None:
+            listed_chat_agent_id = lead.chat_id or lead.agent_id
     return UpdateRunProbe(
         is_probe_answered=True,
         run_status=run_status,
         agent_liveness=liveness,
         is_agent_waiting=is_waiting,
+        chat_agent_id=listed_chat_agent_id,
+        is_watchdog_installed=WATCHDOG_INSTALLED_SENTINEL in (line.strip() for line in lines),
     )
 
 
@@ -327,8 +419,57 @@ class UpdateApplyWindowManager(MutableModel):
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _deadline_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    _onset_check_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_started: bool = PrivateAttr(default=False)
+
+    def model_post_init(self, __context: object) -> None:
+        self.tracker.add_on_failure_run_onset_callback(self._on_outage_onset)
+
+    def _on_outage_onset(self, agent_id: AgentId) -> None:
+        """Read the run record at an outage's first failure, off the probe loop's thread.
+
+        An apply takes the services down within a second of starting, long before the poll
+        can see it, so without this the machine reads as stuck until the stuck edge asks.
+        The outage is held back while the read is out, since a remote read can outlast the
+        stuck threshold; an outage with no apply under way is convicted once it answers.
+        """
+        aid_str = str(agent_id)
+        if not self.store.get(agent_id).is_run_in_flight:
+            return
+        with self._lock:
+            if self._is_window_open_locked(aid_str) or aid_str in self._onset_check_agent_ids:
+                return
+            self._onset_check_agent_ids.add(aid_str)
+            # Under the lock so a window opening meanwhile arms its own, longer grace after this one.
+            self.tracker.begin_probe_grace(
+                agent_id, ProbeGracePurpose.UPDATE_APPLY, time.monotonic() + _RUN_PROBE_TIMEOUT_SECONDS
+            )
+        start_mngr_thread(
+            self.concurrency_group,
+            target=self._check_apply_at_outage_onset,
+            args=(agent_id,),
+            name=f"update-apply-onset-{aid_str}",
+            daemon=True,
+            # The check logs its own failures; a crash must not poison the root group.
+            is_checked=False,
+        )
+
+    def _check_apply_at_outage_onset(self, agent_id: AgentId) -> None:
+        aid_str = str(agent_id)
+        try:
+            probe = self.probe_run_record(agent_id)
+            if probe.is_apply_in_progress:
+                logger.info("Saw the update apply under way in {} at its outage's first failure", agent_id)
+                self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
+        except (MindError, MngrError, OSError, RuntimeError, ValueError) as e:
+            logger.opt(exception=e).warning("Reading the update run record of {} at its outage failed", agent_id)
+        finally:
+            # Under the lock so a window another path opens meanwhile keeps its grace.
+            with self._lock:
+                self._onset_check_agent_ids.discard(aid_str)
+                if aid_str not in self._deadline_by_agent:
+                    self.tracker.end_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY)
 
     def start(self) -> None:
         """Start the expiry pass strand. Idempotent."""
@@ -390,7 +531,11 @@ class UpdateApplyWindowManager(MutableModel):
     def is_window_open(self, agent_id: AgentId) -> bool:
         """Whether an unexpired window is armed for ``agent_id``."""
         with self._lock:
-            deadline = self._deadline_by_agent.get(str(agent_id))
+            return self._is_window_open_locked(str(agent_id))
+
+    def _is_window_open_locked(self, aid_str: str) -> bool:
+        """Whether an unexpired window is armed for ``aid_str``. Must hold ``self._lock``."""
+        deadline = self._deadline_by_agent.get(aid_str)
         return deadline is not None and time.monotonic() < deadline
 
     def should_decline_recovery_dispatch(self, agent_id: AgentId) -> bool:
@@ -399,7 +544,7 @@ class UpdateApplyWindowManager(MutableModel):
             return True
         if not self.store.get(agent_id).is_run_in_flight:
             return False
-        probe = self.probe_run(agent_id)
+        probe = self.probe_run_record(agent_id)
         if probe.is_apply_in_progress:
             logger.info("Declined unattended recovery for {}: its update's apply is under way", agent_id)
             self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
@@ -431,12 +576,19 @@ class UpdateApplyWindowManager(MutableModel):
 
     def probe_run(self, agent_id: AgentId) -> UpdateRunProbe:
         """Ask the workspace whether an update is still happening in it."""
-        chat_agent_name = self.store.get(agent_id).chat_agent_name
+        return self._probe(agent_id, build_update_run_probe_args)
+
+    def probe_run_record(self, agent_id: AgentId) -> UpdateRunProbe:
+        """Read only the workspace's run record; nothing else is asked, so the agent liveness reads UNKNOWN."""
+        return self._probe(agent_id, build_update_run_record_args)
+
+    def _probe(self, agent_id: AgentId, build_args: Callable[[str], list[str]]) -> UpdateRunProbe:
+        state = self.store.get(agent_id)
         result = self.mngr_caller.call(
-            build_update_run_probe_args(build_agent_address(agent_id, self.backend_resolver)),
+            build_args(build_agent_address(agent_id, self.backend_resolver)),
             timeout=_RUN_PROBE_TIMEOUT_SECONDS,
         )
-        probe = parse_update_run_probe(result.stdout, chat_agent_name)
+        probe = parse_update_run_probe(result.stdout, state.chat_agent_name, state.chat_agent_id)
         if not probe.is_probe_answered:
             logger.debug(
                 "Update run probe for {} produced no sentinel (exit {}): {}",
@@ -468,8 +620,7 @@ class UpdateApplyWindowManager(MutableModel):
         A machine still STUCK gets its recovery dispatched here: the stuck edge fires once
         per episode and was already declined, so nothing else would.
         """
-        if self.store.get(agent_id).activity is UpdateActivity.APPLYING:
-            self.store.set_activity(agent_id, UpdateActivity.RUNNING, only_from=frozenset({UpdateActivity.APPLYING}))
+        self.store.end_apply(agent_id)
         if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
             return
         logger.warning(

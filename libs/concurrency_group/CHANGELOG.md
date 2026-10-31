@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.22] - 2026-10-28
+
+### Added
+
+- Added: `RunningProcess.get_reader_thread_stack()` returns the reader thread's `module.function` names (no paths, arguments, or locals) for diagnosing a `terminate()` that timed out.
+
+### Fixed
+
+- Fixed: Stopping a subprocess no longer raises when the OS refuses the stop signal (e.g. macOS "Operation not permitted" on a child mid-exit); the refusal is logged and the shutdown waits for the exit and falls back to SIGKILL as usual.
+
 ## [v0.1.21] - 2026-10-22
 
 ### Added

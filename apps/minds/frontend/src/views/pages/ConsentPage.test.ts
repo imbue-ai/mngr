@@ -1,7 +1,10 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import { createEmptyStores } from "../../models/boot";
 import { REPORTING_CONSENT_QUESTION } from "../../models/onboarding";
 import { attrsOf, collectText, collectVnodes } from "../../testing";
+import { ShellState } from "../shell/shell-state";
 import { ConsentPage } from "./ConsentPage";
 
 function renderPage(): { view: () => unknown } {
@@ -15,19 +18,34 @@ function byId(tree: unknown, id: string): Record<string, unknown> {
   return attrsOf(vnode);
 }
 
-async function continueAndReadPostedBody(page: { view: () => unknown }): Promise<unknown> {
-  const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
+async function continueAndReadPostedBody(page: {
+  view: () => unknown;
+}): Promise<unknown> {
+  const fetchMock = vi.fn(
+    async (_url: string, _init?: RequestInit) =>
+      new Response("{}", { status: 200 }),
+  );
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(m.route, "set").mockImplementation(() => {});
   vi.spyOn(m, "redraw").mockImplementation(() => {});
+  const stores = createEmptyStores();
+  registerAppContext({ stores, shell: new ShellState(stores) });
   (byId(page.view(), "consent-continue").onclick as () => void)();
-  await vi.waitFor(() => expect(m.route.set).toHaveBeenCalledWith("/"));
+  // Answering lands on the window's account's home: a fresh install's window is the device's.
+  await vi.waitFor(() =>
+    expect(m.route.set).toHaveBeenCalledWith(
+      "/account/local/",
+      undefined,
+      undefined,
+    ),
+  );
   const init = fetchMock.mock.calls[0]?.[1];
   return JSON.parse(String(init?.body));
 }
 
 describe("ConsentPage", () => {
   afterEach(() => {
+    clearAppContextForTests();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });

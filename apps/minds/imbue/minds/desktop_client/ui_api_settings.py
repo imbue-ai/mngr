@@ -4,7 +4,7 @@ JSON twins of the data that used to be server-rendered into the Settings,
 Accounts, and AI-keys pages, plus the settings writes the SPA performs
 directly (the error-reporting opt-out and the notification preferences).
 Mutating flows the legacy POST routes already implement (permission revokes,
-connector add/disconnect, plan switch, trim, set-default, logout, key mint,
+connector add/disconnect, plan switch, trim, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
 The error-reporting and notification-prefs writes are records Imbue Studio owns,
@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -42,6 +43,7 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.update_status import EMPTY_UPDATE_WINDOW_MESSAGE
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -99,6 +101,13 @@ class UiSettingsOverview(FrozenModel):
     )
     update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
     update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
+    is_auto_update_enabled: bool = Field(
+        default=False,
+        description="Whether Imbue Studio arms the update of every behind workspace without its own setting",
+    )
+    auto_update_prompt_decision: AutoUpdatePromptDecision | None = Field(
+        default=None, description="How the one-time auto-update offer was answered; None while it never was"
+    )
     sign_in_browsers: tuple[UiSignInBrowserOption, ...] = Field(
         default=(), description="The installed browsers provider sign-ins can open in"
     )
@@ -160,6 +169,23 @@ class UiUpdateWindowWrite(FrozenModel):
 
     start_hour: int = Field(ge=0, le=23, description="Local hour the window opens")
     end_hour: int = Field(ge=0, le=23, description="Local hour the window closes")
+
+
+class UiAutoUpdateWrite(FrozenModel):
+    """Body of the auto-update toggle write."""
+
+    is_enabled: bool = Field(
+        description="Whether Imbue Studio arms the update of every behind workspace without its own setting"
+    )
+
+
+class UiAutoUpdatePromptWrite(FrozenModel):
+    """Body of the auto-update offer's answer; accepting it also turns auto-update on."""
+
+    decision: AutoUpdatePromptDecision = Field(description="How the user answered the offer")
+    window: UiUpdateWindowWrite | None = Field(
+        default=None, description="The update window chosen in the offer; only an acceptance carries one"
+    )
 
 
 class UiNotificationChannels(FrozenModel):
@@ -317,6 +343,10 @@ def _handle_settings_overview() -> Response:
         notification_prefs=_current_notification_prefs(),
         update_window_start_hour=update_window[0],
         update_window_end_hour=update_window[1],
+        is_auto_update_enabled=minds_config.get_auto_update_workspaces() if minds_config is not None else False,
+        auto_update_prompt_decision=(
+            minds_config.get_auto_update_prompt_decision() if minds_config is not None else None
+        ),
         sign_in_browsers=tuple(
             UiSignInBrowserOption(browser_id=browser.browser_id, label=browser.label) for browser in browsers
         ),
@@ -341,14 +371,9 @@ def _handle_if_match_write(
     every settings record Imbue Studio owns so each one doesn't reimplement the same
     parse/validate/If-Match/compare-and-swap skeleton.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = write_model_type.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed settings write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
+    write = _read_json_write(write_model_type)
+    if isinstance(write, Response):
+        return write
     provided_version = request.headers.get("If-Match")
     if provided_version is None:
         return _error_response("If-Match header is required for this write", 428)
@@ -539,6 +564,10 @@ def _handle_browser_import_run() -> Response:
     )
 
 
+def _empty_update_window_response() -> Response:
+    return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400)
+
+
 def _handle_update_window_write() -> Response:
     """POST /ui/api/settings/update-window: set the local hours scheduled updates run in.
 
@@ -549,18 +578,80 @@ def _handle_update_window_write() -> Response:
     minds_config = get_state().minds_config
     if minds_config is None:
         return _error_response("Settings storage is not configured", 503)
+    write = _read_json_write(UiUpdateWindowWrite)
+    if isinstance(write, Response):
+        return write
+    if write.start_hour == write.end_hour:
+        return _empty_update_window_response()
+    minds_config.set_update_window(write.start_hour, write.end_hour)
+    # Every armed workspace's file carries the window; the sweep rewrites them.
+    _request_update_sweep()
+    return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
+
+
+def _request_update_sweep() -> None:
+    """Re-read every workspace's updates, and re-send the updates frame, whose auto-update fields just moved."""
+    state = get_state()
+    if state.workspace_update_service is not None:
+        state.workspace_update_service.detector.request_pass()
+    if state.ui_publisher is not None:
+        state.ui_publisher.notify_change()
+
+
+def _read_json_write(model: type[_WriteT]) -> _WriteT | Response:
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return _error_response("Invalid JSON body", 400)
     try:
-        write = UiUpdateWindowWrite.model_validate(body)
+        return model.model_validate(body)
     except ValidationError as e:
-        logger.debug("Rejected a malformed update-window write body: {}", e)
+        logger.debug("Rejected a malformed {} body: {}", model.__name__, e)
         return _error_response("Invalid JSON body", 400)
-    if write.start_hour == write.end_hour:
-        return _error_response("The update window needs a start and end that differ", 400)
-    minds_config.set_update_window(write.start_hour, write.end_hour)
-    return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
+
+
+def _handle_auto_update_write() -> Response:
+    """POST /ui/api/settings/auto-update: turn automatic workspace updates on or off.
+
+    Turning it off leaves the schedules already armed in place.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    write = _read_json_write(UiAutoUpdateWrite)
+    if isinstance(write, Response):
+        return write
+    minds_config.set_auto_update_workspaces(write.is_enabled)
+    _request_update_sweep()
+    return _json_response(UiAutoUpdateWrite(is_enabled=write.is_enabled))
+
+
+def _handle_auto_update_prompt_write() -> Response:
+    """POST /ui/api/settings/auto-update-prompt: record the answer to the one-time offer, so it never returns.
+
+    Accepting it can carry the update window chosen in the offer, saved with the answer.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    write = _read_json_write(UiAutoUpdatePromptWrite)
+    if isinstance(write, Response):
+        return write
+    window = write.window
+    if window is not None:
+        if write.decision is not AutoUpdatePromptDecision.ACCEPTED:
+            return _error_response("Only turning auto-update on sets an update window", 400)
+        if window.start_hour == window.end_hour:
+            return _empty_update_window_response()
+        minds_config.set_update_window(window.start_hour, window.end_hour)
+    minds_config.set_auto_update_prompt_decision(write.decision)
+    if write.decision is AutoUpdatePromptDecision.ACCEPTED:
+        minds_config.set_auto_update_workspaces(True)
+        _request_update_sweep()
+    return _json_response(UiAutoUpdatePromptWrite(decision=write.decision, window=window))
 
 
 def _handle_sign_in_browser_write() -> Response:
@@ -571,14 +662,9 @@ def _handle_sign_in_browser_write() -> Response:
     minds_config = state.minds_config
     if minds_config is None:
         return _error_response("Settings storage is not configured", 503)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = UiSignInBrowserWrite.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed sign-in browser write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
+    write = _read_json_write(UiSignInBrowserWrite)
+    if isinstance(write, Response):
+        return write
     if write.browser_id is not None and all(
         browser.browser_id != write.browser_id for browser in state.sign_in_browsers.list_browsers()
     ):
@@ -737,6 +823,10 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/auto-update", view_func=_handle_auto_update_write, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/settings/auto-update-prompt", view_func=_handle_auto_update_prompt_write, methods=["POST"]
+    )
     blueprint.add_url_rule("/api/settings/sign-in-browser", view_func=_handle_sign_in_browser_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/browser-import", view_func=_handle_browser_import_status)
     blueprint.add_url_rule(

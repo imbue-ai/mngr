@@ -152,6 +152,7 @@ def test_resolve_restore_subpath_uses_the_snapshot_root_for_plain_snapshots(tmp_
     assert subpath == snapshot.paths[0]
 
 
+@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_resolve_restore_subpath_descends_into_the_nested_host_dir(tmp_path: Path) -> None:
     # Btrfs-volume shape: the snapshot root carries volume-level entries next

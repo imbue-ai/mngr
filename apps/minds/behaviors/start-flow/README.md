@@ -3,7 +3,7 @@
 Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
 The *start flow* is the first-run conversation at "/start" that an installation which has never been taken past it lands on (when it does is specified in `home-page/`).
-It asks its questions one at a time as a chat, and ends when a workspace create goes out or the user leaves for the home page having signed in to an existing account.
+It asks its questions one at a time as a chat, and ends when a workspace create goes out or the user leaves for the home page having signed in to an existing account that already has workspaces (a sign-in landing on an account with none continues the conversation instead).
 
 ## Terms
 

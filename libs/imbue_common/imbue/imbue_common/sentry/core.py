@@ -1004,7 +1004,14 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             upload_to_s3_with_key(key, tb_with_vars.encode())
 
     def _upload_file_cb(self, key: str, file_path: Path, compress: bool = False, immutable: bool = False) -> None:
-        contents = file_path.read_bytes()
+        # The path was chosen earlier and is only read now, on the handler's executor; a size-rotated
+        # live log can be renamed away by its own sink in between. Only a missing file is skipped: the
+        # event's URI for it simply never resolves, while any other read error stays loud.
+        try:
+            contents = file_path.read_bytes()
+        except FileNotFoundError:
+            logger.info("Sentry attachment vanished before upload for key {}: {}", key, file_path)
+            return
         if compress:
             # The highest compression level that still uses the fast pass implementation.
             # https://github.com/madler/zlib/blob/5a82f71ed1dfc0bec044d9702463dbdf84ea3b71/deflate.c#L117

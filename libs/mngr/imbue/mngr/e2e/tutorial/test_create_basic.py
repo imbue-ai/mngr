@@ -8,6 +8,7 @@ import shlex
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 # A codex create installs the codex CLI when the host has none.
@@ -693,6 +694,7 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal --snapshot snap-123abc --type command --no-connect --no-ensure-clean -- sleep 100078",
         comment="use an existing snapshot instead of building a new host",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     assert result.exit_code != 0
     # The command must get far enough to actually hand the snapshot to Modal and

@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 from flask import Flask
 from flask import current_app
 from pydantic import ConfigDict
@@ -62,7 +62,6 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
-from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
@@ -88,13 +87,13 @@ class DesktopClientState(MutableModel):
 
     auth_store: AuthStoreInterface = Field(frozen=True, description="Cookie/session auth store")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Agent/host discovery resolver")
-    http_client: httpx.Client | None = Field(
+    http_client: httpx2.Client | None = Field(
         default=None,
         description=(
             "HTTP client for the share-URL readiness probe (its only consumer), created by the "
-            "runtime with TLS verification disabled -- Python's ssl cannot wildcard-match "
-            "underscore hostnames like system_interface--..., so a verifying probe never goes "
-            "ready on links browsers accept. Injected in tests."
+            "runtime verifying certificate chains but not hostnames -- Python's ssl cannot match "
+            "the underscore labels (system_interface-<rand>) of workspaces built before labels "
+            "became strict hostname labels. Injected in tests."
         ),
     )
     agent_creator: AgentCreator | None = Field(
@@ -323,11 +322,6 @@ class DesktopClientState(MutableModel):
             "Dispatches and closes out workspace template updates; None for apps built without "
             "an mngr caller (minimal tests), where every update route answers 503"
         ),
-    )
-    update_scheduler: UpdateScheduler | None = Field(
-        default=None,
-        frozen=True,
-        description="Runs the scheduled updates inside the update window; None whenever the service is",
     )
     active_share_cache: ActiveShareCache = Field(
         default_factory=ActiveShareCache,

@@ -92,13 +92,23 @@ function arrivalClass(attrs: ArrivalAttrs): string {
   return attrs.isInstant ? "" : " start-chat-in";
 }
 
+/** Lines a user turn folds behind a chevron under its text: the settings a create was submitted with. */
+export interface TurnDetails {
+  /** Unique on the page; ties the toggle to what it opens. */
+  id: string;
+  label: string;
+  lines: string[];
+  isOpen: boolean;
+  onToggle: () => void;
+}
+
 /**
  * A user turn: what you said, in the grey pill a sent message gets. The
  * bottom-right corner is the one that is not 18px, the corner nearest the
- * person who said it.
+ * person who said it. `details` folds lines under the text, closed until opened.
  */
 export function userTurn(
-  attrs: ArrivalAttrs & { text: string; onUndo?: () => void },
+  attrs: ArrivalAttrs & { text: string; onUndo?: () => void; details?: TurnDetails },
 ): m.Children {
   // The undo sits beside the bubble: it acts on the answer rather than being
   // part of what was said.
@@ -134,10 +144,28 @@ export function userTurn(
             // and only a token with nowhere to break is split.
             "whitespace-pre-wrap break-words",
         },
-        attrs.text,
+        [attrs.text, attrs.details === undefined ? null : turnDetails(attrs.details)],
       ),
       undo,
     ],
+  );
+}
+
+/** The folded lines of a user turn, opened by a chevron on their own line under the text. */
+function turnDetails(details: TurnDetails): m.Children {
+  return m(
+    "div",
+    { class: "mt-1", "data-turn-details": details.id },
+    m(
+      Disclosure,
+      {
+        id: details.id,
+        isOpen: details.isOpen,
+        onToggle: details.onToggle,
+        summary: details.label,
+      },
+      details.lines.join("\n"),
+    ),
   );
 }
 
@@ -171,6 +199,8 @@ export function agentTurn(attrs: {
   strong?: string;
   /** A type class for the whole turn, when it is not body text. */
   class?: string;
+  /** The space over the turn, in place of the usual turn gap. */
+  marginClass?: string;
   more?: TurnMore;
 }): m.Children {
   const isInstant = attrs.isInstant ?? false;
@@ -193,7 +223,7 @@ export function agentTurn(attrs: {
       key: attrs.key,
       id: attrs.id,
       class:
-        "mt-10 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0" +
+        `${attrs.marginClass ?? "mt-10"} max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0` +
         (attrs.class !== undefined ? ` ${attrs.class}` : ""),
       "data-agent-turn": "",
     },
@@ -328,8 +358,8 @@ export interface AnswerButton {
 /**
  * The buttons a question offers, as the user's turn: right-aligned, a full
  * turn below the question. The emphasized answer is filled in the success
- * green; the quieter one is a ghost. Minor answers are small links under the
- * buttons.
+ * green; the quieter one is a ghost. The quiet ways out -- the agent-side
+ * aside and any minor answers -- are small links in a line at the row's left.
  */
 export function answerRow(
   attrs: ArrivalAttrs & {
@@ -360,31 +390,44 @@ export function answerRow(
       ),
     ),
   );
-  // The quieter, agent-side way out sits at the row's left end, the answers at
-  // its right: one line, the two sides of the conversation.
-  const row = m(
-    "div",
-    { class: "flex items-center " + (attrs.aside ? "justify-between gap-6" : "justify-end") },
-    attrs.aside
-      ? [linkButton(attrs.aside.label, attrs.aside.onPress, { "data-aside": "" }), buttons]
-      : buttons,
-  );
-  const minorButtons = attrs.minorButtons ?? [];
+  // The quiet links line up at the row's left end, the answers sit at its right:
+  // the two sides of the conversation.
+  const quietLinks = [
+    ...(attrs.aside
+      ? [
+          linkButton(attrs.aside.label, attrs.aside.onPress, {
+            key: "aside",
+            "data-aside": "",
+          }),
+        ]
+      : []),
+    ...(attrs.minorButtons ?? []).map((button) =>
+      linkButton(button.label, button.onPress, {
+        key: button.id,
+        "data-answer": button.id,
+      }),
+    ),
+  ];
   return m(
     "div",
-    { key: attrs.key, class: "mt-10" + arrivalClass(attrs), style: arrivalStyle(attrs) },
-    [
-      row,
-      minorButtons.length === 0
-        ? null
-        : m(
+    {
+      key: attrs.key,
+      class:
+        "mt-10 flex items-center " +
+        (quietLinks.length === 0 ? "justify-end" : "justify-between gap-6") +
+        arrivalClass(attrs),
+      style: arrivalStyle(attrs),
+    },
+    quietLinks.length === 0
+      ? buttons
+      : [
+          m(
             "div",
-            { class: "mt-4 flex flex-wrap justify-end gap-x-6 gap-y-2" },
-            minorButtons.map((button) =>
-              linkButton(button.label, button.onPress, { key: button.id, "data-answer": button.id }),
-            ),
+            { class: "flex flex-wrap items-center gap-x-6 gap-y-2" },
+            quietLinks,
           ),
-    ],
+          buttons,
+        ],
   );
 }
 
@@ -404,8 +447,9 @@ function linkButton(label: string, onPress: () => void, extraAttrs: m.Attributes
 
 /**
  * Answers' points in columns, as an agent would lay them out: markdown's
- * furniture and no more, a rule under the headings, 14px against the chat's
- * body. Each point carries a check, filled in the recommended column.
+ * furniture and no more, a rule under the headings as wide as the columns'
+ * text, 14px against the chat's body. Each point carries a check, filled in
+ * the recommended column.
  */
 export function choiceTable(
   attrs: ArrivalAttrs & { columns: TableColumn[] },
@@ -419,7 +463,7 @@ export function choiceTable(
     },
     m(
       "table",
-      { class: "w-full table-fixed border-collapse text-left type-body" },
+      { class: "w-max max-w-full border-collapse text-left type-body" },
       [
         m(
           "thead",
@@ -431,7 +475,7 @@ export function choiceTable(
                 "th",
                 {
                   key: column.title,
-                  class: "py-2 pr-6 align-top font-semibold",
+                  class: "py-2 pr-6 last:pr-0 align-top font-semibold",
                 },
                 [
                   column.title,
@@ -462,7 +506,7 @@ export function choiceTable(
                 "td",
                 {
                   key: column.title,
-                  class: "py-3 pr-6 align-top leading-[1.45]",
+                  class: "py-3 pr-6 last:pr-0 align-top leading-[1.45]",
                 },
                 m(
                   "ul",

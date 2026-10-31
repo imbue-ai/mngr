@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `skitwright` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-21
 
 Added `imbue.skitwright.redaction.redact_secret_values(text, env, secret_names)`: replaces every occurrence of each named environment variable's value in `text` with `<redacted NAME>`. The caller names the variables that hold credentials; nothing is inferred from variable names. Sessions inherit the test runner's environment, so a recorded `env` or `printenv` would otherwise write live credentials into a saved transcript.

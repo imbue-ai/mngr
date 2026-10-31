@@ -2,9 +2,8 @@
 
 // Pure decisions for pulled-out workspace windows (the pull-out-window spec):
 // when a watched title-bar drag has left the chrome window far enough to pull
-// the window out, where a popout opens, where it follows the cursor to, which
-// main window a re-dock drag is over, and the frame a drop names. Kept free of any
-// `electron` import so it can be unit-tested under plain node; main.js reads
+// the window out, where a popout opens, and where it follows the cursor to.
+// Kept free of any `electron` import so it can be unit-tested under plain node; main.js reads
 // the cursor, the window bounds, and the displays, and acts on what these
 // answer.
 
@@ -113,53 +112,6 @@ function isTornOut(cursor, surface) {
   return overshootPastSurface(cursor, surface) >= TEAR_OUT_DISTANCE;
 }
 
-function containsPoint(bounds, point) {
-  return (
-    point.x >= bounds.x &&
-    point.x < bounds.x + bounds.width &&
-    point.y >= bounds.y &&
-    point.y < bounds.y + bounds.height
-  );
-}
-
-/**
- * Which main window a re-dock drag is over: the first candidate (callers pass
- * them most-recently-focused first) showing the popout's workspace whose
- * surface contains the cursor, or null.
- *
- * @param {{x: number, y: number}} cursor
- * @param {Array<{id: unknown, contentBounds: object, isSameWorkspace: boolean}>} candidates
- * @returns {unknown} The matching candidate's id, or null.
- */
-function dropTargetFor(cursor, candidates) {
-  for (const candidate of candidates) {
-    if (!candidate.isSameWorkspace) continue;
-    if (containsPoint(surfaceBounds(candidate.contentBounds), cursor)) return candidate.id;
-  }
-  return null;
-}
-
-function clamp(value, low, high) {
-  return Math.min(Math.max(value, low), high);
-}
-
-/**
- * The frame (fractions of the target's workspace surface, inside the unit
- * square) a dropped popout's content lands at: the popout's content bounds
- * relative to the surface, shrunk to fit when the popout is larger than it.
- * The workspace shell maps it onto its own backdrop, which is the surface
- * less its taskbar, and clamps it again.
- */
-function redockFrame(popoutContentBounds, targetContentBounds) {
-  const surface = surfaceBounds(targetContentBounds);
-  if (surface.width <= 0 || surface.height <= 0) return { x: 0, y: 0, width: 1, height: 1 };
-  const width = clamp(popoutContentBounds.width / surface.width, 0, 1);
-  const height = clamp(popoutContentBounds.height / surface.height, 0, 1);
-  const x = clamp((popoutContentBounds.x - surface.x) / surface.width, 0, 1 - width);
-  const y = clamp((popoutContentBounds.y - surface.y) / surface.height, 0, 1 - height);
-  return { x, y, width, height };
-}
-
 /**
  * Whether a popout's OS close must first ask its page to return the window
  * to the desktop. Not during a quit (the popout is restored next launch), and
@@ -189,8 +141,6 @@ module.exports = {
   surfaceBounds,
   overshootPastSurface,
   isTornOut,
-  dropTargetFor,
-  redockFrame,
   isReattachHandshakeNeeded,
   isNavigationTarget,
 };

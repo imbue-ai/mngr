@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-import httpx
+import httpx2
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
@@ -33,7 +33,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
-_HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
+_HttpxHandler: Final = Callable[[httpx2.Request], httpx2.Response]
 
 # Verb permission names referenced by these tests (the catalog lives in the
 # shared ``workspace_permissions.json``).
@@ -65,7 +65,7 @@ class _NamingBackendResolver(StaticBackendResolver):
 
 def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
     return LatchkeyGatewayClient.from_credentials(
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
         base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
@@ -115,7 +115,7 @@ def _build_authenticated_client(
 
 
 def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
-    handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
+    handler, _sender = _make_handler(tmp_path, lambda r: httpx2.Response(204))
     assert handler.handles_request_type() == REQUEST_TYPE_WORKSPACE
     assert handler.kind_label() == "workspace access"
 
@@ -126,11 +126,11 @@ def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
 def test_grant_selected_sends_override_with_target(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_handler(tmp_path, _gateway_handler)
     requester = AgentId()
@@ -174,9 +174,9 @@ def test_grant_selected_sends_override_with_target(tmp_path: Path) -> None:
 def test_grant_all_sends_override_with_null_target(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["content"] = request.content
-        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+        return httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_handler(tmp_path, _gateway_handler)
     target = AgentId()
@@ -207,11 +207,11 @@ def test_grant_all_sends_override_with_null_target(tmp_path: Path) -> None:
 def test_grant_rejects_empty_permissions(tmp_path: Path) -> None:
     gateway_called = False
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal gateway_called
         gateway_called = True
         del request
-        return httpx.Response(200, json={"request_id": "evt-abc"})
+        return httpx2.Response(200, json={"request_id": "evt-abc"})
 
     handler, sender = _make_handler(tmp_path, _gateway_handler)
     event = create_workspace_permission_request(
@@ -232,9 +232,9 @@ def test_grant_rejects_empty_permissions(tmp_path: Path) -> None:
 
 
 def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(500, json={"error": "boom"})
+        return httpx2.Response(500, json={"error": "boom"})
 
     handler, sender = _make_handler(tmp_path, _gateway_handler)
     event = create_workspace_permission_request(
@@ -261,10 +261,10 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
 def test_deny_calls_gateway_delete_writes_response_notifies(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+    def _gateway_handler(request: httpx2.Request) -> httpx2.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(204)
+        return httpx2.Response(204)
 
     handler, sender = _make_handler(tmp_path, _gateway_handler)
     requester = AgentId()
@@ -289,7 +289,7 @@ def test_deny_calls_gateway_delete_writes_response_notifies(tmp_path: Path) -> N
 
 
 def test_build_request_detail_payload_mirrors_the_fragment_data(tmp_path: Path) -> None:
-    handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
+    handler, _sender = _make_handler(tmp_path, lambda r: httpx2.Response(204))
     target = AgentId()
     event = create_workspace_permission_request(
         agent_id=str(AgentId()),
@@ -318,7 +318,7 @@ def test_build_request_detail_payload_mirrors_the_fragment_data(tmp_path: Path) 
 
 
 def test_build_request_detail_payload_without_target_disables_target_choice(tmp_path: Path) -> None:
-    handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
+    handler, _sender = _make_handler(tmp_path, lambda r: httpx2.Response(204))
     event = create_workspace_permission_request(
         agent_id=str(AgentId()),
         rationale="broad access",
@@ -342,7 +342,7 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
     carried: list[str] = []
     handler, _sender = _make_handler(
         tmp_path,
-        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
         push_permissions_to_machine=carried.append,
     )
     requester = AgentId()

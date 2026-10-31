@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-28
+
+New `version_mismatch` setting on the codex agent type: `ERROR` (the default, unchanged behavior) fails `mngr create` when the installed binary does not report the pinned `version`; `WARN` logs a warning and creates the agent on the installed binary.
+
+codex already ran the check whenever `version` was set, so only the new setting changes for it. The version is now probed with the binary itself rather than the configured launch `command`, so a wrapper command no longer makes the check skip.
+
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+## 2026-10-26
+
+Codex agents now read their process presence from the host's shared lifecycle snapshot, so a listing reads tmux and `ps` once per host rather than once per agent. When that snapshot can't be read, a codex agent reads UNKNOWN rather than STOPPED.
+
+A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer reads every live codex agent as DONE. That listing knew only claude's process name and looked for the first word of codex's launch command, `(`, which never runs. The process name `codex` is now declared on the agent class, where that listing reads it.
+
+## 2026-10-24
+
+The `codex app-server` socket directory name now hashes the agent's codex home with `hashlib.sha1(..., usedforsecurity=False)`, marking the hash as a path shortener rather than a security control. This resolves Bandit's B324 (`hashlib`) finding on `get_codex_app_server_socket_path`; the socket path itself is unchanged.
+
+## 2026-10-23
+
+The codex `common_transcript.sh` tests now stop their background poll daemon with `running_in_own_process_group` from `imbue.mngr.utils.testing` (MIND-377), the same stop the claude watcher tests use.
+
+The old stop sent SIGTERM to the daemon's process group and returned as soon as the daemon's bash process had exited. Two kinds of process could outlive it: a child being forked at the moment of the signal, which gVisor (the kernel in CI's Modal sandboxes) lets join the group after the signal has gone out, and any other process left in the group once bash was gone. A stand-in that rejoins the group after the signal stayed alive 3 times out of 3 against the old stop. The new stop sends SIGKILL to the group until every process in it has exited, and only then reaps bash.
+
+`_start_watcher` and `_stop_watcher` are replaced by a `_running_watcher()` context manager, so a test cannot start the daemon without stopping it. The daemon's stderr now goes to pytest's captured output instead of `/dev/null`.
+
+Tests only. No change to the shipped script or to codex agents' behaviour.
+
 ## 2026-10-22
 
 Test-only: the test stand-ins for the host file reader accept the new optional `max_byte_count` argument of `read_file_tail_from_offset`.

@@ -4,6 +4,38 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+The `httpx2` floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-28
+
+- An SSH host that closes the connection during the handshake, or while a reverse tunnel is being requested, now surfaces as an `SSHTunnelError` tagged `HOST_CONNECT` instead of a bare paramiko `EOFError`. Previously the `EOFError` escaped every caller's handler: it killed the reverse-tunnel health-check thread, so no tunnel in the process was repaired again until restart, and it aborted the latchkey discovery cycle that was wiring the tunnel.
+
+- Removing a reverse tunnel, and `SSHTunnelManager.cleanup()`, no longer raise when the host hangs up under the best-effort cancel of the remote port forward.
+
+## 2026-10-27
+
+Lowered the trailing-comment ratchet count now that the shared rule no longer counts bare `# noqa` directives.
+
+## 2026-10-26
+
+`mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it. Enough of those used to fill a tunnel's 200-slot pool, after which every HTTP request to that service failed with "Proxy connection pool exhausted" until the forward was restarted.
+
+- The trigger is ordinary sleep/wake. After a wake, the first request rebuilds the tunnel while the page's other requests wait behind it, and some of those requests' clients disconnect in the meantime. When the proxy then cancels the backend request, httpcore 1.0.9 left the just-connected connection holding its slot forever (encode/httpcore#1099, still unmerged upstream). Two users' Imbue Studio chat panels went dead this way after about six days of uptime, while the chat WebSocket on the same tunnel kept working.
+
+- The proxy's HTTP clients now use `httpx2` (Pydantic's maintained fork of httpx, same API), which reclaims these connections. The plugin depends on `httpx2>=2.12.0` instead of `httpx`.
+
+## 2026-10-24
+
+Added `local_ca_dir` and `local_ca_cert_path` to `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` to `imbue.mngr_forward.primitives`, so host applications can find the proxy's local CA certificate from the mngr host dir alone and pin it when they verify the proxy's TLS. The `mngr forward` CLI now derives the same paths through these helpers instead of spelling the layout out itself.
+
+The README now describes how the Imbue Studio shell trusts the proxy: it pins the local CA by the path the backend hands it.
+
+A leaf the proxy mints for a service origin too long for an X.509 CommonName (over 64 characters, e.g. `system-interface-<rand>.agent-<32hex>.localhost`) now carries a fixed non-empty subject (`O=mngr forward local service`) instead of an empty one. An empty subject is only valid with a critical SAN, and Chromium refused the minted leaf for such an origin with `ERR_CERT_INVALID` (the empty subject is the one way that leaf differs from the leaves Chromium accepts), which the Imbue Studio shell used to paper over by trusting every loopback certificate; now that the shell pins the proxy's CA and leaves every other objection to Chromium, those workspace origins failed to load. Clients verify the hostname against the SAN and ignore the subject, so nothing else changes.
+
 ## 2026-10-22
 
 - `mngr forward` no longer rewrites its on-disk service map when an agent re-announces registrations it already knows. Before, an agent replaying a long services history caused one full rewrite of the cache file per line.

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
@@ -257,6 +258,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     first_list = e2e.run(
         "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="record the my-task agent ID after first create",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(first_list).to_succeed()
     first_ids = first_list.stdout.split()
@@ -283,6 +285,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     second_list = e2e.run(
         "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="verify --reuse did not create a duplicate agent",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
     )
     expect(second_list).to_succeed()
     second_ids = second_list.stdout.split()
@@ -386,7 +389,7 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task@.modal --type command --no-connect --no-ensure-clean -- sleep 101015",
             comment="create a modal command agent to exec across",
-            timeout=180.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # The filtered list should return exactly the modal agent we just created.
@@ -433,7 +436,7 @@ def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create parallel-task --provider modal --type command --no-ensure-clean --no-connect -- sleep 101017",
             comment="create a modal command agent to fan out across",
-            timeout=240.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     # Sanity: the modal filter discovers the host we just created. Capture its id

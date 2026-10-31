@@ -10,6 +10,7 @@ import pytest
 
 from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
@@ -278,11 +279,17 @@ def test_list_remote_filter(e2e: E2eSession) -> None:
     ).to_succeed()
 
     # The tutorial command: show only agents running remotely.
-    remote_result = e2e.run("mngr list --remote", comment="show only agents running remotely")
+    remote_result = e2e.run(
+        "mngr list --remote", comment="show only agents running remotely", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
     expect(remote_result).to_succeed()
 
     # The local agent must be filtered out of the remote-only listing.
-    remote_json = e2e.run("mngr list --remote --format json", comment="remote-only listing as JSON")
+    remote_json = e2e.run(
+        "mngr list --remote --format json",
+        comment="remote-only listing as JSON",
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
     expect(remote_json).to_succeed()
     remote_agents = json.loads(remote_json.stdout)["agents"]
     assert all(agent["name"] != "local-task" for agent in remote_agents), (
@@ -310,7 +317,9 @@ def test_list_provider_filter(e2e: E2eSession) -> None:
     Modal backend skipped because its per-user environment does not exist yet) it
     reports "No agents found".
     """
-    result = e2e.run("mngr list --provider modal", comment="filter by provider")
+    result = e2e.run(
+        "mngr list --provider modal", comment="filter by provider", timeout=REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
     expect(result).to_succeed()
     # In a fresh environment there are no agents, and the Modal backend is
     # skipped entirely when its per-user environment does not exist yet, so the
@@ -445,14 +454,14 @@ def test_list_fields_and_sort(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create list-older --provider modal --type command --no-connect --no-ensure-clean -- sleep 100200",
             comment="create the older Modal agent",
-            timeout=240.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
     expect(
         e2e.run(
             "mngr create list-newer --provider modal --type command --no-connect --no-ensure-clean -- sleep 100201",
             comment="create the newer Modal agent",
-            timeout=240.0,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
     ).to_succeed()
 

@@ -608,3 +608,17 @@ def test_run_background_shutdown_event_already_set() -> None:
     process.wait(timeout=2.0)
     assert process.is_finished()
     assert process.returncode != 0
+
+
+def test_get_reader_thread_stack_names_the_running_steps_without_paths() -> None:
+    process = run_background(["sleep", LONG_SLEEP_SECONDS])
+    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
+
+    stack = process.get_reader_thread_stack()
+
+    process.terminate(force_kill_seconds=5.0)
+    assert stack is not None
+    assert "imbue.concurrency_group.subprocess_utils.run_local_command_modern_version" in stack
+    assert stack[0].startswith("threading.")
+    assert not any("/" in name for name in stack)
+    assert process.get_reader_thread_stack() is None

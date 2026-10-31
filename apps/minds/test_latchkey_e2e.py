@@ -26,9 +26,11 @@ credentials at all:
 
 Asserted end-to-end, from *inside* the workspace via ``mngr exec``:
 
-a. ``GET /permissions/self`` succeeds on ``$LATCHKEY_GATEWAY`` with the
-   injected password + permissions-override JWT, through the VPS gateway's
-   desktop-forwarding extension.
+a. ``GET /permissions/self`` naming the desktops succeeds on
+   ``$LATCHKEY_GATEWAY`` with the injected password (a remote workspace gets
+   no permissions override), through the VPS gateway's desktop-forwarding
+   extension, and naming none is answered by the VPS gateway itself with the
+   permissions file it enforces.
 b. A native ``/gateway/...`` request is served by that same VPS gateway and
    its listen password is wired to the desktop-derived value. Nothing listens
    on the retired port 1990, nothing is tunneled onto the container's own
@@ -502,6 +504,33 @@ def _parse_created_event(create_stdout: str) -> tuple[str, str]:
     pytest.fail(f"no 'created' event found in mngr create output:\n{create_stdout}")
 
 
+def _first_json_object_line(text: str) -> dict[str, object] | None:
+    """The first line of ``text`` that parses as a JSON object, or None (``mngr exec`` appends a status line)."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _read_vps_permissions(ssh_config_path: Path) -> dict[str, object] | None:
+    """The permissions file the VPS gateway enforces, or None while it is absent or unreadable."""
+    result = _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}")
+    if result.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _seed_machine_store_slack_credentials(latchkey_binary: Path, latchkey_directory: Path, host_id: str) -> None:
     """Store fake slack credentials in the *machine store* of ``host_id``.
 
@@ -808,10 +837,12 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
 
             password = latchkey_env[ENV_LATCHKEY_GATEWAY_PASSWORD]
 
-            # (a) the VPS gateway forwards desktop-owned extension routes
+            # (a) the VPS gateway forwards desktop-owned extension routes. A
+            # /permissions/self read naming no desktop is answered by the VPS
+            # gateway itself, so naming every desktop is what reaches them.
             desktop_self_command = _curl_gateway_command(
                 _WORKSPACE_GATEWAY_URL,
-                {"X-Latchkey-Gateway-Password": password},
+                {"X-Latchkey-Gateway-Password": password, "X-Latchkey-Device": "*"},
                 "/permissions/self",
             )
             # Content-based success check ("mngr exec" does not reliably
@@ -832,6 +863,30 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert "latchkey-self" in desktop_self.stdout, (
                 f"remote gateway /permissions/self forwarding never succeeded from the workspace:\n"
                 f"stdout:\n{desktop_self.stdout}\nstderr:\n{desktop_self.stderr}\n"
+                f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
+            )
+            # Naming no desktop, the VPS gateway answers with the permissions
+            # file it enforces. A read forwarded to the desktop would not match
+            # it: the desktop's copy keeps the per-agent Studio API rule that
+            # the machine's copy is stripped of.
+            machine_self = _poll_workspace_probe(
+                env,
+                repo,
+                agent_address,
+                _curl_gateway_command(
+                    _WORKSPACE_GATEWAY_URL, {"X-Latchkey-Gateway-Password": password}, "/permissions/self"
+                ),
+                is_success=lambda result: (
+                    (answer := _first_json_object_line(result.stdout)) is not None
+                    and answer == _read_vps_permissions(ssh_config_path)
+                ),
+                timeout=_VPS_GATEWAY_REACHABLE_TIMEOUT_SECONDS,
+            )
+            enforced_policy = _read_vps_permissions(ssh_config_path)
+            assert _first_json_object_line(machine_self.stdout) == enforced_policy, (
+                f"the VPS gateway never answered /permissions/self with the policy it enforces "
+                f"({_VPS_PERMISSIONS_PATH}: {enforced_policy}):\n"
+                f"stdout:\n{machine_self.stdout}\nstderr:\n{machine_self.stderr}\n"
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
 

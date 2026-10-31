@@ -13,6 +13,7 @@ from imbue.minds.mngr_settings._migrations import apply_one_shot_settings_migrat
 from imbue.minds.mngr_settings._migrations import apply_settings_document_migrations
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
+from imbue.minds.mngr_settings.profile_paths import ensure_active_profile_dir
 from imbue.minds.mngr_settings.provider_blocks import AWS_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import AZURE_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import GCP_BACKEND_NAME
@@ -20,12 +21,34 @@ from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import MODAL_BACKEND_NAME
 
 
-def ensure_mngr_settings_before_mngr_import() -> None:
-    """Reconcile the mngr settings for the active env, before mngr is imported.
+def ensure_mngr_profile_and_settings_before_mngr_import() -> None:
+    """Create the active env's mngr profile if missing, then reconcile its settings, before mngr is imported.
 
-    Called from ``main.py`` between ``apply_bootstrap()`` and the ``cli_entry`` import.
-    mngr consults settings.toml during its own import-time initialization (plugin blocking, config discovery), so the Imbue Studio overrides must be on disk before any ``imbue.mngr.*`` module loads -- this function enforces that ordering at runtime.
     No-op when ``MINDS_ROOT_NAME`` is unset (an unactivated shell has nothing to reconcile).
+    """
+    root = _active_root_before_mngr_import()
+    if root is None:
+        return
+    ensure_active_profile_dir(root.mngr_host_dir)
+    ensure_mngr_settings(root)
+
+
+def ensure_mngr_settings_before_mngr_import() -> None:
+    """Reconcile the mngr settings for the active env, before mngr is imported, leaving a missing profile uncreated.
+
+    A shell still activated against a destroyed env thereby does not get the env's root back from its next command.
+    No-op when ``MINDS_ROOT_NAME`` is unset (an unactivated shell has nothing to reconcile).
+    """
+    root = _active_root_before_mngr_import()
+    if root is None:
+        return
+    ensure_mngr_settings(root)
+
+
+def _active_root_before_mngr_import() -> MindsRoot | None:
+    """The active env's root, or None when ``MINDS_ROOT_NAME`` is unset; raises when mngr is already imported.
+
+    mngr consults settings.toml during its own import-time initialization (plugin blocking, config discovery), so the Imbue Studio overrides must be on disk before any ``imbue.mngr.*`` module loads -- this enforces that ordering at runtime.
     """
     already_imported = [name for name in sys.modules if name == "imbue.mngr" or name.startswith("imbue.mngr.")]
     if already_imported:
@@ -34,8 +57,8 @@ def ensure_mngr_settings_before_mngr_import() -> None:
             f"loaded: {already_imported[:5]}"
         )
     if os.environ.get(MINDS_ROOT_NAME_ENV_VAR) is None:
-        return
-    ensure_mngr_settings(MindsRoot.from_environment())
+        return None
+    return MindsRoot.from_environment()
 
 
 # The default-instance suppression blocks, keyed by provider name, each pinned
@@ -118,7 +141,7 @@ def ensure_mngr_settings(root: MindsRoot) -> bool:
 
     Reconciles the file to the desired shape declared above, writing only when something actually drifted.
     Returns ``True`` when the file was written -- the provider set visible to a running ``mngr observe`` changed, so callers that hold a supervisor handle should bounce the observe child.
-    Skips silently when mngr hasn't been initialized in this host_dir yet (no ``config.toml`` / no profile dir) -- there's nothing to write to.
+    Skips silently when the host_dir has no active profile dir -- there's nothing to write to.
     """
     store = settings_store_for(root)
     if store is None:

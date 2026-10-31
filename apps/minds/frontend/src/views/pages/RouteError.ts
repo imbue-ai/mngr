@@ -5,6 +5,7 @@
 // covers only the in-app navigation errors.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import { ButtonLink } from "../components/Button";
 import { PageNarrowContainer } from "../components/Layout";
 import { routeLinkAttrs } from "../components/route-link";
@@ -22,7 +23,18 @@ export function RouteError(): m.Component<RouteErrorAttrs> {
       return m(PageNarrowContainer, { maxWidth: "max-w-[460px]" }, [
         m("h1", { class: "type-heading text-primary" }, title),
         m("p", { class: "mt-2 text-primary" }, message),
-        m("div", { class: "mt-4" }, m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/") }, "Back to workspaces")),
+        m(
+          "div",
+          { class: "mt-4" },
+          m(
+            ButtonLink,
+            {
+              variant: "primary",
+              ...routeLinkAttrs(getAppContext().shell.hubRoute()),
+            },
+            "Back to workspaces",
+          ),
+        ),
       ]);
     },
   };

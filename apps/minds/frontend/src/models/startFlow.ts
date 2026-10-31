@@ -11,7 +11,8 @@
 import type { ResendOutcome } from "./emailVerification";
 
 /** The agent speaks first, and names the thing the rest of the exchange is about. */
-export const MANIFESTO_OPENER = "Imbue Studio is honest software.";
+export const MANIFESTO_OPENER =
+  "Studio is a new kind of personal computer, built on honest software.";
 /** The phrase in the opener the exchange is about: italic wherever the opener is drawn. */
 export const MANIFESTO_OPENER_EMPHASIS = "honest software";
 export const MANIFESTO_QUESTION = "Wait.. what is honest software?";
@@ -19,7 +20,7 @@ export const MANIFESTO_HEADING = "Honest Software:";
 
 /**
  * A line behind a chevron toggle, and what opens under it: the manifesto's
- * points, and the creation page's reading material.
+ * points.
  */
 export interface DisclosurePoint {
   id: string;
@@ -32,36 +33,35 @@ export const MANIFESTO_POINTS: DisclosurePoint[] = [
     id: "loyal",
     label: "is 100% loyal to you",
     detail:
-      "Your agent works for you and nobody else. It is not tuned to sell you things, keep you scrolling, " +
-      "or serve an advertiser. When your interests and someone else's differ, it takes your side.",
+      "It isn’t built to sell you things, keep you hooked, or make money off your attention. Studio answers " +
+      "to you, not to advertisers or big tech companies.",
   },
   {
     id: "data",
     label: "never sells your data",
     detail:
-      "What you tell your agent stays between you and it. Your conversations, files and memory are never " +
-      "sold, shared with advertisers, or used to train models for other people.",
+      "Everything stays between you and Studio. We never sell it, show it to advertisers, or use it to train " +
+      "AI for anyone else.",
   },
   {
     id: "transparent",
     label: "is fully transparent",
     detail:
-      "You can see what your agent is doing and why: every action it takes, every service it reaches, " +
-      "every permission it uses. There is no hidden behavior and nothing you are not allowed to inspect.",
+      "You can always see what Studio is doing and why: what it changed, which apps it connected to, and " +
+      "what it has access to. Nothing happens behind your back.",
   },
   {
     id: "secure",
     label: "is safe and secure",
     detail:
-      "Your agent runs in its own workspace, apart from your other data, and only reaches the services you " +
-      "grant it. You decide what it may touch, and you can take a permission back at any time.",
+      "Studio can only use the apps and accounts you connect. You can disconnect any of them, anytime.",
   },
   {
     id: "portable",
     label: "doesn't lock you in",
     detail:
-      "Your workspace is yours. Run it on Imbue Cloud, on your own computer, or on a provider you choose, " +
-      "and move it later without losing anything. Your data leaves with you whenever you want it to.",
+      "Run Studio on our cloud, your own computer, or a provider you choose, and switch whenever you want " +
+      "without losing a thing. Leave at any time and take everything with you.",
   },
 ];
 
@@ -77,11 +77,12 @@ export const REPORTING_ASK = "Is it ok if we report errors to help improve Studi
 /** What the ask does not say, a click away. */
 export const REPORTING_MORE_LABEL = "See more";
 export const REPORTING_MORE_DETAIL =
-  "The reports we collect include diagnostic details about the error and your setup, which can be identifying " +
-  "at times (e.g. an email account). We generally try to anonymize data, and we try to ensure that error data " +
-  "is not retained for more than 30 days. You can change this any time in Settings → Error reporting.";
-export const REPORTING_DECLINE_LABEL = "No";
-export const REPORTING_ACCEPT_LABEL = "Sounds great";
+  "We want you to know what you're saying yes to. Error reports include details about what went wrong and how " +
+  "your Studio is set up. We try to remove anything personal, but sometimes something identifying, like an email " +
+  "address, gets through. Your privacy matters to us, so we do our best to delete error data within 30 days. If " +
+  "you change your mind, you can turn error reporting on or off in Settings → Error reporting.";
+export const REPORTING_DECLINE_LABEL = "No thanks";
+export const REPORTING_ACCEPT_LABEL = "Yes, send reports";
 
 /** The user's bubble rises into place over this long. */
 export const CHAT_BUBBLE_MS = 280;
@@ -129,7 +130,7 @@ export type StepId = "run" | "auth" | "account" | "retry" | "again" | "verify" |
 const FORM_CHOICE_IDS = ["local", "own-cloud"] as const;
 /** The answers that open the create form instead of creating on Imbue Cloud. */
 export type FormChoiceId = (typeof FORM_CHOICE_IDS)[number];
-export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified";
+export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified" | "existing-login";
 
 export function isFormChoice(value: string | null): value is FormChoiceId {
   return FORM_CHOICE_IDS.some((id) => id === value);
@@ -163,7 +164,7 @@ export interface FlowStep {
   /** The points of the answer the question recommends, under its title, on the question that has them. */
   table?: TableColumn[];
   choices: FlowChoice[];
-  /** The answers it does not recommend: small links under the buttons, so they read as the exceptions. */
+  /** The answers it does not recommend: small links at the row's left, so they read as the exceptions. */
   minorChoices?: FlowChoice[];
   /** The quieter, agent-side way out under the question, when there is one. */
   aside?: { label: string };
@@ -199,7 +200,8 @@ const WHERE_TO_RUN_CHOICES: Pick<FlowStep, "choices" | "minorChoices"> = {
   minorChoices: [LOCAL_CHOICE, OWN_CLOUD_CHOICE],
 };
 
-export const EXISTING_LOGIN_LABEL = "I already have a workspace (log in)";
+/** The start flow's title-bar way back in for a returning user, offered for the whole flow. */
+export const EXISTING_LOGIN_LABEL = "Already set up? Log in";
 export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
@@ -212,6 +214,8 @@ const SIGNUP_CHOICE: FlowChoice = {
 };
 
 const SIGNIN_ACK = "Welcome back.";
+/** What the agent says on hearing Use Imbue Cloud with nobody signed in, ahead of asking for the account. */
+const AUTH_ACK = "Great.";
 
 const VERIFIED_CHOICE: FlowChoice = {
   id: "verified",
@@ -224,8 +228,8 @@ const VERIFIED_CHOICE: FlowChoice = {
 export const FLOW: Record<StepId, FlowStep> = {
   run: {
     ask:
-      "Let's create your first workspace. A workspace is a private place where you and your agent work together. " +
-      "We recommend running it on Imbue Cloud.",
+      "Let's set up your workspace. It's a virtual computer that's all yours, where you build apps just by " +
+      "asking. We recommend running it on Imbue Cloud.",
     table: [
       {
         title: "Imbue Cloud",
@@ -234,21 +238,18 @@ export const FLOW: Record<StepId, FlowStep> = {
         points: [
           "30 second setup",
           "Runs even if your computer is off",
-          "Accessible from mobile",
-          "Shareable with other people",
+          "Use it from your phone",
+          "Easy to share with others",
         ],
       },
     ],
     ...WHERE_TO_RUN_CHOICES,
-    aside: { label: EXISTING_LOGIN_LABEL },
   },
   // Sign in leads: the app is downloaded from a page that already required an
   // Imbue account, so the account step is a sign-in for nearly everyone. The
   // quieter create-account button stays for dev and CI runs.
   auth: {
-    ask:
-      "A cloud workspace runs on our machines, so it needs an Imbue account. " +
-      "Sign in with the account you downloaded Imbue Studio with.",
+    ask: "Imbue Cloud needs an Imbue account. Use the email you downloaded Imbue Studio with.",
     choices: [SIGNUP_CHOICE, { id: "signin", label: "Sign in", said: "", ack: SIGNIN_ACK, isEmphasized: true }],
   },
   // The account step when an account is already signed in: the entry's ack
@@ -316,8 +317,8 @@ export function verificationEmailSentNote(email: string, outcome: ResendOutcome)
 }
 
 export const SIGN_IN_INTRO_BY_CHOICE: Record<"signup" | "signin", string> = {
-  signup: "Create an account to run your workspace in Imbue Cloud.",
-  signin: "Sign in to run your workspace in Imbue Cloud.",
+  signup: "Create an account to run Studio in Imbue Cloud.",
+  signin: "Sign in to run Studio in Imbue Cloud.",
 };
 
 /** What your side says once the account step is done. */
@@ -403,7 +404,7 @@ function stepEntry(id: StepId, ack: string): TranscriptEntry {
 
 /** The account step after the cloud answer: asking for an account, or offering to continue as the one signed in. */
 function accountStepEntry(signedInAccount: FlowAccount | null): TranscriptEntry {
-  if (signedInAccount === null) return stepEntry("auth", CLOUD_CHOICE.ack);
+  if (signedInAccount === null) return stepEntry("auth", AUTH_ACK);
   const email = signedInAccount.email;
   return { kind: "step", id: "account", ack: signedInAck(email), answer: null, said: "", email };
 }
@@ -523,9 +524,43 @@ export function landedAccount(
   return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
 }
 
-/** The user pressed the quieter "I already have a workspace (log in)" under the first question. */
+/** The user pressed the title bar's "Already set up? Log in". */
 export function chooseExistingLogin(state: StartFlowState): StartFlowState {
   return { ...state, pending: "existing-login" };
+}
+
+/** What the agent says when the existing-login sign-in lands on an account with no workspaces. */
+export const NO_WORKSPACES_ACK = "You don't have any workspaces yet, so let's create your first one.";
+
+/**
+ * The existing-login sign-in landed on an account with no workspaces: the
+ * sign-in receipt becomes the open question's answer, whichever it is, and
+ * where to run is asked again -- the first workspace still needs to be made,
+ * now under the signed-in account (the view adopts it into the window), so
+ * an account or verification the flow had settled on is dropped. With no
+ * question open yet (the reporting question unanswered) nothing is recorded.
+ * An account that has workspaces leaves the flow for its home page instead,
+ * which is the view's doing, like the routing itself.
+ */
+export function continueExistingLoginWithoutWorkspaces(
+  state: StartFlowState,
+  account: FlowAccount,
+): StartFlowState {
+  if (state.pending !== "existing-login") return state;
+  const at = openStepIndex(state);
+  if (at === null) return { ...state, pending: null };
+  return {
+    ...state,
+    pending: null,
+    account: null,
+    offeredAccount: null,
+    verificationEmail: null,
+    isCloudCreatePending: false,
+    entries: [
+      ...withAnswer(state.entries, at, "existing-login", signedInSaid(account.email)),
+      stepEntry("again", NO_WORKSPACES_ACK),
+    ],
+  };
 }
 
 /** A modal the flow was waiting on closed without finishing. */
@@ -696,11 +731,17 @@ function lastAccountStepIndex(entries: TranscriptEntry[]): number {
   return -1;
 }
 
-/** The question the user is being asked right now, or null when none is open. */
+/**
+ * The question the user is being asked right now, or null when none is open:
+ * the last question, unless it is answered. Notes may follow it (a re-sent
+ * verification email's), and it is still the one being asked.
+ */
 export function openStepIndex(state: StartFlowState): number | null {
-  const last = state.entries[state.entries.length - 1];
-  if (last === undefined || last.kind !== "step" || last.answer !== null) return null;
-  return state.entries.length - 1;
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry.kind === "step") return entry.answer === null ? index : null;
+  }
+  return null;
 }
 
 /**
@@ -719,6 +760,11 @@ export class StartFlowModel {
    * reader's own.
    */
   isSubmittedCreateCloudPreset = false;
+  /**
+   * The open start page's sign-in for a returning user, which the title bar
+   * offers at every point of the flow; null while no start page is mounted.
+   */
+  logInExisting: (() => void) | null = null;
 
   reset(): void {
     this.state = initialStartFlowState();

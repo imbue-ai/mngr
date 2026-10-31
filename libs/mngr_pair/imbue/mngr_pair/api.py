@@ -43,7 +43,9 @@ from imbue.mngr_pair.remote import write_ssh_wrapper_script
 
 _GIT_FETCH_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# Told True when unison starts moving bytes, False when it settles again.
+# Told True when unison starts moving bytes, False when a pass settles: always
+# for the first pass, so a caller learns the replicas are level even when that
+# pass had nothing to move, and on every later pass that moved something.
 TransferCallback = Callable[[bool, "TransferProgress | None"], None]
 
 # How often a path-restricted sync rescans. unison normally watches its
@@ -196,9 +198,13 @@ class UnisonSyncer(MutableModel):
     on_transfer_change: TransferCallback | None = Field(
         frozen=True,
         default=None,
-        description="Called with True when unison starts moving bytes and False when it settles again",
+        description=(
+            "Called with True when unison starts moving bytes, and with False when a pass settles: "
+            "always for the first pass, then whenever a transfer ends"
+        ),
     )
     _is_transferring: bool = PrivateAttr(default=False)
+    _has_settled_once: bool = PrivateAttr(default=False)
     _progress: "TransferProgress | None" = PrivateAttr(default=None)
     _progress_reported_at: float = PrivateAttr(default=0.0)
     _running_process: RunningProcess | None = PrivateAttr(default=None)
@@ -300,7 +306,10 @@ class UnisonSyncer(MutableModel):
         """Flip the transferring flag on unison's own progress narration.
 
         Only a change is reported: unison prints a line per item copied, and a
-        consumer wants the edges, not one event per file.
+        consumer wants the edges, not one event per file. The one exception is
+        the first pass to finish, which is reported even when it moved nothing:
+        "Nothing to do" is not an edge, but it is the only word that the two
+        replicas have been compared and found level.
         """
         progress = parse_transfer_progress(line)
         if progress is not None:
@@ -315,9 +324,11 @@ class UnisonSyncer(MutableModel):
             is_transferring = False
         else:
             return
-        if is_transferring == self._is_transferring:
+        is_first_settle = not is_transferring and not self._has_settled_once
+        if is_transferring == self._is_transferring and not is_first_settle:
             return
         if not is_transferring:
+            self._has_settled_once = True
             # Nothing outstanding once it settles, and a stale "12 of 17 MB"
             # beside a finished sync reads as a transfer that stopped halfway.
             self._progress = None
@@ -351,6 +362,7 @@ class UnisonSyncer(MutableModel):
     def start(self) -> None:
         """Start the unison sync process."""
         self._started_event.clear()
+        self._has_settled_once = False
         cmd = self._build_unison_command()
         logger.debug("Starting unison with command: {}", " ".join(cmd))
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import selectors
+import signal
 import subprocess
 import time
 from collections.abc import Iterator
@@ -251,15 +252,32 @@ def _shutdown_popen(
         process.pid,
         reason,
     ):
-        process.terminate()
+        _send_shutdown_signal(process, signal.SIGTERM)
         if exited_event.wait(timeout=shutdown_timeout_sec):
             return process.returncode
         logger.warning("Process didn't die within {} seconds of SIGTERM", shutdown_timeout_sec)
-        process.kill()
+        _send_shutdown_signal(process, signal.SIGKILL)
         if exited_event.wait(timeout=_POST_SIGKILL_WAIT_SECONDS):
             return process.returncode
         logger.error("Process didn't die after kill()")
         return None
+
+
+def _send_shutdown_signal(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    """Send ``sig`` to the child, tolerating a refusal: the caller waits for the exit either way.
+
+    macOS can refuse a signal to our own child with EPERM while that child is
+    in the middle of exiting (``send_signal`` only suppresses ESRCH). The signal
+    is only a request -- the exit waiter's event is what says the child is gone
+    -- so a refusal must not abort the wait for an exit that may already be
+    underway. Logged at debug like the already-exited race above it: a child
+    that is genuinely unsignalable surfaces through the caller's "didn't die"
+    warning and error instead.
+    """
+    try:
+        process.send_signal(sig)
+    except PermissionError as exc:
+        logger.debug("Could not send {} to subprocess (pid {}): {}", sig.name, process.pid, exc)
 
 
 def _start_exit_waiter(process: subprocess.Popen[bytes], on_exit: Callable[[], None]) -> Event:

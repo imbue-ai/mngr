@@ -21,8 +21,9 @@ by an abandoned create). The local host can never be destroyed.
 
 Use with caution! This operation is irreversible.
 
-By default, running agents cannot be destroyed. Use --force to stop and destroy
-running agents. The command will prompt for confirmation before destroying
+By default, running agents cannot be destroyed, nor can agents whose state
+could not be read (e.g. on a host too loaded to answer in time). Use --force to
+stop and destroy such agents. The command will prompt for confirmation before destroying
 agents or hosts unless --force is specified. With --force, a host address that
 matches nothing is skipped instead of failing, so cleanup scripts stay
 idempotent.

@@ -38,6 +38,7 @@ from typing import Final
 
 import pytest
 
+from imbue.minds.cli.latchkey_bundle_diagnostics import check_latchkey_bundle_integrity
 from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_SHA256_BY_TRIPLE as GATEWAY_CURL_SHIMS_SHA256_BY_TRIPLE
 from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_VERSION as GATEWAY_CURL_SHIMS_VERSION
 from imbue.mngr_pair.remote import REMOTE_UNISON_SHA256
@@ -86,6 +87,7 @@ MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
 TEST_ONLY_HELPER_PATTERN = re.compile(r"(^|/)([^/]*_)?testing\.py$")
 _DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
+_BUNDLE_MANIFEST_PATH: Final[Path] = APP_ROOT / "scripts" / "bundle-manifest.js"
 _ENSURE_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "ensure-binaries.js"
 _INSTALL_LINUX_PATH: Final[Path] = APP_ROOT / "scripts" / "install-linux.sh"
 _VERIFY_LINUX_ARTIFACTS_PATH: Final[Path] = APP_ROOT / "scripts" / "verify-linux-artifacts.sh"
@@ -579,6 +581,55 @@ def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
             "pnpm-lock.yaml and floats the shipped playwright independently "
             "of what dev/CI tested. Use `pnpm deploy --prod` instead."
         )
+
+
+def test_bundle_latchkey_writes_the_integrity_manifest() -> None:
+    """bundleLatchkey() must write the manifest the backend checks a failing bundle against."""
+    text = (APP_ROOT / "scripts" / "build.js").read_text()
+    match = re.search(r"function bundleLatchkey\(\) \{(.*?)\n\}\n", text, re.DOTALL)
+    assert match is not None, "Could not locate bundleLatchkey() in build.js"
+    assert "writeBundleManifest(destDir)" in match.group(1)
+
+
+def test_bundle_manifest_round_trips_into_the_backend_integrity_check(tmp_path: Path) -> None:
+    """The manifest bundle-manifest.js writes is the one the backend's integrity check reads."""
+    bundle_dir = tmp_path / "latchkey"
+    (bundle_dir / "bin").mkdir(parents=True)
+    (bundle_dir / "bin" / "latchkey").write_text("#!/usr/bin/env bash\n")
+    services_dir = bundle_dir / "node_modules" / "latchkey" / "dist" / "src" / "services"
+    services_dir.mkdir(parents=True)
+    (services_dir / "zoom.js").write_text("export const ZoomCredentials = {};\n")
+    keyring_node = bundle_dir / "node_modules" / "@napi-rs" / "keyring-darwin-arm64" / "keyring.node"
+    keyring_node.parent.mkdir(parents=True)
+    # A little-endian arm64 Mach-O header: MH_CIGAM_64 then CPU_TYPE_ARM64.
+    keyring_node.write_bytes(bytes.fromhex("cffaedfe0c000001") + b"unsigned")
+
+    assert _NODE_BINARY is not None
+    written = subprocess.run(
+        [
+            _NODE_BINARY,
+            "-e",
+            "console.log(require(process.argv[1]).writeBundleManifest(process.argv[2]));",
+            str(_BUNDLE_MANIFEST_PATH),
+            str(bundle_dir),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert written.returncode == 0, written.stderr
+    assert written.stdout.strip() == "3"
+
+    integrity = check_latchkey_bundle_integrity(bundle_dir)
+    assert integrity is not None
+    assert integrity.manifest_file_count == 3
+    assert (integrity.missing_paths, integrity.mismatched_paths, integrity.unexpected_paths) == ((), (), ())
+
+    (services_dir / "zoom.js").write_text("export const SomethingElse = {};\n")
+    keyring_node.write_bytes(bytes.fromhex("cffaedfe0c000001") + b"re-signed")
+    drifted = check_latchkey_bundle_integrity(bundle_dir)
+    assert drifted is not None
+    assert drifted.mismatched_paths == ("node_modules/latchkey/dist/src/services/zoom.js",)
 
 
 def test_pnpm_workspace_pins_cross_platform_architectures() -> None:

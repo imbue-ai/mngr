@@ -23,6 +23,8 @@ export class WorkspacesStore {
   restorableWorkspaceIds: readonly string[] = [];
   /** agent id -> the derived access state (and its detail) of each remote tile. */
   remoteWorkspaceStates: Readonly<Record<string, RemoteTileState>> = {};
+  /** account id ('local' for the device) -> how many rows that account's windows list, every account's. */
+  workspaceCountByAccountId: Readonly<Record<string, number>> = {};
 
   private accentByAnyId = new Map<string, AccentCacheEntry>();
   private agentIdByHostId = new Map<string, string>();
@@ -33,6 +35,7 @@ export class WorkspacesStore {
     this.destroyingAgentIds = message.destroying_agent_ids;
     this.restorableWorkspaceIds = message.restorable_workspace_ids;
     this.remoteWorkspaceStates = message.remote_workspace_states;
+    this.workspaceCountByAccountId = message.workspace_count_by_account_id ?? {};
     for (const entry of message.workspaces) {
       const cached: AccentCacheEntry = {
         accent: entry.accent || null,

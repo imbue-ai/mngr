@@ -29,6 +29,7 @@ _ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 
 
 @pytest.mark.release
+@pytest.mark.flaky
 @pytest.mark.timeout(900)
 def test_schedule_run_and_remove_modal_trigger() -> None:
     """Exercise the full Modal schedule lifecycle: add, list, run, verify, remove.

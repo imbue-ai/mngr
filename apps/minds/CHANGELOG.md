@@ -8,6 +8,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Nineteen more connectors (Airtable, Atlassian, Buildkite, Cal.com, Fastmail, Hugging Face, Linktree, Neon, Netlify, OpenRouter, PayPal, PostHog, Supabase, Tailscale, TickTick, Trello, Vercel, Webflow, Wix) now show their real logo in the Permissions tab instead of the generic glyph.
+- Added: Started the Imbue Studio 0.9.4 stable rollout — the desktop stable channel offers the 0.9.4 build to 20% of mac and Linux installs, and the stable download link and browser-created workspaces pin `minds-v0.9.4`.
+- Added: Released Imbue Studio 0.9.4 and promoted it to the alpha desktop and browser channels (`FALLBACK_BRANCH` pinned to `minds-v0.9.4`; beta stays 0.8.7, stable 0.8.5), carrying harness-version-mismatch warnings, Antigravity reasoning-effort recording, and (through the services deploy that went with it) the web chrome clearing its data-encryption key on sign-out.
+- Added: Native crashes of the desktop app's main process now carry crashpad annotations on their Sentry minidump (last navigation milestone, a once-a-minute memory snapshot, and the last main-process event handled) to diagnose an unsymbolicated `EXC_BREAKPOINT` crash.
+- Added: Imbue Studio asks before a workspace opens a custom-scheme link (e.g. `paseo://`, `slack://`, `vscode://`), with a per-scheme "Always allow"; workspace apps on newer templates can handle such links themselves.
+- Added: Workspaces update themselves unattended -- scheduling and the update run inside the workspace, so a scheduled update no longer needs Imbue Studio open or the laptop awake, with an opt-in auto-update setting and a per-release security floor.
+- Added: minds 0.9.0 released.
+- Added: On macOS, Imbue Studio lists itself in System Settings > Privacy & Security > Full Disk Access.
 - Added: `apps/minds/docs/dev-setup.md`, a canonical prerequisites + bootstrap guide for setting up minds for development; `apps/minds/README.md`'s Getting started now points to it.
 - Added: Bumped bundled Latchkey to 2.21.0.
 - Added: Workspace/account state now syncs across a user's devices, end-to-end encrypted. Each associated workspace has a record on the Imbue Cloud connector — plaintext metadata (name, color, provider, which device hosts it) plus a secrets blob (the workspace's SSH key material and its backup `restic.env`) encrypted under a per-account data key that only the user's master password can unwrap. The master password's only role is wrapping that per-account key; new backup repositories are initialized with the workspace's own random password, the per-workspace "backup encryption method" / master-password inputs are gone from the create form and workspace settings, and the Settings page's password change rewraps the key (and pushes/clears synced secrets) instead of rekeying every repository. Clearing the password scrubs all synced secrets server-side; while empty, only metadata syncs. The landing page and sidebar list workspaces on the user's other devices as greyed rows with an "on <device>" badge and a remove-from-list action; a new-device unlock banner asks for the master password once and installs the account key. Reconcile heals a missing server-side key bundle (converted legacy installs push their bundle up so a reinstall after a machine loss can still unlock). Legacy local state (`workspace_associations.json` — or the older `sessions.json` — plus `backup_password_hash` and `backup_password`) is converted once at startup and renamed aside with a `.pre-sync` suffix. Destroying a workspace tombstones its record so its backups remain reachable from any device.
@@ -150,9 +158,27 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Mint-only AI-key page (`/settings/ai-keys?workspace=<host_id>`), opened from the workspace's "Sign in with Imbue" option, mints a LiteLLM key for the workspace's account and copies a credential blob to paste back.
 - Added: Workspace apps can request microphone input (macOS still asks).
 - Added: Developer knobs `MINDS_REMOTE_DEBUGGING_PORT` (Chromium DevTools protocol on 127.0.0.1, also a `just minds-start` argument), `MINDS_WINDOW_CONTROLS=mac`, `MINDS_LATCHKEY_CURL` (dev mode only) and `start-desktop.sh --reopen`.
+- Added: Imbue Studio 0.9.1 released.
+- Added: Bumped bundled Latchkey to 3.19.4 (restores Zoom sign-in through latchkey).
+- Added: Each Imbue Studio window belongs to one account, with an account switcher in the titlebar; a window's account lives in its URL and its live channel, and the install-wide default account is removed (phase 1 of user-profile state).
+- Added: An account's home page with no workspaces of its own offers to switch the window to each other account (or the device) that has workspaces on this computer, naming how many each has.
+- Added: `GET /api/v1/agents/<agent_id>/folder-syncs` lets an agent in a workspace read this desktop's folder syncs with it (local and workspace paths, state, progress, direction, conflict rule).
+- Added: A workspace app can ask Imbue Studio to open the Permissions pane's Local files section (embed contract v11, `minds:open-local-files`).
+- Added: Released Imbue Studio 0.9.2 (a patch over 0.9.1, template `minds-v0.9.2`) and promoted it to the alpha desktop and workspace channels.
+- Added: Promoted Imbue Studio 0.9.4 to the beta desktop and browser channels (beta workspaces pin `minds-v0.9.4`, mac now requires macOS 13); stable stays 0.8.5.
+- Added: Cut the Imbue Studio 0.9.5 release and promoted it to the desktop alpha channel — a patch release carrying a redesigned workspace-update experience (titlebar status pill, rebuilt Settings > Updates tab, per-workspace update settings), HTTP clients moved to httpx2, first-run certificate verification against the OS trust store, >2 GiB backup exports, and bundled Latchkey 3.21.0.
+- Added: Bundled Latchkey 3.21.0 adds the Asana connector, shown with its brand mark in the Permissions tab.
 
 ### Changed
 
+- Changed: The desktop backend's HTTP clients now use `httpx2` (Pydantic's maintained `httpx` fork); on macOS the backend sets `SSL_CERT_FILE` to its certifi bundle so TLS keeps working before Apple's 2026-10-19 emSign update, while Linux uses the host CA store.
+- Changed: Bumped bundled Latchkey to 3.20.0.
+- Changed: Redesigned workspace updates — a titlebar status pill (replacing the full-width notice band and the update popup) carries a workspace's update and opens the rebuilt Settings > Updates tab, and auto-update is now per-workspace.
+- Changed: The update modal's security-fix notice is now drawn in the warning (orange) palette with plainer "See details" text.
+- Changed: The "Failed to start" screen (and reports filed from it) now show the backend's last stderr lines, exit code or signal, run duration, and how it was launched, instead of only the exit code.
+- Changed: Redesigned the share panel into two-line person cards that show whether each person has opened your workspace and where their invitation stands, replacing the "(hasn't signed up yet)" / "Joined" text.
+- Changed: Reworked onboarding (second pass): the agent asks during workspace creation whether you know what to build and offers examples, with new copy and a workspace tour.
+- Changed: The workspace backup programs are now real modules instead of string literals (behavior unchanged).
 - Changed: `minds env deploy` preflights the pinned Modal profile's workspace before touching cloud state, and its URL-mismatch failure now names the wrong-workspace-token cause with the `modal token new --profile <workspace>` fix.
 - Changed: CI cleanup now sweeps the R2 buckets imbue-cloud backups leave behind. The `cleanup-minds-ci-envs` stage deletes buckets whose owning account no longer exists (emptying each first). Because dev and CI tiers share a Cloudflare account, the rule is deliberately positive: a bucket is only swept when its owner prefix matches no user in any SuperTokens app on the shared core, and the sweep fails closed (unreachable SuperTokens, or empty live-owner set, aborts before deleting anything) so a developer's own backups can never be caught in it.
 - Changed: Titlebar "help" entry point reframed around bug reporting — the trigger now shows a bug glyph (instead of the question-mark "help" circle) with the tooltip "Ran into a bug?", and the modal is retitled "Ran into a bug?" with a "Here's how we can help:" lead-in above the fix-or-report options. The two paths inside (have an agent try to fix the problem, or report the bug to Imbue) are unchanged. A `bug` glyph is added to the 16x16 icon set.
@@ -327,6 +353,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Bumped bundled Latchkey from 2.21.0 to 3.19.3.
 - Changed: Tier `deploy.toml` gains `[origins]` (`accounts_origin`, `chrome_origin`, `cookie_domain`, `api_origin`, `llm_origin`, `legacy_chrome_origins`), `content_domain`, `[ssh_ca]`, optional `[management_plane]` (replacing `management_plane.toml`), per-plan quota definitions (`[plans.free]`, `[plans.explorer]`, `[plans.ally]` and a zero-quota `[plans.guest]`), `[storage] stop_retention_seconds`, `[waitlist] is_enabled`, and the `sharing`, `storage`, `sentry`, `ssh-ca` and `postmark` secret services (`pool-ssh` is dropped). Production keeps two warm connector containers and staging/production a 600s scaledown window, stopping share-relay 500s.
 - Changed: A source run without `--config-file`/`MINDS_CLIENT_CONFIG_PATH` defaults to the production `client.toml`. Dev binaries are cached per user (`~/.cache/minds/binaries/`, override `MINDS_BINARY_CACHE_DIR`), and dev uses the pinned `limactl`.
+- Changed: From 0.9.0, Imbue Studio requires macOS 13 or later; an older Mac stays on its 0.8.x build until macOS is updated.
+- Changed: The one-time "Turn on auto-updates?" offer now also appears over a workspace, not only over Home.
+- Changed: A synced folder reads "Syncing" until unison's first pass has compared both sides and left them level, and only then "Synced"; it used to say "Synced" the moment unison started.
+- Changed: A popped-out window no longer merges back when dragged over the window showing its workspace; its close control and the taskbar's "Bring back to desktop" remain the ways back, and the re-dock drop target and desktop ghost are gone.
+- Changed: The backup, restore and apply-update gates count a chat whose state can't be read (UNKNOWN) as running, so they don't run underneath a live chat on a loaded workspace.
+- Changed: Completed the Imbue Studio 0.9.4 stable rollout to 100% of mac (macOS 13+) and Linux installs; macOS 12 stays on 0.8.5.
 
 ### Deprecated
 
@@ -359,6 +391,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: The latchkey gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing datalib's Slack sync failing on a truncated `auth.test` reply.
+- Fixed: The `/api/v1/files` WebDAV server returns `403 Forbidden` instead of `500` (and no longer reports to Sentry) when macOS privacy protection blocks a folder such as Photos, Music or TV.
+- Fixed: An update running on a workspace whose template predates minds-v0.8.x is no longer stopped partway when the workspace runs short of memory.
+- Fixed: Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent runs a background command.
+- Fixed: A folder sync whose workspace was not running now waits and starts once the workspace is running again, instead of staying stopped until "Try again".
+- Fixed: "Render frame was disposed before WebFrameMain could be accessed" error when a workspace app reopened a custom-scheme link (present since 0.8.6).
+- Fixed: Long file paths in file-sharing permission dialogs show the full path in a hover tooltip.
 - Fixed: Workspace glossary and design docs updated to match reality — a workspace is a mngr host (not an agent labeled `workspace=<name>`, a label that was removed) holding a primary `system-services` agent plus chat/worktree/worker agents; the launch-mode list drops the nonexistent `CLOUD` and adds `VULTR`/`AWS`/`MODAL`; and `design.md`/`user_story.md`'s `mngr create` example uses `--new-host` instead of the removed `--label workspace=<name>` flag.
 - Fixed: Tooltips clipped on their right side and modal overlays (get help, inbox, workspace menu, sign-in) leaving an un-dimmed strip at the window's right edge on Macs with always-visible ("classic") scrollbars. The global `scrollbar-gutter: stable` rule (added so content pages don't shift when a classic scrollbar appears) also applied to edge-to-edge chrome and overlay surfaces, reserving a 15px gutter that nothing painted. Those surfaces now opt out via a new `OverlaySurface` template wrapper and an `html_class` argument on the Base template.
 - Fixed: Synced workspaces silently de-associated by a startup race. The absent-host tombstone pass could tombstone a workspace record while its provider was merely slow to produce its first discovery listing (e.g. a stopped Lima VM right after app start), pushing a spurious "destroyed" state to the connector. The pass now requires the record's specific provider to have produced at least one snapshot before treating absence as evidence. Adds the inverse safety net: a tombstoned record hosted by this install whose workspace is live in local discovery is automatically re-activated and re-pushed (self-healing rows tombstoned by the old race), guarded so an in-flight destroy or a genuinely-destroyed host lingering in discovery is never resurrected.
@@ -477,12 +516,28 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Backend shutdown stalling ~10s and being force-killed, and pre-warmed `mngr` processes outliving the backend; SIGTERM/SIGINT quit without the running-workspaces prompt, and closing a window no longer raises an uncaught main-process error.
 - Fixed: Imbue Studio no longer pins a CPU core when a workspace keeps re-announcing its apps (e.g. one still running the retired `app-watcher`): unchanged workspace updates no longer wake the backend's listeners, and UI updates are spaced at least 100 ms apart.
 - Fixed: The report-a-bug dialog an agent opens closes again (close X, Escape) after two quick agent requests, and Done returns to the machine the report is about.
+- Fixed: A workspace update whose apply has landed now reads "Finishing update…" until its verdict, instead of showing "Preparing an update for this workspace" again.
+- Fixed: The band over a workspace no longer flashes "Lost connection to this workspace" when its update starts landing.
+- Fixed: Adding a path that is already shared no longer re-grades it to read-only, which used to take away write access and turn a two-way sync one-way.
+- Fixed: The Permissions pane's once-a-second poll no longer shows a sync that failed to come back at launch as a plain "stopped" row while another sync is running; it reports the failure.
+- Fixed: Quitting Imbue Studio now reliably stops every folder sync, including one that was part-way to starting (which used to leave a `mngr pair` and its unison outliving the app).
+- Fixed: Creating a workspace from a remote repository with a branch it does not have (e.g. `main` on a `master`-default repo) no longer reports "This repository looks private"; the creating page explains the ref is missing (new `GIT_REF_NOT_FOUND` `error_kind`) and the failure is no longer sent to error tracking.
+- Fixed: On macOS, the traffic lights of a pulled-out window now show the normal pointer instead of the grab cursor.
+- Fixed: Exporting a workspace backup as a zip no longer fails with a 500 when the snapshot contains a file larger than 2 GiB (zip entries now use ZIP64 headers).
+- Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
+- Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
 
 ### Security
 
+- Security: Cleared every `pnpm audit --prod` finding in the Electron package (28 advisories, 16 high) and the renderer (`dompurify` 3.4.17 fixes a critical sanitizer bypass).
+- Security: The desktop app's Electron 45 bundle moves to 45.1.0, adding Chromium 156 security fixes and stricter handling of malformed asar archives and File System Access writes to `.git/hooks`.
+- Security: Security update for the emSign/eMudhra CA compromise -- Electron 45, uv 0.13.4, certifi 2026.10.19 and Node 24.22.1 drop the compromised CA root, and workspaces below the new security floor are offered the fix (Electron 45 drops macOS 12 support).
 - Security: Redact secrets from persisted logs. The `mngr create` subprocess is now given a log-safe process `name` with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field or `ProcessError` messages. The `modal secret create` subprocess used by `minds env` deploy tooling is likewise named with its `KEY=VALUE` secret values masked so raw Vault secrets no longer reach the thread name or error messages. The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie — a reusable, session-lifetime bearer token — before writing backend stdout events to disk. The single-use one-time login code is left as-is (spent immediately at session start).
 - Security: The bundled lima download is SHA256-verified against a pinned hash, like every other bundled binary.
 - Security: Remote workspace VPSes load an nftables policy (via `mngr_latchkey` provisioning) that drops traffic to the gateway and owner-exec daemon ports unless it arrives on the docker bridge or loopback, and drops any other new connection from the workspace into its VPS.
+- Security: Desktop probes of the local `mngr forward` proxy verify its TLS certificate against the proxy's local CA, and the Electron shell trusts a loopback forward-proxy origin only when its leaf was signed by that CA, instead of disabling certificate verification.
+- Security: The share-URL readiness probe verifies certificate chains against the system roots instead of disabling verification altogether.
+- Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
 
 ## [v0.2.8] - 2026-05-13
 

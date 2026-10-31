@@ -53,6 +53,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import RUNNING_AGENT_LIFECYCLE_STATES
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
@@ -394,6 +395,8 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
 
     If the agent is stopped and is_start_desired is True, starts the agent.
     If the agent is stopped and is_start_desired is False, raises UserInputError.
+    If the agent's state could not be read, it is started when is_start_desired is True (a no-op
+    for one that is running, below) and otherwise left as it is.
 
     Purely additive: ``start_agents`` no-ops on an existing tmux session, so a DONE
     agent's lingering session (and its pane content) is left exactly as it was.
@@ -406,14 +409,14 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     would kill the tree the faster one had just launched.
     """
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state not in (
-        AgentLifecycleState.RUNNING,
-        AgentLifecycleState.REPLACED,
-        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        AgentLifecycleState.WAITING,
-    ):
+    if lifecycle_state == AgentLifecycleState.UNKNOWN and not is_start_desired:
+        return
+    if lifecycle_state not in RUNNING_AGENT_LIFECYCLE_STATES:
         if is_start_desired:
-            logger.info("Agent {} is stopped, starting it", agent.name)
+            if lifecycle_state == AgentLifecycleState.UNKNOWN:
+                logger.info("Could not read whether agent {} is running; starting it if it is not", agent.name)
+            else:
+                logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(
                 is_readiness_awaited=False,
                 start_action=lambda: start_agents_locked(host, [agent.id], is_restart=False),

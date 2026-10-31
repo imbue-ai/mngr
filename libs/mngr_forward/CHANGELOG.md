@@ -6,6 +6,29 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The `httpx2` dependency floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
+
+### Fixed
+
+- Fixed: An SSH host that closes the connection during the handshake or while a reverse tunnel is being set up now surfaces as an `SSHTunnelError` (`HOST_CONNECT`) instead of a bare paramiko `EOFError` that used to kill the reverse-tunnel health-check thread and abort the latchkey discovery cycle.
+- Fixed: Removing a reverse tunnel and `SSHTunnelManager.cleanup()` no longer raise when the host hangs up during the best-effort remote port-forward cancel.
+
+## [v0.2.1] - 2026-10-28
+
+### Added
+
+- Added: `local_ca_dir` and `local_ca_cert_path` in `imbue.mngr_forward.tls`, and `forward_plugin_state_dir` in `imbue.mngr_forward.primitives`, so host applications can locate the proxy's local CA certificate from the mngr host dir alone and pin it when verifying the proxy's TLS.
+
+### Changed
+
+- Changed: Leaves minted for a service origin too long for an X.509 CommonName now carry a non-empty subject (`O=mngr forward local service`) instead of an empty one, which Chromium requires (it refused the old leaf with `ERR_CERT_INVALID`).
+
+### Fixed
+
+- Fixed: `mngr forward` no longer leaks a connection-pool slot each time a client gives up on a request before the proxy starts handling it; enough of those (e.g. after sleep/wake) used to exhaust a tunnel's pool ("Proxy connection pool exhausted") until the forward was restarted. The proxy's HTTP clients now use `httpx2` instead of `httpx`.
+
 ## [v0.2.0] - 2026-10-22
 
 ### Added

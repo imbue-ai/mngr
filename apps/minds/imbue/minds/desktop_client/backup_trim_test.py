@@ -230,7 +230,7 @@ def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: P
     # Account-level: no workspace, so the entry carries none and names the account.
     assert _wait_for_system_events(feed) == [("Backup cleanup finished", outcome.detail, "")]
     (entry,) = feed.reconcile((), {}).entries
-    assert entry.workspace_name == "a@example.com"
+    assert (entry.workspace_name, entry.account_id) == ("a@example.com", "user-1")
 
 
 def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) -> None:

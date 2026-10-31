@@ -26,7 +26,7 @@ from typing import Final
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 from itsdangerous import TimestampSigner
@@ -692,12 +692,12 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
         instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
     )
 
-    async def _ok(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": True})
+    async def _ok(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_ok), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_ok), follow_redirects=False)
         response = client.get(
             "/api/health",
             headers={"accept": "application/json"},
@@ -715,14 +715,14 @@ def test_bare_agent_origin_resolves_to_the_default_service(tmp_path: Path, host_
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     _register_default_service(resolver, "http://stub-default-service")
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, content=b"ok")
+        return httpx2.Response(200, content=b"ok")
 
     with TestClient(app, follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/whatever",
             headers={
@@ -749,15 +749,15 @@ def test_non_agent_hosts_are_served_by_the_bare_origin(tmp_path: Path, host: str
     app, auth_store, resolver = _make_forward_app(tmp_path)
     _register_default_service(resolver, "http://stub-backend")
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, content=b"forwarded")
+        return httpx2.Response(200, content=b"forwarded")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/",
             headers={"host": host, "accept": "text/html"},
@@ -836,12 +836,14 @@ def test_legacy_service_path_unknown_service_passes_through_to_shell(tmp_path: P
     owns the unknown-service response."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
 
-    def _shell_marker(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="shell served this")
+    def _shell_marker(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_shell_marker), follow_redirects=False
+        )
         response = client.get(
             "/service/never-registered/",
             headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
@@ -857,12 +859,14 @@ def test_legacy_service_path_non_navigation_passes_through_to_shell(tmp_path: Pa
     cross-origin redirect can never break a same-origin XHR."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
 
-    def _shell_marker(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="shell served this")
+    def _shell_marker(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_shell_marker), follow_redirects=False
+        )
         response = client.get(
             "/service/terminal/__sw.js",
             headers={"accept": "*/*"},
@@ -877,13 +881,13 @@ def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) 
     path space and must be proxied to it untouched."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
 
-    def _terminal_marker(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="terminal served this")
+    def _terminal_marker(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="terminal served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin("terminal"), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_terminal_marker), follow_redirects=False
+        app.state.http_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_terminal_marker), follow_redirects=False
         )
         response = client.get(
             "/service/terminal/whatever",
@@ -924,14 +928,14 @@ def test_forwarded_request_gets_the_configured_headers_and_drops_inbound_copies(
 
     seen_headers: dict[str, str] = {}
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         seen_headers.clear()
         seen_headers.update(request.headers)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/health",
             headers={
@@ -972,13 +976,13 @@ def test_forwarded_request_headers_are_untouched_without_a_request_headers_file(
 
     seen_headers: dict[str, str] = {}
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         seen_headers.update(request.headers)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/health",
             headers={"accept": "application/json", "X-Example-Requester": "client-supplied"},
@@ -997,13 +1001,13 @@ def test_forwarded_request_headers_are_untouched_without_a_request_headers_file(
 
 def _make_forwarding_app(
     tmp_path: Path,
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     preauth: str,
-) -> tuple[FastAPI, httpx.AsyncClient]:
+) -> tuple[FastAPI, httpx2.AsyncClient]:
     """A forward app whose sole agent proxies to a ``MockTransport`` running ``handler``."""
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     _register_default_service(resolver, "http://stub-backend")
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler), follow_redirects=False)
     return app, mock_client
 
 
@@ -1014,11 +1018,11 @@ def _make_forwarding_app(
 def test_forwarded_request_preserves_method_path_query_body_and_host(tmp_path: Path) -> None:
     """The backend receives the same method, path, query string, and body, with a Host naming the backend."""
     preauth = "preauth-request-preserved"
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     app, mock_client = _make_forwarding_app(tmp_path, _capture, preauth)
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -1047,9 +1051,9 @@ def test_buffered_backend_response_returns_to_client_unchanged(tmp_path: Path) -
     """A buffered response's status, remaining headers (duplicates included), and body pass back untouched."""
     preauth = "preauth-response-preserved"
 
-    def _answer(request: httpx.Request) -> httpx.Response:
+    def _answer(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(
+        return httpx2.Response(
             201,
             headers=[
                 ("x-backend-marker", "backend-value"),
@@ -1084,9 +1088,9 @@ def test_forwarded_response_carries_backend_headers_plus_appended_frame_ancestor
     """
     preauth = "preauth-frame-ancestors"
 
-    def _answer(request: httpx.Request) -> httpx.Response:
+    def _answer(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers=[("x-backend-marker", "backend-value"), ("content-security-policy", "default-src 'self'")],
             content=b"ok",
@@ -1117,10 +1121,10 @@ def test_backend_redirect_is_forwarded_and_not_followed(tmp_path: Path) -> None:
     preauth = "preauth-redirect"
     request_count = [0]
 
-    def _redirect(request: httpx.Request) -> httpx.Response:
+    def _redirect(request: httpx2.Request) -> httpx2.Response:
         del request
         request_count[0] += 1
-        return httpx.Response(302, headers=[("location", "https://elsewhere.example/landing")])
+        return httpx2.Response(302, headers=[("location", "https://elsewhere.example/landing")])
 
     app, mock_client = _make_forwarding_app(tmp_path, _redirect, preauth)
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -1146,9 +1150,9 @@ def test_backend_error_status_and_body_reach_the_client_unchanged(tmp_path: Path
     """A backend error response (its own status and body) is forwarded to the client exactly."""
     preauth = "preauth-error-passthrough"
 
-    def _error(request: httpx.Request) -> httpx.Response:
+    def _error(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(418, content=b"backend's own teapot page")
+        return httpx2.Response(418, content=b"backend's own teapot page")
 
     app, mock_client = _make_forwarding_app(tmp_path, _error, preauth)
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -1426,15 +1430,15 @@ def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
     app, _auth_store, resolver = _make_forward_app(tmp_path)
     _register_default_service(resolver, "http://stub-backend")
 
-    contacted: list[httpx.Request] = []
+    contacted: list[httpx2.Request] = []
 
-    def _record_contact(request: httpx.Request) -> httpx.Response:
+    def _record_contact(request: httpx2.Request) -> httpx2.Response:
         contacted.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_record_contact), follow_redirects=False
+        app.state.http_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_record_contact), follow_redirects=False
         )
         response = client.get(
             "/api/something",
@@ -1482,13 +1486,13 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     _register_default_service(resolver, "http://stub-backend")
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
+    async def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         # Replace the lifespan-created http_client with one whose transport we
@@ -1531,13 +1535,13 @@ def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_presen
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     _register_default_service(resolver, "http://stub-backend")
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
+    async def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
@@ -1603,13 +1607,13 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     )
     _register_default_service(resolver, loopback_url)
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
+    async def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
@@ -1639,13 +1643,13 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True)
     _register_default_service(resolver, "http://127.0.0.1:8000")
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
+    async def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
@@ -1667,11 +1671,11 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # retry-page behaviour is independent of that check.
     _register_default_service(resolver, "http://stub-backend")
 
-    async def _refuse(request: httpx.Request) -> httpx.Response:
+    async def _refuse(request: httpx2.Request) -> httpx2.Response:
         del request
-        raise httpx.ConnectError("backend not yet listening")
+        raise httpx2.ConnectError("backend not yet listening")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_refuse), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_refuse), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
@@ -1731,7 +1735,7 @@ def test_unavailable_backend_answers_503_shaped_for_the_caller(
         # dial raises ConnectError before any response header arrives.
         instance_key = _make_test_instance_key()
         app, _captured, _env_out, mock_client = _make_forward_app_with_capture(
-            tmp_path, instance_key, preauth, raise_error=httpx.ConnectError
+            tmp_path, instance_key, preauth, raise_error=httpx2.ConnectError
         )
         with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
             app.state.http_client = mock_client
@@ -1772,13 +1776,13 @@ def test_loading_page_self_heals_once_the_backend_answers(tmp_path: Path) -> Non
 
     is_backend_up = threading.Event()
 
-    async def _backend(request: httpx.Request) -> httpx.Response:
+    async def _backend(request: httpx2.Request) -> httpx2.Response:
         del request
         if not is_backend_up.is_set():
-            raise httpx.ConnectError("backend still starting")
-        return httpx.Response(200, text="workspace is up")
+            raise httpx2.ConnectError("backend still starting")
+        return httpx2.Response(200, text="workspace is up")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_backend), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_backend), follow_redirects=False)
     cookie = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"
     html_headers = {"cookie": cookie, "accept": "text/html,application/xhtml+xml"}
 
@@ -1811,8 +1815,8 @@ def _make_forward_app_with_capture(
     raise_error: type[Exception] | None = None,
     backend_delay_seconds: float = 0.0,
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
-) -> tuple[FastAPI, list[httpx.Request], io.StringIO, httpx.AsyncClient]:
-    capture: list[httpx.Request] = []
+) -> tuple[FastAPI, list[httpx2.Request], io.StringIO, httpx2.AsyncClient]:
+    capture: list[httpx2.Request] = []
     envelope_output = io.StringIO()
     app, _auth_store, resolver = _make_forward_app(
         tmp_path,
@@ -1823,21 +1827,21 @@ def _make_forward_app_with_capture(
     resolver.add_known_agent(instance_key)
     resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
+    async def _capture(request: httpx2.Request) -> httpx2.Response:
         capture.append(request)
         if backend_delay_seconds > 0:
             await asyncio.sleep(backend_delay_seconds)
         if raise_error is not None:
             raise raise_error("simulated failure")
-        return httpx.Response(backend_status, content=b"hi")
+        return httpx2.Response(backend_status, content=b"hi")
 
     # Given production's timeout, so a captured request carries that rather
-    # than httpx's default. ``MockTransport`` never enforces one, so this
+    # than httpx2's default. ``MockTransport`` never enforces one, so this
     # changes nothing for the tests that only look at status codes and
     # envelopes. The pool ceiling ``_managed_lifespan`` also sets is not
-    # mirrored: httpx ignores ``limits`` when handed an explicit transport.
-    mock_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(_capture), follow_redirects=False, timeout=_PROXY_TIMEOUT
+    # mirrored: httpx2 ignores ``limits`` when handed an explicit transport.
+    mock_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(_capture), follow_redirects=False, timeout=_PROXY_TIMEOUT
     )
     return app, capture, envelope_output, mock_client
 
@@ -1991,7 +1995,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
 
     Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
     whose backend died between SSH-tunnel accept and channel-open would surface
-    ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
+    ``httpx2.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
     That exception was not caught by the SSE branch (only ``ConnectError``
     and ``TimeoutException`` were), so it bubbled up through starlette as a
     500 and no failure envelope was emitted -- meaning a consumer had no
@@ -2003,7 +2007,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
         tmp_path,
         instance_key,
         preauth,
-        raise_error=httpx.RemoteProtocolError,
+        raise_error=httpx2.RemoteProtocolError,
     )
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -2035,7 +2039,7 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
         tmp_path,
         instance_key,
         preauth,
-        raise_error=httpx.ConnectError,
+        raise_error=httpx2.ConnectError,
     )
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -2060,7 +2064,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
     Regression test: a wedged-but-listening backend produces a
-    ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
+    ``httpx2.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
     waits for response headers that never arrive. Without an envelope a
     consumer would have no signal that a hung-in-user-code backend is
     failing.
@@ -2071,7 +2075,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
         tmp_path,
         instance_key,
         preauth,
-        raise_error=httpx.ConnectTimeout,
+        raise_error=httpx2.ConnectTimeout,
     )
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -2110,7 +2114,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_tim
         tmp_path,
         instance_key,
         preauth,
-        raise_error=httpx.ConnectTimeout,
+        raise_error=httpx2.ConnectTimeout,
     )
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -2799,11 +2803,11 @@ class _BackendFailureMode(UpperCaseStrEnum):
     The two resets are what make their tests say the same thing on every
     platform. A peer that merely closes is a clean EOF on macOS and, when it
     still holds the unread request, an RST on Linux -- so an ordinary close
-    reaches httpx as ``RemoteProtocolError`` on one and ``ReadError`` on the
+    reaches httpx2 as ``RemoteProtocolError`` on one and ``ReadError`` on the
     other. Draining the request first and closing under ``SO_LINGER`` with a
     zero timeout produces the RST (and so the ``ReadError``) on both.
 
-    ``STALL_AFTER_HEADERS`` answers and then simply stops, which httpx reports
+    ``STALL_AFTER_HEADERS`` answers and then simply stops, which httpx2 reports
     as a ``ReadTimeout`` from under the body -- the same exception a backend
     that never sent headers raises, so only the phase separates the two.
     """
@@ -2883,7 +2887,7 @@ def _make_loopback_backend_app(tmp_path: Path, port: int, preauth: str) -> tuple
 def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tmp_path: Path) -> None:
     """A backend that resets before answering never answered, whichever exception carries it.
 
-    The reset reaches httpx as ``ReadError``, which reads like a mid-response
+    The reset reaches httpx2 as ``ReadError``, which reads like a mid-response
     failure and is not one: nothing was delivered, so this is the same
     unreachable-backend signal the recovery UI acts on. This is the case a
     refused ``direct-tcpip`` open produces on Linux, where the tunnel closes the
@@ -2907,7 +2911,7 @@ def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tm
     payload = json.loads(lines[0])["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
-    # httpx leaves a ``ReadError`` with no message at all, so the class name is
+    # httpx2 leaves a ``ReadError`` with no message at all, so the class name is
     # what reaches the consumer instead of an empty string.
     assert payload["detail"] == "ReadError"
 
@@ -2954,7 +2958,7 @@ _STALLED_BODY_READ_TIMEOUT_SECONDS: Final[float] = 2.0
 def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_body(tmp_path: Path) -> None:
     """A read timeout under the body is a mid-response failure, not an unreachable backend.
 
-    The timeout counterpart of the reset split above. httpx raises the same
+    The timeout counterpart of the reset split above. httpx2 raises the same
     ``ReadTimeout`` either side of the headers, so without the phase to separate
     them a body that stalls once the backend has answered is reported as a
     backend that never answered -- evidence against a workspace that
@@ -2965,7 +2969,7 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
     with _failing_backend(_BackendFailureMode.STALL_AFTER_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
         with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
-            app.state.http_client.timeout = httpx.Timeout(
+            app.state.http_client.timeout = httpx2.Timeout(
                 connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
                 pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
                 read=_STALLED_BODY_READ_TIMEOUT_SECONDS,
@@ -3073,14 +3077,14 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path, host_suf
         {},
     )
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, content=b"ok")
+        return httpx2.Response(200, content=b"ok")
 
     with TestClient(app, follow_redirects=False) as client:
-        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/ws-info",
             headers={
@@ -3103,13 +3107,13 @@ def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
     resolver.add_known_agent(instance_key)
     resolver.update_services(instance_key, {"svc": "http://stub-svc"}, {})
 
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, content=b"ok")
+        return httpx2.Response(200, content=b"ok")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(app, base_url=_agent_origin("deep", "svc"), follow_redirects=False) as client:
         app.state.http_client = mock_client
@@ -3793,7 +3797,7 @@ def test_forward_repeat_rate_limiter_forgets_lapsed_keys_instead_of_growing_fore
 # (the ASGI server has no write timeout for an active stream), pinning the
 # suspended body generator and its pooled backend connection until the pool
 # saturated and every proxied request 504'd without ever dialing the backend.
-# These drive the real streaming response against a real httpx client and a
+# These drive the real streaming response against a real httpx2 client and a
 # real socket backend, so they exercise the exact resources that leaked.
 
 _SSE_KEEPALIVE_CHUNK = b": keepalive\n\n"
@@ -3821,10 +3825,28 @@ async def _serve_sse_keepalives(reader: asyncio.StreamReader, writer: asyncio.St
         writer.close()
 
 
-async def _proxy_body_from(backend_response: httpx.Response) -> AsyncGenerator[bytes, None]:
+async def _proxy_body_from(backend_response: httpx2.Response) -> AsyncGenerator[bytes, None]:
     """The same shape as ``_forward_workspace_http``'s ``_stream()``: relays chunks, closes nothing."""
     async for chunk in backend_response.aiter_bytes():
         yield chunk
+
+
+def _make_events_request_scope(accept_header: bytes) -> dict[str, Any]:
+    """Build the ASGI scope for a bare ``GET /api/events`` handed straight to ``_forward_workspace_http``."""
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.1"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/events",
+        "raw_path": b"/api/events",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"accept", accept_header)],
+        "client": ("127.0.0.1", 54321),
+        "server": ("127.0.0.1", 18421),
+    }
 
 
 @asynccontextmanager
@@ -3841,10 +3863,10 @@ async def _running_sse_backend() -> AsyncGenerator[int, None]:
 @asynccontextmanager
 async def _sse_proxy_scenario(
     close_events: list[str],
-) -> AsyncGenerator[tuple[httpx.Response, _StallGuardedStreamingResponse], None]:
+) -> AsyncGenerator[tuple[httpx2.Response, _StallGuardedStreamingResponse], None]:
     """Yield a live backend SSE response and the guarded streaming response proxying it."""
     async with _running_sse_backend() as listen_port:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        client = httpx2.AsyncClient(timeout=httpx2.Timeout(5.0))
         try:
             backend_response = await client.send(
                 client.build_request("GET", f"http://127.0.0.1:{listen_port}/api/events"), stream=True
@@ -3986,30 +4008,17 @@ async def _run_sse_write_failure_through_the_forward_handler(
     async with _running_sse_backend() as listen_port:
         # Accepts the response head plus three chunks, then fails the way a
         # client transport that has been torn down does. Unlike a disconnect
-        # (which cancels the response, and httpcore closes its own stream under
+        # (which cancels the response, and httpcore2 closes its own stream under
         # cancellation regardless), this leaves the body generator suspended at
         # its ``yield`` -- so only the response's own ``finally`` gives the
         # pooled slot back.
         send_channel = _RaisingSendChannel(accepted_message_count=4)
         receive_channel = _NeverDisconnectingReceiveChannel()
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.1"},
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/api/events",
-            "raw_path": b"/api/events",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [(b"accept", b"text/event-stream")],
-            "client": ("127.0.0.1", 54321),
-            "server": ("127.0.0.1", 18421),
-        }
-        http_client = httpx.AsyncClient(
+        scope = _make_events_request_scope(b"text/event-stream")
+        http_client = httpx2.AsyncClient(
             follow_redirects=False,
-            timeout=httpx.Timeout(5.0),
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            timeout=httpx2.Timeout(5.0),
+            limits=httpx2.Limits(max_connections=1, max_keepalive_connections=1),
         )
         try:
             response = await _forward_workspace_http(
@@ -4035,7 +4044,7 @@ async def _run_sse_write_failure_through_the_forward_handler(
                 http_client.build_request(
                     "GET",
                     f"http://127.0.0.1:{listen_port}/api/events",
-                    timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=2.0),
+                    timeout=httpx2.Timeout(connect=5.0, read=5.0, write=5.0, pool=2.0),
                 ),
                 stream=True,
             )
@@ -4054,8 +4063,8 @@ def test_forwarded_sse_stream_returns_its_pooled_backend_connection_when_a_clien
     returned a plain ``StreamingResponse``, or one that dropped
     ``close_backend``, leaves the backend stream pinned by a body generator
     suspended at its ``yield``, and the follow-up request below then finds no
-    free slot and raises ``httpx.PoolTimeout``: the wedge this branch fixes, in
-    miniature -- pool saturated, backend never dialed.
+    free slot and raises ``httpx2.PoolTimeout``: the proxy wedge in miniature
+    -- pool saturated, backend never dialed.
     """
     envelope_output = io.StringIO()
     sent_messages, probe_status_code = asyncio.run(_run_sse_write_failure_through_the_forward_handler(envelope_output))
@@ -4067,6 +4076,90 @@ def test_forwarded_sse_stream_returns_its_pooled_backend_connection_when_a_clien
     )
     # A client leg that broke says nothing about the backend's health.
     assert _envelope_lines(envelope_output) == []
+
+
+class _AlreadyDisconnectedReceiveChannel(MutableModel):
+    """ASGI receive stub for a client that hung up before the handler ran: the body, then one queued disconnect."""
+
+    _delivered_message_count: int = PrivateAttr(default=0)
+
+    async def __call__(self) -> dict[str, Any]:
+        self._delivered_message_count += 1
+        if self._delivered_message_count == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        if self._delivered_message_count == 2:
+            return {"type": "http.disconnect"}
+        await asyncio.Event().wait()
+        raise MngrForwardError("unreachable: the never-set event resolved")
+
+
+@asynccontextmanager
+async def _running_unix_socket_sse_backend() -> AsyncGenerator[Path, None]:
+    """Serve ``_serve_sse_keepalives`` on a Unix socket, the transport the per-tunnel pools dial."""
+    socket_tmpdir = _create_short_path_tmpdir("mngr-fwd-orphan-test-")
+    socket_path = Path(socket_tmpdir.name) / "backend.sock"
+    server = await asyncio.start_unix_server(_serve_sse_keepalives, path=str(socket_path))
+    try:
+        yield socket_path
+    finally:
+        server.close()
+        await server.wait_closed()
+        socket_tmpdir.cleanup()
+
+
+async def _forward_for_a_client_that_already_left(accept_header: bytes) -> tuple[int, int]:
+    """Proxy one request whose client is gone before the handler starts, then re-use the one-slot pool."""
+    async with _running_unix_socket_sse_backend() as socket_path:
+        scope = _make_events_request_scope(accept_header)
+        transport = httpx2.AsyncHTTPTransport(
+            uds=str(socket_path), limits=httpx2.Limits(max_connections=1, max_keepalive_connections=1)
+        )
+        http_client = httpx2.AsyncClient(transport=transport, follow_redirects=False, timeout=_PROXY_TIMEOUT)
+        try:
+            response = await _forward_workspace_http(
+                request=Request(scope, _AlreadyDisconnectedReceiveChannel()),
+                backend_url="http://localhost:8010",
+                http_client=http_client,
+                agent_id=AgentId(),
+                envelope_writer=EnvelopeWriter(output=io.StringIO()),
+                stall_notice_seconds=_STALL_NOTICE_SECONDS,
+                was_backend_refused=_never_refused,
+                is_shell_target=False,
+                answered_envelope_limiter=ForwardRepeatRateLimiter(),
+                request_headers=NO_REQUEST_HEADERS,
+            )
+            # Short pool budget so a slot that was never released fails here
+            # rather than stalling the test for the full pool budget.
+            probe_response = await http_client.send(
+                http_client.build_request(
+                    "GET",
+                    "http://localhost:8010/api/events",
+                    timeout=httpx2.Timeout(connect=5.0, read=5.0, write=5.0, pool=2.0),
+                ),
+                stream=True,
+            )
+            await probe_response.aclose()
+            return response.status_code, probe_response.status_code
+        finally:
+            await http_client.aclose()
+
+
+@pytest.mark.parametrize("accept_header", [b"application/json", b"text/event-stream"], ids=["plain", "sse"])
+def test_request_whose_client_left_before_the_handler_ran_gives_its_pooled_connection_back(
+    accept_header: bytes,
+) -> None:
+    """A client that is already gone when the backend race starts must not cost a pool slot.
+
+    After a machine wakes, requests wait behind the tunnel rebuild and their
+    clients give up meanwhile, so the race sees the disconnect at once and
+    cancels a backend request that has only just connected. The backend is a
+    Unix socket, as for a tunnel: over loopback TCP the cancel lands during the
+    connect instead, where the pool already cleans up.
+    """
+    status_code, probe_status_code = asyncio.run(_forward_for_a_client_that_already_left(accept_header))
+
+    assert status_code == 499
+    assert probe_status_code == 200
 
 
 async def _collect_incremental_sse_deliveries() -> list[dict[str, Any]]:
@@ -4081,21 +4174,8 @@ async def _collect_incremental_sse_deliveries() -> list[dict[str, Any]]:
     async with _running_sse_backend() as listen_port:
         send_channel = _RaisingSendChannel(accepted_message_count=3)
         receive_channel = _NeverDisconnectingReceiveChannel()
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.1"},
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/api/events",
-            "raw_path": b"/api/events",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [(b"accept", b"text/event-stream")],
-            "client": ("127.0.0.1", 54321),
-            "server": ("127.0.0.1", 18421),
-        }
-        http_client = httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(5.0))
+        scope = _make_events_request_scope(b"text/event-stream")
+        http_client = httpx2.AsyncClient(follow_redirects=False, timeout=httpx2.Timeout(5.0))
         try:
             response = await _forward_workspace_http(
                 request=Request(scope, receive_channel),
@@ -4145,7 +4225,7 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
         tmp_path,
         instance_key,
         preauth,
-        raise_error=httpx.PoolTimeout,
+        raise_error=httpx2.PoolTimeout,
     )
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
@@ -4192,10 +4272,10 @@ class _FixedSocketTunnelManager(SSHTunnelManager):
         return self.reported_socket_path
 
 
-def _pool_ceiling_of(client: httpx.AsyncClient) -> int:
-    """Read back the connection ceiling httpx built into a client's transport pool.
+def _pool_ceiling_of(client: httpx2.AsyncClient) -> int:
+    """Read back the connection ceiling httpx2 built into a client's transport pool.
 
-    httpx keeps ``limits`` only long enough to construct the pool, so confirming
+    httpx2 keeps ``limits`` only long enough to construct the pool, so confirming
     that a client was given one means reading the pool it built. The instance
     dictionaries are walked rather than the attributes because neither hop
     type-checks: ``AsyncClient._transport`` is annotated as the abstract
@@ -4208,7 +4288,7 @@ def _pool_ceiling_of(client: httpx.AsyncClient) -> int:
 
 
 def test_both_proxying_http_clients_are_built_with_explicit_pool_ceilings(tmp_path: Path) -> None:
-    """Neither proxying client may fall back to httpx's default connection ceiling.
+    """Neither proxying client may fall back to httpx2's default connection ceiling.
 
     That default (100) is exactly hypercorn's ``h2_max_concurrent_streams``, and
     the coincidence is what turned a handful of wedged streaming responses into
@@ -4248,7 +4328,7 @@ _TIE_BRANCH_LOG_FRAGMENT = "as the backend stream"
 
 async def _run_simultaneous_disconnect_and_handoff(
     envelope_output: io.StringIO,
-) -> tuple[Response, list[httpx.Response], list[str]]:
+) -> tuple[Response, list[httpx2.Response], list[str]]:
     """Open an SSE backend stream and deliver the client's disconnect in the same event loop step.
 
     The ``asyncio.Barrier`` is what rendezvouses the two: the backend handler and
@@ -4267,19 +4347,19 @@ async def _run_simultaneous_disconnect_and_handoff(
     the transport produced, and the chunks pulled from the backend stream.
     """
     handoff_barrier = asyncio.Barrier(2)
-    backend_responses: list[httpx.Response] = []
+    backend_responses: list[httpx2.Response] = []
     streamed_chunks: list[str] = []
 
     async def _backend_body() -> AsyncGenerator[bytes, None]:
         streamed_chunks.append("chunk")
         yield _SSE_KEEPALIVE_CHUNK
 
-    async def _handle(request: httpx.Request) -> httpx.Response:
+    async def _handle(request: httpx2.Request) -> httpx2.Response:
         # Hand the loop over first, so the client's disconnect is the party
         # already waiting at the rendezvous rather than the one releasing it.
         await asyncio.sleep(0)
         await handoff_barrier.wait()
-        backend_response = httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_backend_body())
+        backend_response = httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_backend_body())
         backend_responses.append(backend_response)
         return backend_response
 
@@ -4297,21 +4377,8 @@ async def _run_simultaneous_disconnect_and_handoff(
         is_disconnect_delivered = True
         return {"type": "http.disconnect"}
 
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.1"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": "/api/events",
-        "raw_path": b"/api/events",
-        "query_string": b"",
-        "root_path": "",
-        "headers": [(b"accept", b"text/event-stream")],
-        "client": ("127.0.0.1", 54321),
-        "server": ("127.0.0.1", 18421),
-    }
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handle), follow_redirects=False)
+    scope = _make_events_request_scope(b"text/event-stream")
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_handle), follow_redirects=False)
     try:
         response = await _forward_workspace_http(
             request=Request(scope, _receive),
@@ -4355,7 +4422,7 @@ def test_sse_handoff_that_ties_with_the_client_disconnect_releases_the_backend_s
     # Nothing in the outcome tells the tie apart from a disconnect that simply
     # won outright: that branch also ends 499, also produces a backend response
     # (the transport builds one before the cancelled handoff unwinds) and also
-    # ends up closed, because httpx closes the response itself when ``send`` is
+    # ends up closed, because httpx2 closes the response itself when ``send`` is
     # cancelled. The branch's own log line is the discriminator.
     assert any(_TIE_BRANCH_LOG_FRAGMENT in message for message in logged_messages), (
         "the disconnect never tied with the handoff, so the branch under test did not run"

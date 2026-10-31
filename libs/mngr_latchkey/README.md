@@ -112,7 +112,9 @@ CLI flag > env var > settings.toml > built-in default.
   `latchkey gateway` subprocess's output is routed through the same log
   (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
   timestamped and rotated too rather than living in a separate unrotated
-  file.
+  file. When a gateway spawn never binds its port, the gateway's last 20
+  output lines are also logged at `WARNING` (with its listen password and
+  encryption key redacted), next to the bind-timeout error.
 
 - `latchkey_forward.log` -- the raw stdout/stderr capture of the
   supervisor process. Its file descriptor is handed straight to the
@@ -1028,13 +1030,18 @@ since the caller's password authenticates it to the VPS gateway and its
 override would let it choose the policy the desktop evaluates it against.
 Native VPS requests carry no override and are authorized by the machine's own
 `~/.latchkey/permissions.json` (seeded at provisioning, then rewritten by the
-full permission snapshot the desktop pushes on every edit). Which desktop a
-request goes to is described under [Desktops](#desktops).
+full permission snapshot the desktop pushes on every edit). A
+`GET /permissions/self` that names no desktop is not forwarded: the VPS gateway
+answers it from that file, the policy in force for the caller, so reading it
+needs no desktop. Which desktop a request goes to is described under
+[Desktops](#desktops).
 
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway
-continue to work, while desktop-owned extension routes fail with a clear HTTP
-503 (no desktop connected) or 502 (a desktop that stopped answering) response.
+continue to work, and so does an agent reading its own permissions
+(`GET /permissions/self`), while the other desktop-owned extension routes fail
+with a clear HTTP 503 (no desktop connected) or 502 (a desktop that stopped
+answering) response.
 That includes calls carrying an *expiring* credential -- an OAuth connection or
 Zoom: the store the VPS gateway runs on is the machine's own, so it renews the
 tokens in it itself rather than waiting for the desktop to (see
@@ -1096,7 +1103,8 @@ The extension exposes the desktops it knows and lets a caller pick among them:
   or `/minds-api-proxy` request names where it goes:
   * absent: the most recently announced desktop, which is what every
     workspace built before the header did (503 when none has ever announced
-    itself);
+    itself) -- except `GET /permissions/self`, which the VPS gateway answers
+    itself;
   * one device id: that desktop (503 for one the gateway does not know);
   * `*`: every desktop the gateway knows, or a comma-separated list of device
     ids: each named desktop the gateway knows (the others are ignored). When

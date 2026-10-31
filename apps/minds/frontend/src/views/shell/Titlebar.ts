@@ -1,6 +1,6 @@
 // The fixed 38px titlebar: breadcrumb (home / workspace / page), workspace
-// icon-tabs, notification bell, bug-report button, and non-mac window
-// controls. Faithful port of ChromeShell.jinja's markup + chrome.js's context
+// icon-tabs and the status pill after them, notification bell, bug-report
+// button, and non-mac window controls. Faithful port of ChromeShell.jinja's markup + chrome.js's context
 // state machine; DOM ids are preserved for the Playwright renderer-contract
 // specs.
 //
@@ -20,11 +20,15 @@ import { TitlebarButton } from "../components/TitlebarButton";
 import { TrafficLights } from "./TrafficLights";
 import { electronBridge } from "../../electron-bridge";
 import type { OptionsTab } from "../../models/workspaceOptions";
-import type { ShellState } from "./shell-state";
+import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
-import { classifyRoute, isWorkspaceOverlayPath } from "./classify";
+import { classifyRoute, hubPagePath, isWorkspaceOverlayPath } from "./classify";
+import { AccountSwitcherButton } from "./AccountSwitcher";
+import { TitlebarStatusPill } from "./titlebar-status";
+import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
+import { EXISTING_LOGIN_LABEL, startFlow } from "../../models/startFlow";
 
 export interface TitlebarAttrs {
   shell: ShellState;
@@ -37,10 +41,21 @@ export interface TitlebarAttrs {
 export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-primary));";
 export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
 
+/** The ring a workspace's tour asks for around one chrome control (minds:highlight-chrome), as extra classes. */
+export function chromeAnchorRingClass(
+  shell: ShellState,
+  anchor: ChromeAnchor,
+): string {
+  return shell.highlightedChromeAnchor === anchor
+    ? " ring-2 ring-accent ring-offset-2 animate-pulse"
+    : "";
+}
+
 /** The room a bar leaves under the native traffic lights on macOS (main.js
- * places them at the bar's left edge). */
+ * places them at the bar's left edge). The page under the native lights sets
+ * their cursor, so the spacer keeps a draggable bar's grab cursor off them. */
 export function trafficLightSpacer(): m.Children {
-  return m("div", { class: "w-[72px] shrink-0", "aria-hidden": "true" });
+  return m("div", { class: "w-[72px] shrink-0 cursor-default", "aria-hidden": "true" });
 }
 
 /** Whether the bar takes the Mac layout: the window controls at its left
@@ -64,8 +79,10 @@ export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
 };
 
 /**
- * The start flow's titlebar: nothing but the lockup, centered, in the brand color.
- * Every other control points at something that does not exist yet.
+ * The start flow's titlebar: the lockup, centered, in the brand color, and at
+ * the right the returning user's way in, there from the first frame so the
+ * flow never has to be sat through to reach it. Every other control points at
+ * something that does not exist yet.
  */
 function startTitlebar(shell: ShellState): m.Children {
   const isDesktop = electronBridge.isDesktop;
@@ -81,11 +98,28 @@ function startTitlebar(shell: ShellState): m.Children {
       m("div", { class: "flex-1" }),
       m("img", {
         id: "start-mark",
-        class: "start-chrome-mark absolute left-1/2 top-1/2 h-5 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
+        // 24px tall, 1px below the bar's centre: electron/shell.html parks the loading screen's mark there too.
+        class:
+          "start-chrome-mark absolute left-1/2 top-[calc(50%+1px)] h-6 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
         src: lockupUrl,
         alt: "Imbue Studio",
         draggable: false,
       }),
+      ...(startFlow.logInExisting === null
+        ? []
+        : [
+            m(
+              TitlebarButton,
+              {
+                id: "start-log-in",
+                variant: "crumb",
+                tone: "muted",
+                extra: "group mr-3 translate-y-1",
+                onclick: () => startFlow.logInExisting?.(),
+              },
+              m("span", { class: "type-body text-tertiary group-hover:text-primary" }, EXISTING_LOGIN_LABEL),
+            ),
+          ]),
       m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
         m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
         m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),
@@ -127,9 +161,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         );
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
-      // Every one of these five icons' surfaces (the docked options panel, the
+      // Every one of these six icons' surfaces (the docked options panel, the
       // request popup, the bell's feed, Get help) draws a raised copy of ALL
-      // FIVE at their measured rects, so hide all five here (by visibility,
+      // SIX at their measured rects, so hide all six here (by visibility,
       // which keeps their boxes and so those rects true) or the two strips
       // would ghost through each other -- matching the legacy
       // body.ws-options-open rule. The panel is still up, frozen, while an app
@@ -139,15 +173,19 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       //
       // The request popup hangs from #ws-tab-strip, and with no machine on
       // screen there is no strip: it falls back to a centered card that raises
-      // nothing, so the real five stay painted (as they do under every other
+      // nothing, so the real six stay painted (as they do under every other
       // centered app modal).
       const isTitlebarPopupOpen =
         isWorkspaceOverlayPath(routePath) ||
-        (routePath === "/inbox" && isWorkspace) ||
-        routePath === "/help" ||
+        (hubPagePath(routePath) === "/inbox" && isWorkspace) ||
+        hubPagePath(routePath) === "/help" ||
         shell.panelRouteBehindOverlay !== null ||
         shell.isNotificationsOpen;
       const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
+      // The workspace's own status, after its icon group. Not on a creation
+      // page: the workspace it would speak for does not exist yet.
+      const status =
+        context.kind === "workspace" ? titlebarStatusFor(shell, context.workspaceAnyId ?? null) : null;
 
       const bar = m(
         "div#minds-titlebar",
@@ -166,7 +204,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               variant: "crumb",
               tone: isHomeSelected ? "default" : "muted",
               extra: "gap-1",
-              onclick: () => m.route.set("/"),
+              onclick: () => shell.routeToHub(),
             },
             [
               m(Icon16, { name: "home" }),
@@ -193,7 +231,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                       "aria-label": "Switch workspace",
                       "data-tooltip": "Switch workspace",
                       variant: "crumb",
-                      extra: "gap-1 min-w-0",
+                      extra:
+                        "gap-1 min-w-0" +
+                        chromeAnchorRingClass(shell, "workspace-switcher"),
                       onclick: (event: MouseEvent) => {
                         const button = (
                           event.currentTarget as HTMLElement
@@ -245,7 +285,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               ? "invisible"
                               : context.activeTab === "permissions"
                                 ? "bg-fill-active"
-                                : "") + " relative",
+                                : "") +
+                            " relative" +
+                            chromeAnchorRingClass(shell, "permissions"),
                           // Pointing at the key starts the read the pane makes
                           // on its first mount, so opening it usually lands on
                           // an answer instead of on "Loading permissions...".
@@ -296,11 +338,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             context.activeTab === "settings"
                               ? "default"
                               : "muted",
-                          extra: isTitlebarPopupOpen
-                            ? "invisible"
-                            : context.activeTab === "settings"
-                              ? "bg-fill-active"
-                              : "",
+                          extra:
+                            (isTitlebarPopupOpen
+                              ? "invisible"
+                              : context.activeTab === "settings"
+                                ? "bg-fill-active"
+                                : "") +
+                            chromeAnchorRingClass(shell, "settings"),
                           onclick: () => {
                             if (isCreating) notYetTab = "settings";
                             else toggleWorkspaceOptions(shell, routePath, context, "settings");
@@ -316,11 +360,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           "data-tooltip": "Sharing",
                           tone:
                             context.activeTab === "share" ? "default" : "muted",
-                          extra: isTitlebarPopupOpen
-                            ? "invisible"
-                            : context.activeTab === "share"
-                              ? "bg-fill-active"
-                              : "",
+                          extra:
+                            (isTitlebarPopupOpen
+                              ? "invisible"
+                              : context.activeTab === "share"
+                                ? "bg-fill-active"
+                                : "") + chromeAnchorRingClass(shell, "share"),
                           onclick: () => {
                             if (isCreating) notYetTab = "share";
                             else toggleWorkspaceOptions(shell, routePath, context, "share");
@@ -330,6 +375,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                       ),
                     ],
                   ),
+                  // Hidden like the icons while a popup raises its copy over the titlebar.
+                  status !== null ? m(TitlebarStatusPill, { status, extra: popupHiddenClass }) : null,
                 ]
               : null,
           ),
@@ -365,6 +412,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           "div",
           { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
           [
+            // The account this window shows, first in the group: left of the bell.
+            m(AccountSwitcherButton, { shell, popupHiddenClass }),
             notificationsBell(shell, popupHiddenClass),
             m(
               TitlebarButton,
@@ -373,7 +422,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                 "aria-label": "Report a bug",
                 "data-tooltip": "Report a bug",
                 tone: "muted",
-                extra: popupHiddenClass,
+                extra: popupHiddenClass + chromeAnchorRingClass(shell, "help"),
                 onclick: () => shell.openHelp(),
               },
               m(Icon16, { name: "bug" }),

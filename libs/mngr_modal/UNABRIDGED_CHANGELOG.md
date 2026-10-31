@@ -4,6 +4,28 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+The snapshot-and-shutdown route test uses `httpx2` instead of `httpx`, matching the rest of the repo.
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-28
+
+Tests only: the `snapshot_and_shutdown` endpoint's acceptance tests no longer start against an endpoint that Modal is not yet routing requests to.
+
+The tests' fixture deployed the endpoint and then sent one warmup request, ignoring its answer. During a Modal incident on 2026-10-18 and 2026-10-19, Modal's HTTP frontend answered freshly deployed endpoints itself with `404 modal-http: invalid function call`. The warmup ignored that, so the tests failed on assertions about the endpoint's own status codes.
+
+The fixture now waits for the endpoint itself to answer. It retries up to three times while Modal answers in the endpoint's place or nothing answers, then fails with an error naming Modal's last answer. Every status assertion also reports the response body, so a Modal-level answer is identifiable in the failure output.
+
+`test_snapshot_and_shutdown_missing_sandbox_id` and `test_snapshot_and_shutdown_nonexistent_host_record` are no longer marked `@pytest.mark.flaky`. In the last 14 days of CI they flaked only during that Modal incident. The other three tests in the module keep their marks: each also failed with a Modal frontend answer outside the incident (`_success` on 2026-10-12, `_nonexistent_sandbox` on 2026-10-14 and 2026-10-21, `_missing_host_id` on 2026-10-22).
+
+## 2026-10-24
+
+The CI safety-net sweep of old Modal test environments no longer fails when another run deletes an environment first: `modal environment delete` reports that as "No such environment", which now counts as already gone, as "not found" did.
+
+The wait for a new sandbox's sshd now checks the sandbox's host key against the key mngr pinned for it in the provider's known_hosts file. Previously the probe accepted whatever key the endpoint presented. If the sandbox presents a different key, sandbox creation now fails immediately with an error naming the mismatch.
+
 ## 2026-10-20
 
 Marked eight Modal acceptance tests `@pytest.mark.flaky`, so offload retries them instead of turning CI red on each occurrence. The 2026-10-19 flake sweep found each one recovering on a retry, on `main` or on more than one branch that does not touch the code it exercises, and none carried the marker:

@@ -1,11 +1,13 @@
-"""The machine-readable status contract between ``/update-self`` and the app.
+"""The machine-readable status contract between a workspace's update files and the app.
 
 The enums ``ui_models`` puts on the wire live here so the wire contract does not
 import the detection module (and the discovery resolver behind it). The skill
-writes one file, ``data/.state/update-apply/run.json``, which the app polls over
-``mngr exec``: the run's start facts, three in-flight facts (worker, hold, apply),
-and one terminal verdict. A new run's start overwrites it, so it always describes
-the latest run.
+writes ``data/.state/update-apply/run.json``, which the app polls over ``mngr
+exec``: the run's start facts, its in-flight facts, and one terminal verdict. A
+new run's start overwrites it, so it always describes the latest run. The app's
+in-workspace update program writes ``schedule.json`` and ``last-dispatch.json``
+beside it and answers with an ``UpdateArmOutcome``; their parsed forms live here
+too.
 """
 
 import json
@@ -34,10 +36,18 @@ class UpdateVerdict(UpperCaseStrEnum):
     NEEDS_RECREATION = auto()
     """The target cannot be applied in place. Surfaced like any other failure: the run's own chat says why."""
     STUCK = auto()
-    """The run could not finish and could not clean up after itself."""
+    """A fault stopped the run and its lead could not recover from it, or the lead's chat was deleted."""
     REFUSED = auto()
     """Nothing was applied -- e.g. no target was admissible, or the apply rolled back."""
+    NEEDS_DECISION = auto()
+    """Nothing was applied: the update cannot keep something the user built. The worker's branch is kept,
+    and the user's answer in the run's own chat is what lands it."""
 
+
+# The verdicts the user has to be told went wrong: the run ended short, after its lead's best effort.
+FAILURE_UPDATE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
+    {UpdateVerdict.STUCK, UpdateVerdict.REFUSED, UpdateVerdict.NEEDS_RECREATION}
+)
 
 # The verdicts after which the workspace serves the new build.
 LANDED_UPDATE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
@@ -46,7 +56,7 @@ LANDED_UPDATE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
 
 
 class UpdateAvailability(UpperCaseStrEnum):
-    """The detection tri-state, plus the reverse-divergence case."""
+    """Where a workspace's version stands against the app's ceiling, as far as both can be read."""
 
     UP_TO_DATE = auto()
     """A positive read on both sides, and the workspace is at the ceiling."""
@@ -55,6 +65,9 @@ class UpdateAvailability(UpperCaseStrEnum):
     PATCH_AVAILABLE = auto()
     """A positive read on both sides, and the workspace sorts below the ceiling within its minor release:
     never prompted for, but may be updated or scheduled by hand."""
+    SECURITY_UPDATE = auto()
+    """A positive read on both sides, the workspace sorts below the security floor, and the ceiling does not:
+    prompted for however small the gap, since the update carries a security fix the workspace lacks."""
     UNKNOWN = auto()
     """No comparable version on one side or the other; no update UI, no dispatch."""
     APP_BEHIND = auto()
@@ -91,39 +104,100 @@ class UpdateActivity(UpperCaseStrEnum):
     whose chat is busy (a turn in flight or a background task pending) is not idle."""
     APPLYING = auto()
     """The merge-and-reveal is landing. The system-interface outage this causes is expected."""
+    FINISHING = auto()
+    """The apply has landed and the run's chat is finishing its checks before it records a verdict."""
     STALLED = auto()
-    """A probe found no live update agent and no apply under way: the run is gone without a verdict."""
+    """A probe found no live update agent and no apply under way: the run is gone without a verdict.
+
+    Not final: a later probe that finds the run's lead back, with no verdict recorded, reports it RUNNING again."""
 
 
 # Named once so the surfaces' read and the store's run-slot claim cannot disagree about what "in flight" means.
 IN_FLIGHT_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
-    {UpdateActivity.STARTING, UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
+    {
+        UpdateActivity.STARTING,
+        UpdateActivity.RUNNING,
+        UpdateActivity.WAITING,
+        UpdateActivity.APPLYING,
+        UpdateActivity.FINISHING,
+    }
 )
 
 
 class UpdateSkipReason(UpperCaseStrEnum):
-    """Why a scheduled attempt did not run; all re-arm except ``ALREADY_UP_TO_DATE``."""
+    """Why an update window closed without its scheduled run starting, as the workspace's dispatcher recorded it.
 
-    WORKSPACE_UNREACHABLE = auto()
-    CHATS_RUNNING = auto()
+    Every one leaves the schedule armed for the next window.
+    """
+
     UPDATE_IN_FLIGHT = auto()
-    ALREADY_UP_TO_DATE = auto()
+    LEASE_HELD = auto()
+    NEEDS_SIGN_IN = auto()
     DISPATCH_FAILED = auto()
+    WINDOW_CLOSED = auto()
 
 
-# Shown in the modal; each names the condition, not the code path. Window-relative
+# Shown on the Updates tab; each names the condition, not the code path. Window-relative
 # rather than "last night": the window is configurable to any hours.
 SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
-    UpdateSkipReason.WORKSPACE_UNREACHABLE: "This workspace couldn't be reached during the last update window.",
-    UpdateSkipReason.CHATS_RUNNING: "Agents were still working in this workspace during the last update window.",
-    UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this workspace.",
-    UpdateSkipReason.ALREADY_UP_TO_DATE: "This workspace was already up to date.",
+    UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this workspace during the last update window.",
+    UpdateSkipReason.LEASE_HELD: "Another update flow was working in this workspace during the last update window.",
+    UpdateSkipReason.NEEDS_SIGN_IN: "No AI account was signed in to this workspace during the last update window.",
     UpdateSkipReason.DISPATCH_FAILED: "The update couldn't be started during the last update window.",
+    UpdateSkipReason.WINDOW_CLOSED: "The last update window closed before the update could start.",
 }
 
 
+# Every route that sets an update window refuses an empty one in these words.
+EMPTY_UPDATE_WINDOW_MESSAGE: Final[str] = "The update window needs a start and end that differ"
+
+
+def format_update_window(window: tuple[int, int]) -> str:
+    """Render an hour window the way a person reads a clock."""
+    return f"{_format_hour(window[0])}-{_format_hour(window[1])}"
+
+
+def _format_hour(hour: int) -> str:
+    suffix = "AM" if hour < 12 else "PM"
+    display_hour = hour % 12 or 12
+    return f"{display_hour}:00 {suffix}"
+
+
+class UpdateStartedBy(UpperCaseStrEnum):
+    """How an update run was started, as the in-workspace command stamped it."""
+
+    SCHEDULED = auto()
+    """The workspace's own cron tick dispatched it inside the update window."""
+    IMMEDIATE = auto()
+    """The user pressed "Update now" (or "Update all")."""
+
+
+class UpdateArmOutcome(UpperCaseStrEnum):
+    """What one run of the in-workspace update command came to, in its own words."""
+
+    ARMED = auto()
+    """The schedule file is written; the workspace's cron tick starts the run inside the window."""
+    CREATED = auto()
+    """The update chat was created and is starting."""
+    ALREADY_RUNNING = auto()
+    """An update is already in flight there; the existing run is the answer."""
+    NEEDS_SIGN_IN = auto()
+    """The workspace has no signed-in AI account its chats could run on."""
+    CHAT_APP_UNREACHABLE = auto()
+    """The workspace's chat app did not answer, and the bare create behind it failed too."""
+    CREATE_FAILED = auto()
+    """The workspace's chat app answered, but did not create the chat; its words are the detail."""
+    # CLEANUP: drop NO_CRON and TOO_OLD_TO_UPDATE (and the update program's checks that answer them,
+    # ``_readiness_refusal`` and ``is_cron_available``) once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` is a
+    # release from mid-August 2026 or later, every one of which ships both cron and the update-self skill.
+    NO_CRON = auto()
+    """The workspace has no cron program, so nothing inside it could start a scheduled run."""
+    TOO_OLD_TO_UPDATE = auto()
+    """The workspace predates the update-self skill; there is nothing to run."""
+
+
 def describe_skip_reason(recorded_reason: str) -> str:
-    """The modal's line for a recorded skip; '' for none, or for one this build does not know (a newer build's)."""
+    """The Updates tab's line for a recorded skip; '' for none, or for one only a newer build knows."""
     if not recorded_reason:
         return ""
     try:
@@ -157,7 +231,7 @@ class UpdateRunStatus(FrozenModel):
     is_holding: bool = Field(
         default=False, description="Whether the run has stopped to wait for the user; False while it is moving"
     )
-    hold_detail: str = Field(default="", description="One line naming what the run is waiting on, for the modal")
+    hold_detail: str = Field(default="", description="One line naming what the run is waiting on, for the Updates tab")
     apply_phase: str = Field(
         default="",
         description="The apply's last completed phase while it is landing (mirrored from the apply's own marker "
@@ -166,22 +240,35 @@ class UpdateRunStatus(FrozenModel):
     apply_updated_at: datetime | None = Field(
         default=None, description="When the apply last moved (UTC); None when no apply is under way or unreadable"
     )
+    applied_at: datetime | None = Field(
+        default=None,
+        description="When this run's apply went live (UTC); None before it lands, for a rolled-back apply, "
+        "or from a workspace whose skill predates the field",
+    )
     verdict: UpdateVerdict | None = Field(default=None, description="The terminal verdict, None while the run goes")
-    detail: str = Field(default="", description="One-line human-readable summary, for the modal")
+    detail: str = Field(default="", description="One-line human-readable summary, for the Updates tab")
     resulting_ref: str = Field(default="", description="Ref the workspace is on now (success verdicts)")
     in_place_compatible_ref: str = Field(
         default="",
         description="On REFUSED/NEEDS_RECREATION, the newest ref that could still be applied in place, if any",
     )
     verdict_at: datetime | None = Field(default=None, description="When the verdict landed (UTC), None until it has")
+    started_by: UpdateStartedBy | None = Field(
+        default=None, description="How the run was started; None when the record does not say (an older template)"
+    )
 
     @property
     def is_apply_in_progress(self) -> bool:
         """Whether the record says the apply is landing right now."""
         return bool(self.apply_phase)
 
+    @property
+    def is_landed(self) -> bool:
+        """Whether the record says this run's apply went live."""
+        return self.applied_at is not None
 
-def _parse_epoch(value: object) -> datetime | None:
+
+def parse_update_epoch(value: object) -> datetime | None:
     """An epoch-seconds field as an aware UTC datetime, or None if it is not one."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -202,27 +289,130 @@ def parse_update_run_status(text: str) -> UpdateRunStatus | None:
     except json.JSONDecodeError as e:
         logger.warning("Dropped an unparseable update run record: {}", e)
         return None
-    if not isinstance(raw, dict):
-        logger.warning("Dropped an update run record that is not an object: {!r}", text[:200])
+    return parse_update_run_record(raw)
+
+
+def _parse_started_by(value: object) -> UpdateStartedBy | None:
+    if value is None:
         return None
+    try:
+        return UpdateStartedBy(str(value).upper())
+    except ValueError:
+        logger.debug("Reading an update run record's unknown start kind {!r} as unknown", value)
+        return None
+
+
+def parse_update_run_record(raw: object) -> UpdateRunStatus | None:
+    """Parse one already-decoded ``run.json`` object, or None when it is not one; lenient as above."""
+    if not isinstance(raw, dict):
+        logger.warning("Dropped an update run record that is not an object: {!r}", str(raw)[:200])
+        return None
+    record: dict[str, object] = {str(key): value for key, value in raw.items()}
     verdict: UpdateVerdict | None = None
-    raw_verdict = raw.get("verdict")
+    raw_verdict = record.get("verdict")
     if raw_verdict is not None:
         try:
             verdict = UpdateVerdict(str(raw_verdict))
         except ValueError:
             logger.warning("Reading an update run record with an unknown verdict {!r} as still running", raw_verdict)
     return UpdateRunStatus(
-        chat_agent_name=str(raw.get("chat_agent_name") or ""),
-        started_at=_parse_epoch(raw.get("started_at")),
-        worker_agent_name=str(raw.get("worker_agent_name") or ""),
-        is_holding=bool(raw.get("is_holding", False)),
-        hold_detail=str(raw.get("hold_detail") or ""),
-        apply_phase=str(raw.get("apply_phase") or ""),
-        apply_updated_at=_parse_epoch(raw.get("apply_updated_at")),
+        chat_agent_name=str(record.get("chat_agent_name") or ""),
+        started_at=parse_update_epoch(record.get("started_at")),
+        worker_agent_name=str(record.get("worker_agent_name") or ""),
+        is_holding=bool(record.get("is_holding", False)),
+        hold_detail=str(record.get("hold_detail") or ""),
+        apply_phase=str(record.get("apply_phase") or ""),
+        apply_updated_at=parse_update_epoch(record.get("apply_updated_at")),
+        applied_at=parse_update_epoch(record.get("applied_at")),
         verdict=verdict,
-        detail=str(raw.get("detail") or ""),
-        resulting_ref=str(raw.get("resulting_ref") or ""),
-        in_place_compatible_ref=str(raw.get("in_place_compatible_ref") or ""),
-        verdict_at=_parse_epoch(raw.get("verdict_at")),
+        detail=str(record.get("detail") or ""),
+        resulting_ref=str(record.get("resulting_ref") or ""),
+        in_place_compatible_ref=str(record.get("in_place_compatible_ref") or ""),
+        verdict_at=parse_update_epoch(record.get("verdict_at")),
+        started_by=_parse_started_by(record.get("started_by")),
+    )
+
+
+class UpdateScheduleRecord(FrozenModel):
+    """One workspace's armed schedule, parsed from the file its in-workspace update command writes there.
+
+    The app writes the ceiling, the window and the override; the workspace's
+    dispatcher writes the chat it started this window and why the last window was skipped.
+    """
+
+    armed_at: datetime | None = Field(description="When the schedule was armed (UTC), None if unreadable")
+    ceiling_ref: str = Field(description="The app's release ceiling the run targets unless an override names another")
+    window_start_minute_utc: int = Field(description="Minutes past UTC midnight the window opens at")
+    window_length_minutes: int = Field(description="How long the window stays open, in minutes")
+    override_ref: str = Field(description="The exact version the user typed, '' for the ceiling")
+    is_auto_armed: bool = Field(description="Whether auto-update armed it, rather than the user")
+    marked_chat_name: str = Field(description="The update chat the dispatcher started this window; '' for none")
+    pending_skip_reason: str = Field(description="Why the open window's run has not started yet; '' for none")
+    last_skip_reason: str = Field(description="Why the last window closed without a start; '' for none")
+    last_skip_at: datetime | None = Field(description="When that window closed (UTC), None for none")
+
+    @property
+    def target_ref(self) -> str:
+        """The ref the scheduled run targets: the override when the user typed one, else the ceiling."""
+        return self.override_ref or self.ceiling_ref
+
+
+def _parse_minute_of_day(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 24 * 60:
+        return None
+    return value
+
+
+def parse_update_schedule_record(raw: object) -> UpdateScheduleRecord | None:
+    """Parse one already-decoded schedule file, or None when it is not a usable one.
+
+    Lenient per field, as a file a newer app wrote must stay readable; only a window with no
+    readable start or length is dropped, since nothing could say when it runs.
+    """
+    if not isinstance(raw, dict):
+        logger.warning("Dropped an update schedule file that is not an object: {!r}", str(raw)[:200])
+        return None
+    record: dict[str, object] = {str(key): value for key, value in raw.items()}
+    start_minute = _parse_minute_of_day(record.get("window_start_minute_utc"))
+    length_minutes = _parse_minute_of_day(record.get("window_length_minutes"))
+    if start_minute is None or length_minutes is None:
+        logger.warning("Dropped an update schedule file with no readable window: {!r}", str(raw)[:200])
+        return None
+    return UpdateScheduleRecord(
+        armed_at=parse_update_epoch(record.get("armed_at")),
+        ceiling_ref=str(record.get("ceiling") or ""),
+        window_start_minute_utc=start_minute,
+        window_length_minutes=length_minutes,
+        override_ref=str(record.get("override_ref") or ""),
+        is_auto_armed=record.get("is_auto_armed") is True,
+        marked_chat_name=str(record.get("marked_chat") or ""),
+        pending_skip_reason=str(record.get("pending_skip_reason") or ""),
+        last_skip_reason=str(record.get("last_skip_reason") or ""),
+        last_skip_at=parse_update_epoch(record.get("last_skip_at")),
+    )
+
+
+class UpdateLastDispatch(FrozenModel):
+    """The update chat the workspace's update program last created, as it recorded it."""
+
+    chat_agent_name: str = Field(description="The chat's agent name")
+    chat_id: str = Field(description="The chat's id, for opening it; '' when the create did not say")
+    started_by: UpdateStartedBy | None = Field(description="Whether a schedule or a press started it")
+    target_ref: str = Field(description="The release the run aimed at; '' when the record does not say")
+
+
+def parse_update_last_dispatch(raw: object) -> UpdateLastDispatch | None:
+    """Parse one already-decoded ``last-dispatch.json``, or None when it is not one."""
+    if not isinstance(raw, dict):
+        logger.warning("Dropped an update dispatch record that is not an object: {!r}", str(raw)[:200])
+        return None
+    record: dict[str, object] = {str(key): value for key, value in raw.items()}
+    chat_agent_name = str(record.get("chat_agent_name") or "")
+    if not chat_agent_name:
+        return None
+    return UpdateLastDispatch(
+        chat_agent_name=chat_agent_name,
+        chat_id=str(record.get("chat_id") or ""),
+        started_by=_parse_started_by(record.get("started_by")),
+        target_ref=str(record.get("target_ref") or ""),
     )

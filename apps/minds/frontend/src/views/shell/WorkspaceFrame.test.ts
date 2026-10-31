@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceLinkHandlingReport } from "../../electron-bridge";
+import type {
+  WorkspaceLinkHandlingReport,
+  WorkspaceLinkPromises,
+} from "../../electron-bridge";
 import type { PermissionResolutionEntry } from "./WorkspaceFrame";
 import {
   FrameLinkHandling,
@@ -123,8 +126,17 @@ function makeContract() {
     OPEN_EXTERNAL: "minds:open-external",
     IMMERSIVE_REQUEST: "minds:immersive-request",
     IMMERSIVE_CHANGED: "minds:immersive-changed",
+    OPEN_LOCAL_FILES: "minds:open-local-files",
+    HIGHLIGHT_CHROME: "minds:highlight-chrome",
+    CHROME_ANCHORS: [
+      "workspace-switcher",
+      "permissions",
+      "settings",
+      "share",
+      "help",
+    ],
     REQUEST_ID_PATTERN,
-  } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
+  } as unknown as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
@@ -147,9 +159,10 @@ function makeHandlers(
   const relayStops: string[] = [];
   const popoutCalls: unknown[] = [];
   let frontCount = 0;
-  const readyAnnouncements: boolean[] = [];
+  const readyAnnouncements: WorkspaceLinkPromises[] = [];
   const externalLinks: string[] = [];
   const immersiveRequests: boolean[] = [];
+  const highlights: (string | null)[] = [];
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -170,11 +183,12 @@ function makeHandlers(
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
-    onWorkspaceReady: (opensLinks) => readyAnnouncements.push(opensLinks),
+    onWorkspaceReady: (promises) => readyAnnouncements.push(promises),
     openExternalLink:
       options.opensExternalLinks === true
         ? (url) => externalLinks.push(url)
         : null,
+    highlightChrome: (anchor) => highlights.push(anchor),
     popout:
       options.canPopOut === true
         ? {
@@ -212,6 +226,7 @@ function makeHandlers(
     readyAnnouncements,
     externalLinks,
     immersiveRequests,
+    highlights,
   };
 }
 
@@ -220,16 +235,32 @@ describe("buildEmbedHandlers", () => {
     const { contract, handlers, readyAnnouncements, navigations } =
       makeHandlers();
     handlers[contract.WORKSPACE_READY]({});
-    expect(readyAnnouncements).toEqual([false]);
+    expect(readyAnnouncements).toEqual([
+      { opensLinks: false, opensCustomSchemeLinks: false },
+    ]);
     expect(navigations).toEqual([]);
   });
 
-  it("reads opensLinks off the announcement, as a promise only when it is literally true", () => {
+  it("reads opensLinks and opensCustomSchemeLinks off the announcement, each a promise only when literally true", () => {
     const { contract, handlers, readyAnnouncements } = makeHandlers();
     handlers[contract.WORKSPACE_READY]({ opensLinks: true });
     handlers[contract.WORKSPACE_READY]({ opensLinks: false });
     handlers[contract.WORKSPACE_READY]({ opensLinks: "true" });
-    expect(readyAnnouncements).toEqual([true, false, false]);
+    handlers[contract.WORKSPACE_READY]({
+      opensLinks: true,
+      opensCustomSchemeLinks: true,
+    });
+    handlers[contract.WORKSPACE_READY]({
+      opensLinks: true,
+      opensCustomSchemeLinks: "true",
+    });
+    expect(readyAnnouncements).toEqual([
+      { opensLinks: true, opensCustomSchemeLinks: false },
+      { opensLinks: false, opensCustomSchemeLinks: false },
+      { opensLinks: false, opensCustomSchemeLinks: false },
+      { opensLinks: true, opensCustomSchemeLinks: true },
+      { opensLinks: true, opensCustomSchemeLinks: false },
+    ]);
   });
 
   it("answers a readiness announcement with what this chrome can do", () => {
@@ -240,17 +271,35 @@ describe("buildEmbedHandlers", () => {
     expect(browser.acks).toEqual([browser.contract.EMBEDDER_CAPABILITIES]);
     // Immersive mode needs only the Fullscreen API, so a plain browser offers it too.
     expect(browser.ackPayloads).toEqual([
-      { canPopOut: false, opensExternalLinks: false, immersive: true },
+      {
+        canPopOut: false,
+        opensExternalLinks: false,
+        opensCustomSchemeLinks: false,
+        opensLocalFiles: true,
+        immersive: true,
+      },
     ]);
     const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
     desktop.handlers[desktop.contract.WORKSPACE_READY]({});
     expect(desktop.ackPayloads).toEqual([
-      { canPopOut: true, opensExternalLinks: true, immersive: true },
+      {
+        canPopOut: true,
+        opensExternalLinks: true,
+        opensCustomSchemeLinks: true,
+        opensLocalFiles: true,
+        immersive: true,
+      },
     ]);
     const frameless = makeHandlers({ canImmerse: false });
     frameless.handlers[frameless.contract.WORKSPACE_READY]({});
     expect(frameless.ackPayloads).toEqual([
-      { canPopOut: false, opensExternalLinks: false, immersive: false },
+      {
+        canPopOut: false,
+        opensExternalLinks: false,
+        opensCustomSchemeLinks: false,
+        opensLocalFiles: true,
+        immersive: false,
+      },
     ]);
   });
 
@@ -264,6 +313,18 @@ describe("buildEmbedHandlers", () => {
     expect(
       frameless.handlers[frameless.contract.IMMERSIVE_REQUEST],
     ).toBeUndefined();
+  });
+
+  it("opens the Permissions pane at Local files when the workspace asks, and answers nothing", () => {
+    const { contract, handlers, navigations, sent } = makeHandlers();
+    handlers[contract.OPEN_LOCAL_FILES]({});
+    expect(navigations).toEqual([
+      {
+        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
+        params: { tab: "permissions", section: "local-files" },
+      },
+    ]);
+    expect(sent).toEqual([]);
   });
 
   it("hands an external link the workspace could not open itself to main, and ignores it where main cannot open one", () => {
@@ -441,6 +502,16 @@ describe("buildEmbedHandlers", () => {
     ]);
   });
 
+  it("rings the chrome control a tour names, and clears the ring on null or on an anchor it does not know", () => {
+    const { contract, handlers, highlights } = makeHandlers();
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "share" });
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "help" });
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: null });
+    // Unreachable through the real endpoint (the validator rejects it); pins the handler's own fallback.
+    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "sidebar" });
+    expect(highlights).toEqual(["share", "help", null, null]);
+  });
+
   it("floats help over this workspace, without opening the popup", () => {
     const { contract, handlers, navigations, popupOpens, frontCount } =
       makeHandlers();
@@ -547,14 +618,36 @@ describe("FrameLinkHandling", () => {
 
   const WORKSPACE = "agent-0a1b2c3d";
   const LINK = "http://localhost:3000/preview";
+  const OPENS_LINKS: WorkspaceLinkPromises = {
+    opensLinks: true,
+    opensCustomSchemeLinks: false,
+  };
+  const OPENS_NO_LINKS: WorkspaceLinkPromises = {
+    opensLinks: false,
+    opensCustomSchemeLinks: false,
+  };
 
-  it("tells main what the frame shows, and whether its page promised to open links", () => {
+  it("tells main what the frame shows, and whether its page promised to open links, custom-scheme ones included", () => {
     const { handling, reports } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
+    handling.pageReady({ opensLinks: true, opensCustomSchemeLinks: true });
     expect(reports).toEqual([
-      { workspaceId: WORKSPACE, opensLinks: false },
-      { workspaceId: WORKSPACE, opensLinks: true },
+      {
+        workspaceId: WORKSPACE,
+        opensLinks: false,
+        opensCustomSchemeLinks: false,
+      },
+      {
+        workspaceId: WORKSPACE,
+        opensLinks: true,
+        opensCustomSchemeLinks: false,
+      },
+      {
+        workspaceId: WORKSPACE,
+        opensLinks: true,
+        opensCustomSchemeLinks: true,
+      },
     ]);
   });
 
@@ -566,9 +659,9 @@ describe("FrameLinkHandling", () => {
     handling.openLink(LINK);
     handling.frameArmed(WORKSPACE, true);
     handling.openLink(LINK);
-    handling.pageReady(false);
+    handling.pageReady(OPENS_NO_LINKS);
     handling.openLink(LINK);
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
     handling.openLink(LINK);
     expect(sent).toEqual([LINK]);
     expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
@@ -582,7 +675,7 @@ describe("FrameLinkHandling", () => {
   it("forgets the promise when the frame goes to a new page, until that page announces", () => {
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
     // A reload (or a new workspace): the page that promised is gone, and a URL
     // sent before the next one listens would be lost.
     handling.frameArmed(WORKSPACE, true);
@@ -591,8 +684,9 @@ describe("FrameLinkHandling", () => {
     expect(reports.at(-1)).toEqual({
       workspaceId: WORKSPACE,
       opensLinks: false,
+      opensCustomSchemeLinks: false,
     });
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
     handling.openLink(LINK);
     expect(sent).toEqual([LINK]);
   });
@@ -601,7 +695,7 @@ describe("FrameLinkHandling", () => {
     // Every redraw re-arms the frame; only a change is worth an IPC.
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
     handling.frameArmed(WORKSPACE, false);
     handling.frameArmed(WORKSPACE, false);
     handling.openLink(LINK);
@@ -612,7 +706,7 @@ describe("FrameLinkHandling", () => {
   it("reports no workspace once the frame unmounts, and sends nothing after", () => {
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(true);
+    handling.pageReady(OPENS_LINKS);
     handling.unmounted();
     handling.openLink(LINK);
     expect(reports.at(-1)).toBeNull();

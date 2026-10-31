@@ -27,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -199,8 +200,7 @@ class MultiAccountSessionStore(MutableModel):
         """The plugin's sessions dir, or None while it cannot be resolved yet.
 
         Resolution needs the host dir's ``config.toml`` (for the active
-        profile id), which the app writes on mngr initialization -- so a miss
-        is retried on the next read rather than cached.
+        profile id); a miss is retried on the next read rather than cached.
         """
         if self.mngr_host_dir is None:
             return None
@@ -318,6 +318,30 @@ class MultiAccountSessionStore(MutableModel):
                 return _build_session(account, workspace_ids)
         return None
 
+    def get_owner_user_id_for_workspace(self, workspace_any_id: str) -> str | None:
+        """The account a workspace (by either coordinate) is associated with, signed in here or not.
+
+        None for a workspace with no record. The association is record existence,
+        so it names an account whose session is gone from this device as readily
+        as a signed-in one: the window scoping lists such a workspace under its
+        account, not under the device. A ``host-`` coordinate (a restored window's
+        URL) is mapped through the records too, so a workspace discovery does not
+        report resolves all the same.
+        """
+        if self.record_store is None:
+            return None
+        agent_id = (
+            self.record_store.active_agent_id_for_host(workspace_any_id)
+            if workspace_any_id.startswith("host-")
+            else workspace_any_id
+        )
+        if agent_id is None:
+            return None
+        for user_id, workspace_ids in self._associations_view().items():
+            if agent_id in workspace_ids:
+                return user_id
+        return None
+
     def is_any_signed_in(self) -> bool:
         """Whether at least one account is currently signed in (per the plugin)."""
         return bool(self._identity_by_user_id())
@@ -389,6 +413,16 @@ class MultiAccountSessionStore(MutableModel):
         account = self._require_account(user_id)
         self.record_store.disassociate_workspace_or_raise(user_id, account.email, agent_id)
         logger.info("Disassociated machine {} from user {}", agent_id, user_id[:8])
+
+
+def get_owning_account_id_for_workspace(
+    session_store: MultiAccountSessionStore | None,
+    workspace_any_id: str,
+) -> str:
+    """The account whose windows list a workspace: its association's, else the device's."""
+    if session_store is None:
+        return LOCAL_PROFILE_USER_ID
+    return session_store.get_owner_user_id_for_workspace(workspace_any_id) or LOCAL_PROFILE_USER_ID
 
 
 def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> AccountSession:

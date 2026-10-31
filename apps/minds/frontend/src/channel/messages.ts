@@ -22,10 +22,14 @@ import type {
   UiProvidersMessage,
   UiReloadMessage,
   UiRequestsMessage,
+  UiRouteAccountResponse,
   UiSnapshot,
+  UiSwitchAccountRequest,
+  UiSwitchAccountResponse,
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceAutoUpdateOverride,
   UiWorkspaceUpdate,
   UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
@@ -33,6 +37,7 @@ import type {
   UpdateAvailability,
   UpdateUnknownReason,
   UpdateVerdict,
+  WorkspaceAutoUpdateMode,
 } from "../generated/ui";
 
 export type {
@@ -51,10 +56,14 @@ export type {
   UiProvidersMessage,
   UiReloadMessage,
   UiRequestsMessage,
+  UiRouteAccountResponse,
   UiSnapshot,
+  UiSwitchAccountRequest,
+  UiSwitchAccountResponse,
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceAutoUpdateOverride,
   UiWorkspaceUpdate,
   UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
@@ -62,6 +71,7 @@ export type {
   UpdateAvailability,
   UpdateUnknownReason,
   UpdateVerdict,
+  WorkspaceAutoUpdateMode,
 };
 
 // pydantic emits literal-defaulted `type` fields as optional in JSON Schema,
@@ -92,6 +102,8 @@ export interface UiClientState {
   route: string;
   workspace_agent_id: string | null;
   has_focus: boolean;
+  /** The account this window shows; the server scopes its frames to it. */
+  account_id: string;
 }
 
 /** Parse one channel frame; null for frames that are not a known server message. */

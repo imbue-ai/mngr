@@ -4,7 +4,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { formatGpuFeatureStatus, formatGpuProcessGone } = require('../../electron/gpu-diagnostics');
+const { formatGpuFeatureStatus, formatGpuProcessGone, formatMegabytes } = require('../../electron/gpu-diagnostics');
 
 test('feature status renders sorted feature=status pairs', () => {
   assert.equal(
@@ -29,13 +29,16 @@ test('a GPU death after a termination signal records the signal and shutdown sta
       terminationSignal: 'SIGTERM',
       uptimeSeconds: 120.04,
       featureStatus: { gpu_compositing: 'disabled_software' },
+      freeMemoryBytes: 1024 * 1024 * 1024,
+      appMemoryBytes: 374.6 * 1024 * 1024,
     }),
     '[gpu] GPU process gone (reason=killed, exitCode=15, gpuDeathCount=1, isShuttingDown=true, ' +
-      'terminationSignal=SIGTERM, uptime=120.0s, features=gpu_compositing=disabled_software)',
+      'terminationSignal=SIGTERM, uptime=120.0s, freeMemory=1024MB, appMemory=375MB, ' +
+      'features=gpu_compositing=disabled_software)',
   );
 });
 
-test('a GPU death with no termination signal says "none"', () => {
+test('a GPU death with no signal, feature status or app metrics says "none" and "unavailable"', () => {
   const line = formatGpuProcessGone({
     reason: 'crashed',
     exitCode: 139,
@@ -44,7 +47,17 @@ test('a GPU death with no termination signal says "none"', () => {
     terminationSignal: null,
     uptimeSeconds: 42,
     featureStatus: null,
+    freeMemoryBytes: 0,
+    appMemoryBytes: null,
   });
   assert.match(line, /reason=crashed, exitCode=139, gpuDeathCount=3, isShuttingDown=false, terminationSignal=none, /);
+  assert.match(line, /, freeMemory=0MB, appMemory=unavailable, /);
   assert.match(line, /features=unavailable\)$/);
+});
+
+test('megabytes round to whole numbers and missing values are "unavailable"', () => {
+  assert.equal(formatMegabytes(1.4 * 1024 * 1024), '1MB');
+  assert.equal(formatMegabytes(1.6 * 1024 * 1024), '2MB');
+  assert.equal(formatMegabytes(null), 'unavailable');
+  assert.equal(formatMegabytes(undefined), 'unavailable');
 });

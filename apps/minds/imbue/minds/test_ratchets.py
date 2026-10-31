@@ -11,9 +11,18 @@ _DIR = Path(__file__).parent.parent.parent
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
-# These files carry Python scripts as strings that run inside a workspace container; the scripts'
-# prints are their return protocol, which the regex cannot tell from the file's own output.
-_EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = ("test_litellm_via_workspace.py",)
+# These files carry Python programs as strings that run inside a workspace container (or stand in
+# for its tools in tests), which the regexes cannot tell from the file's own code: the programs'
+# prints are their return protocol, and their processes, loops, and imports are the container's.
+_EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = (
+    "test_litellm_via_workspace.py",
+    "*/desktop_client/update_program_stubs_testing.py",
+)
+
+# The programs the app runs inside a workspace (see workspace_programs/README.md). They are
+# standard-library only, so stdout/stderr are their only output channels (a marker-prefixed JSON
+# line is how each answers the app) and they run the workspace's tools with subprocess directly.
+_WORKSPACE_PROGRAMS: tuple[str, ...] = ("workspace_programs/*.py",)
 
 
 # ratchet_group("Code safety")
@@ -32,11 +41,11 @@ def test_prevent_eval() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(0))
+    rc.check_while_true(_DIR, snapshot(0), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(10))
+    rc.check_time_sleep(_DIR, snapshot(11))
 
 
 def test_prevent_global_keyword() -> None:
@@ -44,7 +53,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
+    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS + _WORKSPACE_PROGRAMS)
 
 
 # ratchet_group("Exception handling")
@@ -74,7 +83,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(1))
+    rc.check_inline_imports(_DIR, snapshot(1), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 def test_prevent_relative_imports() -> None:
@@ -129,7 +138,11 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(13))
+    rc.check_async_await(_DIR, snapshot(11))
+
+
+def test_prevent_httpx_import() -> None:
+    rc.check_httpx_import(_DIR, snapshot(0))
 
 
 # ratchet_group("Hardcoded paths")
@@ -154,7 +167,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(3))
+    rc.check_trailing_comments(_DIR, snapshot(1))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -235,7 +248,7 @@ def test_prevent_pytest_mark_integration() -> None:
 
 
 def test_prevent_raw_start_new_thread() -> None:
-    rc.check_raw_start_new_thread(_DIR, snapshot(43))
+    rc.check_raw_start_new_thread(_DIR, snapshot(41))
 
 
 def test_prevent_os_fork() -> None:
@@ -257,6 +270,8 @@ def test_prevent_direct_subprocess() -> None:
         "*/deployment_tests/helpers.py",
         "*/desktop_client/e2e_workspace_runner.py",
         "*/desktop_client/default_workspace_template_worktree.py",
+        *_EMBEDDED_CONTAINER_SCRIPTS,
+        *_WORKSPACE_PROGRAMS,
     )
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 

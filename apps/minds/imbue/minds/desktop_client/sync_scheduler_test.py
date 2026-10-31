@@ -12,52 +12,17 @@ from uuid import uuid4
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import InstallationPaths
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_fresh_device_scheduler
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import make_sync_test_device
+from imbue.minds.desktop_client.conftest import push_remote_workspace_record
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
-from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
-from imbue.minds.desktop_client.testing import device_id_for_test
-from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
-
-
-def _make_device(
-    base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[WorkspaceRecordStore, MultiAccountSessionStore]:
-    paths = InstallationPaths(data_dir=base / name)
-    paths.data_dir.mkdir(parents=True, exist_ok=True)
-    record_store = WorkspaceRecordStore(
-        paths=paths,
-        cli=cli,
-        device_id=device_id_for_test(name),
-        device_label=name,
-    )
-    session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
-    return record_store, session_store
-
-
-def _make_fresh_device_scheduler(base: Path, cli: FakeImbueCloudCli) -> WorkspaceSyncScheduler:
-    record_store, session_store = _make_device(base, f"fresh-{uuid4().hex}", cli)
-    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
-    return WorkspaceSyncScheduler(record_store=record_store, session_store=session_store, resolver=empty_resolver)
-
-
-def _push_remote_workspace_record(base: Path, cli: FakeImbueCloudCli, user_id: str, name: str) -> None:
-    """Simulate another device having synced one active machine for the account."""
-    _, session_store = _make_device(base, f"pusher-{uuid4().hex}", cli)
-    agent_id = AgentId.generate()
-    host_id = HostId.generate()
-    agents = [{"id": str(agent_id), "labels": {"is_primary": "true"}, "host": {"id": str(host_id), "name": name}}]
-    resolver: MngrCliBackendResolver = make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
-    session_store.associate_workspace(user_id, str(agent_id), resolver)
 
 
 def test_note_account_signin_marks_pending_only_when_no_local_records(tmp_path: Path) -> None:
@@ -65,16 +30,16 @@ def test_note_account_signin_marks_pending_only_when_no_local_records(tmp_path: 
     email = f"user-{uuid4().hex}@example.com"
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=user_id, email=email)
-    _push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
+    push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
 
     # A device that already pulled the account's records tracks nothing.
-    scheduler_with_records = _make_fresh_device_scheduler(tmp_path, cli)
+    scheduler_with_records = make_fresh_device_scheduler(tmp_path, cli)
     scheduler_with_records.run_one_pass()
     scheduler_with_records.note_account_signin(user_id, email)
     assert scheduler_with_records.list_initial_sync_statuses() == []
 
     # A record-less device tracks the signin as PENDING.
-    fresh_scheduler = _make_fresh_device_scheduler(tmp_path, cli)
+    fresh_scheduler = make_fresh_device_scheduler(tmp_path, cli)
     fresh_scheduler.note_account_signin(user_id, email)
     statuses = fresh_scheduler.list_initial_sync_statuses()
     assert len(statuses) == 1
@@ -87,9 +52,9 @@ def test_initial_sync_resolves_to_done_with_remote_workspace_count(tmp_path: Pat
     email = f"user-{uuid4().hex}@example.com"
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=user_id, email=email)
-    _push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
+    push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
 
-    scheduler = _make_fresh_device_scheduler(tmp_path, cli)
+    scheduler = make_fresh_device_scheduler(tmp_path, cli)
     scheduler.note_account_signin(user_id, email)
     scheduler.run_one_pass()
 
@@ -104,9 +69,9 @@ def test_failed_pass_marks_pending_failed_then_recovers(tmp_path: Path) -> None:
     email = f"user-{uuid4().hex}@example.com"
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=user_id, email=email)
-    _push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
+    push_remote_workspace_record(tmp_path, cli, user_id, "ws-1")
 
-    scheduler = _make_fresh_device_scheduler(tmp_path, cli)
+    scheduler = make_fresh_device_scheduler(tmp_path, cli)
     scheduler.note_account_signin(user_id, email)
 
     # A connector outage marks the pending fetch FAILED (and must not raise).
@@ -132,7 +97,7 @@ def test_signed_out_account_entry_dropped_on_next_pass(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=user_id, email=email)
 
-    scheduler = _make_fresh_device_scheduler(tmp_path, cli)
+    scheduler = make_fresh_device_scheduler(tmp_path, cli)
     scheduler.note_account_signin(user_id, email)
     assert len(scheduler.list_initial_sync_statuses()) == 1
 
@@ -159,7 +124,7 @@ def test_brand_new_account_resolves_to_done_with_zero_workspaces(tmp_path: Path)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=user_id, email=email)
 
-    scheduler = _make_fresh_device_scheduler(tmp_path, cli)
+    scheduler = make_fresh_device_scheduler(tmp_path, cli)
     scheduler.note_account_signin(user_id, email)
     scheduler.run_one_pass()
 
@@ -176,7 +141,7 @@ def test_pass_rebuilds_the_forward_headers_file_from_the_pulled_shared_workspace
     cli.add_account(user_id=user_id, email=email)
     shared_agent_id = str(AgentId.generate())
     cli.shared_agent_ids_by_email[email] = {shared_agent_id}
-    record_store, session_store = _make_device(tmp_path, f"headers-{uuid4().hex}", cli)
+    record_store, session_store = make_sync_test_device(tmp_path, f"headers-{uuid4().hex}", cli)
     headers_file = ForwardHeadersFile(path=tmp_path / "forward_headers.json")
     scheduler = WorkspaceSyncScheduler(
         record_store=record_store,
@@ -209,7 +174,7 @@ def test_pass_reports_the_shares_retired_elsewhere_to_its_hook(tmp_path: Path) -
     cli.add_account(user_id=user_id, email=email)
     shared_agent_id = str(AgentId.generate())
     cli.shared_agent_ids_by_email[email] = {shared_agent_id}
-    record_store, session_store = _make_device(tmp_path, f"retired-{uuid4().hex}", cli)
+    record_store, session_store = make_sync_test_device(tmp_path, f"retired-{uuid4().hex}", cli)
     reported: list[dict[str, list[str]]] = []
     scheduler = WorkspaceSyncScheduler(
         record_store=record_store,
@@ -238,7 +203,7 @@ def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
     # pass is mid-flight, so the caller can safely tear down the shared mngr
     # caller the pass runs through without racing it.
     cli = make_fake_imbue_cloud_cli()
-    record_store, session_store = _make_device(tmp_path, f"blocking-{uuid4().hex}", cli)
+    record_store, session_store = make_sync_test_device(tmp_path, f"blocking-{uuid4().hex}", cli)
     resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
     scheduler = _BlockingPassScheduler(record_store=record_store, session_store=session_store, resolver=resolver)
 

@@ -30,6 +30,7 @@ const {
   assertTreeFitsUploadBudget,
   assertUploadFitsToDesktopLimit,
 } = require('./download-binaries.js');
+const { BUNDLE_MANIFEST_FILENAME, writeBundleManifest } = require('./bundle-manifest.js');
 
 const ROOT = path.resolve(__dirname, '..');
 // The pnpm filter for this workspace package. Read rather than spelled out:
@@ -316,8 +317,12 @@ function bundleLatchkey() {
   // through the shim because the shim requires Electron; plain Node works
   // because cli.js only uses standard Node APIs and its bundled deps.
   const bundledCli = path.join(destNodeModules, 'latchkey', cliRelative);
-  console.log(`Smoke-testing bundled latchkey: ${bundledCli} --version`);
+  console.log(`Smoke-testing bundled latchkey under Node ${process.version}: ${bundledCli} --version`);
   execFileSync(process.execPath, [bundledCli, '--version'], { stdio: 'inherit' });
+
+  // Keep this last, so the manifest covers the final tree.
+  const manifestFileCount = writeBundleManifest(destDir);
+  console.log(`Wrote ${BUNDLE_MANIFEST_FILENAME} for ${manifestFileCount} latchkey bundle files`);
 
   console.log(
     `latchkey@${latchkeyPkg.version} bundled at ${destNodeModules} ` +

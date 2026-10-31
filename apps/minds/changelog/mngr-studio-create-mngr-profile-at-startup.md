@@ -1,0 +1,1 @@
+On a fresh install, Imbue Studio now creates its mngr profile at startup, before mngr is loaded, and writes its settings overrides into it straight away. The default AWS, GCP, Azure, Modal and Imbue Cloud provider instances are therefore disabled from the first mngr process on, so the first provider discovery no longer builds them.

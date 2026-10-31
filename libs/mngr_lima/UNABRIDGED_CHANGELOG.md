@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
+## 2026-10-27
+
+Locked in a lower trailing-comment ratchet count: the project already had fewer trailing comments than its recorded count.
+
+## 2026-10-23
+
+Lima VMs upgrade `ca-certificates` at provisioning (one best-effort attempt, so an offline start is not held up) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.
+
 ## 2026-10-18
 
 The Lima provider reports its create steps through mngr's structured progress stream (`--format jsonl`): `lima.start_vm`, `lima.wait_cloud_init`, and `lima.wait_ssh` under the create's `creating_host` phase. The VM start advances through limactl's own "requirement k of n" counter as the guest boots.

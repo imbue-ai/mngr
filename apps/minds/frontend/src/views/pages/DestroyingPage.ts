@@ -3,6 +3,7 @@
 // the destroy failed. Routes home when the destroy completes.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { PageContainer } from "../components/Layout";
@@ -24,7 +25,10 @@ export const DestroyingPage: m.Component<Record<string, never>, DestroyingState>
     vnode.state.redirectTimer = null;
     vnode.state.model = new DestroyingModel(agentId, deps);
     vnode.state.model.onDone = () => {
-      vnode.state.redirectTimer = setTimeout(() => m.route.set("/"), REDIRECT_HOME_DELAY_MS);
+      vnode.state.redirectTimer = setTimeout(
+        () => getAppContext().shell.routeToHub(),
+        REDIRECT_HOME_DELAY_MS,
+      );
     };
     vnode.state.model.start();
   },
@@ -42,10 +46,17 @@ export const DestroyingPage: m.Component<Record<string, never>, DestroyingState>
         m("h1", { class: "type-heading-lg" }, "Destroying workspace"),
         m("div", { class: "flex items-center gap-2" }, [
           model.status === "running"
-            ? m("div", { class: "flex items-center gap-2" }, [m(Spinner, { size: "sm" }), m("span", { class: "text-primary type-body" }, "Running...")])
+            ? m("div", { class: "flex items-center gap-2" }, [
+                m(Spinner, { size: "sm" }),
+                m("span", { class: "text-primary type-body" }, "Running..."),
+              ])
             : null,
-          model.status === "failed" ? m(StatusBadge, { variant: "error" }, "Failed") : null,
-          model.status === "done" ? m(StatusBadge, { variant: "success" }, "Done. Redirecting...") : null,
+          model.status === "failed"
+            ? m(StatusBadge, { variant: "error" }, "Failed")
+            : null,
+          model.status === "done"
+            ? m(StatusBadge, { variant: "success" }, "Done. Redirecting...")
+            : null,
         ]),
         m(Card, { padding: "tight" }, [
           m(

@@ -6,6 +6,38 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: `mngr connect` (and `create`/`start --connect`) now recovers when its SSH session to a remote agent drops (e.g. after the laptop sleeps): it resets the terminal modes the session enabled, restores and restarts a host that paused while disconnected, and exits non-zero when the session cannot be reattached.
+- Fixed: An SSH connection whose local address vanished (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake) is now treated as a dead connection and retried on a rebuilt connection, surfacing as `HostConnectionError` instead of a raw `OSError`; this stops the latchkey forward daemon's gateway provisioning from crashing on it.
+
+## [v0.3.1] - 2026-10-28
+
+### Added
+
+- Added: `VersionMismatchPolicy` (`ERROR`/`WARN`) and a `mismatch_policy` argument on `verify_pinned_cli_version`, letting an agent type choose whether a CLI that does not report its pinned version fails provisioning or only logs a warning.
+
+### Changed
+
+- Changed: The shared version probe runs `<binary> --version` instead of the agent's launch command, so a wrapper command no longer causes the check to be skipped.
+- Changed: `run_interactive_subprocess` and `popen_interactive_subprocess` now take an argv list only (the `shell` argument is removed); the one deliberate shell invocation (the `--help` pager) moved to the new `popen_interactive_shell_command`.
+- Changed: Commands now treat an agent whose state can't be read (UNKNOWN) conservatively: `mngr message` and chat sends fail with a `state_unknown` error instead of delivering or reviving, `mngr destroy` without `--force` refuses, and `mngr archive` treats it as running; `mngr exec`, `connect`, `capture` and `create --reuse` proceed as before.
+- Changed: `create_pyinfra_host` now raises `PyinfraConnectorUnavailableError` (both a `HostError` and a `KeyError`), logging a pyinfra install snapshot, instead of letting a bare `KeyError` escape when the `ssh` connector is missing.
+- Changed: Every interactive TUI agent type must declare `PASTE_PLACEHOLDER_PREFIXES` and `_build_enter_retry_gate`, and `tui_utils` send helpers take `paste_placeholder_prefixes`/`enter_retry_gate`, so a non-Claude TUI gets correct `mngr message` send behaviour (existing agents unchanged).
+
+### Fixed
+
+- Fixed: An agent's tmux pane is no longer taken over by a failed resize-hook job; the per-session repaint hooks now use `if-shell -b` instead of `run-shell -b`.
+- Fixed: `mngr message` and typed key chords now preserve a trailing `;` instead of dropping it (tmux read it as a command separator).
+- Fixed: Live agents no longer read as STOPPED or DONE when their host is too loaded to answer in time (chats used to flip to paused and a send could restart a running agent); a listing now reads each host's tmux panes and process table once per host, each with its own 5s timeout, and an agent whose tmux read fails reads UNKNOWN.
+- Fixed: A laptop-side `mngr list` of a remote host (modal, vps, imbue_cloud) no longer reads live codex, antigravity, pi or opencode agents as DONE (nor code-guardian, fixme-fairy or witness as REPLACED); agent classes now declare a `fixed_process_name` that both the batched listing and a loaded agent read.
+- Fixed: An extra tmux window whose launch command exceeds the pty line limit now runs (sourced from a file), so the ttyd web terminal starts on macOS again.
+
+### Security
+
+- Security: The mngr Docker image drops the compromised `emSign ECC Root CA - G3` root (uv 0.13.4, Node 24.22.1, Claude Code 2.1.307, upgraded `ca-certificates`).
+- Security: `wait_for_sshd_with_retry` now verifies the SSH server's host key against a pinned `known_hosts` file (new required `known_hosts_path`) instead of trusting any key presented.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

@@ -49,6 +49,50 @@ def test_trailing_comment_rule_ignores_a_hex_colour_closing_a_string_literal(git
     assert check_ratchet_rule(PREVENT_TRAILING_COMMENTS, git_repo) == ()
 
 
+def test_trailing_comment_rule_exempts_a_bare_noqa_directive_but_not_prose_after_one(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        """
+        def f() -> None:
+            bare = 1  # noqa
+            coded = 2  # noqa: E501
+            several = 3  # noqa: E501, B009
+            explained = 4  # noqa: BLE001 -- the exception class is the measurement
+        """,
+    )
+
+    chunks = check_ratchet_rule(PREVENT_TRAILING_COMMENTS, git_repo)
+
+    assert [chunk.start_line for chunk in chunks] == [5]
+
+
+def test_trailing_comment_rule_ignores_a_scoped_bandit_suppression(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        """
+        def f() -> int:
+            return eval("1")  # nosec B307
+        """,
+    )
+
+    assert check_ratchet_rule(PREVENT_TRAILING_COMMENTS, git_repo) == ()
+
+
+def test_trailing_comment_rule_finds_a_bare_bandit_suppression(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        """
+        def f() -> int:
+            return eval("1")  # nosec
+        """,
+    )
+
+    chunks = check_ratchet_rule(PREVENT_TRAILING_COMMENTS, git_repo)
+
+    assert len(chunks) == 1
+    assert chunks[0].start_line == 2
+
+
 @pytest.mark.parametrize(
     "line",
     [

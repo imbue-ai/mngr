@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-29
+
+Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.
+
 ## 2026-10-18
 
 An Azure provider instance can now authenticate through this machine's `az login` instead of a pasted service principal: set `use_azure_cli_login = true` together with `tenant_id` and `subscription_id` on the `[providers.<instance>]` block (mutually exclusive with `client_secret`). The block then carries no secret, and the credential is an `AzureCliCredential` pinned to that tenant and subscription, never `DefaultAzureCredential`, so `AZURE_CLIENT_*` variables and managed identities are not consulted.

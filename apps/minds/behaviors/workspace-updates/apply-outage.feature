@@ -30,6 +30,16 @@ Feature: The apply step's outage
     And the app does not restart a workspace that cannot answer either way
     And the app does not report a workspace that cannot answer either way as applying its update
 
+  @apply-seen-at-the-outage-onset
+  Scenario: An apply that begins between the app's readings is recognised before the workspace reads as stuck
+    The apply takes the services down within a second of beginning, sooner than any periodic reading can see it.
+    Given a workspace with an update in flight
+    And that workspace stops answering before the app has seen its apply begin
+    And that workspace reports an apply under way
+    Then the app does not report that workspace as stuck
+    And the app reports that workspace as applying its update
+    And the app reports the apply over that workspace rather than a lost connection to it
+
   @answered-while-asked
   Scenario: A workspace that answers again while the app is asking about its apply is left alone
     Asking takes long enough that a brief outage can be over before the answer arrives.

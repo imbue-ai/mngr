@@ -39,8 +39,8 @@ function createTearOutWatch(request, effects) {
     /** One cursor sample: out past the tear-out distance opens the popout, back inside drops it. */
     sample(isOut) {
       if (isOut && popout === null) {
-        // A window is out in at most one popout. One still open for it (dropped back onto the desktop and waiting
-        // for the desktop to take the window) goes before this drag opens its own.
+        // A window is out in at most one popout. One still open for it (closing and waiting for the desktop to
+        // take the window) goes before this drag opens its own.
         const lingering = effects.findPopout(current);
         if (lingering !== null) effects.closePopout(lingering, 'replaced by a new tear-out');
         popout = effects.openPopout(current);

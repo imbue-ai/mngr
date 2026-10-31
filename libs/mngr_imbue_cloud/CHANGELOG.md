@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The connector client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
+
+### Removed
+
+- Removed: The connector client's unused `auth_get_user` method and the unauthenticated `GET /auth/users/{user_id}` route it bound to; `GET /users/{user_id}` (signed-in callers only) remains the way to read a user's identity record by id.
+
+## [v0.3.1] - 2026-10-28
+
+### Added
+
+- Added: `ImbueCloudAccountDeletedError`, raised when the connector refuses a call with 403 `account_deleted` (e.g. a deleted account's device-token exchange during `mngr imbue_cloud login`); it carries the connector's own message and the CLI emits it as `code: account_deleted` (mirroring `account_suspended`), so the minds desktop client can key off the refusal structurally.
+
+### Security
+
+- Security: Gen-2 slice VMs upgrade `ca-certificates` at provisioning, so a VM built from an older image drops the compromised `emSign ECC Root CA - G3` root.
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added

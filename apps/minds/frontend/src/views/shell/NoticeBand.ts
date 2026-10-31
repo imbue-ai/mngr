@@ -11,12 +11,12 @@ import m from "mithril";
 import { Button } from "../components/Button";
 import { noticeVariantClass } from "../components/Notice";
 import type { ShellState } from "./shell-state";
-import type { NoticePayload } from "./notice-band";
+import type { NoticeAction, NoticePayload } from "./notice-band";
 
 export interface NoticeBandAttrs {
   shell: ShellState;
   payload: NoticePayload;
-  onAction: () => void;
+  onAction: (action: NoticeAction) => void;
 }
 
 export function NoticeBand(): m.Component<NoticeBandAttrs> {
@@ -69,9 +69,13 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
           { class: "flex items-center gap-3 px-4 py-2 " + noticeVariantClass(payload.variant) },
           [
             m("span", { class: "type-body flex-1 min-w-0" }, payload.message),
-            payload.action !== null
-              ? m(Button, { variant: "secondary", size: "md", onclick: onAction }, payload.action.label)
-              : null,
+            ...payload.actions.map((action) =>
+              m(
+                Button,
+                { variant: "secondary", size: "md", onclick: () => onAction(action) },
+                action.label,
+              ),
+            ),
           ],
         ),
       );

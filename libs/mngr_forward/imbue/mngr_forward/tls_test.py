@@ -8,15 +8,19 @@ from typing import cast
 
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID
+from cryptography.x509.oid import NameOID
 
 from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import InMemoryTLSConfig
+from imbue.mngr_forward.tls import _LONG_NAME_LEAF_SUBJECT
 from imbue.mngr_forward.tls import _MAX_MINTED_CONTEXTS
 from imbue.mngr_forward.tls import _SNICertMinter
 from imbue.mngr_forward.tls import _is_covered_by_static_sans
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_forward.tls import load_or_create_local_ca
+from imbue.mngr_forward.tls import local_ca_cert_path
+from imbue.mngr_forward.tls import local_ca_dir
 
 
 def _leaf_certificate(chain_pem: bytes) -> x509.Certificate:
@@ -38,6 +42,17 @@ def test_load_or_create_local_ca_persists_across_calls(tmp_path: Path) -> None:
     certificate = x509.load_pem_x509_certificate(first.cert_pem)
     basic = certificate.extensions.get_extension_for_class(x509.BasicConstraints).value
     assert basic.ca is True
+
+
+def test_local_ca_cert_path_names_the_certificate_the_proxy_writes(tmp_path: Path) -> None:
+    """A client pinning the CA by its path reads exactly what the proxy run under that host dir created.
+
+    This is the contract between the proxy and the host applications that
+    verify its TLS: both derive the path from the mngr host dir alone.
+    """
+    mngr_host_dir = tmp_path / "host"
+    ca = load_or_create_local_ca(local_ca_dir(mngr_host_dir))
+    assert local_ca_cert_path(mngr_host_dir).read_bytes() == ca.cert_pem
 
 
 def test_generate_server_credentials_has_expected_sans_and_chain() -> None:
@@ -108,12 +123,17 @@ def _negotiate_alpn(server_context: ssl.SSLContext, client_offers: list[str]) ->
     return server.selected_alpn_protocol()
 
 
-def _served_dns_names(server_context: ssl.SSLContext, server_hostname: str) -> list[str]:
-    """Handshake against ``server_hostname`` and return the served cert's DNS SANs."""
+def _served_certificate(server_context: ssl.SSLContext, server_hostname: str) -> x509.Certificate:
+    """Handshake against ``server_hostname`` and return the certificate the server presented."""
     client, _server = _handshake(server_context, ["http/1.1"], server_hostname=server_hostname)
     cert_der = client.getpeercert(binary_form=True)
     assert cert_der is not None
-    certificate = x509.load_der_x509_certificate(cert_der)
+    return x509.load_der_x509_certificate(cert_der)
+
+
+def _served_dns_names(server_context: ssl.SSLContext, server_hostname: str) -> list[str]:
+    """Handshake against ``server_hostname`` and return the served cert's DNS SANs."""
+    certificate = _served_certificate(server_context, server_hostname)
     san = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     return list(san.get_values_for_type(x509.DNSName))
 
@@ -152,6 +172,28 @@ def test_sni_minting_covers_arbitrary_depth() -> None:
     assert _served_dns_names(context, hostname) == [hostname]
     # A second handshake for the same name serves the cached cert unchanged.
     assert _served_dns_names(context, hostname) == [hostname]
+
+
+def test_minted_leaf_subject_names_the_origin_or_a_fixed_subject() -> None:
+    """A minted leaf's subject is the origin's CN when it fits, and a fixed non-empty name otherwise.
+
+    X.509 caps the CN at 64 characters, which deep service origins exceed. The
+    long-name leaf must still carry a subject: an empty subject is only valid
+    with a critical SAN, and a strict verifier (Chromium's, in the Imbue Studio
+    shell) refuses the leaf rather than overlook the violation, which is how
+    the empty-subject leaf showed up as `ERR_CERT_INVALID` on a workspace frame.
+    """
+    context = _server_context()
+    short_hostname = "terminal.host-0123456789abcdef0123456789abcdef.localhost"
+    short_leaf = _served_certificate(context, short_hostname)
+    assert short_leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == short_hostname
+    long_hostname = "system-interface-z7hq6mbp.agent-0123456789abcdef0123456789abcdef.localhost"
+    assert len(long_hostname) > 64
+    long_leaf = _served_certificate(context, long_hostname)
+    assert long_leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME) == []
+    assert long_leaf.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)[0].value == _LONG_NAME_LEAF_SUBJECT
+    san = long_leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert list(san.get_values_for_type(x509.DNSName)) == [long_hostname]
 
 
 def test_sni_minting_evicts_oldest_when_cap_reached() -> None:

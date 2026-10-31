@@ -1,8 +1,8 @@
 """Imbue Studio application configuration stored in ``~/.minds/config.toml``.
 
 Provides a thread-safe interface for reading and writing user preferences
-that persist across sessions, such as the default account for new workspaces
-and the error-reporting preferences.
+that persist across sessions, such as the error-reporting preferences and the
+order in which accounts and workspaces were last shown.
 
 The env-selection URL (``connector_url``, ``litellm_proxy_url``) lives in
 the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is
@@ -15,18 +15,29 @@ from enum import auto
 from pathlib import Path
 from typing import Callable
 from typing import Final
+from typing import assert_never
 
 import tomlkit
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import StrictInt
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.errors import MindsConfigError
+from imbue.minds.errors import WorkspaceAutoUpdateSettingError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
+
+# How many accounts, and how many workspaces per account, the ``[recent]``
+# lists keep. Both are consulted for a switch target and a new window's account,
+# so a bound well above what one install holds loses nothing.
+MAX_RECENT_ACCOUNTS: Final[int] = 32
+MAX_RECENT_WORKSPACES_PER_ACCOUNT: Final[int] = 64
 
 # Local-clock hours [start, end) scheduled updates run in by default.
 DEFAULT_UPDATE_WINDOW: Final[tuple[int, int]] = (2, 5)
@@ -45,6 +56,119 @@ class NotificationStyle(LowerCaseStrEnum):
 
 
 DEFAULT_NOTIFICATION_STYLE: Final[NotificationStyle] = NotificationStyle.BOTH
+
+
+class AutoUpdatePromptDecision(LowerCaseStrEnum):
+    """How the user answered the one-time offer to turn on automatic workspace updates.
+
+    The lowercase values are the wire strings the settings API serves and accepts verbatim
+    (and what ``config.toml`` stores).
+    """
+
+    ACCEPTED = auto()
+    DECLINED = auto()
+
+
+class WorkspaceAutoUpdateMode(LowerCaseStrEnum):
+    """A workspace's own auto-update setting, in place of the app-wide one.
+
+    The lowercase values are the wire strings the update routes accept (and what ``config.toml`` stores).
+    """
+
+    # Auto-update on for this workspace, in its own window, whatever the app-wide switch says.
+    CUSTOM_WINDOW = auto()
+    # Never auto-updated; updated only by hand.
+    MANUAL = auto()
+
+
+class WorkspaceAutoUpdateOverride(FrozenModel):
+    """One workspace's own auto-update setting; a workspace without one follows the app-wide setting."""
+
+    mode: WorkspaceAutoUpdateMode = Field(description="Auto-update in its own window, or never")
+    window: tuple[StrictInt, StrictInt] | None = Field(
+        default=None, description="Local-clock hours [start, end) for CUSTOM_WINDOW; None for MANUAL"
+    )
+
+    @model_validator(mode="after")
+    def _window_matches_mode(self) -> "WorkspaceAutoUpdateOverride":
+        match self.mode:
+            case WorkspaceAutoUpdateMode.CUSTOM_WINDOW:
+                if self.window is None or not is_usable_update_window(self.window[0], self.window[1]):
+                    raise WorkspaceAutoUpdateSettingError(
+                        f"A custom auto-update window needs two distinct hours in 0-23, got {self.window}"
+                    )
+            case WorkspaceAutoUpdateMode.MANUAL:
+                if self.window is not None:
+                    raise WorkspaceAutoUpdateSettingError("A manual auto-update setting has no window")
+            case _ as unreachable:
+                assert_never(unreachable)
+        return self
+
+
+class EffectiveAutoUpdate(FrozenModel):
+    """What auto-update does for one workspace: its own setting when it has one, else the app's."""
+
+    is_enabled: bool = Field(description="Whether the background check arms this workspace's update itself")
+    window: tuple[int, int] = Field(description="Local-clock hours [start, end) this workspace's updates start in")
+    override: WorkspaceAutoUpdateOverride | None = Field(description="The workspace's own setting; None to follow")
+
+
+@pure
+def is_usable_update_window(start_hour: object, end_hour: object) -> bool:
+    """Whether two stored values make an update window: whole hours in 0-23 that differ."""
+    # bool is an int subclass; a stored ``true`` is not hour one.
+    if not isinstance(start_hour, int) or not isinstance(end_hour, int):
+        return False
+    if isinstance(start_hour, bool) or isinstance(end_hour, bool):
+        return False
+    return 0 <= start_hour <= 23 and 0 <= end_hour <= 23 and start_hour != end_hour
+
+
+@pure
+def effective_auto_update(
+    app_is_enabled: bool, app_window: tuple[int, int], override: WorkspaceAutoUpdateOverride | None
+) -> EffectiveAutoUpdate:
+    """One workspace's auto-update: a custom window turns it on in its own hours, manual turns it off."""
+    if override is None:
+        return EffectiveAutoUpdate(is_enabled=app_is_enabled, window=app_window, override=None)
+    match override.mode:
+        case WorkspaceAutoUpdateMode.CUSTOM_WINDOW:
+            assert override.window is not None
+            return EffectiveAutoUpdate(is_enabled=True, window=override.window, override=override)
+        case WorkspaceAutoUpdateMode.MANUAL:
+            return EffectiveAutoUpdate(is_enabled=False, window=app_window, override=override)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _override_from_raw(value: object) -> WorkspaceAutoUpdateOverride | None:
+    """A stored workspace setting, or None (logged) when it is missing or unusable."""
+    table = _as_str_keyed_dict(value)
+    if table is None:
+        return None
+    start = table.get("window_start_hour")
+    end = table.get("window_end_hour")
+    try:
+        return WorkspaceAutoUpdateOverride.model_validate(
+            {
+                "mode": table.get("mode"),
+                "window": (start, end) if start is not None or end is not None else None,
+            }
+        )
+    except ValueError as e:
+        logger.warning("Ignoring an unusable workspace auto-update setting {!r}: {}", table, e)
+        return None
+
+
+def _update_window_from_table(table: dict[str, object]) -> tuple[int, int]:
+    """The window stored in ``table``'s ``window_*_hour`` keys, or the default when unusable."""
+    start = table.get("window_start_hour")
+    end = table.get("window_end_hour")
+    if isinstance(start, int) and isinstance(end, int) and is_usable_update_window(start, end):
+        return (start, end)
+    if start is not None or end is not None:
+        logger.warning("Ignoring an unusable update window ({}, {})", start, end)
+    return DEFAULT_UPDATE_WINDOW
 
 
 def _bool_from_raw(data: dict[str, object], key: str, default: bool) -> bool:
@@ -94,23 +218,38 @@ def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
     return {str(key): item for key, item in value.items()}
 
 
+def _str_list(value: object) -> list[str]:
+    """A TOML array read as a list of strings; anything else reads as empty."""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _recent_account_ids(data: dict[str, object]) -> list[str]:
+    recent = _as_str_keyed_dict(data.get("recent"))
+    return _str_list(recent.get("accounts")) if recent is not None else []
+
+
+def _recent_workspace_ids(data: dict[str, object], account_id: str) -> list[str]:
+    recent = _as_str_keyed_dict(data.get("recent"))
+    if recent is None:
+        return []
+    by_account = _as_str_keyed_dict(recent.get("workspaces_by_account"))
+    return _str_list(by_account.get(account_id)) if by_account is not None else []
+
+
 @pure
-def resolve_default_account_id(
-    stored_default_account_id: str | None,
-    signed_in_user_ids: Sequence[str],
-) -> str | None:
-    """Return the account new workspaces default to: the stored default while it is signed in, else the first signed-in account.
-
-    None only when no account is signed in, so a signed-in account always has a default beside it.
-    """
-    if stored_default_account_id is not None and stored_default_account_id in signed_in_user_ids:
-        return stored_default_account_id
-    return signed_in_user_ids[0] if signed_in_user_ids else None
+def _moved_to_front(items: Sequence[str], item: str, max_count: int) -> list[str]:
+    """``items`` with ``item`` first (added when absent), bounded to ``max_count``."""
+    return [item] + [other for other in items if other != item][: max_count - 1]
 
 
-def _stored_default_account_id(data: dict[str, object]) -> str | None:
-    value = data.get("default_account_id")
-    return str(value) if value is not None else None
+def _write_text_atomically(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a sibling temp file, creating the parent directory as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(text)
+    tmp_path.rename(path)
 
 
 class MindsConfig(MutableModel):
@@ -144,44 +283,53 @@ class MindsConfig(MutableModel):
             raise MindsConfigError(f"Failed to parse {path}: {e}") from e
 
     def _write_raw(self, data: dict[str, object]) -> None:
-        """Write the config data to TOML file atomically."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        """Write the config data to TOML file atomically.
+
+        Raises MindsConfigError when the file cannot be written, so a caller
+        handles a failed write the way it handles a failed read.
+        """
         path = self._config_path
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(tomlkit.dumps(data))
-        tmp_path.rename(path)
+        try:
+            _write_text_atomically(path, tomlkit.dumps(data))
+        except OSError as e:
+            raise MindsConfigError(f"Cannot write {path}: {e}") from e
 
-    def get_default_account_id(self) -> str | None:
-        """Return the default account user ID for new workspaces, or None."""
+    def get_recent_account_ids(self) -> list[str]:
+        """The accounts windows of this install last showed, most recent first (``[recent].accounts``)."""
         with self._lock:
-            return _stored_default_account_id(self._read_raw())
+            return _recent_account_ids(self._read_raw())
 
-    def settle_default_account_id(self, signed_in_user_ids: Sequence[str]) -> str | None:
-        """Resolve the default account (see :func:`resolve_default_account_id`) and store it when it changed.
+    def get_recent_workspace_ids(self, account_id: str) -> list[str]:
+        """The workspaces windows on ``account_id`` last opened, most recent first."""
+        with self._lock:
+            return _recent_workspace_ids(self._read_raw(), account_id)
 
-        Storing the fallback keeps it put when the account listing's order changes. An empty
-        listing stores nothing, since a failed listing reads the same and proves nothing.
+    def note_window_shows(self, account_id: str, workspace_id: str | None) -> bool:
+        """Move ``account_id`` (and ``workspace_id`` within it) to the front of the recent lists.
+
+        Fed by every window's ``client_state`` report, so it runs often: the file is
+        rewritten only when the order it records changes. Returns whether it did.
         """
         with self._lock:
             data = self._read_raw()
-            stored_default_account_id = _stored_default_account_id(data)
-            default_account_id = resolve_default_account_id(stored_default_account_id, signed_in_user_ids)
-            if default_account_id is not None and default_account_id != stored_default_account_id:
-                data["default_account_id"] = default_account_id
-                self._write_raw(data)
-        return default_account_id
-
-    def set_default_account_id(self, user_id: str | None) -> None:
-        """Set or clear the default account for new workspaces."""
-        with self._lock:
-            data = self._read_raw()
-            if user_id is not None:
-                data["default_account_id"] = user_id
-            elif "default_account_id" in data:
-                del data["default_account_id"]
-            else:
-                pass
+            recent_accounts = _recent_account_ids(data)
+            moved_accounts = _moved_to_front(recent_accounts, account_id, MAX_RECENT_ACCOUNTS)
+            recent_workspaces = _recent_workspace_ids(data, account_id)
+            moved_workspaces = (
+                recent_workspaces
+                if workspace_id is None
+                else _moved_to_front(recent_workspaces, workspace_id, MAX_RECENT_WORKSPACES_PER_ACCOUNT)
+            )
+            if moved_accounts == recent_accounts and moved_workspaces == recent_workspaces:
+                return False
+            recent = _as_str_keyed_dict(data.get("recent")) or {}
+            workspaces_by_account = _as_str_keyed_dict(recent.get("workspaces_by_account")) or {}
+            workspaces_by_account[account_id] = moved_workspaces
+            recent["accounts"] = moved_accounts
+            recent["workspaces_by_account"] = workspaces_by_account
+            data["recent"] = recent
             self._write_raw(data)
+            return True
 
     def get_sign_in_browser_id(self) -> str | None:
         """Return the browser provider sign-ins open in (see ``sign_in_browser``), or None for the default."""
@@ -243,26 +391,103 @@ class MindsConfig(MutableModel):
             updates = _as_str_keyed_dict(data.get("updates"))
             if updates is None:
                 return DEFAULT_UPDATE_WINDOW
-            start = updates.get("window_start_hour")
-            end = updates.get("window_end_hour")
-            # bool is an int subclass; a stored ``true`` is not hour one.
-            is_bool_hour = isinstance(start, bool) or isinstance(end, bool)
-            if not isinstance(start, int) or not isinstance(end, int) or is_bool_hour:
-                return DEFAULT_UPDATE_WINDOW
-            if not (0 <= start <= 23 and 0 <= end <= 23) or start == end:
-                logger.warning("Ignoring an unusable update window ({}, {})", start, end)
-                return DEFAULT_UPDATE_WINDOW
-            return (start, end)
+            return _update_window_from_table(updates)
 
     def set_update_window(self, start_hour: int, end_hour: int) -> None:
         """Persist the local-clock hours scheduled updates may run in."""
+        self._write_updates_keys({"window_start_hour": start_hour, "window_end_hour": end_hour})
+
+    def _read_updates_table(self) -> dict[str, object]:
+        """The ``[updates]`` table, empty when absent. Must hold ``self._lock``."""
+        return _as_str_keyed_dict(self._read_raw().get("updates")) or {}
+
+    def _write_updates_keys(self, values: dict[str, object]) -> None:
+        """Set keys of the ``[updates]`` table in one read-modify-write."""
         with self._lock:
             data = self._read_raw()
             updates = _as_str_keyed_dict(data.get("updates")) or {}
-            updates["window_start_hour"] = start_hour
-            updates["window_end_hour"] = end_hour
+            updates.update(values)
             data["updates"] = updates
             self._write_raw(data)
+
+    def get_auto_update_workspaces(self) -> bool:
+        """Return whether Imbue Studio arms every behind workspace without its own setting. Default: False."""
+        with self._lock:
+            return _bool_from_raw(self._read_updates_table(), "auto_update_workspaces", False)
+
+    def set_auto_update_workspaces(self, is_enabled: bool) -> None:
+        """Persist whether Imbue Studio arms every behind workspace without its own setting."""
+        self._write_updates_keys({"auto_update_workspaces": is_enabled})
+
+    def get_auto_update_prompt_decision(self) -> AutoUpdatePromptDecision | None:
+        """Return how the user answered the auto-update offer, or None while it has never been answered."""
+        with self._lock:
+            value = self._read_updates_table().get("auto_update_prompt_decision")
+        if not isinstance(value, str):
+            return None
+        try:
+            return AutoUpdatePromptDecision(value)
+        except ValueError:
+            logger.warning("Ignoring an unknown auto-update prompt decision {!r}", value)
+            return None
+
+    def set_auto_update_prompt_decision(self, decision: AutoUpdatePromptDecision) -> None:
+        """Record how the user answered the auto-update offer, so it is never shown again."""
+        self._write_updates_keys({"auto_update_prompt_decision": str(decision)})
+
+    def get_skipped_update_target(self, agent_id: str) -> str | None:
+        """Return the release the user skipped for this workspace under auto-update, or None."""
+        with self._lock:
+            skipped = _as_str_keyed_dict(self._read_updates_table().get("skipped_targets")) or {}
+        value = skipped.get(agent_id)
+        return str(value) if isinstance(value, str) and value else None
+
+    def set_skipped_update_target(self, agent_id: str, target_ref: str) -> None:
+        """Record the release the user skipped for this workspace under auto-update."""
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates")) or {}
+            skipped = _as_str_keyed_dict(updates.get("skipped_targets")) or {}
+            skipped[agent_id] = target_ref
+            updates["skipped_targets"] = skipped
+            data["updates"] = updates
+            self._write_raw(data)
+
+    def get_workspace_auto_update_overrides(self) -> dict[str, WorkspaceAutoUpdateOverride]:
+        """Every workspace's own auto-update setting, keyed by agent id; unusable entries are left out."""
+        with self._lock:
+            by_workspace = _as_str_keyed_dict(self._read_updates_table().get("workspace_settings")) or {}
+        overrides = {agent_id: _override_from_raw(value) for agent_id, value in by_workspace.items()}
+        return {agent_id: override for agent_id, override in overrides.items() if override is not None}
+
+    def set_workspace_auto_update_override(self, agent_id: str, override: WorkspaceAutoUpdateOverride | None) -> None:
+        """Persist this workspace's own auto-update setting; None puts it back on the app-wide one."""
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates")) or {}
+            by_workspace = _as_str_keyed_dict(updates.get("workspace_settings")) or {}
+            if override is None:
+                if by_workspace.pop(agent_id, None) is None:
+                    return
+            else:
+                entry: dict[str, object] = {"mode": str(override.mode)}
+                if override.window is not None:
+                    entry["window_start_hour"], entry["window_end_hour"] = override.window
+                by_workspace[agent_id] = entry
+            updates["workspace_settings"] = by_workspace
+            data["updates"] = updates
+            self._write_raw(data)
+
+    def get_effective_auto_update(self, agent_id: str) -> EffectiveAutoUpdate:
+        """What auto-update does for this workspace: its own setting when it has one, else the app's."""
+        with self._lock:
+            updates = self._read_updates_table()
+        by_workspace = _as_str_keyed_dict(updates.get("workspace_settings")) or {}
+        return effective_auto_update(
+            app_is_enabled=_bool_from_raw(updates, "auto_update_workspaces", False),
+            app_window=_update_window_from_table(updates),
+            override=_override_from_raw(by_workspace.get(agent_id)),
+        )
 
     def _get_bool(self, key: str, default: bool) -> bool:
         """Read a top-level boolean setting, returning ``default`` when unset or malformed."""
@@ -293,7 +518,7 @@ class MindsConfig(MutableModel):
         """Return whether this installation has been taken past the first-run start flow. Default: False.
 
         Flips to True once the user starts creating a workspace (any surface) or signs in
-        from the start flow's "I already have a workspace" answer; while False and no workspace
+        from the start flow's title-bar "Already set up? Log in"; while False and no workspace
         exists, a launch lands on the start flow.
         """
         return self._get_bool("is_onboarding_complete", default=False)
@@ -426,10 +651,3 @@ class MindsConfig(MutableModel):
             _write_notification_prefs_into_raw(data, is_enabled, style)
             self._write_raw(data)
             return compute_version(is_enabled, style, True)
-
-
-def settle_default_account_id(minds_config: MindsConfig | None, signed_in_user_ids: Sequence[str]) -> str | None:
-    """The default account every reader of it shows: settled into ``minds_config``, or resolved alone without one."""
-    if minds_config is None:
-        return resolve_default_account_id(None, signed_in_user_ids)
-    return minds_config.settle_default_account_id(signed_in_user_ids)

@@ -24,7 +24,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
+import httpx2
 import pytest
 from pydantic import PrivateAttr
 
@@ -60,6 +60,7 @@ from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_f
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
 from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
+from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
@@ -90,11 +91,13 @@ from imbue.minds.desktop_client.testing import install_stub_on_path
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import vault_kv_stub_body
+from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
+from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -350,6 +353,15 @@ def test_classify_create_attempt_error_flags_any_failed_github_clone() -> None:
         assert (
             classify_create_attempt_error(url, GitCloneError(message)) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
         ), message
+
+
+def test_classify_create_attempt_error_flags_a_missing_ref_on_any_remote() -> None:
+    """A clone that reached the remote but found no such branch or tag is not an
+    access problem, so it classifies as GIT_REF_NOT_FOUND ahead of the
+    host-based auth kinds."""
+    error = GitRefNotFoundError("git fetch failed:\nfatal: couldn't find remote ref main")
+    for source in ("https://github.com/acme/repo", "https://gitlab.example.com/acme/repo.git"):
+        assert classify_create_attempt_error(source, error) is CreateAttemptErrorKind.GIT_REF_NOT_FOUND, source
 
 
 def test_classify_create_attempt_error_flags_non_github_remotes_generically() -> None:
@@ -1094,7 +1106,7 @@ def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
 # contention on a loaded machine; passes in isolation. Retried rather than lengthened:
 # the timeout is the suite-wide budget, and this test is only slow when it is
 # competing, not when it is doing more work. Same shape as the group marked in
-# backup_workspace_scripts_test.py.
+# backup_workspace_programs_test.py.
 @pytest.mark.flaky
 def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
     """Cloning then checking out a branch keeps full ancestry (non-shallow) and remains mirror-pushable.
@@ -1255,13 +1267,40 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
 # load rather than anything about the branch it is checking. Passes alone.
 @pytest.mark.flaky
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
-    """Requesting a branch that does not exist fails at clone time (cleanly)."""
+    """Requesting a branch that does not exist on a reachable remote fails at
+    clone time with the ref-not-found error, not a generic clone failure."""
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
 
     dest = tmp_path / "clone"
-    with pytest.raises(GitCloneError):
+    with pytest.raises(GitRefNotFoundError):
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_raises_on_missing_branch_despite_a_ref_ending_in_its_name(tmp_path: Path) -> None:
+    """``ls-remote`` tail-matches patterns, so a bare ``main`` probe would match
+    ``refs/heads/release/main``; the probe is qualified so ``git fetch``'s
+    "couldn't find remote ref main" is still reported as a missing ref."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "release/main")
+    _git(origin, "branch", "-q", "-m", "main", "master")
+
+    with pytest.raises(GitRefNotFoundError):
+        clone_git_repo(GitUrl("file://{}".format(origin)), tmp_path / "clone", branch=GitBranch("main"))
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_does_not_call_a_missing_commit_sha_a_missing_ref(tmp_path: Path) -> None:
+    """A full SHA is never probed with ``ls-remote`` (which lists refs, not
+    commits), so an unknown SHA stays a plain clone failure."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    with pytest.raises(GitCloneError) as exc_info:
+        clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("0" * 40))
+    assert not isinstance(exc_info.value, GitRefNotFoundError)
 
 
 class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
@@ -1276,6 +1315,19 @@ class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
         del format, args
 
 
+@contextmanager
+def _serve_always_unauthorized_git_remote() -> Iterator[GitUrl]:
+    """Serve an ``_AlwaysUnauthorizedHandler`` remote on a daemon thread and yield its git URL."""
+    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 @pytest.mark.timeout(30)
 def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
     """A remote that answers with an auth challenge fails the clone quickly and
@@ -1287,19 +1339,22 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
     supplies rejected credentials: "Authentication failed"), so the assertion
     accepts either shape.
     """
-    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        url = GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
-        dest = tmp_path / "clone"
+    with _serve_always_unauthorized_git_remote() as url:
         with pytest.raises(GitCloneError) as exc_info:
-            clone_git_repo(url, dest)
-        message = str(exc_info.value)
-        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
+            clone_git_repo(url, tmp_path / "clone")
+    message = str(exc_info.value)
+    assert "terminal prompts disabled" in message or "Authentication failed" in message, message
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_with_a_branch_on_a_remote_that_requires_auth_is_not_a_missing_ref(tmp_path: Path) -> None:
+    """When the remote never answers with its refs, the ``ls-remote`` probe
+    fails too (exit 128, not 2), so the failure stays a plain clone error
+    and keeps the access guidance."""
+    with _serve_always_unauthorized_git_remote() as url:
+        with pytest.raises(GitCloneError) as exc_info:
+            clone_git_repo(url, tmp_path / "clone", branch=GitBranch("main"))
+    assert not isinstance(exc_info.value, GitRefNotFoundError)
 
 
 def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
@@ -1359,11 +1414,67 @@ def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> Non
     assert (dest / "f").read_text() == "on branch\n"
 
 
+def _forward_ca_cert_path(tmp_path: Path) -> Path:
+    """Where a test's plugin stand-in writes its CA certificate and the creator under test pins it."""
+    return tmp_path / "forward-ca.pem"
+
+
+def _fail_a_create_on_a_missing_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_default_template: bool
+) -> list[str]:
+    """Run a create naming a ref its origin lacks, check it failed as GIT_REF_NOT_FOUND, and return its ERROR records.
+
+    With ``is_default_template``, the origin is configured as the default workspace template repo.
+    """
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, "exit 0")
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    origin_url = "file://{}".format(origin)
+    if is_default_template:
+        monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+        monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", origin_url)
+    creator = _make_test_creator(tmp_path)
+
+    with capture_error_logs() as error_records:
+        create_attempt_id = creator.start_create_attempt(
+            origin_url, host_name="missing-ref-2165", branch="nonexistent"
+        )
+        _wait_until_finished(creator, create_attempt_id)
+        creator.wait_for_all()
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    assert info.error_kind is CreateAttemptErrorKind.GIT_REF_NOT_FOUND
+    return error_records
+
+
+@pytest.mark.timeout(30)
+def test_a_create_naming_a_missing_branch_fails_as_ref_not_found_without_an_error_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch the repository does not have is a mistake in the create's input,
+    shown on the creating page: it classifies as GIT_REF_NOT_FOUND and files no
+    ERROR record (ERROR records become error-tracker events)."""
+    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=False)
+    assert error_records == []
+
+
+@pytest.mark.timeout(30)
+def test_a_missing_ref_on_the_default_template_repo_still_logs_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default template's ref is the release's pinned tag, not the person's
+    input, so a missing one is a broken release and must reach error reporting."""
+    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=True)
+    assert any("Failed to create agent for create attempt" in record for record in error_records)
+
+
 def _make_test_creator(
     tmp_path,
     *,
     mngr_forward_port: int = 0,
     preauth_cookie: str = "",
+    is_forward_ca_configured: bool = True,
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
@@ -1386,6 +1497,7 @@ def _make_test_creator(
         report_backup_setup_failure=report_backup_setup_failure,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        mngr_forward_ca_cert_path=_forward_ca_cert_path(tmp_path) if is_forward_ca_configured else None,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
@@ -1448,9 +1560,20 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     assert log_sink.appended_line_count == 0
 
 
+def test_wait_for_workspace_ready_short_circuits_without_a_ca_certificate(tmp_path) -> None:
+    """No CA certificate to verify the plugin against also disables the probe."""
+    creator = _make_test_creator(
+        tmp_path, mngr_forward_port=8421, preauth_cookie="anything", is_forward_ca_configured=False
+    )
+    log_sink = CreateAttemptLogSink()
+    aid = AgentId.generate()
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+    assert log_sink.appended_line_count == 0
+
+
 def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     """The probe stops as soon as the (subdomain) endpoint returns 200."""
-    with scripted_workspace_probe_server(not_ready_count=2) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=2) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1491,7 +1614,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1517,20 +1640,16 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     answering on the inner port, with no assumption about which routes it
     implements.
     """
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, text="ok")
+        return httpx2.Response(200, text="ok")
 
     workspace_id = AgentId.generate()
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(workspace_id),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(workspace_id)
         )
 
     assert outcome.is_ready
@@ -1553,17 +1672,13 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
     records a probe failure, driving the agent toward STUCK.
     """
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(503, text="Service Unavailable")
+        return httpx2.Response(503, text="Service Unavailable")
 
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert not outcome.is_ready
@@ -1574,10 +1689,10 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
 @pytest.mark.parametrize(
     "raised, expected_summary",
     [
-        (httpx.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
-        # httpx raises its timeouts and read errors with an empty message, so
+        (httpx2.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
+        # httpx2 raises its timeouts and read errors with an empty message, so
         # the class name is the whole of what there is to report.
-        (httpx.ReadTimeout(""), "ReadTimeout"),
+        (httpx2.ReadTimeout(""), "ReadTimeout"),
     ],
     ids=("refused", "timed-out"),
 )
@@ -1590,21 +1705,38 @@ def test_probe_workspace_through_plugin_names_the_transport_failure(raised: Exce
     a different component.
     """
 
-    def _fail(request: httpx.Request) -> httpx.Response:
+    def _fail(request: httpx2.Request) -> httpx2.Response:
         raise raised
 
-    with httpx.Client(transport=httpx.MockTransport(_fail)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_fail)) as client:
         outcome = probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert not outcome.is_ready
     assert outcome.status_code is None
     assert outcome.summary == expected_summary
+
+
+def test_probe_client_refuses_a_proxy_signed_by_another_ca(tmp_path: Path) -> None:
+    """The probe client trusts the CA at its path and nothing else, so an impostor on the port gets no cookie.
+
+    The preauth cookie the client carries is accepted by the plugin as the
+    owner, which is what makes verifying the proxy matter even on loopback.
+    """
+    other_ca_cert_path = tmp_path / "other-ca.pem"
+    write_forward_ca_for_test(other_ca_cert_path)
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
+        with make_workspace_probe_client(
+            preauth_cookie="any-preauth", probe_timeout_seconds=5.0, ca_cert_path=other_ca_cert_path
+        ) as client:
+            outcome = probe_workspace_through_plugin(
+                probe_client=client, mngr_forward_port=port, workspace_id=str(AgentId.generate())
+            )
+
+    assert not outcome.is_ready
+    assert outcome.status_code is None
+    assert "CERTIFICATE_VERIFY_FAILED" in outcome.summary, outcome.summary
 
 
 def test_probe_workspace_uses_https_scheme() -> None:
@@ -1614,19 +1746,15 @@ def test_probe_workspace_uses_https_scheme() -> None:
     make every readiness probe fail the TLS handshake (or hit a closed http
     port).
     """
-    captured: list[httpx.Request] = []
+    captured: list[httpx2.Request] = []
 
-    def _capture(request: httpx.Request) -> httpx.Response:
+    def _capture(request: httpx2.Request) -> httpx2.Response:
         captured.append(request)
-        return httpx.Response(200, text="ok")
+        return httpx2.Response(200, text="ok")
 
-    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
         probe_workspace_through_plugin(
-            mngr_forward_port=18999,
-            preauth_cookie="any-preauth",
-            workspace_id=str(AgentId.generate()),
-            probe_timeout_seconds=0.5,
-            client=client,
+            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
         )
 
     assert captured[0].url.scheme == "https"
@@ -1674,7 +1802,9 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
         poll_until(lambda: calls_path.read_text() != "", poll_interval=0.01)
 
     with scripted_workspace_probe_server(
-        not_ready_count=0, on_first_request=_hold_until_the_follow_recorded_its_call
+        ca_cert_path=_forward_ca_cert_path(tmp_path),
+        not_ready_count=0,
+        on_first_request=_hold_until_the_follow_recorded_its_call,
     ) as port:
         creator = _make_test_creator(
             tmp_path,
@@ -1700,7 +1830,7 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
-    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2462,7 +2592,7 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
     install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
     # The readiness probe never answers 200, so the create attempt sits in
     # WAITING_FOR_READY for the whole (short) ready window.
-    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2519,7 +2649,7 @@ def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions
         if info is not None and info.agent_id == aid:
             is_host_file_present_by_canonical_notification.append(host_permissions_path.is_file())
 
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2553,7 +2683,7 @@ def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_pat
         finished.append((create_attempt_id, agent_id))
         is_finished.set()
 
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path, mngr_forward_port=port, preauth_cookie="any-preauth", on_create_attempt_done=on_done
         )

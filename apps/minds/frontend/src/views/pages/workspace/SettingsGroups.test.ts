@@ -18,6 +18,8 @@ import type { AnyVnode } from "../../../testing";
 import {
   allText,
   attrsOf,
+  byId,
+  classesOf,
   collectVnodes,
   jsonResponse,
   renderDeep,
@@ -30,7 +32,6 @@ import { SettingsGroups } from "./SettingsGroups";
 // is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
-const NO_BACKUP_QUESTION = "This workspace has no backups.";
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
@@ -52,22 +53,6 @@ interface Harness {
   models: Map<string, WorkspaceOptionsModel>;
 }
 
-/** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
- * "Cancel" of their own. */
-function updatesGroup(root: m.Children): AnyVnode {
-  const group = collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).id === "ws-updates-group",
-  );
-  if (group === undefined) throw new Error("the Updates group was not drawn");
-  return group;
-}
-
-/** The same group, rendered through its components, for the assertions that
- * reach inside one -- the specific-version field lives in a collapsible. */
-function updatesGroupDeep(root: m.Children): AnyVnode {
-  return updatesGroup(renderDeep(root) as m.Children);
-}
-
 function pressableWithLabel(
   node: AnyVnode,
   label: string,
@@ -77,24 +62,6 @@ function pressableWithLabel(
       typeof attrsOf(vnode).onclick === "function" &&
       allText(vnode.children).includes(label),
   );
-}
-
-/** The specific-version field of one drawn Updates group. */
-function overrideField(node: AnyVnode): AnyVnode {
-  const field = collectVnodes(node).find(
-    (vnode) => attrsOf(vnode).id === "update-override-input",
-  );
-  if (field === undefined)
-    throw new Error("the specific-version field was not drawn");
-  return field;
-}
-
-/** Type into that field: its oninput is the only writer of the typed ref. */
-function typeOverride(node: AnyVnode, value: string): void {
-  const oninput = attrsOf(overrideField(node)).oninput as (
-    event: InputEvent,
-  ) => void;
-  oninput({ target: { value } } as unknown as InputEvent);
 }
 
 function press(node: AnyVnode, label: string): void {
@@ -125,8 +92,7 @@ function harness(
     requests.push(url);
     return respond(url, init);
   });
-  // No ?override=1, which would open the specific-version field. A successful
-  // dispatch enters the machine and redraws; there is no mount for either.
+  // A successful press routes and redraws; there is no mount for either.
   vi.spyOn(m.route, "get").mockReturnValue(
     "/workspace/x/options?tab=settings&group=updates",
   );
@@ -194,226 +160,31 @@ afterEach(() => {
   clearAppContextForTests();
 });
 
-describe("the Updates settings group's no-backup question", () => {
-  it("holds a press on a machine without backups and asks in place of the controls", () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-
-    const asked = updatesGroup(draw(UNBACKED));
-    expect(allText(asked)).toContain(NO_BACKUP_QUESTION);
-    // A live "Update now" under "Go ahead?" would be a second way to answer.
-    expect(pressableWithLabel(asked, "Update now")).toBeUndefined();
-    expect(requests).toEqual([]);
-  });
-
-  it("dispatches only once the question is answered, and only for the machine it asked about", async () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/now`]);
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      NO_BACKUP_QUESTION,
-    );
-  });
-
-  it("takes back the press when the question is cancelled", () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-    press(updatesGroup(draw(UNBACKED)), "Cancel");
-
-    const settled = updatesGroup(draw(UNBACKED));
-    expect(allText(settled)).not.toContain(NO_BACKUP_QUESTION);
-    expect(pressableWithLabel(settled, "Update now")).toBeDefined();
-    expect(requests).toEqual([]);
-  });
-
-  it("never puts one machine's question in front of another, nor answers it for one", async () => {
-    // A route change between machines preserves this instance, so A's question
-    // must neither stand over B nor dispatch to it.
-    const { draw, requests } = harness();
-    press(updatesGroup(draw(UNBACKED)), "Update now");
-
-    const other = updatesGroup(draw(BACKED));
-    expect(allText(other)).not.toContain(NO_BACKUP_QUESTION);
-    press(other, "Update now");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
-    // Unanswered, not discarded: the machine it was raised for still has it.
-    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
-  });
-
-  it("keeps a dispatch's spinner and its refusal on the machine the dispatch was made for", async () => {
-    // A dispatch can take minutes, so the reader may switch machines while it is out.
-    let answer: ((response: Response) => void) | null = null;
-    const { draw, requests } = harness(
-      () =>
-        new Promise<Response>((resolve) => {
-          answer = resolve;
-        }),
-    );
-    press(updatesGroup(draw(BACKED)), "Update now");
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
-
-    const other = updatesGroup(draw(UNBACKED));
-    const otherButton = pressableWithLabel(other, "Update now");
-    expect(otherButton).toBeDefined();
-    expect(attrsOf(otherButton as AnyVnode).disabled).toBe(false);
-
-    (answer as unknown as (response: Response) => void)(
-      jsonResponse(
-        { error: "An update is already running in this workspace." },
-        409,
-      ),
-    );
-    await settleDispatch();
-
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      "An update is already running",
-    );
-    expect(allText(updatesGroup(draw(BACKED)))).toContain(
-      "An update is already running",
-    );
-  });
-
-  it("quotes the machine's own verdict under the refusal", async () => {
-    // The reason a wedged machine gives is the only thing that tells the reader
-    // retrying will not help, so it has to survive all the way onto the pane.
-    const { draw } = harness(() =>
-      Promise.resolve(
-        jsonResponse(
-          {
-            error: "Couldn't start the update agent in this workspace.",
-            detail:
-              "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
-          },
-          502,
-        ),
-      ),
-    );
-
-    press(updatesGroup(draw(BACKED)), "Update now");
-    await settleDispatch();
-
-    const refused = allText(updatesGroup(draw(BACKED)));
-    expect(refused).toContain(
-      "Couldn't start the update agent in this workspace.",
-    );
-    expect(refused).toContain(
-      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
-    );
-  });
-});
-
-describe("the Updates settings group's scheduled update", () => {
-  it("asks the no-backup question for a schedule press too, and arms the schedule once answered", async () => {
-    const { draw, requests } = harness();
-
-    press(updatesGroup(draw(UNBACKED)), "Schedule update");
-    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
-    expect(requests).toEqual([]);
-
-    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
-    await settleDispatch();
-
-    // A held schedule press arms a schedule, not a run.
-    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/schedule`]);
-  });
-
-  it("offers to cancel a scheduled machine's run in place of scheduling it again", async () => {
-    const { draw, requests } = harness();
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          is_scheduled: true,
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-    });
-
-    const group = updatesGroup(draw(BACKED));
-    expect(allText(group)).toContain(
-      "Scheduled to update in the next update window (2:00 AM-5:00 AM)",
-    );
-    expect(pressableWithLabel(group, "Schedule update")).toBeUndefined();
-    press(group, "Cancel schedule");
-    await settleDispatch();
-
-    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule/cancel`]);
-  });
-});
-
-describe("the Updates settings group's specific-version field", () => {
-  it("keeps a typed ref on the machine it was typed for", () => {
-    const { draw } = harness();
-
-    // The disclosure is one toggle for the pane, so it stays open across the switch.
-    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
-    typeOverride(updatesGroupDeep(draw(UNBACKED)), "upstream/some-branch");
-
-    const other = updatesGroupDeep(draw(BACKED));
-    expect(attrsOf(overrideField(other)).value).toBe("");
-    // Nothing was typed for this machine, so there is nothing to send.
-    const otherDispatch = pressableWithLabel(other, "Update to this version");
-    expect(otherDispatch).toBeDefined();
-    expect(attrsOf(otherDispatch as AnyVnode).disabled).toBe(true);
-
-    // Kept for the machine it was typed for, not wiped on every switch.
-    expect(attrsOf(overrideField(updatesGroupDeep(draw(UNBACKED)))).value).toBe(
-      "upstream/some-branch",
-    );
-  });
-});
-
-describe("the Updates settings group after an update that never went out", () => {
-  function recordFailureOnBacked(): void {
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: {
-        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
-        [BACKED]: {
-          ...OUT_OF_DATE,
-          is_backup_configured: true,
-          dispatch_failure: "Couldn't start this workspace to run the update.",
-          dispatch_failure_detail: "ERROR: The box behind host-5821 is gone",
-        },
-      },
-      update_window: "2:00 AM-5:00 AM",
-    });
+describe("the Updates entry in the settings nav", () => {
+  function navDot(root: m.Children): AnyVnode | undefined {
+    return byId(root, "updates-nav-dot");
   }
 
-  it("shows the machine's recorded reason, on that machine only", () => {
+  it("wears the titlebar pill's colour while the pill shows, and nothing otherwise", () => {
     const { draw } = harness();
-    recordFailureOnBacked();
+    // Out of date, nothing handling it: the pill's orange dot.
+    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-warning");
 
-    const backed = allText(updatesGroup(draw(BACKED)));
-    expect(backed).toContain(
-      "Couldn't start this workspace to run the update.",
-    );
-    expect(backed).toContain("ERROR: The box behind host-5821 is gone");
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      "Couldn't start this workspace",
-    );
-  });
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, availability: "UP_TO_DATE", verdict: "UPDATED_WITH_REBUILD_ITEMS" } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+    // A landed update with a note: good news, green.
+    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-success");
 
-  it("holds the recorded reason back while a new press is out", () => {
-    // The press is the newer question; the old answer beside its spinner would read as its reply.
-    const { draw } = harness(() => new Promise<Response>(() => undefined));
-    recordFailureOnBacked();
-
-    press(updatesGroup(draw(BACKED)), "Update now");
-
-    expect(allText(updatesGroup(draw(BACKED)))).not.toContain(
-      "Couldn't start this workspace",
-    );
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_scheduled: true } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+    // A schedule asks nothing, so there is no pill and no dot.
+    expect(navDot(draw(BACKED))).toBeUndefined();
   });
 });
 
@@ -489,6 +260,62 @@ describe("the Account settings group on a workspace on an account-owned provider
       "This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
     );
     expect(section.hasUnlink).toBe(false);
+  });
+});
+
+describe("the Account settings group's link to an account", () => {
+  const OFFERED = {
+    user_id: "user-1",
+    email: "me@example.com",
+    display_name: null,
+  };
+
+  /** A pane whose PATCH of the association answers `patchStatus`, and whose options reload answers the drawn data. */
+  function linkingHarness(patchStatus: number): Harness {
+    let drawn: Harness | null = null;
+    const pane = harness((url, init) => {
+      if (init?.method === "PATCH")
+        return Promise.resolve(
+          jsonResponse(
+            patchStatus === 200 ? {} : { error: "refused" },
+            patchStatus,
+          ),
+        );
+      const model = drawn?.models.get(UNBACKED);
+      return Promise.resolve(jsonResponse(model?.data ?? {}));
+    });
+    drawn = pane;
+    return pane;
+  }
+
+  it("leaves for the window's account's hub once the workspace belongs to the account", async () => {
+    const { draw, requests } = linkingHarness(200);
+    const routeSet = vi.spyOn(m.route, "set");
+    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+
+    press(root as AnyVnode, `Link to ${OFFERED.email}`);
+    await settleDispatch();
+
+    // The association is patched, then the options reloaded (which fetches the panes' own data too).
+    expect(requests.slice(0, 2)).toEqual([
+      `/api/v1/workspaces/${UNBACKED}`,
+      `/ui/api/workspaces/${UNBACKED}/options`,
+    ]);
+    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([
+      "/account/local/",
+    ]);
+  });
+
+  it("stays put and shows the refusal when the association is refused", async () => {
+    const { draw, models } = linkingHarness(400);
+    const routeSet = vi.spyOn(m.route, "set");
+    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+
+    press(root as AnyVnode, `Link to ${OFFERED.email}`);
+    await settleDispatch();
+
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(models.get(UNBACKED)?.accountErrorMessage).toBe("refused");
   });
 });
 

@@ -26,6 +26,12 @@ class GitCloneError(MindError):
     ...
 
 
+class GitRefNotFoundError(GitCloneError):
+    """Raised when a clone's remote answered but has no branch or tag with the requested name."""
+
+    ...
+
+
 class GitOperationError(MindError):
     """Raised when a git operation (other than clone) fails."""
 
@@ -93,6 +99,15 @@ class MindsConfigError(MindError):
     ...
 
 
+class WorkspaceAutoUpdateSettingError(MindsConfigError, ValueError):
+    """Raised when a workspace's own auto-update setting has a window its mode cannot have.
+
+    A ``ValueError`` so pydantic reports it as a validation error of the setting.
+    """
+
+    ...
+
+
 class NaiveTimestampError(MindError, ValueError):
     """Raised when a timezone-aware datetime is required but a naive one was passed."""
 
@@ -112,12 +127,6 @@ class WorkspaceNameInUseError(MindError, ValueError):
 
 class PendingCreateAttemptStoreError(MindError):
     """Raised when a pending-create-attempt record cannot be written or deleted."""
-
-    ...
-
-
-class UpdateScheduleStoreError(MindError):
-    """Raised when a scheduled-update intent cannot be written."""
 
     ...
 

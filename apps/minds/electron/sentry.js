@@ -148,6 +148,16 @@ function fixupReleaseId(releaseId) {
 }
 
 /**
+ * Whether Sentry's native-crash (Crashpad) integration runs in this process --
+ * every run except the dev launcher's, which sets MINDS_DISABLE_CRASHPAD (see
+ * the `integrations` comment in initSentry). Electron's crashReporter APIs may
+ * only be used once that integration has started Crashpad.
+ */
+function isNativeCrashReportingEnabled() {
+  return process.env.MINDS_DISABLE_CRASHPAD !== '1';
+}
+
+/**
  * Initialize Sentry for the Electron main process. The SDK is always
  * initialized so it is ready to capture startup errors, but a `beforeSend` hook
  * reads `report_unexpected_errors` live on every event and drops the event while
@@ -182,10 +192,9 @@ function initSentry(options = {}) {
     // minidump reporting on for every other run -- packaged builds and a plain
     // `electron .` alike.
     integrations: (defaults) => {
-      const kept =
-        process.env.MINDS_DISABLE_CRASHPAD === '1'
-          ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
-          : defaults;
+      const kept = isNativeCrashReportingEnabled()
+        ? defaults
+        : defaults.filter((integration) => integration.name !== 'SentryMinidump');
       // Replace the default ChildProcess integration so an out-of-memory renderer
       // death is captured as a Sentry EVENT, not just a breadcrumb. Its default
       // ``events`` list is ['abnormal-exit', 'launch-failed', 'integrity-failure']
@@ -439,6 +448,7 @@ function captureManualReport({ message, details }) {
 module.exports = {
   initSentry,
   isErrorReportingEnabled,
+  isNativeCrashReportingEnabled,
   resolveEnvironment,
   fixupReleaseId,
   getOrCreateAnonymousUserId,

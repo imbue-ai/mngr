@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from pydantic import Field
 
@@ -58,27 +58,27 @@ def _client_env_config() -> ClientEnvConfig:
 
 
 def test_probe_share_readiness_true_on_any_http_response() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         assert str(request.url) == f"https://{_DOMAIN}/"
-        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize?x=1"})
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize?x=1"})
 
-    client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     assert probe_share_readiness(client, _DOMAIN) is True
 
 
 def test_probe_share_readiness_true_even_on_403() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403)
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(403)
 
-    client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     assert probe_share_readiness(client, _DOMAIN) is True
 
 
 def test_probe_share_readiness_false_on_transport_error() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("relay not reachable")
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("relay not reachable")
 
-    client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
     assert probe_share_readiness(client, _DOMAIN) is False
 
 

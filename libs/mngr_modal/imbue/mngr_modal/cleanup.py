@@ -208,28 +208,35 @@ def delete_modal_environment(environment_name: str) -> ModalCleanupOutcome:
         result = _run_modal(
             f"environment-delete-{environment_name}", ["environment", "delete", environment_name, "--yes"]
         )
-        if result.returncode == 0:
-            logger.debug("Deleted Modal environment {}", environment_name)
-            return ModalCleanupOutcome.DELETED
-        stderr = _failure_detail(result)
-        # Require the env name to appear alongside "not found" so unrelated
-        # errors (e.g. "credentials not found", "config file not found") do
-        # NOT get misclassified as NOT_FOUND. NOT_FOUND lets the caller drop
-        # the env from leak tracking; misclassifying a real FAILED here would
-        # silently defeat the session-end leak detector for that env.
-        stderr_lower = stderr.lower()
-        if "not found" in stderr_lower and environment_name.lower() in stderr_lower:
-            logger.debug("Modal environment {} already gone: {}", environment_name, stderr.strip())
-            return ModalCleanupOutcome.NOT_FOUND
-        logger.warning(
-            "Modal environment delete returned non-zero for {}: {}",
-            environment_name,
-            stderr,
-        )
-        return ModalCleanupOutcome.FAILED
     except ProcessError as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
         return ModalCleanupOutcome.FAILED
+    return _classify_environment_delete(environment_name, result)
+
+
+def _classify_environment_delete(environment_name: str, result: FinishedProcess) -> ModalCleanupOutcome:
+    """The outcome of one ``modal environment delete`` run."""
+    if result.returncode == 0:
+        logger.debug("Deleted Modal environment {}", environment_name)
+        return ModalCleanupOutcome.DELETED
+    stderr = _failure_detail(result)
+    # Require the env name to appear alongside the absence phrase so unrelated
+    # errors (e.g. "credentials not found", "config file not found") do
+    # NOT get misclassified as NOT_FOUND. NOT_FOUND lets the caller drop
+    # the env from leak tracking; misclassifying a real FAILED here would
+    # silently defeat the session-end leak detector for that env.
+    # The delete itself says "No such environment '<name>'"; other commands say "Environment '<name>' not found".
+    stderr_lower = stderr.lower()
+    is_absence_reported = "not found" in stderr_lower or "no such environment" in stderr_lower
+    if is_absence_reported and environment_name.lower() in stderr_lower:
+        logger.debug("Modal environment {} already gone: {}", environment_name, stderr.strip())
+        return ModalCleanupOutcome.NOT_FOUND
+    logger.warning(
+        "Modal environment delete returned non-zero for {}: {}",
+        environment_name,
+        stderr,
+    )
+    return ModalCleanupOutcome.FAILED
 
 
 class ModalTestEnvironmentSweepResult(FrozenModel):

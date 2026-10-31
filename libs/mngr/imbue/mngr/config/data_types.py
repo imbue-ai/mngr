@@ -405,7 +405,10 @@ class RetryConfig(FrozenModel):
 
     connect_retry_times: int = Field(
         default=3,
-        description="Number of times to retry a failed SSH connection before giving up",
+        description=(
+            "Number of times to retry a failed SSH connection before giving up. A drop that spans a "
+            "suspension of this machine, or that reconnects to a restored host, does not use a retry"
+        ),
     )
     connect_retry_delay: str = Field(
         default="5s",

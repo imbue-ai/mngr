@@ -13,6 +13,7 @@ import type {
 } from "../../../generated/ui";
 import type {
   InboxModel,
+  ManualCredentialParameter,
   PredefinedPermissionDetail as Detail,
 } from "../../../models/inbox";
 import {
@@ -242,6 +243,67 @@ function editorView(model: InboxModel, detail: Detail): m.Children {
   ]);
 }
 
+/** How the copy names what the credential form asks for: its inputs, as the
+ * user would call them ("a token", "the access key id and secret access key").
+ * Never "credentials", which reads as a username and password the dialog does
+ * not ask for. */
+function describeCredentialInputs(parameters: readonly ManualCredentialParameter[]): {
+  nounPhrase: string;
+  pronoun: string;
+  verb: string;
+} {
+  const names = parameters.map((parameter) => parameter.label.charAt(0).toLowerCase() + parameter.label.slice(1));
+  if (names.length === 1) {
+    const article = "aeiou".includes(names[0].charAt(0)) ? "an" : "a";
+    return { nounPhrase: `${article} ${names[0]}`, pronoun: "it", verb: "Paste" };
+  }
+  const joined = `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return { nounPhrase: `the ${joined}`, pronoun: "them", verb: "Enter" };
+}
+
+/** The offer to type instead of signing in, for a service that takes both. A
+ * footnote under the buttons: it is about what Approve would do, so it sits
+ * with Approve. Only while the sign-in is what Approve does -- once the form is
+ * up, the way back sits on the form -- and never while an approval runs. */
+function credentialEntryOffer(model: InboxModel, detail: Detail): m.Children {
+  if (!model.isManualCredentialEntryOffered() || model.manualCredentialsPrompt() !== null) return null;
+  if (model.isApproveBusy || detail.manual_credentials === null) return null;
+  const inputs = describeCredentialInputs(detail.manual_credentials.parameters);
+  return m("p", { id: "permissions-credential-entry-offer", class: "type-helper text-secondary" }, [
+    `Already have ${inputs.nounPhrase}? `,
+    m(
+      "button",
+      {
+        type: "button",
+        id: "permissions-credential-entry-offer-link",
+        class: TEXT_LINK_CLASS,
+        onclick: () => model.chooseManualCredentialEntry(),
+      },
+      `${inputs.verb} ${inputs.pronoun} instead of signing in`,
+    ),
+  ]);
+}
+
+/** The way back to the sign-in once the form is up. Sits right under the form,
+ * since the form is what the user is leaving behind. */
+function credentialEntrySwitch(model: InboxModel): m.Children {
+  if (!model.isManualCredentialEntryOffered() || model.manualCredentialsPrompt() === null) return null;
+  return m(
+    "p",
+    { id: "permissions-credential-entry-switch", class: "type-helper text-secondary" },
+    m(
+      "button",
+      {
+        type: "button",
+        id: "permissions-credential-entry-switch-link",
+        class: TEXT_LINK_CLASS,
+        onclick: () => model.chooseBrowserSignIn(),
+      },
+      "Sign in through the browser instead",
+    ),
+  );
+}
+
 const PROXY_SUMMARY_ID = "permissions-proxy-summary";
 
 /** The agent's ask to also send the service's requests through this computer.
@@ -303,17 +365,21 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
         ),
         rationale: detail.rationale,
         account: accountPicker(model, detail),
+        credentialEntrySwitch: credentialEntrySwitch(model),
         // Says what approving will do, so the browser hop is not a surprise
         // (and for AWS and the like never contradicts the credential form
         // right below the button).
         approveLabel: model.isBrowserSignInPending() ? "Sign in & approve" : "Approve",
-        progressLabel: detail.will_open_browser
+        // Read off the live selection, like the label, so credentials typed
+        // in instead of a sign-in never get a browser promised.
+        progressLabel: model.isBrowserSignInPending()
           ? `Opening a browser window for you to sign in to ${detail.display_name}…`
           : "Granting permission...",
         body: [
           model.isPermissionEditorShown ? editorView(model, detail) : summaryView(model, detail),
           proxySection(model, detail),
         ],
+        footer: credentialEntryOffer(model, detail),
       });
     },
   };

@@ -9,8 +9,16 @@ import type { WorkspaceHealth } from "../../models/health";
 import type { UiChannelClient } from "../../channel/client";
 import type { RequestVerdict, ResolvedRequest } from "../../models/inbox";
 import type { NotificationsUiController } from "../../models/notificationsUi";
+import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
+import type { UpdateActionResult } from "../../models/updates";
 import {
   accentSourceForRoute,
+  accountHubRoute,
+  accountIdFromHubPath,
+  creatingAttemptIdFromPath,
+  destroyingWorkspaceIdFromPath,
+  hubPagePath,
+  isAccountId,
   isAppOverlayPath,
   isTitlebarPopupRoutePath,
   isWorkspaceOverlayPath,
@@ -18,10 +26,17 @@ import {
   popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
+  workspacePageIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
-import type { PopoutRoute } from "./classify";
-import type { PopoutFrame, PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
+import type { HubPage, PopoutRoute } from "./classify";
+import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
+import type {
+  UiRouteAccountResponse,
+  UiSwitchAccountRequest,
+  UiSwitchAccountResponse,
+} from "../../channel/messages";
+import type { PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
 import {
@@ -59,11 +74,8 @@ export type WorkspaceMessageSender = (
 ) => boolean;
 
 /** Sends a reattach ask into the mounted frame: return the pulled-out window
- * to the desktop, at `frame` when one is given. Registered by WorkspaceFrame. */
-export type ReattachWindowSender = (
-  windowId: string,
-  frame: PopoutFrame | null,
-) => void;
+ * to the desktop. Registered by WorkspaceFrame. */
+export type ReattachWindowSender = (windowId: string) => void;
 
 /** Forwards a step of a watched title-bar drag into the mounted frame, when
  * the report names the frame's workspace. Registered by WorkspaceFrame. */
@@ -103,8 +115,25 @@ export interface WorkspaceFrameHandle {
   lastLoadedAtMs(): number | null;
 }
 
+/** A control of the chrome's own that a workspace's tour may ask to have ringed: the embed contract's CHROME_ANCHORS. */
+export type ChromeAnchor = "workspace-switcher" | "permissions" | "settings" | "share" | "help";
+
+/** One request for a workspace's Updates tab, taken once by the tab: it
+ * flashes its status block, and explains a press's failure when there is one. */
+export interface UpdatesTabArrival {
+  agentId: string;
+  serial: number;
+  /** A press made elsewhere that failed, which the tab opened to explain. */
+  failure: UpdateActionResult | null;
+}
+
 export class ShellState {
   readonly stores: AppStores;
+  /** The one-time auto-update offer, one per window, so its answer and a
+   * put-away hold across every surface the window shows. */
+  readonly autoUpdatePrompt: AutoUpdatePromptModel;
+  private pendingUpdatesTabArrival: UpdatesTabArrival | null = null;
+  private updatesTabArrivalCount = 0;
   private readonly webLogin: WebLoginModel;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
@@ -120,6 +149,19 @@ export class ShellState {
    * machine) without navigating and without swapping what is painted behind
    * it -- a route-based app modal over a hub page would fall back to Home. */
   isNotificationsOpen = false;
+  /** The titlebar's account switcher popover, local state like the feed. */
+  isAccountSwitcherOpen = false;
+  /** A switch asked of the backend and not yet landed, so a second press is not a second switch. */
+  isAccountSwitchPending = false;
+  /**
+   * The account this window shows: a signed-in account's user id, a signed-out
+   * one's, or `local` for the device. Seeded from the bootstrap, then set on
+   * every route change from the hub segment, the displayed workspace's
+   * association, or an overlay's ?account=; a sign-in the window asked for
+   * adopts the account without a navigation (see adoptAccount). Every hub
+   * route the window builds carries it, and the channel scopes its frames to it.
+   */
+  accountId: string = LOCAL_PROFILE_USER_ID;
   isSidebarOpen = false;
   sidebarAnchor: {
     x: number;
@@ -129,6 +171,8 @@ export class ShellState {
   } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
+  /** The chrome control the displayed workspace's tour is talking about, ringed in the titlebar; null for none. */
+  highlightedChromeAnchor: ChromeAnchor | null = null;
   /** The workspace-options route an app modal was opened over, so the Shell can
    * keep that panel painted (and mounted) beneath the modal: the live route is
    * the modal's, which carries none of the panel's params. Null whenever no
@@ -158,10 +202,6 @@ export class ShellState {
    */
   private openRecovery: { agentId: string; isAutoRaised: boolean } | null =
     null;
-  /** Which machine's update modal is up. Unlike the recovery card this is not
-   * tied to a displayed machine (the machines list opens it from a row); it is
-   * dropped by the next navigation away from its machine. */
-  private openUpdateAgentId: string | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -177,9 +217,20 @@ export class ShellState {
    * arrival must not close it the way an ordinary navigation does. Consumed
    * by the first route change that lands. */
   private isNotificationsArmed = false;
+  /** The same for the account switcher, raised by `switchToAccountSwitcher`. */
+  private isAccountSwitcherArmed = false;
   /** The path the last `handleRouteChanged` saw, so a redraw on the route the
    * window is already on is not mistaken for a navigation to it. */
   private lastHandledRoutePath: string | null = null;
+  /** Whether the route the window is on has not said whose account it is yet
+   * (a workspace whose row has not arrived), so a later redraw asks it again. */
+  private isRouteAccountUnknown = false;
+  /** The account the route a switch is landing on belongs to: the backend
+   * chose the landing from that account's own rows, so the route's account is
+   * known before the account's list has arrived, and the backend is not asked
+   * whose it is. Consumed by the navigation it was made for, and dropped by
+   * any other. */
+  private routeAccountInHand: { path: string; accountId: string } | null = null;
   /** The ``?review=`` deep link already consumed, keyed by route+id.
    * `handleRouteChanged` runs on EVERY redraw and its stripping route-set
    * lands a tick later, so without this every interim redraw would re-consume
@@ -222,23 +273,28 @@ export class ShellState {
   /** Callers waiting for a window to leave the detached set (a reattach on
    * its way): resolved by the next report without it, or by their timer. */
   private reattachWaiters: ReattachWaiter[] = [];
-  /** Whether a popout is being dragged over this window's surface, offering
-   * to return its window to the desktop here. */
-  isPopoutDropTarget = false;
   /** The mounted Permissions pane's live list, registered while one is up. The
    * popup answers a request; the pane behind it is what shows the list that
    * request was in. */
   private waitingRequestList: WaitingRequestList | null = null;
 
-  constructor(stores: AppStores, webLoginModel: WebLoginModel = webLogin) {
+  constructor(
+    stores: AppStores,
+    webLoginModel: WebLoginModel = webLogin,
+    autoUpdatePrompt: AutoUpdatePromptModel = new AutoUpdatePromptModel(),
+  ) {
     this.stores = stores;
     this.webLogin = webLoginModel;
+    this.autoUpdatePrompt = autoUpdatePrompt;
   }
 
   /** Whether this window's workspace frame is showing the workspace named. */
   isWorkspaceFrameOn(agentScopedId: string): boolean {
     const armed = this.workspaceFrame?.armedWorkspaceAnyId() ?? null;
-    return armed !== null && this.stores.workspaces.toAgentScopedId(armed) === agentScopedId;
+    return (
+      armed !== null &&
+      this.stores.workspaces.toAgentScopedId(armed) === agentScopedId
+    );
   }
 
   /** Rebuild this window's workspace view, if its frame is showing the one named
@@ -262,6 +318,225 @@ export class ShellState {
     return route.split("?")[1] ?? "";
   }
 
+  /** The hub route of `page` on this window's account (`/account/<id>/` for home). */
+  hubRoute(page: HubPage = "/"): string {
+    return accountHubRoute(this.accountId, page);
+  }
+
+  /** The query an overlay route (/settings, /accounts, /help, /inbox) carries so a reload keeps the window's account. */
+  overlayQuery(params: Record<string, string> = {}): Record<string, string> {
+    return { ...params, account: this.accountId };
+  }
+
+  /** Route to one of the hub pages of this window's account. */
+  routeToHub(page: HubPage = "/", options?: { replace: boolean }): void {
+    m.route.set(this.hubRoute(page), undefined, options);
+  }
+
+  /** Whether this window's account is signed out here: a user id with no session, which its hub says instead of offering Create. */
+  isAccountSignedOut(): boolean {
+    return (
+      this.accountId !== LOCAL_PROFILE_USER_ID &&
+      !this.stores.accounts.isSignedIn(this.accountId)
+    );
+  }
+
+  /**
+   * Make `accountId` this window's account without navigating: the start flow
+   * and the create form, both on the device, take up the account a sign-in they
+   * asked for just landed, so the create is submitted under it. The browser
+   * URL's hub segment is rewritten in place so a reload keeps the account; the
+   * router's own idea of the route is left alone, since the page is not
+   * changing. The channel is told at once, so the frames follow.
+   */
+  adoptAccount(accountId: string): void {
+    if (accountId === this.accountId) return;
+    const path = this.currentRoutePath();
+    const hubAccountId = accountIdFromHubPath(path);
+    if (hubAccountId !== null && typeof window !== "undefined") {
+      const rewritten = path.replace(
+        `/account/${hubAccountId}`,
+        `/account/${encodeURIComponent(accountId)}`,
+      );
+      const search = this.currentRouteSearch();
+      window.history.replaceState(
+        null,
+        "",
+        rewritten + (search ? `?${search}` : ""),
+      );
+    }
+    this.takeUpAccount(accountId);
+  }
+
+  /** Become `accountId`'s window and tell the channel, so its frames (the account's rows first) follow. */
+  private takeUpAccount(accountId: string): void {
+    this.accountId = accountId;
+    // A switch or an adoption settles whose window this is, so an answer still
+    // out for the route it happened on is dropped rather than undoing it.
+    this.isRouteAccountUnknown = false;
+    this.channel?.setClientState(
+      this.currentRoutePath(),
+      this.displayedWorkspaceAgentId(),
+      this.accountId,
+    );
+  }
+
+  openAccountSwitcher(): void {
+    this.isAccountSwitcherOpen = true;
+  }
+
+  closeAccountSwitcher(): void {
+    this.isAccountSwitcherOpen = false;
+  }
+
+  /**
+   * Open the switcher from a raised titlebar strip, putting the open surface
+   * away first. Like the feed (see switchToNotifications), the switcher is
+   * armed across the navigation that puts a route-backed surface away, so
+   * that arrival does not close it the way an ordinary navigation does.
+   */
+  switchToAccountSwitcher(): void {
+    this.closeNotifications();
+    this.isAccountSwitcherArmed =
+      this.dismissAppOverlay() || this.closeWorkspaceOverlay({ replace: true });
+    this.openAccountSwitcher();
+  }
+
+  /**
+   * Move this window to `accountId`: the backend answers where to land (the
+   * account's most recent workspace no other window shows, else its hub) and
+   * the window routes there like any navigation, so the desktop's one-window
+   * rule still runs; a claim lost to another window lands on the hub, the
+   * documented fallback. The window becomes the account's before it routes:
+   * a workspace landing is one the old account's list does not know, so the
+   * route alone could not say whose it is, and the channel has to be on the
+   * new account for that row to arrive at all.
+   */
+  async switchAccount(accountId: string): Promise<void> {
+    this.closeAccountSwitcher();
+    if (accountId === this.accountId || this.isAccountSwitchPending) return;
+    this.isAccountSwitchPending = true;
+    const body: UiSwitchAccountRequest = {
+      account_id: accountId,
+      client_id: this.channel?.clientId ?? "",
+      is_desktop: electronBridge.isDesktop,
+    };
+    const hubRoute = accountHubRoute(accountId);
+    let route = hubRoute;
+    try {
+      const response = await fetch("/ui/api/windows/switch-account", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (response.ok)
+        route = ((await response.json()) as UiSwitchAccountResponse).route;
+      else
+        console.warn(
+          `[account-switch] switch-account answered ${response.status}; landing on the account's hub`,
+        );
+    } catch (error) {
+      // The hub is the landing when the backend cannot say better.
+      console.warn(
+        `[account-switch] switch-account could not be asked; landing on the account's hub: ${String(error)}`,
+      );
+    } finally {
+      this.isAccountSwitchPending = false;
+    }
+    this.takeUpAccount(accountId);
+    this.routeAccountInHand = { path: route.split("?")[0], accountId };
+    this.routeTo(route, undefined, hubRoute);
+    m.redraw();
+  }
+
+  /** The account in hand for a landing on `path`, when a switch left one for it. */
+  private routeAccountInHandFor(path: string): string | null {
+    const inHand = this.routeAccountInHand;
+    return inHand !== null && inHand.path === path ? inHand.accountId : null;
+  }
+
+  /** The workspace (either coordinate) or create attempt a route names in its path, else null. An overlay's
+   * `?workspace=` is not a route's own subject: see `overlayBehindWorkspaceId`. */
+  private static routeSubjectIdFromPath(path: string): string | null {
+    return (
+      workspacePageIdFromPath(path) ??
+      popoutFromPath(path)?.workspaceAnyId ??
+      recoveryWorkspaceIdFromPath(path) ??
+      creatingAttemptIdFromPath(path) ??
+      destroyingWorkspaceIdFromPath(path) ??
+      null
+    );
+  }
+
+  /** The account a route is for, from what the route itself says; null when it says nothing (keep the window's). */
+  accountIdForRoute(path: string, search: string): string | null {
+    const hubAccountId = accountIdFromHubPath(path);
+    if (hubAccountId !== null) return hubAccountId;
+    const workspaceAnyId =
+      ShellState.routeSubjectIdFromPath(path) ??
+      overlayBehindWorkspaceId(path, search) ??
+      null;
+    if (workspaceAnyId !== null) {
+      // A workspace the list does not know yet (a cold start on it) says nothing until it arrives.
+      const entry = this.stores.workspaces.entryByAnyId(workspaceAnyId);
+      return entry === null
+        ? null
+        : entry.account_user_id || LOCAL_PROFILE_USER_ID;
+    }
+    // An overlay's ?account=, when it names an account id; anything else says nothing, as the backend reads it.
+    const queryAccountId = new URLSearchParams(search).get("account");
+    if (queryAccountId !== null && isAccountId(queryAccountId))
+      return queryAccountId;
+    // The start flow runs on the device, whatever is signed in.
+    if (path === "/start" || path === "/consent") return LOCAL_PROFILE_USER_ID;
+    return null;
+  }
+
+  /**
+   * Ask the backend whose a route is when the list cannot say. The list holds
+   * the window's own account's rows, so a workspace of another account (a step
+   * back onto the one the window showed before a switch, a workspace moved to
+   * another account) never arrives on this connection; its association is in
+   * the records, which the backend reads the way it seeds a window's account.
+   * The answer counts only while the window is still on that route and the
+   * list has not said first.
+   */
+  private async askRouteAccount(path: string, search: string): Promise<void> {
+    let accountId: string;
+    try {
+      const params = new URLSearchParams({ path, query: search });
+      const response = await fetch(
+        `/ui/api/windows/route-account?${params.toString()}`,
+        { credentials: "same-origin" },
+      );
+      if (!response.ok) {
+        console.warn(
+          `[account] route-account answered ${response.status} for ${path}; the window keeps its account`,
+        );
+        return;
+      }
+      accountId = ((await response.json()) as UiRouteAccountResponse)
+        .account_id;
+      if (typeof accountId !== "string" || accountId === "") {
+        console.warn(
+          `[account] route-account named no account for ${path}; the window keeps its account`,
+        );
+        return;
+      }
+    } catch (error) {
+      console.warn(
+        `[account] route-account could not be asked for ${path}; the window keeps its account: ${String(error)}`,
+      );
+      return;
+    }
+    if (path !== this.lastHandledRoutePath || !this.isRouteAccountUnknown)
+      return;
+    this.isRouteAccountUnknown = false;
+    if (accountId !== this.accountId) this.takeUpAccount(accountId);
+    m.redraw();
+  }
+
   /** Enter a workspace: route to the content surface for its identity.
    * `query` carries route params along (the ``?review=`` deep link an
    * OS-notification click arrives with); empty adds nothing. */
@@ -274,9 +549,14 @@ export class ShellState {
    * route onto the surface of a workspace this window is not showing first
    * asks the desktop app, which raises that workspace's own window instead
    * when it has one (handing it the route) and leaves this window where it
-   * is. Outside the desktop app, where windows and tabs are not deduplicated,
-   * it is a plain route set. */
-  routeTo(route: string, params?: Record<string, string>): void {
+   * is -- or sends it to `fallbackRoute` when one is given. Outside the
+   * desktop app, where windows and tabs are not deduplicated, it is a plain
+   * route set. */
+  routeTo(
+    route: string,
+    params?: Record<string, string>,
+    fallbackRoute: string | null = null,
+  ): void {
     const setRoute = (): void => {
       if (params === undefined) m.route.set(route);
       else m.route.set(route, params);
@@ -303,10 +583,35 @@ export class ShellState {
     void claim.then(
       (isOpenedElsewhere) => {
         if (!isOpenedElsewhere) setRoute();
+        else if (fallbackRoute !== null) m.route.set(fallbackRoute);
       },
       // No answer from main: navigating here is better than going nowhere.
       () => setRoute(),
     );
+  }
+
+  /** Land in a workspace on one of its chats: asked of the frame directly when
+   * the workspace is already on screen, with whatever floats over it (its
+   * options panel, or an app modal opened over it) put away so the chat is
+   * not left behind it, else carried as ``?chat=`` for handleRouteChanged to
+   * forward once the frame is up. */
+  openWorkspaceChat(anyId: string, chatAgentId: string): void {
+    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
+    if (this.displayedWorkspaceAgentId() === agentScoped) {
+      if (!this.dismissAppOverlay()) this.closeWorkspaceOverlay();
+      this.requestFocusChat(agentScoped, chatAgentId);
+      return;
+    }
+    this.enterWorkspace(agentScoped, { chat: chatAgentId });
+  }
+
+  /** Answer an update refused for want of a signed-in AI account: enter the
+   * workspace, then ask it for a new chat with the provider chooser up. The
+   * entry comes first because the chat opens only in a connected frame. */
+  async signInForUpdate(anyId: string): Promise<UpdateActionResult> {
+    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
+    this.enterWorkspace(agentScoped);
+    return await this.stores.updates.signIn(agentScoped);
   }
 
   /** Enter a workspace the way its machines-list row does: onto its surface
@@ -362,13 +667,14 @@ export class ShellState {
     if (isWorkspaceOverlayPath(path))
       this.panelRouteBehindOverlay = m.route.get() ?? null;
     const displayed = this.displayedWorkspaceAnyId;
-    const query =
+    const query = this.overlayQuery(
       displayed === null
         ? params
         : {
             ...params,
             workspace: this.stores.workspaces.toAgentScopedId(displayed),
-          };
+          },
+    );
     // Swinging the OPEN popup onto another request replaces its history entry
     // rather than stacking a second one, so one dismissal still lands back on
     // the surface the popup was opened over instead of on the request before it.
@@ -466,7 +772,10 @@ export class ShellState {
   /** The title the mounted shell last reported for a pulled-out window, else
    * a placeholder until it does. */
   popoutWindowTitle(windowId: string): string {
-    return this.detachedWindows.find((entry) => entry.windowId === windowId)?.title ?? "…";
+    return (
+      this.detachedWindows.find((entry) => entry.windowId === windowId)
+        ?.title ?? "…"
+    );
   }
 
   /** The mounted shell reported its pulled-out windows. In a popout window
@@ -500,8 +809,7 @@ export class ShellState {
   }
 
   /** Main asks this window to return a pulled-out window of the workspace it
-   * shows to the desktop (the popout was dropped onto this window's surface,
-   * or is closing): the mounted shell takes the window back. Resolves true
+   * shows to the desktop (the popout is closing): the mounted shell takes the window back. Resolves true
    * once the shell reports it back, which is main's word to close the popout
    * (its own page may not have loaded to see it), and false when this window
    * did not take it (it shows some other workspace, or is a popout itself,
@@ -518,20 +826,19 @@ export class ShellState {
       return Promise.resolve(false);
     }
     const reportedBack = this.whenReportedBack(ask.windowId);
-    sender(ask.windowId, ask.frame);
+    sender(ask.windowId);
     return reportedBack;
   }
 
-  /** Ask this popout's own shell to return its window to the desktop, at
-   * `frame` when a drop named one: the way back when no desktop window can
-   * take it. Resolves when the shell reports the window back (which it does
+  /** Ask this popout's own shell to return its window to the desktop: the
+   * way back when no desktop window can take it. Resolves when the shell reports the window back (which it does
    * only once its save has landed), or after a short wait when it never does. */
-  async returnPopoutToDesktop(frame: PopoutFrame | null): Promise<void> {
+  async returnPopoutToDesktop(): Promise<void> {
     const popout = this.popoutRoute();
     const sender = this.reattachWindowSender;
     if (popout === null || sender === null) return;
     const reportedBack = this.whenReportedBack(popout.windowId);
-    sender(popout.windowId, frame);
+    sender(popout.windowId);
     await reportedBack;
   }
 
@@ -552,10 +859,6 @@ export class ShellState {
       };
       this.reattachWaiters.push(waiter);
     });
-  }
-
-  setPopoutDropTarget(isOver: boolean): void {
-    this.isPopoutDropTarget = isOver;
   }
 
   registerWorkspaceMessageSender(sender: WorkspaceMessageSender): void {
@@ -692,7 +995,7 @@ export class ShellState {
     // (?workspace=) -- with none it is a redirect, not an overlay.
     const isCloseable =
       isAppOverlayPath(path) ||
-      (path === "/create/template" &&
+      (hubPagePath(path) === "/create/template" &&
         overlayBehindWorkspaceId(path, search) !== null);
     if (!isCloseable) return false;
     // history.back() does not update the route synchronously, so a second
@@ -708,9 +1011,13 @@ export class ShellState {
       // popup is not left sitting one Back away and the stack this
       // dismissal walks away from does not grow on every review.
       const behind = overlayBehindWorkspaceId(path, search);
-      m.route.set(behind !== null ? `/workspace/${behind}` : "/", undefined, {
-        replace: true,
-      });
+      m.route.set(
+        behind !== null ? `/workspace/${behind}` : this.hubRoute(),
+        undefined,
+        {
+          replace: true,
+        },
+      );
       return true;
     }
     if (window.history.length > 1) {
@@ -727,7 +1034,7 @@ export class ShellState {
       return true;
     }
     const behind = overlayBehindWorkspaceId(path, search);
-    m.route.set(behind !== null ? `/workspace/${behind}` : "/");
+    m.route.set(behind !== null ? `/workspace/${behind}` : this.hubRoute());
     return true;
   }
 
@@ -834,6 +1141,10 @@ export class ShellState {
       this.closeSidebar();
       return true;
     }
+    if (this.isAccountSwitcherOpen) {
+      this.closeAccountSwitcher();
+      return true;
+    }
     if (this.webLogin.isOpen) {
       this.webLogin.dismiss();
       return true;
@@ -844,32 +1155,37 @@ export class ShellState {
     }
     return (
       this.closeOpenRecoveryModal() ||
-      this.closeOpenUpdateModal() ||
       this.closeWorkspaceOverlay() ||
       this.dismissAppOverlay()
     );
   }
 
-  /** The machine whose update modal is up, or null when none is. */
-  openUpdateModalAgentId(): string | null {
-    return this.openUpdateAgentId;
+  /**
+   * Open a workspace's Settings -> Updates tab, the one place its update is
+   * explained and acted on. The tab flashes its status block once on arrival.
+   */
+  openUpdatesTab(
+    anyId: string,
+    options: { failure?: UpdateActionResult } = {},
+  ): void {
+    const agentId = this.stores.workspaces.toAgentScopedId(anyId);
+    this.pendingUpdatesTabArrival = {
+      agentId,
+      serial: ++this.updatesTabArrivalCount,
+      failure: options.failure ?? null,
+    };
+    const params = { tab: "settings", group: "updates" };
+    if (isTitlebarPopupRoutePath(this.currentRoutePath()))
+      m.route.set(`/workspace/${agentId}/options`, params, { replace: true });
+    else this.routeTo(`/workspace/${agentId}/options`, params);
   }
 
-  /** The user asked for the update modal (a badge, the band's "See update"). */
-  openUpdateModal(agentId: string): void {
-    this.openUpdateAgentId = agentId;
-  }
-
-  closeUpdateModal(): void {
-    this.openUpdateAgentId = null;
-  }
-
-  /** Close whichever update modal is up, reporting whether there was one. Not
-   * keyed on the displayed machine, because the modal is not. */
-  closeOpenUpdateModal(): boolean {
-    if (this.openUpdateAgentId === null) return false;
-    this.closeUpdateModal();
-    return true;
+  /** Take the pending Updates-tab request if it is for this machine, so it is acted on once. */
+  takeUpdatesTabArrival(agentId: string): UpdatesTabArrival | null {
+    const arrival = this.pendingUpdatesTabArrival;
+    if (arrival === null || arrival.agentId !== agentId) return null;
+    this.pendingUpdatesTabArrival = null;
+    return arrival;
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
@@ -886,6 +1202,30 @@ export class ShellState {
     // instruction after it was written.
     const isSameRoute = path === this.lastHandledRoutePath;
     this.lastHandledRoutePath = path;
+    // The window's account follows the route when the route changes, and is
+    // asked of it again while it has not said whose it is. A redraw of an
+    // unchanged route leaves the account alone: an account adopted without a
+    // navigation (adoptAccount) would otherwise be undone by the next draw,
+    // since the start flow's route is the device's and a hub route rewritten
+    // in place still reads as the old account from m.route.get().
+    if (!isSameRoute || this.isRouteAccountUnknown) {
+      const routeAccountId =
+        this.accountIdForRoute(path, search) ??
+        this.routeAccountInHandFor(path);
+      this.isRouteAccountUnknown = routeAccountId === null;
+      if (routeAccountId !== null) this.accountId = routeAccountId;
+      // A route naming a workspace the list does not carry is asked of the
+      // backend, once per navigation; a redraw keeps asking the list.
+      else if (!isSameRoute && ShellState.routeSubjectIdFromPath(path) !== null)
+        void this.askRouteAccount(path, search);
+    }
+    if (!isSameRoute) this.routeAccountInHand = null;
+    // The switcher closes like any popover when the surface under it changes,
+    // except across the one navigation that opened it from a raised strip.
+    if (!isSameRoute) {
+      if (this.isAccountSwitcherArmed) this.isAccountSwitcherArmed = false;
+      else this.isAccountSwitcherOpen = false;
+    }
     // The dismissal navigation has landed; clear the closeAppOverlay guard.
     // Gated on an actual navigation, like the panel below: history.back() does
     // not land synchronously, so a redraw on the route still being left would
@@ -957,20 +1297,9 @@ export class ShellState {
     ) {
       this.openRecovery = null;
     }
-    // Dropped by a navigation to anywhere but its own machine: "Update now"
-    // enters the machine before dispatching (so the chat tab has a connected
-    // client to open in), and the modal rides that navigation. Keyed on the
-    // navigation because it can be open with no machine displayed.
-    if (
-      !isSameRoute &&
-      this.openUpdateAgentId !== null &&
-      this.openUpdateAgentId !== heldAgentScoped
-    ) {
-      this.openUpdateAgentId = null;
-    }
     this.consumeReviewParam(path, search);
     this.consumeChatParam(path, search);
-    this.channel?.setClientState(path, agentScoped);
+    this.channel?.setClientState(path, agentScoped, this.accountId);
   }
 
   /** Consume a ``?chat=<chat-agent-id>`` param on the workspace surface --
@@ -1314,13 +1643,16 @@ export class ShellState {
     const routeOptions = isSwitching ? { replace: true } : undefined;
     const agentScoped = this.displayedWorkspaceAgentId();
     if (agentScoped === null) {
-      m.route.set("/help", undefined, routeOptions);
+      m.route.set("/help", this.overlayQuery(), routeOptions);
       return;
     }
     const isHealthy = this.stores.health.isContentAssumedReady(agentScoped);
     m.route.set(
       "/help",
-      { workspace: agentScoped, assist: isHealthy ? "1" : "0" },
+      this.overlayQuery({
+        workspace: agentScoped,
+        assist: isHealthy ? "1" : "0",
+      }),
       routeOptions,
     );
   }
@@ -1357,7 +1689,9 @@ export class ShellState {
       isHelpPending || isTitlebarPopupRoutePath(this.currentRoutePath());
     m.route.set(
       "/help",
-      workspaceAgentId ? { workspace: workspaceAgentId } : undefined,
+      this.overlayQuery(
+        workspaceAgentId ? { workspace: workspaceAgentId } : {},
+      ),
       isSwitching ? { replace: true } : undefined,
     );
   }

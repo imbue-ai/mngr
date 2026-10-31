@@ -20,7 +20,7 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     react (e.g. drive a health tracker / recovery UI).
 
     - ``CONNECT_ERROR``: the plugin could not establish a connection to
-      the backend (httpx.ConnectError, or RemoteProtocolError / ReadError
+      the backend (httpx2.ConnectError, or RemoteProtocolError / ReadError
       / a timeout before any response bytes, or a failure dialing the SSH
       host a remote backend lives on -- e.g. when the agent's host has
       gone away). It is the residual class: a failure that leaves the
@@ -146,7 +146,7 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
         default=None,
         description=(
             "Description of the exception that produced the observation, for a consumer to show or log: "
-            "its message, or its class name where it carries no message (httpx leaves ReadError and every "
+            "its message, or its class name where it carries no message (httpx2 leaves ReadError and every "
             "TimeoutException empty). None wherever no exception backs the observation -- every "
             "ERROR_RESPONSE / UNRESOLVED / STALLED, and the CONNECT_ERROR the plugin raises itself when it "
             "refuses to dial host loopback for an agent with no SSH tunnel."

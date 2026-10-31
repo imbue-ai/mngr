@@ -963,3 +963,23 @@ def test_user_text_quoting_command_markup_mid_text_stays_user(tmp_path: Path) ->
     write_raw_transcript(input_file, [make_user_record("u1", text="what does the <command-name> markup mean?")])
     _convert_complete(input_file, output_file)
     assert len(read_steps(output_file, "user")) == 1
+
+
+def test_replayed_input_lines_convert_once(tmp_path: Path) -> None:
+    """A line recorded twice in the input yields one record, with intact content."""
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    fanned_inference = [
+        make_assistant_record("u1", text="part one", message_id="msg_shared", timestamp="2026-01-01T00:00:01Z"),
+        make_assistant_record("u2", text="part two", message_id="msg_shared", timestamp="2026-01-01T00:00:02Z"),
+    ]
+    records = [make_user_record("u0", text="go"), *fanned_inference]
+    write_raw_transcript(input_file, [*records, *records])
+
+    _convert_complete(input_file, output_file)
+
+    events = read_stream(output_file)
+    assert len({e["event_id"] for e in events}) == len(events)
+    agent_steps = read_steps(output_file, "agent")
+    assert len(agent_steps) == 1
+    assert agent_steps[0]["message"] == "part one\npart two"
+    assert len(read_steps(output_file, "user")) == 1

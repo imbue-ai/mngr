@@ -25,6 +25,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GETATTR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GLOBAL_KEYWORD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_CLAUDE_DIR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_GUARDED_BINARY
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HTTPX_IMPORT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IF_ELIF_WITHOUT_ELSE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORTLIB_IMPORT_MODULE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORT_DATETIME
@@ -103,8 +104,8 @@ def check_eval(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_EVAL, source_dir, max_count)
 
 
-def check_while_true(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_WHILE_TRUE, source_dir, max_count)
+def check_while_true(source_dir: Path, max_count: int, excluded_patterns: tuple[str, ...] = ()) -> None:
+    assert_ratchet(PREVENT_WHILE_TRUE, source_dir, max_count, excluded_patterns)
 
 
 def check_time_sleep(source_dir: Path, max_count: int) -> None:
@@ -157,8 +158,8 @@ def check_silent_decode_error_catches(source_dir: Path, max_count: int) -> None:
 # ratchet_group("Import style")
 
 
-def check_inline_imports(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_INLINE_IMPORTS, source_dir, max_count)
+def check_inline_imports(source_dir: Path, max_count: int, excluded_patterns: tuple[str, ...] = ()) -> None:
+    assert_ratchet(PREVENT_INLINE_IMPORTS, source_dir, max_count, excluded_patterns)
 
 
 def check_relative_imports(source_dir: Path, max_count: int) -> None:
@@ -206,6 +207,10 @@ def check_async_await(
 
 def check_pandas_import(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_PANDAS_IMPORT, source_dir, max_count)
+
+
+def check_httpx_import(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_HTTPX_IMPORT, source_dir, max_count)
 
 
 def check_dataclasses_import(source_dir: Path, max_count: int) -> None:

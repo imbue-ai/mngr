@@ -7,12 +7,11 @@ from typing import IO
 
 
 def run_interactive_subprocess(
-    command: str | Sequence[str],
+    command: Sequence[str],
     *,
     stdin: int | IO[Any] | None = None,
     stdout: int | IO[Any] | None = None,
     stderr: int | IO[Any] | None = None,
-    shell: bool = False,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
     check: bool = False,
@@ -28,7 +27,6 @@ def run_interactive_subprocess(
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
-        shell=shell,
         cwd=cwd,
         env=env,
         check=check,
@@ -37,12 +35,11 @@ def run_interactive_subprocess(
 
 
 def popen_interactive_subprocess(
-    command: str | Sequence[str],
+    command: Sequence[str],
     *,
     stdin: int | IO[Any] | None = None,
     stdout: int | IO[Any] | None = None,
     stderr: int | IO[Any] | None = None,
-    shell: bool = False,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.Popen[Any]:
@@ -56,7 +53,28 @@ def popen_interactive_subprocess(
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
-        shell=shell,
         cwd=cwd,
+        env=env,
+    )
+
+
+def popen_interactive_shell_command(
+    command_line: str,
+    *,
+    stdin: int | IO[Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.Popen[Any]:
+    """Open a user-configured command line through the shell, with terminal access.
+
+    Only for command lines the user wrote themselves (e.g. the ``pager`` config
+    setting or ``$PAGER``), where shell syntax such as flags and pipelines is the
+    point and the user already controls what runs on their machine. Never pass a
+    string built from program or remote data; use popen_interactive_subprocess
+    with an argv list instead.
+    """
+    return subprocess.Popen(  # nosec B602
+        command_line,
+        stdin=stdin,
+        shell=True,
         env=env,
     )

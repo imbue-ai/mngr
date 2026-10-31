@@ -129,7 +129,8 @@ mngr forward --trust-ca
 once to install that CA into your platform's trust stores (macOS login
 keychain; Linux per-user NSS database used by Chrome), after which browsers
 accept every workspace origin without certificate warnings. The Imbue Studio
-Electron app trusts the proxy programmatically and does not need this.
+Electron app pins that CA programmatically (the backend hands it the
+certificate's path) and does not need this.
 
 ## Status
 
