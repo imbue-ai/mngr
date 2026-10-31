@@ -996,6 +996,8 @@ class IceServersResponse(FrozenModel):
     expires_at: str | None = Field(
         description="RFC 3339 expiry of the credential the list carries; null when the list is empty"
     )
+
+
 class AgentFolderSync(FrozenModel):
     """One folder of this desktop that the workspace has a copy of, or had."""
 

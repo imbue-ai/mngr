@@ -59,8 +59,8 @@ from imbue.minds.desktop_client.agent_creator import is_network_restricting_buil
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
-from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
+from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version

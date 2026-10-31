@@ -1983,8 +1983,8 @@ def test_get_share_status_parses_status_document(monkeypatch: pytest.MonkeyPatch
 
 
 def test_get_share_status_parses_the_media_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "host_id": _SHARE_HOST_ID,
@@ -3189,9 +3189,9 @@ def test_lease_host_sends_the_declared_ports_only_when_declared(monkeypatch: pyt
     (specs/published-ports); a create without declarations keeps the old body shape."""
     bodies: list[dict[str, object]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         bodies.append(_json.loads(request.content))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "host_db_id": "00000000-0000-0000-0000-000000000001",
