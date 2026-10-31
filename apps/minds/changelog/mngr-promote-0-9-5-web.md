@@ -1,0 +1,1 @@
+- Browser-created alpha workspaces pin to `minds-v0.9.5`, now that production is baked at that tag, so the alpha channel serves Imbue Studio 0.9.5 on mac, Linux and the web.

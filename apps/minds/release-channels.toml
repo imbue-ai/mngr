@@ -85,4 +85,4 @@ template_ref = "minds-v0.9.4"
 template_ref = "minds-v0.9.4"
 
 [web_channels.alpha]
-template_ref = "minds-v0.9.4"
+template_ref = "minds-v0.9.5"
