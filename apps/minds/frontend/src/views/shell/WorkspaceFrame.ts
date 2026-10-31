@@ -237,8 +237,9 @@ export function buildEmbedHandlers(
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
     // Float the options panel's sharing pane over this machine (kept mounted),
-    // focused on the asking app. A name the pane does not recognize falls back
-    // to the whole workspace (SharePanelModel.selectTarget).
+    // focused on the asking app, or on the whole workspace when the message names
+    // none (contract v13). A name the pane does not recognize falls back to the
+    // whole workspace too (SharePanelModel.selectTarget).
     const serviceName =
       typeof message.serviceName === "string" ? message.serviceName : null;
     navigate(

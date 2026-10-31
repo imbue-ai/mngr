@@ -815,23 +815,38 @@ def test_transcript_cli_applies_head(
     assert json.loads(lines[1])["message"] == "msg-1"
 
 
+def test_transcript_cli_reads_an_agent_type_without_the_mixin_from_its_file(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """The common transcript is a file contract, not a class one: an agent whose type's class does not implement
+    HasCommonTranscriptMixin (the default 'generic' type here; a config-defined ``command`` subtype whose
+    process writes the convention itself, like a chat room's reader, in the field) renders what it wrote."""
+    _agent_id, events_dir = create_agent_with_events_dir(
+        local_provider.host_dir, agent_name="room-like-agent", events_source="room/common_transcript"
+    )
+    write_common_transcript_events(events_dir, SAMPLE_ATIF_STREAM_EVENTS)
+
+    result = cli_runner.invoke(transcript, ["room-like-agent"], obj=plugin_manager)
+
+    assert result.exit_code == 0
+    assert "Hello" in result.output
+
+
 @pytest.mark.parametrize("preserved", [False, True])
-def test_transcript_cli_rejects_agent_type_without_mixin(
+def test_transcript_cli_names_the_missing_file_for_an_agent_type_without_the_mixin(
     preserved: bool,
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_provider,
     temp_mngr_ctx,
 ) -> None:
-    """Agent types whose class does not implement HasCommonTranscriptMixin should be rejected up front.
+    """An agent of a mixin-less type that wrote no transcript gets discovery's own 'No common transcript found'.
 
-    The default 'generic' agent_type maps to the BaseAgent default class, which
-    does not implement the mixin -- the CLI must fail with a clear error
-    naming the agent and its type, rather than a misleading 'no transcript yet' message.
-
-    An unsupported type is a live agent that was found, so --preserved must report it rather
-    than answering from an archive that happens to share the name: only a target live discovery
-    conclusively did not find licenses the fallback.
+    It is still a live agent that was found, so --preserved must report it rather than answering from an archive
+    that happens to share the name: only a target live discovery conclusively did not find licenses the fallback.
     """
     create_agent_with_events_dir(local_provider.host_dir, agent_name="no-transcript-agent")
     _write_preserved_transcript(
@@ -847,9 +862,7 @@ def test_transcript_cli_rejects_agent_type_without_mixin(
     result = cli_runner.invoke(transcript, args, obj=plugin_manager)
 
     assert result.exit_code != 0
-    assert "no-transcript-agent" in result.output
-    assert "generic" in result.output
-    assert "does not produce a common transcript" in result.output
+    assert "No common transcript found" in result.output
     assert "Warning: reading preserved transcript snapshot" not in result.stderr
 
 
@@ -859,10 +872,11 @@ def test_transcript_cli_missing_events_file_for_supporting_type_gives_clear_erro
     local_provider,
     temp_mngr_ctx,
 ) -> None:
-    """A supporting agent type with no transcript events yet still gets the 'no source' error.
+    """An agent of a transcript-writing type with no transcript events yet gets the 'no source' error.
 
-    The mixin precheck passes (the type implements it), but the on-disk file is
-    missing, so the original 'No common transcript found' error path runs.
+    The type resolves (the only up-front check), and a type whose class implements the mixin gets no
+    special treatment: the contract is the file, which is missing here, so the discovery's
+    'No common transcript found' error path runs.
     """
     create_agent_with_events_dir(local_provider.host_dir, agent_name="claude-pending-agent", agent_type="claude")
 

@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "12";
+export const CONTRACT_VERSION = "13";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -49,7 +49,8 @@ export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
 // chrome (there is no window to raise). Payload: {}.
 export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 // workspace -> embedder: open the shell's workspace-options panel on its
-// Share tab, focused on that app. Payload: { serviceName }.
+// Share tab, focused on that app, or on the whole workspace when no app is
+// named. Payload: { serviceName? }.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
 // the embedder held for it can be sent now. Payload: { opensLinks?,
@@ -339,7 +340,7 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return true;
   },
   [OPEN_SHARE_SETTINGS]: function (data) {
-    return typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName);
+    return data.serviceName === undefined || (typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName));
   },
   [WORKSPACE_READY]: function (data) {
     return isOptionalBoolean(data.opensLinks) && isOptionalBoolean(data.opensCustomSchemeLinks);

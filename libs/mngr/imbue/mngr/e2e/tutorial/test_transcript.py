@@ -120,21 +120,15 @@ _SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
 
 
 def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_value: int) -> None:
-    """Create a transcript-capable ``my-task`` agent and seed a common transcript.
+    """Create a ``my-task`` agent and seed a common transcript.
 
-    ``mngr transcript`` only supports agent types that emit a common transcript
-    (i.e. implement ``HasCommonTranscriptMixin`` -- e.g. ``claude``), so a plain
-    ``command`` agent is rejected by the command's up-front type check. Creating
-    a real ``claude`` agent in the e2e environment is not viable here: it
-    requires the Claude Code trust dialog to have been accepted for the source
-    directory (and, for a live run, the claude binary). Instead we create a
-    reliable ``command`` agent and relabel its recorded ``type`` to ``claude``.
-    The transcript code path only reads ``type`` from ``data.json`` during
-    discovery (it never instantiates the claude agent class), so this faithfully
-    exercises ``mngr transcript`` while avoiding the trust/binary dependencies.
+    ``mngr transcript`` reads the on-disk common-transcript convention whatever the agent's type, so a
+    reliable ``command`` agent with a seeded events file exercises it faithfully. Creating a real ``claude``
+    agent in the e2e environment is not viable here: it requires the Claude Code trust dialog to have been
+    accepted for the source directory (and, for a live run, the claude binary).
 
     A representative common_transcript events file (header, user step, agent
-    step, observation) is then written into the agent's events directory so the
+    step, observation) is written into the agent's events directory so the
     role-filtering behavior can be verified.
     """
     expect(
@@ -150,15 +144,8 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     assert len(agent_dirs) == 1, f"expected exactly one agent directory, found: {agent_dirs}"
     agent_dir = agent_dirs[0]
 
-    # Relabel the agent type to ``claude`` so it advertises common-transcript
-    # support; all other (real) data.json fields are left untouched.
-    data_path = agent_dir / "data.json"
-    data = json.loads(data_path.read_text())
-    data["type"] = "claude"
-    data_path.write_text(json.dumps(data))
-
-    # Seed a common_transcript events file at the path the converter would use:
-    # events/<agent_type>/common_transcript/events.jsonl.
+    # Seed a common_transcript events file at a path the suffix convention matches:
+    # events/<source>/common_transcript/events.jsonl.
     events_dir = agent_dir / "events" / "claude" / "common_transcript"
     events_dir.mkdir(parents=True, exist_ok=True)
     (events_dir / "events.jsonl").write_text(

@@ -39,7 +39,6 @@ from imbue.mngr.errors import HostNameNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import HostAddress
@@ -131,10 +130,14 @@ def _render_content(content: Any) -> str:
     return "\n".join(rendered)
 
 
-def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> None:
-    """Raise UserInputError if the targeted agent's type does not implement HasCommonTranscriptMixin.
+def _assert_agent_type_is_resolvable(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> None:
+    """Raise if the targeted agent's type cannot be resolved; a resolved type is never refused here.
 
-    No-op for HostAddress targets; only agent-scoped lookups are validated here.
+    The common transcript is a file contract, not a class one: an agent type whose class does not implement
+    ``HasCommonTranscriptMixin`` (e.g. a config-defined ``command`` subtype whose process writes the
+    ``common_transcript`` convention itself, like a chat room's reader) still reads fine, and one that wrote
+    nothing gets the discovery's own clear "No common transcript found" answer. No-op for HostAddress targets;
+    only agent-scoped lookups are validated here.
     """
     if not isinstance(address, AgentAddress):
         return
@@ -149,12 +152,7 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     # A type we cannot resolve raises here (UnknownAgentTypeError, or MngrError if
     # its plugin is disabled), which is correct: if we cannot resolve the type we
     # do not know how to read it, so block rather than fall through to discovery.
-    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
-    if issubclass(resolved.agent_class, HasCommonTranscriptMixin):
-        return
-    raise UserInputError(
-        f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not produce a common transcript."
-    )
+    resolve_agent_type(agent_type, mngr_ctx.config)
 
 
 def _parse_transcript_events(
@@ -443,7 +441,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         preserved_target = _find_preserved_target(opts.target, mngr_ctx)
     else:
         try:
-            _assert_agent_type_supports_transcripts(opts.target, mngr_ctx)
+            _assert_agent_type_is_resolvable(opts.target, mngr_ctx)
         except MngrError as error:
             if not opts.preserved or not _is_missing_live_target(error):
                 raise
