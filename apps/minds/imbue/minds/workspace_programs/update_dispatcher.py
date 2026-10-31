@@ -532,7 +532,7 @@ def resolve_account(agent_environment: AgentEnvironment) -> tuple[bool, list[str
     # file. On older templates a bare create launches claude, so the resolver is asked for a
     # claude account; a default account on another harness reads as no account.
     resolved = run_command(
-        ["uv", "run", "python", _ACCOUNT_RESOLVER_SCRIPT, "claude"],
+        ["uv", "run", "--no-sync", "python", _ACCOUNT_RESOLVER_SCRIPT, "claude"],
         _RESOLVER_TIMEOUT_SECONDS,
         env=agent_environment.variables(),
     )
