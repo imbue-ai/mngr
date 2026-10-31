@@ -80,7 +80,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   new_account_value: ":new-account",
   wildcard_permission: "any",
   proxy: null,
-  will_open_browser: false,
+  is_browser_auth_supported: true,
   manual_credentials: null,
 };
 
@@ -121,7 +121,29 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     },
   ],
   selected_account_value: "bob@x",
+  is_browser_auth_supported: false,
   manual_credentials: AWS_PROMPT,
+};
+
+const GITHUB_PROMPT: ManualCredentialsPrompt = {
+  parameters: [{ name: "token", label: "Token" }],
+  message: "Imbue Studio needs a token for GitHub.",
+};
+
+// A service that can connect either way: the sign-in is the default, and the
+// form is there for a user who would rather paste a token.
+const DUAL_DETAIL: PredefinedPermissionDetail = {
+  ...PREDEFINED_DETAIL,
+  display_name: "GitHub",
+  service_name: "github",
+  account_choices: [
+    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
+    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+    { value: ":new-account", label: "Add account", hint: "", is_credential_setup_needed: true, is_account_name_needed: true },
+  ],
+  selected_account_value: "bob@x",
+  is_browser_auth_supported: true,
+  manual_credentials: GITHUB_PROMPT,
 };
 
 const FILE_DETAIL: FileSharingPermissionDetail = {
@@ -598,6 +620,158 @@ describe("InboxModel", () => {
     await model.select("evt-a");
 
     expect(model.manualCredentialsPrompt()).toBeNull();
+  });
+
+  it("offers typed credentials beside the sign-in, and starts on the sign-in", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+    });
+
+    await model.select("evt-a");
+
+    expect(model.isManualCredentialEntryOffered()).toBe(true);
+    // The form stays out of the way until asked for, so Approve signs in.
+    expect(model.manualCredentialsPrompt()).toBeNull();
+    expect(model.isBrowserSignInPending()).toBe(true);
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("swaps the sign-in for the credential form on request, and back", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+
+    model.chooseManualCredentialEntry();
+
+    expect(model.manualCredentialsPrompt()).toEqual(GITHUB_PROMPT);
+    expect(model.isBrowserSignInPending()).toBe(false);
+    expect(model.isApproveAllowed(), "nothing typed yet").toBe(false);
+    model.manualCredentialValues.token = "ghp-7a1c";
+    expect(model.isApproveAllowed()).toBe(true);
+
+    model.chooseBrowserSignIn();
+
+    expect(model.manualCredentialsPrompt()).toBeNull();
+    expect(model.isBrowserSignInPending()).toBe(true);
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("submits the typed values only when typing them was chosen", async () => {
+    const responses = {
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+      "GET /ui/api/settings/browser-import": () => jsonResponse({ is_offered: true, is_available: true }),
+    };
+    const typed = makeModel(responses);
+    await typed.select("evt-a");
+    typed.chooseManualCredentialEntry();
+    typed.manualCredentialValues.token = "ghp-7a1c";
+
+    await typed.approve();
+
+    const typedForm = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
+    expect(typedForm.get("manual_credentials")).toBe(JSON.stringify({ token: "ghp-7a1c" }));
+    expect(typedForm.get("account")).toBe("bob@x");
+
+    const signedIn = makeModel(responses);
+    await signedIn.select("evt-a");
+
+    await signedIn.approve();
+
+    const signInForm = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
+    expect(signInForm.has("manual_credentials"), "the sign-in carries no credential form").toBe(false);
+    expect(signInForm.get("account")).toBe("bob@x");
+  });
+
+  it("offers no switch when there is nothing to switch between", async () => {
+    const connected = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+    });
+    await connected.select("evt-a");
+    connected.chooseManualCredentialEntry();
+    // A connected account needs neither a sign-in nor credentials...
+    connected.selectedAccount = "alice@x";
+    expect(connected.isManualCredentialEntryOffered()).toBe(false);
+    expect(connected.manualCredentialsPrompt()).toBeNull();
+    expect(connected.isBrowserSignInPending()).toBe(false);
+
+    // ...a browser service with no form to offer only signs in...
+    const signInOnly = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: { ...DUAL_DETAIL, manual_credentials: null } }),
+    });
+    await signInOnly.select("evt-a");
+    signInOnly.chooseManualCredentialEntry();
+    expect(signInOnly.isManualCredentialEntryOffered()).toBe(false);
+    expect(signInOnly.manualCredentialsPrompt()).toBeNull();
+    expect(signInOnly.isBrowserSignInPending()).toBe(true);
+
+    // ...and a service with no sign-in shows its form outright, choice or not.
+    const formOnly = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+    await formOnly.select("evt-a");
+    expect(formOnly.isManualCredentialEntryOffered()).toBe(false);
+    expect(formOnly.manualCredentialsPrompt()).toEqual(AWS_PROMPT);
+  });
+
+  it("asks to name a new account only while typing its credentials in", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+    model.selectedAccount = ":new-account";
+
+    // A sign-in learns the account's name from the service.
+    expect(model.isManualAccountNameNeeded()).toBe(false);
+    model.chooseManualCredentialEntry();
+    expect(model.isManualAccountNameNeeded()).toBe(true);
+    model.manualCredentialValues.token = "ghp-7a1c";
+    expect(model.isApproveAllowed()).toBe(false);
+    model.manualAccountName = "work";
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("starts the next request on the sign-in again, and forgets a rejection on the way back", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-b/detail": () => jsonResponse({ detail: { ...DUAL_DETAIL, request_id: "evt-b" } }),
+    });
+    await model.select("evt-a");
+    model.chooseManualCredentialEntry();
+    model.manualCredentialsFeedback = {
+      prompt: { ...GITHUB_PROMPT, message: "GitHub did not accept that token." },
+      isRejection: true,
+    };
+
+    model.chooseBrowserSignIn();
+    model.chooseManualCredentialEntry();
+
+    // The rejected attempt is over; the form opens on its instruction again.
+    expect(model.manualCredentialsPrompt()).toEqual(GITHUB_PROMPT);
+
+    await model.select("evt-b");
+
+    expect(model.isManualCredentialEntryChosen).toBe(false);
+    expect(model.manualCredentialsPrompt()).toBeNull();
+  });
+
+  it("drops the failure notice of the way of connecting the user leaves behind", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: DUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+
+    // A sign-in that did not complete has nothing to say about typing a token in...
+    model.errorMessage = "Sign-in to GitHub did not complete.";
+    model.chooseManualCredentialEntry();
+    expect(model.errorMessage).toBeNull();
+
+    // ...and a typed attempt's failure nothing about the sign-in.
+    model.errorMessage = "Could not apply grant through the latchkey gateway.";
+    model.chooseBrowserSignIn();
+    expect(model.errorMessage).toBeNull();
   });
 
   it("enables Approve once every credential input is filled in", async () => {
@@ -1194,7 +1368,6 @@ describe("the Chrome sign-in import offer", () => {
       },
     ],
     selected_account_value: ":new-account",
-    will_open_browser: true,
   };
 
   let calls: string[] = [];

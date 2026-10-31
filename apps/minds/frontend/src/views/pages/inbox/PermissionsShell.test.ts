@@ -48,7 +48,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   new_account_value: ":new-account",
   wildcard_permission: "any",
   proxy: null,
-  will_open_browser: false,
+  is_browser_auth_supported: false,
   manual_credentials: AWS_PROMPT,
 };
 
@@ -76,7 +76,13 @@ function modelWithDetail(detail: PredefinedPermissionDetail): InboxModel {
   return model;
 }
 
-function renderShell(model: InboxModel, account: m.Children = null, headerTooltip?: string): ElementVnode[] {
+function renderShell(
+  model: InboxModel,
+  account: m.Children = null,
+  headerTooltip?: string,
+  credentialEntrySwitch: m.Children = null,
+  footer: m.Children = null,
+): ElementVnode[] {
   const instance = PermissionsShell() as unknown as m.Component;
   const attrs = {
     model,
@@ -85,6 +91,8 @@ function renderShell(model: InboxModel, account: m.Children = null, headerToolti
     mark: m("span", { id: "permissions-mark-glyph" }),
     rationale: "list the buckets",
     account,
+    credentialEntrySwitch,
+    footer,
     progressLabel: "Granting permission...",
     body: m("div", { id: "permissions-body" }),
   };
@@ -192,6 +200,41 @@ describe("PermissionsShell manual credentials", () => {
     // ...and the latchkey command behind it is never shown.
     expect(JSON.stringify(nodes)).not.toContain("latchkey");
     expect(hasApproveButton(nodes)).toBe(true);
+  });
+
+  it("puts a kind's credential entry switch right under the form, above the body", () => {
+    const nodes = renderShell(
+      modelWithDetail(MANUAL_DETAIL),
+      null,
+      undefined,
+      m("p", { id: "permissions-credential-entry-switch" }),
+    );
+
+    const switchIndex = indexOfId(nodes, "permissions-credential-entry-switch");
+    expect(switchIndex).toBeGreaterThan(indexOfId(nodes, "permissions-manual-credentials"));
+    expect(switchIndex).toBeLessThan(indexOfId(nodes, "permissions-body"));
+  });
+
+  it("puts a kind's footer last, under the buttons and behind a hairline", () => {
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }),
+      null,
+      undefined,
+      null,
+      m("p", { id: "permissions-credential-entry-offer" }),
+    );
+
+    const footerIndex = indexOfId(nodes, "permissions-footer");
+    expect(footerIndex).toBeGreaterThan(indexOfId(nodes, "permissions-approve-btn"));
+    expect(indexOfId(nodes, "permissions-credential-entry-offer")).toBeGreaterThan(footerIndex);
+    const footerClasses = classesOf(findById(nodes, "permissions-footer"));
+    expect(footerClasses).toContain("border-t");
+    // Aligned with the buttons it sits under.
+    expect(footerClasses).toContain("text-right");
+  });
+
+  it("draws no footer for a kind that hands none over", () => {
+    expect(indexOfId(renderShell(modelWithDetail(MANUAL_DETAIL)), "permissions-footer")).toBe(-1);
   });
 
   it("also asks for an account name when the selected account needs one", () => {

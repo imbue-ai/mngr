@@ -3,6 +3,7 @@ import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Final
 
 import pytest
 from flask.testing import FlaskClient
@@ -34,6 +35,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import _describe_ro
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _format_proxy_not_set_up_note
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _format_route_note
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _parse_proxy_form
+from imbue.minds.desktop_client.latchkey.handlers.predefined import describe_credential_inputs
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
@@ -277,6 +279,29 @@ def _make_latchkey_with_status(
     return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory or tmp_path)
 
 
+def _detail_payload(
+    handler: LatchkeyPermissionGrantHandler,
+    *,
+    permissions: tuple[str, ...] = (),
+    account: str | None = None,
+) -> UiPredefinedPermissionDetail:
+    """The dialog's detail payload for a slack-api request, with no workspace route to speak of."""
+    event = create_predefined_permission_request(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        permissions=permissions,
+        rationale="need to read a channel",
+        account=account,
+    )
+    payload = handler.build_request_detail_payload(
+        permission_request=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    return payload
+
+
 def _build_handler(
     tmp_path: Path,
     *,
@@ -457,10 +482,11 @@ def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Pat
 
 
 def test_detail_payload_with_unknown_credentials_does_not_promise_browser(tmp_path: Path) -> None:
-    # The dialog's progress notice must match what ``grant()`` will
-    # actually do: UNKNOWN credential status proceeds straight to the
-    # grant (no ``latchkey auth browser``), so the payload must not
-    # promise a sign-in browser. Empty auth options mirror the real
+    # The dialog's wording must match what ``grant()`` will actually do:
+    # UNKNOWN credential status proceeds straight to the grant (no
+    # ``latchkey auth browser``), so the preselected account must not be
+    # flagged as needing credential setup, which is what the dialog reads
+    # to promise a sign-in. Empty auth options mirror the real
     # degraded-UNKNOWN case (``services info`` fails for a non-latchkey
     # scope) and hit the legacy "no auth options" fallback, which would
     # falsely promise a browser under a plain not-VALID test.
@@ -469,20 +495,12 @@ def test_detail_payload_with_unknown_credentials_does_not_promise_browser(tmp_pa
         credential_status="unknown",
         auth_options_json=json.dumps([]),
     )
-    event = create_predefined_permission_request(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        rationale="need to read a channel",
-    )
 
-    payload = handler.build_request_detail_payload(
-        permission_request=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
+    payload = _detail_payload(handler)
 
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
-    assert payload.will_open_browser is False
+    assert payload.is_browser_auth_supported is True
+    selected = next(choice for choice in payload.account_choices if choice.value == payload.selected_account_value)
+    assert selected.is_credential_setup_needed is False
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
@@ -698,7 +716,7 @@ def test_grant_returns_an_empty_form_when_the_example_has_no_parameters(tmp_path
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
     assert result.manual_credentials is not None
     assert result.manual_credentials.parameters == ()
-    assert "cannot work out which credentials to ask for" in result.message
+    assert "cannot work out what it would need typed in" in result.message
     assert "latchkey" not in result.message
     assert _read_set_recording(tmp_path) == []
 
@@ -1070,6 +1088,197 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     )
     assert second.outcome == GrantOutcome.GRANTED
     assert [e.status for e in load_response_events(tmp_path)] == [str(RequestStatus.GRANTED)]
+
+
+# Unlike _DEFAULT_SET_EXAMPLE, this one carries a <placeholder>, so it yields a form.
+_BEARER_TOKEN_SET_EXAMPLE: Final[str] = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+
+
+def test_detail_payload_offers_typed_credentials_beside_the_browser_sign_in(tmp_path: Path) -> None:
+    """A service that signs in through a browser still gets its form, as the alternative."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["browser", "set"]),
+        set_credentials_example=_BEARER_TOKEN_SET_EXAMPLE,
+    )
+
+    payload = _detail_payload(handler)
+
+    assert payload.is_browser_auth_supported is True
+    assert payload.manual_credentials is not None
+    assert payload.manual_credentials.parameters == (CredentialCommandParameter(name="token", label="Token"),)
+    # The form is an alternative here, so it may not claim the service cannot sign in.
+    assert "does not support browser sign-in" not in payload.manual_credentials.message
+    # The copy names what the form asks for, never "credentials", which would read as a username and password.
+    assert "needs a token for Slack" in payload.manual_credentials.message
+    assert "credentials" not in payload.manual_credentials.message
+    assert "latchkey" not in payload.manual_credentials.message
+
+
+def test_detail_payload_offers_no_typed_credentials_when_a_browser_service_has_an_unusable_example(
+    tmp_path: Path,
+) -> None:
+    """With the sign-in available, an example that yields no inputs is no reason to show an error."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["browser", "set"]),
+        set_credentials_example=_DEFAULT_SET_EXAMPLE,
+    )
+
+    payload = _detail_payload(handler)
+
+    assert payload.is_browser_auth_supported is True
+    assert payload.manual_credentials is None
+
+
+@pytest.mark.parametrize("auth_options", [["browser"], []])
+def test_detail_payload_offers_no_typed_credentials_when_a_browser_service_takes_no_set_credentials(
+    tmp_path: Path, auth_options: list[str]
+) -> None:
+    """Without ``set`` advertised, the bearer fallback the form builder has must not be offered.
+
+    Empty auth options are the shape assumed for a service whose probe did not
+    answer, which reads as browser-capable and must not grow a token form.
+    """
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(auth_options),
+        set_credentials_example=_BEARER_TOKEN_SET_EXAMPLE,
+    )
+
+    payload = _detail_payload(handler)
+
+    assert payload.is_browser_auth_supported is True
+    assert payload.manual_credentials is None
+
+
+def test_detail_payload_keeps_the_unusable_form_when_the_service_has_no_browser_sign_in(tmp_path: Path) -> None:
+    """Without a sign-in, the parameter-less form IS the error the dialog has to show."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=_DEFAULT_SET_EXAMPLE,
+    )
+
+    payload = _detail_payload(handler)
+
+    assert payload.is_browser_auth_supported is False
+    assert payload.manual_credentials is not None
+    assert payload.manual_credentials.parameters == ()
+    assert "does not support browser sign-in" in payload.manual_credentials.message
+
+
+def test_grant_with_typed_credentials_stores_them_instead_of_opening_a_browser(tmp_path: Path) -> None:
+    """Typed values are the user's choice: the browser flow stays shut even though the service has one."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["browser", "set"]),
+        set_credentials_example=_BEARER_TOKEN_SET_EXAMPLE,
+    )
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=NEW_ACCOUNT_FORM_VALUE,
+        manual_credentials=_submission({"token": "ghp-7a1c"}),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
+    recording = _read_set_recording(tmp_path)
+    assert len(recording) == 1
+    assert recording[0]["argv"] == ["--account", "", "auth", "set", "slack", "-H", "Authorization: Bearer ghp-7a1c"]
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [{account_scope_key("slack-api", ""): ["slack-read-all"]}]
+
+
+def test_grant_without_typed_credentials_signs_in_through_the_browser_when_both_are_possible(tmp_path: Path) -> None:
+    """The sign-in stays the default: a form the dialog carried but did not submit changes nothing."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["browser", "set"]),
+        set_credentials_example=_BEARER_TOKEN_SET_EXAMPLE,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=NEW_ACCOUNT_FORM_VALUE,
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert len(_read_recording(tmp_path / "auth_latchkey_report.jsonl")) == 1
+    assert _read_set_recording(tmp_path) == []
+
+
+@pytest.mark.parametrize("is_browser_auth_supported", [True, False])
+def test_build_account_choices_asks_to_name_a_second_account_however_the_service_connects(
+    is_browser_auth_supported: bool,
+) -> None:
+    """Typed credentials cannot discover an account's name, so a service with one already asks for it.
+
+    The flag is set whichever way the service connects: the dialog only reads it
+    while its credential form is up, and a browser service's form can be.
+    """
+    accounts = (ServiceAccountCredential(account="alice@x", credential_status=CredentialStatus.VALID),)
+
+    with_accounts, _ = _build_account_choices(accounts, None, is_browser_auth_supported=is_browser_auth_supported)
+    without_accounts, _ = _build_account_choices((), None, is_browser_auth_supported=is_browser_auth_supported)
+
+    assert with_accounts[-1].value == NEW_ACCOUNT_FORM_VALUE
+    assert with_accounts[-1].is_account_name_needed is True
+    assert without_accounts[-1].value == NEW_ACCOUNT_FORM_VALUE
+    assert without_accounts[-1].is_account_name_needed is False
+
+
+def test_describe_credential_inputs_names_one_value_with_an_article_and_several_as_a_list() -> None:
+    token = describe_credential_inputs((CredentialCommandParameter(name="token", label="Token"),))
+    assert (token.noun_phrase, token.pronoun, token.verb) == ("a token", "it", "Paste")
+
+    api_key = describe_credential_inputs((CredentialCommandParameter(name="api-key", label="Api key"),))
+    assert api_key.noun_phrase == "an api key"
+
+    aws = describe_credential_inputs(
+        (
+            CredentialCommandParameter(name="access-key-id", label="Access key id"),
+            CredentialCommandParameter(name="secret-access-key", label="Secret access key"),
+        )
+    )
+    assert (aws.noun_phrase, aws.pronoun, aws.verb) == ("the access key id and secret access key", "them", "Enter")
+
+
+def test_set_only_form_message_names_the_values_the_service_asks_for(tmp_path: Path) -> None:
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=_AWS_SET_EXAMPLE,
+    )
+
+    payload = _detail_payload(handler)
+
+    assert payload.manual_credentials is not None
+    assert (
+        "Slack does not support browser sign-in, so Imbue Studio needs the access key id and secret access key"
+        in payload.manual_credentials.message
+    )
+    assert "credentials" not in payload.manual_credentials.message
 
 
 def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: Path) -> None:
@@ -1520,20 +1729,9 @@ def test_grant_fails_when_the_signed_in_account_is_ambiguous(tmp_path: Path) -> 
 def test_detail_payload_offers_every_account_plus_a_new_one(tmp_path: Path) -> None:
     latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid", "bob@x": "valid"})
     handler = _build_handler_for_latchkey(tmp_path, latchkey)
-    event = create_predefined_permission_request(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        rationale="need to read a channel",
-        account="bob@x",
-    )
 
-    payload = handler.build_request_detail_payload(
-        permission_request=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
+    payload = _detail_payload(handler, account="bob@x")
 
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     account_values = [choice.value for choice in payload.account_choices]
     assert "alice@x" in account_values
     assert "bob@x" in account_values
@@ -1551,20 +1749,9 @@ def test_detail_payload_offers_a_requested_account_that_is_not_connected(tmp_pat
     """
     latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"})
     handler = _build_handler_for_latchkey(tmp_path, latchkey)
-    event = create_predefined_permission_request(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        rationale="need to read a channel",
-        account="bob@x",
-    )
 
-    payload = handler.build_request_detail_payload(
-        permission_request=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
+    payload = _detail_payload(handler, account="bob@x")
 
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     # The un-connected account is offered *and* preselected, next to the
     # already-connected one, and is flagged as needing sign-in.
     account_values = [choice.value for choice in payload.account_choices]
@@ -1574,7 +1761,8 @@ def test_detail_payload_offers_a_requested_account_that_is_not_connected(tmp_pat
     bob_choice = next(choice for choice in payload.account_choices if choice.value == "bob@x")
     assert bob_choice.hint == "needs sign-in"
     # Approving will therefore open a browser rather than granting silently.
-    assert payload.will_open_browser is True
+    assert bob_choice.is_credential_setup_needed is True
+    assert payload.is_browser_auth_supported is True
 
 
 def test_grant_for_a_requested_account_that_is_not_connected_signs_it_in(tmp_path: Path) -> None:
@@ -1697,8 +1885,9 @@ def test_build_request_detail_payload_mirrors_the_fragment_derivation(tmp_path: 
     assert "slack-read-all" in payload.checked_permissions
     assert payload.rationale == "need to read a channel"
     # MISSING credentials + a browser auth option: approving will pop a
-    # browser sign-in, exactly as the fragment's progress notice promises.
-    assert payload.will_open_browser is True
+    # browser sign-in, exactly as the dialog's progress notice promises.
+    assert payload.is_browser_auth_supported is True
+    assert payload.selected_account_value == NEW_ACCOUNT_FORM_VALUE
     assert payload.new_account_value
     account_values = [choice.value for choice in payload.account_choices]
     assert payload.selected_account_value in account_values
@@ -1712,20 +1901,9 @@ def test_build_request_detail_payload_groups_permissions_for_the_dialog(tmp_path
     apart visually.
     """
     handler = _build_handler(tmp_path, credential_status="valid")
-    event = create_predefined_permission_request(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        permissions=("slack-chat-read",),
-        rationale="need to read a channel",
-    )
 
-    payload = handler.build_request_detail_payload(
-        permission_request=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
+    payload = _detail_payload(handler, permissions=("slack-chat-read",))
 
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     assert [(group.heading, group.is_extras) for group in payload.permission_groups] == [
         ("Full access", False),
         ("Chat", False),
@@ -1757,20 +1935,9 @@ def test_build_request_detail_payload_carries_catalog_descriptions_on_the_rows(t
     not describe carry an empty string, not a missing key.
     """
     handler = _build_handler(tmp_path, credential_status="valid")
-    event = create_predefined_permission_request(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        permissions=("slack-read-all",),
-        rationale="need to read a channel",
-    )
 
-    payload = handler.build_request_detail_payload(
-        permission_request=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
+    payload = _detail_payload(handler, permissions=("slack-read-all",))
 
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     rows_by_permission = {row.permission: row for group in payload.permission_groups for row in group.rows}
     assert rows_by_permission["slack-read-all"].description == "All read operations across the Slack API."
     assert rows_by_permission["slack-write-all"].description == ""

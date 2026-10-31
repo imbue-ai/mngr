@@ -61,7 +61,10 @@ class UiPermissionAccountChoice(FrozenModel):
     )
     is_account_name_needed: bool = Field(
         default=False,
-        description="Whether picking this account also requires the user to name it (manual-credentials services)",
+        description=(
+            "Whether picking this account also requires the user to name it when its credentials are typed "
+            "into the dialog; read only while the credential form is up"
+        ),
     )
 
 
@@ -112,11 +115,19 @@ class UiPredefinedPermissionDetail(FrozenModel):
     selected_account_value: str = Field(description="Preselected account choice value")
     new_account_value: str = Field(description="Form value of the sign-a-new-account-in choice")
     wildcard_permission: str = Field(description="The catch-all permission's submitted value (e.g. 'any')")
-    will_open_browser: bool = Field(description="Whether approving is expected to pop a browser sign-in")
+    is_browser_auth_supported: bool = Field(
+        description=(
+            "Whether the service can sign in through a browser. True makes the sign-in the dialog's default "
+            "way of connecting, with the credential form (when carried) as the alternative the user can switch "
+            "to; False leaves the form as the only way."
+        ),
+    )
     manual_credentials: UiManualCredentialsPrompt | None = Field(
         description=(
-            "The credential form to show while an account that needs credential setup is selected. None when "
-            "the service signs in through a browser, so no form is ever needed."
+            "The credential form to show while an account that needs credential setup is selected: up front "
+            "for a service with no browser sign-in, behind the user's choice to enter credentials instead of "
+            "signing in for one that has it. None when no form can be offered -- a browser service that takes "
+            "no set credentials, or whose credential command Imbue Studio cannot turn into inputs."
         ),
     )
     proxy: UiRequestedProxy | None = Field(

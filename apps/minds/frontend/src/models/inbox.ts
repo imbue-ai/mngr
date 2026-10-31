@@ -84,7 +84,13 @@ export interface PredefinedPermissionDetail {
   selected_account_value: string;
   new_account_value: string;
   wildcard_permission: string;
-  will_open_browser: boolean;
+  /** Whether the service can sign in through a browser. True makes the sign-in
+   * the default way of connecting, with `manual_credentials` (when carried) as
+   * the alternative the user can switch to. */
+  is_browser_auth_supported: boolean;
+  /** The credential form for an account that needs credentials: the only way
+   * in for a service with no browser sign-in, the alternative to it for one
+   * that has it. Null when no form can be offered. */
   manual_credentials: ManualCredentialsPrompt | null;
   /** Set when the agent asked for the service to also be proxied through the
    * approving computer, the workspace can have a route, and this computer is
@@ -326,6 +332,10 @@ export class InboxModel {
   manualCredentialValues: Record<string, string> = {};
   /** Name for the new account the manually-entered credentials belong to. */
   manualAccountName = "";
+  /** Whether the user chose to type credentials in rather than sign in
+   * through the browser, on a service that offers both. The sign-in is the
+   * default; this only counts while `isManualCredentialEntryOffered()`. */
+  isManualCredentialEntryChosen = false;
   /** Ids whose deny POST is in flight, so a re-selection never lands back on one. */
   denyingIds = new Set<string>();
 
@@ -494,6 +504,7 @@ export class InboxModel {
     this.isFailureScrollPending = false;
     this.manualCredentialValues = {};
     this.manualAccountName = "";
+    this.isManualCredentialEntryChosen = false;
     this.isProgressShown = false;
     this.redraw();
     // Warmed on the way in (pointing at a "Waiting on you" row starts the
@@ -566,8 +577,46 @@ export class InboxModel {
     return detail.account_choices.find((choice) => choice.value === this.selectedAccount) ?? null;
   }
 
+  /** Whether the selected account has to establish credentials, and the
+   * detail carries a form to type them into. */
+  private hasManualCredentialsFormForSelection(): boolean {
+    const detail = this.detail;
+    if (detail === null || detail.kind !== "predefined" || detail.manual_credentials === null) return false;
+    return this.selectedAccountChoice()?.is_credential_setup_needed ?? false;
+  }
+
+  /** Whether the dialog lets the user pick between signing in through the
+   * browser and typing credentials in: the service does both, and the selected
+   * account needs one or the other. */
+  isManualCredentialEntryOffered(): boolean {
+    const detail = this.detail;
+    if (detail === null || detail.kind !== "predefined" || !detail.is_browser_auth_supported) return false;
+    return this.hasManualCredentialsFormForSelection();
+  }
+
+  /** Switch from the browser sign-in to typing credentials in. A sign-in
+   * that failed is an attempt now abandoned, so its notice goes. */
+  chooseManualCredentialEntry(): void {
+    this.isManualCredentialEntryChosen = true;
+    this.errorMessage = null;
+    this.redraw();
+  }
+
+  /** Back to the browser sign-in. What the form was reporting -- a rejection,
+   * or a failure of the approval it carried -- is for an attempt that is now
+   * abandoned, so the form opens on its instruction again if the user comes
+   * back; what they typed is kept. */
+  chooseBrowserSignIn(): void {
+    this.isManualCredentialEntryChosen = false;
+    this.manualCredentialsFeedback = null;
+    this.errorMessage = null;
+    this.redraw();
+  }
+
   /** The credential form to render, if the selected account needs one. It is
-   * part of the detail, so it shows up front rather than after a first Approve. */
+   * part of the detail, so it shows up front rather than after a first Approve
+   * -- unless the service can also sign in through a browser, which is the
+   * default and keeps the form behind the user's choice to type instead. */
   manualCredentialsPrompt(): ManualCredentialsPrompt | null {
     const detail = this.detail;
     if (detail === null) return null;
@@ -579,9 +628,8 @@ export class InboxModel {
       // arrives as feedback.
       return this.manualCredentialsFeedback?.prompt ?? null;
     }
-    if (detail.kind !== "predefined" || detail.manual_credentials === null) return null;
-    const choice = this.selectedAccountChoice();
-    if (choice === null || !choice.is_credential_setup_needed) return null;
+    if (detail.kind !== "predefined" || !this.hasManualCredentialsFormForSelection()) return null;
+    if (detail.is_browser_auth_supported && !this.isManualCredentialEntryChosen) return null;
     return this.manualCredentialsFeedback?.prompt ?? detail.manual_credentials;
   }
 
@@ -734,11 +782,11 @@ export class InboxModel {
    * (a staged choice that signs nothing in until Approve is pressed), an
    * account the agent asked for that is not connected here, or a stored one
    * whose credentials went bad. Reading the selection and not just the payload
-   * is the point: it changes as the user works the dropdown, which is why the
-   * payload's own `will_open_browser` (computed for the account it was built
-   * with) cannot stand in. None of it counts for a service latchkey cannot
-   * sign in to at all (AWS, Coolify), which connects by the credentials the
-   * dialog asks for -- `manual_credentials` is non-null exactly then.
+   * is the point: it changes as the user works the dropdown. None of it
+   * counts for a service latchkey cannot sign in to at all (AWS, Coolify),
+   * which connects by the credentials the dialog asks for, nor while the user
+   * has chosen to type credentials into that form instead of signing in --
+   * the form being up is what says so.
    *
    * A custom service signs in through a browser exactly when the request
    * carries a login URL. */
@@ -746,7 +794,8 @@ export class InboxModel {
     const detail = this.detail;
     if (detail === null) return false;
     if (detail.kind === "predefined") {
-      if (detail.manual_credentials !== null) return false;
+      if (!detail.is_browser_auth_supported) return false;
+      if (this.manualCredentialsPrompt() !== null) return false;
       if (hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value) return true;
       return this.selectedAccountChoice()?.is_credential_setup_needed ?? false;
     }

@@ -77,7 +77,7 @@ const DETAIL: PredefinedPermissionDetail = {
   new_account_value: ":new-account",
   wildcard_permission: "any",
   proxy: null,
-  will_open_browser: false,
+  is_browser_auth_supported: true,
   manual_credentials: null,
 };
 
@@ -94,7 +94,10 @@ interface ShellAttrs {
   headerLabel: string;
   mark: m.Children;
   account: m.Children;
+  credentialEntrySwitch?: m.Children;
+  footer?: m.Children;
   approveLabel?: string;
+  progressLabel: string;
   body: m.Children;
 }
 
@@ -301,6 +304,7 @@ describe("PredefinedPermissionDetailView account states", () => {
       ...DETAIL,
       display_name: "AWS",
       service_name: "aws",
+      is_browser_auth_supported: false,
       manual_credentials: { parameters: [{ name: "access-key-id", label: "Access key id" }], message: "" },
       account_choices: [
         ALICE,
@@ -316,6 +320,96 @@ describe("PredefinedPermissionDetailView account states", () => {
 
     const firstConnection = { ...credentialsOnly, account_choices: [credentialsOnly.account_choices[1]] };
     expect(renderShell(makeModel(firstConnection), firstConnection).approveLabel).toBe("Approve");
+  });
+});
+
+describe("PredefinedPermissionDetailView credential entry switch", () => {
+  const GITHUB_PROMPT = { parameters: [{ name: "token", label: "Token" }], message: "" };
+  // GitHub signs in through a browser and also takes a pasted token; bob@x,
+  // the selected account, needs one or the other.
+  const DUAL: PredefinedPermissionDetail = {
+    ...DETAIL,
+    display_name: "GitHub",
+    service_name: "github",
+    selected_account_value: "bob@x",
+    manual_credentials: GITHUB_PROMPT,
+  };
+
+  function offerLink(shell: ShellAttrs): AnyVnode | undefined {
+    return findById(shell.footer, "permissions-credential-entry-offer-link");
+  }
+
+  function wayBackLink(shell: ShellAttrs): AnyVnode | undefined {
+    return findById(shell.credentialEntrySwitch, "permissions-credential-entry-switch-link");
+  }
+
+  it("offers to paste a token in a footnote under the buttons, naming what the form asks for", () => {
+    const shell = renderShell(makeModel(DUAL), DUAL);
+
+    // Under the buttons, since it is about what Approve would do; nothing on
+    // the form slot yet, since there is no form to leave.
+    expect(collectText(shell.footer).join("")).toBe("Already have a token? Paste it instead of signing in");
+    expect(shell.credentialEntrySwitch).toBeNull();
+    // The sign-in is still what Approve does.
+    expect(shell.approveLabel).toBe("Sign in & approve");
+  });
+
+  it("never says 'credentials', and lists several values as what they are", () => {
+    const aws = {
+      ...DUAL,
+      manual_credentials: {
+        parameters: [
+          { name: "access-key-id", label: "Access key id" },
+          { name: "secret-access-key", label: "Secret access key" },
+        ],
+        message: "",
+      },
+    };
+    const text = collectText(renderShell(makeModel(aws), aws).footer).join("");
+    expect(text).toBe("Already have the access key id and secret access key? Enter them instead of signing in");
+    expect(text).not.toContain("credentials");
+
+    const apiKey = { ...DUAL, manual_credentials: { parameters: [{ name: "api-key", label: "Api key" }], message: "" } };
+    expect(collectText(renderShell(makeModel(apiKey), apiKey).footer).join("")).toContain("Already have an api key?");
+  });
+
+  it("offers nothing to switch when only one way is open, none is needed, or an approval runs", () => {
+    // A browser service with no form to offer...
+    expect(renderShell(makeModel(DETAIL), { ...DETAIL, selected_account_value: "bob@x" }).footer).toBeNull();
+    // ...a service with no sign-in...
+    const credentialsOnly = { ...DUAL, is_browser_auth_supported: false };
+    expect(renderShell(makeModel(credentialsOnly), credentialsOnly).footer).toBeNull();
+    expect(renderShell(makeModel(credentialsOnly), credentialsOnly).credentialEntrySwitch).toBeNull();
+    // ...a connected account, which needs neither...
+    const connected = makeModel(DUAL);
+    connected.selectedAccount = "alice@x";
+    expect(renderShell(connected, DUAL).footer).toBeNull();
+    // ...and a sign-in already under way, which is not to be switched out from under.
+    const busy = makeModel(DUAL);
+    busy.isApproveBusy = true;
+    expect(renderShell(busy, DUAL).footer).toBeNull();
+  });
+
+  it("swaps Approve's sign-in for the typed token, with the way back on the form", () => {
+    const model = makeModel(DUAL);
+    (attrsOf(offerLink(renderShell(model, DUAL)) as AnyVnode).onclick as () => void)();
+
+    expect(model.isManualCredentialEntryChosen).toBe(true);
+    const typing = renderShell(model, DUAL);
+    // The offer leaves the footer; the way back sits with the form it leaves.
+    expect(typing.footer).toBeNull();
+    expect(collectText(typing.credentialEntrySwitch).join("")).toBe("Sign in through the browser instead");
+    // No browser is promised anywhere now: not on the button, not in the progress notice.
+    expect(typing.approveLabel).toBe("Approve");
+    expect(typing.progressLabel).toBe("Granting permission...");
+
+    (attrsOf(wayBackLink(typing) as AnyVnode).onclick as () => void)();
+
+    expect(model.isManualCredentialEntryChosen).toBe(false);
+    const back = renderShell(model, DUAL);
+    expect(back.approveLabel).toBe("Sign in & approve");
+    expect(back.credentialEntrySwitch).toBeNull();
+    expect(offerLink(back)).toBeDefined();
   });
 });
 

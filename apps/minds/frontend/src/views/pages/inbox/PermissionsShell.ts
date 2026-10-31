@@ -1,6 +1,7 @@
 // Shared chrome for every request-detail dialog: the marked header, the
-// Account section, Reason, the credential form a manual-credentials service
-// asks for, the Deny/Approve row, and the progress / error notices (the SPA
+// Account section, Reason, the credential form (the only way in for a service
+// with no browser sign-in, the alternative the user can switch to for one that
+// has it), the Deny/Approve row, and the progress / error notices (the SPA
 // twin of the Permissions* JinjaX components + the shell's submission states).
 
 import m from "mithril";
@@ -119,6 +120,14 @@ export interface PermissionsShellAttrs {
   rationale: string;
   /** The account the grant rides on; null when nothing is signed in yet. */
   account?: m.Children;
+  /** The way to the other way of connecting, for a kind whose service can
+   * both sign in through a browser and take typed credentials. Sits right
+   * under the credential form, where the choice it changes is. */
+  credentialEntrySwitch?: m.Children;
+  /** A footnote under the buttons, behind a hairline and aligned with them:
+   * for what Approve could do instead (a service that would also take a
+   * pasted token). */
+  footer?: m.Children;
   /** Approve's wording, when the kind wants to say what approving will do
    * (a first connection signs in before it grants). Defaults to "Approve". */
   approveLabel?: string;
@@ -130,7 +139,18 @@ export interface PermissionsShellAttrs {
 export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
   return {
     view(vnode) {
-      const { model, headerLabel, headerTooltip, mark, rationale, account, progressLabel, body } = vnode.attrs;
+      const {
+        model,
+        headerLabel,
+        headerTooltip,
+        mark,
+        rationale,
+        account,
+        credentialEntrySwitch,
+        progressLabel,
+        body,
+        footer,
+      } = vnode.attrs;
       const approveLabel = vnode.attrs.approveLabel ?? "Approve";
       // A credential form with no inputs is a dead end (Imbue Studio cannot work out
       // what to ask for), so Approve goes away entirely.
@@ -166,6 +186,7 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
           : null,
         // The credential form comes next: it is what the user has to act on.
         manualCredentialsForm(model),
+        credentialEntrySwitch ?? null,
         body,
         // Right-aligned, Deny then Approve, each in its answer's color.
         m("div", { class: "flex items-center justify-end gap-2" }, [
@@ -216,6 +237,9 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
               ),
             )
           : null,
+        footer === null || footer === undefined
+          ? null
+          : m("div", { id: "permissions-footer", class: "border-t border-subtle pt-3 text-right" }, footer),
       ]);
     },
   };

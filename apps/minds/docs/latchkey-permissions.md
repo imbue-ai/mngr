@@ -110,13 +110,18 @@ second gateway URL or a different agent skill.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample` (the same call that
-      rendered the dialog's account picker and, for a service with no
-      browser sign-in, its credential form).
+      rendered the dialog's account picker and its credential form: shown
+      up front for a service with no browser sign-in, offered as an
+      alternative to the sign-in for one that has it).
    2. If credentials are not `valid` and the service advertises a
       `browser` auth option (or latchkey reports no `authOptions` at all,
       treated as the legacy fallback), runs `latchkey auth browser <service>`
       synchronously (transparently running the one-off `latchkey auth
-      browser-prepare <service>` step first when latchkey asks for it).
+      browser-prepare <service>` step first when latchkey asks for it) --
+      unless the Approve carries credentials the user typed into the
+      dialog instead, which takes the manual path of step 6.3 (see
+      [Manual credential entry](#manual-credential-entry): a browser
+      service offers the form as an alternative to the sign-in).
       Two kinds of service get a preparation of Imbue Studio's own on the way:
       a `google-*` service is signed in against the OAuth client Imbue Studio
       provides (and only that one: it is never self-set-up through
@@ -136,8 +141,11 @@ second gateway URL or a different agent skill.
       recorded as a denial.
    3. If credentials are not `valid` and the service does not advertise a
       `browser` auth option (e.g. AWS or Coolify, where `authOptions =
-      ["set"]`), the grant is **refused for now** and the request stays
-      pending while the dialog collects the credentials (see
+      ["set"]`) -- or the Approve carries credentials typed into the
+      dialog's form -- Imbue Studio stores those values itself with the
+      service's `latchkey auth set` command, re-reads the credential status
+      and continues the grant. Credentials that do not check out leave the
+      request **pending** and re-show the form with the reason (see
       [Manual credential entry](#manual-credential-entry) below). Imbue Studio
       never asks the user to open a terminal.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
@@ -426,6 +434,32 @@ Details worth knowing:
   account to a working one hides the form (and re-enables Approve) without
   a round trip. Approve stays disabled while any input is empty.
 
+* A service that *can* sign in through a browser gets the same form, as an
+  alternative, when latchkey reports `set` beside `browser` for it and it
+  advertises a usable `setCredentialsExample` (GitHub's is a bearer token,
+  GitLab's a `PRIVATE-TOKEN` header); the detail payload then carries the
+  form for it too, next to `is_browser_auth_supported`. A service whose
+  `services info` probe does not answer is assumed to sign in through a
+  browser and is offered no form, since nothing says it takes set
+  credentials. The sign-in stays the default: the dialog keeps the form out
+  of the way and offers a footnote under the Approve and Deny buttons,
+  right-aligned with them behind a hairline ("Already have a token? Paste
+  it instead of signing in"), while the selected account needs credentials
+  at all and no approval is running; taking it shows the form (its
+  instruction minus the "does not support browser sign-in" opening a
+  service with no sign-in gets), drops the "Sign in &" from Approve, and
+  puts the way back ("Sign in through the browser instead") on the form
+  itself. The copy names what the form asks for -- its inputs, as latchkey's
+  placeholders label them: "a token" for every browser service in the
+  catalog, "the access key id and secret access key" were a service to ask
+  for several -- and never says "credentials", which would read as a
+  username and password the dialog does not ask for. An Approve that carries typed
+  values takes the manual path whatever the service could have done, so the
+  desktop never opens a browser the user chose not to. Each request starts
+  on the sign-in again. A browser service whose example yields no inputs
+  (Slack's names an example token rather than a `<placeholder>`) is simply
+  offered no alternative, rather than an error it has no need of.
+
 * The account the credentials are stored under is the one the dialog's
   **Account** dropdown selects. The dialog has two shapes, not three:
   with nothing signed in there is no dropdown at all and Approve reads
@@ -441,7 +475,9 @@ Details worth knowing:
   back; nothing is signed in until Approve. A service with no accounts yet resolves to latchkey's
   unnamed default account; "Add account" on a service that already has
   one also asks for an **account name** (`is_account_name_needed`), since
-  a manual connection cannot discover it the way a browser sign-in does.
+  a manual connection cannot discover it the way a browser sign-in does;
+  the flag is set however the service connects, and the dialog reads it
+  only while its credential form is up.
 
 * Two different things can go wrong, and they read differently:
 
