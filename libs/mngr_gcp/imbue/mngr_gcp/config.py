@@ -1,8 +1,11 @@
 import json
+import os
 import shutil
+from pathlib import Path
 from typing import Any
 
 import google.auth
+from google.auth import environment_vars
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import Credentials
 from google.oauth2 import service_account
@@ -42,6 +45,13 @@ DEFAULT_GCE_ZONE: str = "us-west1-a"
 # Cap on the best-effort ``gcloud config get`` probe so a hung gcloud never
 # stalls provider construction (which runs on read paths like ``mngr list``).
 _GCLOUD_CONFIG_GET_TIMEOUT_SECONDS: float = 10.0
+
+_ADC_NOT_CONFIGURED_MESSAGE: str = (
+    "GCP Application Default Credentials not configured. Run "
+    "'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS to a "
+    "service-account key file. On a GCE/Cloud Run/GKE instance, set "
+    "use_gce_metadata_server=true on the provider config to use its attached service account."
+)
 
 
 def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
@@ -83,14 +93,30 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
     return zone or None
 
 
+def get_gcloud_adc_file_path() -> Path:
+    """Where ``gcloud auth application-default login`` writes ADC: ``$CLOUDSDK_CONFIG``, else ``~/.config/gcloud``."""
+    config_dir = os.environ.get(environment_vars.CLOUD_SDK_CONFIG_DIR)
+    base_dir = Path(config_dir) if config_dir is not None else Path.home() / ".config" / "gcloud"
+    return base_dir / "application_default_credentials.json"
+
+
+def has_local_application_default_credentials() -> bool:
+    """Whether ``google.auth.default()`` stops at a local ADC source rather than reaching the GCE metadata server."""
+    gcloud_adc_file_path = get_gcloud_adc_file_path()
+    explicit_file = os.environ.get(environment_vars.CREDENTIALS, "")
+    is_explicit_file_set = explicit_file != "" and Path(explicit_file) != gcloud_adc_file_path
+    return is_explicit_file_set or gcloud_adc_file_path.is_file()
+
+
 class GcpProviderConfig(OfflineCapableVpsProviderConfig):
     """Configuration for the GCP Compute Engine VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Google
     Application Default Credentials (ADC) are used exclusively, resolved via
     ``google.auth.default()`` (``GOOGLE_APPLICATION_CREDENTIALS``, the
-    ``gcloud auth application-default login`` file, or an attached service
-    account / metadata server). This matches the Modal and AWS provider
+    ``gcloud auth application-default login`` file, or, with
+    ``use_gce_metadata_server``, an attached service account via the GCE
+    metadata server). This matches the Modal and AWS provider
     convention and the broader project preference: do not handle credentials
     in mngr configs when an SDK can do it for us.
 
@@ -211,6 +237,17 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             "flow. Leave unset to use ADC."
         ),
     )
+    use_gce_metadata_server: bool = Field(
+        default=False,
+        description=(
+            "Whether Application Default Credentials may fall back to the GCE metadata server "
+            "(169.254.169.254) when neither GOOGLE_APPLICATION_CREDENTIALS nor the gcloud ADC file is "
+            "present. Off by default: off Google Cloud the probe can only fail, and on macOS a "
+            "connection to that link-local address raises the 'find devices on your local network' "
+            "prompt for the app running mngr. Set True only when running mngr on a GCE / Cloud Run / "
+            "GKE instance that should authenticate via its attached service account."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -232,9 +269,14 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         Returning both from a single ``default()`` call lets the backend resolve
         credentials and the fallback project without probing twice.
 
+        Unless ``use_gce_metadata_server`` is set, ``google.auth.default()`` is
+        only called when a local ADC source exists, so it never falls through
+        to the GCE metadata server.
+
         Raises ``GcpCredentialsError`` when ADC resolves no credentials (no
         ``GOOGLE_APPLICATION_CREDENTIALS``, no ``gcloud auth
-        application-default login`` file, no attached service account). The
+        application-default login`` file, and no attached service account
+        reachable through ``use_gce_metadata_server``). The
         backend wraps this in ``ProviderUnavailableError`` (state *unknown* --
         we never reached GCP, so there may be hosts we cannot see) so read paths
         (mngr list / mngr connect / discovery) surface it to the user instead of
@@ -267,15 +309,12 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
                     f"GCP service_account_key_json is not a usable service-account key: {e}"
                 ) from e
             return credentials, key_info.get("project_id")
+        if not self.use_gce_metadata_server and not has_local_application_default_credentials():
+            raise GcpCredentialsError(_ADC_NOT_CONFIGURED_MESSAGE)
         try:
             credentials, resolved_project = google.auth.default()
         except google_auth_exceptions.DefaultCredentialsError as e:
-            raise GcpCredentialsError(
-                "GCP Application Default Credentials not configured. Run "
-                "'gcloud auth application-default login', set GOOGLE_APPLICATION_CREDENTIALS to a "
-                "service-account key file, or run on a GCE/Cloud Run/GKE instance with an attached "
-                "service account."
-            ) from e
+            raise GcpCredentialsError(_ADC_NOT_CONFIGURED_MESSAGE) from e
         return credentials, resolved_project
 
     def resolve_project_id(self, adc_fallback_project: str | None) -> str:

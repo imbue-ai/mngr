@@ -6,9 +6,9 @@ typically a few cents per run for a ~5-minute Standard_B2s -- and are gated:
 - ``MNGR_AZURE_RELEASE_TESTS=1`` must be set explicitly. When it is unset the
   whole module is skipped.
 - Once opted in, Azure credentials must be resolvable via
-  ``DefaultAzureCredential`` (an ``az login`` session, a service principal, or a
-  managed identity; see ``testing.azure_credentials_available``, the same probe
-  the session-end cleanup hook uses) and a subscription must be resolvable
+  ``DefaultAzureCredential`` (an ``az login`` session or a service principal;
+  see ``testing.azure_credentials_available``, the same probe the session-end
+  cleanup hook uses) and a subscription must be resolvable
   (``AZURE_SUBSCRIPTION_ID`` / ``MNGR_AZURE_SUBSCRIPTION_ID`` / the active ``az``
   subscription). Opting in without either makes the tests *fail* (not skip), so
   a run the user explicitly requested but that cannot reach Azure is visible
@@ -39,7 +39,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
@@ -48,6 +47,7 @@ from imbue.mngr.providers.provider_release_testing import run_provider_release_t
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.client import AzureVpsClient
+from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
@@ -504,7 +504,7 @@ def test_provider_release_trip4(
 def azure_release_client(azure_release_subscription_id: str) -> AzureVpsClient:
     """Real Azure API client for release-test read-only calls."""
     return AzureVpsClient(
-        credential=DefaultAzureCredential(),
+        credential=AzureProviderConfig().get_credential(),
         subscription_id=azure_release_subscription_id,
         region=AZURE_DEFAULT_REGION,
         resource_group=AZURE_DEFAULT_RESOURCE_GROUP,
@@ -528,7 +528,7 @@ def test_default_image_resolves(azure_release_subscription_id: str) -> None:
     Marketplace SKUs occasionally change names; a periodic release-test run is
     the cheapest way to catch a stale default before it breaks every create.
     """
-    compute = ComputeManagementClient(DefaultAzureCredential(), azure_release_subscription_id)
+    compute = ComputeManagementClient(AzureProviderConfig().get_credential(), azure_release_subscription_id)
     versions = list(
         compute.virtual_machine_images.list(
             location=AZURE_DEFAULT_REGION,

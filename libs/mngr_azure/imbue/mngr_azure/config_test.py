@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from azure.identity import AzureCliCredential
 from azure.identity import DefaultAzureCredential
+from azure.identity import ManagedIdentityCredential
 from pydantic import SecretStr
 from pydantic import ValidationError
 
@@ -138,9 +139,23 @@ def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.Monkey
         config.get_subscription_id()
 
 
-def test_get_credential_returns_default_azure_credential() -> None:
+def test_get_credential_returns_default_azure_credential(unset_azure_token_credentials: None) -> None:
     config = AzureProviderConfig(subscription_id="sub-123")
     assert isinstance(config.get_credential(), DefaultAzureCredential)
+
+
+def test_use_managed_identity_defaults_to_false() -> None:
+    assert AzureProviderConfig().use_managed_identity is False
+
+
+def test_get_credential_excludes_managed_identity_by_default(unset_azure_token_credentials: None) -> None:
+    credential = AzureProviderConfig(subscription_id="sub-123").get_credential()
+    assert not any(isinstance(chained, ManagedIdentityCredential) for chained in credential.credentials)
+
+
+def test_get_credential_keeps_managed_identity_when_opted_in(unset_azure_token_credentials: None) -> None:
+    credential = AzureProviderConfig(subscription_id="sub-123", use_managed_identity=True).get_credential()
+    assert any(isinstance(chained, ManagedIdentityCredential) for chained in credential.credentials)
 
 
 def test_get_credential_pins_the_az_login_to_the_blocks_tenant_and_subscription() -> None:
@@ -202,7 +217,7 @@ def test_resolve_state_storage_account_name_honors_explicit_override() -> None:
     assert config.resolve_state_storage_account_name("sub-123") == "mngrstmyteam"
 
 
-def test_build_state_bucket_uses_resolved_name_and_scope() -> None:
+def test_build_state_bucket_uses_resolved_name_and_scope(unset_azure_token_credentials: None) -> None:
     config = AzureProviderConfig(subscription_id="sub-123", resource_group="mngr", default_region="westus")
     bucket = config.build_state_bucket("sub-123")
     assert bucket.account_name == config.resolve_state_storage_account_name("sub-123")

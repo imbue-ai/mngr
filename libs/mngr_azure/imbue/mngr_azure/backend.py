@@ -161,7 +161,8 @@ def _azure_not_authorized_error(
         "  - subscription: set AZURE_SUBSCRIPTION_ID, set `subscription_id` in [providers.azure], "
         "or run `az account set --subscription <id>`;\n"
         "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
-        "AZURE_CLIENT_SECRET for a service principal);\n"
+        "AZURE_CLIENT_SECRET for a service principal, or, on an Azure VM or Container App, set "
+        "`use_managed_identity = true` in [providers.azure] to use its managed identity);\n"
         "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )

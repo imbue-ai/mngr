@@ -250,6 +250,16 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
             "provider as awaiting its credential source until `az login` has run."
         ),
     )
+    use_managed_identity: bool = Field(
+        default=False,
+        description=(
+            "Whether DefaultAzureCredential may try a managed identity, which probes the Azure instance "
+            "metadata service (169.254.169.254). Off by default: off Azure the probe can only fail, and "
+            "on macOS a connection to that link-local address raises the 'find devices on your local "
+            "network' prompt for the app running mngr. Set True only when running mngr on an Azure VM or "
+            "Container App that should authenticate via its managed identity."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -259,13 +269,17 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.
 
+        The managed-identity credential is excluded from the chain unless
+        ``use_managed_identity`` is set, so it never probes the instance
+        metadata service.
+
         Typed ``Any`` because ``azure.core.credentials.TokenCredential`` is a
         Protocol (not an isinstance-able concrete class), which pydantic's
         ``arbitrary_types_allowed`` validation cannot accept as a field type.
         The returned credential is consumed transparently by the SDK; mngr never
         inspects or stores the secret material.
 
-        Construction never raises (``DefaultAzureCredential`` authenticates
+        Construction never authenticates (``DefaultAzureCredential`` authenticates
         lazily on first token request), so unlike AWS/GCP there is no cheap
         no-credentials check here -- the gating is on ``subscription_id``
         presence (see ``get_subscription_id``), and an unauthenticated
@@ -278,7 +292,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         When ``use_azure_cli_login`` is set, an ``AzureCliCredential`` pinned to
         the block's tenant and subscription is returned: never
         ``DefaultAzureCredential``, which would prefer ``AZURE_CLIENT_*``
-        environment variables and probe a managed identity first. Raises
+        environment variables. Raises
         ``AzureCredentialConfigError`` when the switch is combined with a
         service-principal secret or lacks the two ids.
         """
@@ -300,7 +314,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
                 client_id=self.client_id,
                 client_secret=self.client_secret.get_secret_value(),
             )
-        return DefaultAzureCredential()
+        return DefaultAzureCredential(exclude_managed_identity_credential=not self.use_managed_identity)
 
     def get_subscription_id(self) -> str:
         """Return the subscription ID, raising ``AzureSubscriptionError`` if unresolvable.
