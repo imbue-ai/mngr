@@ -44,7 +44,7 @@
 build_id = "2610286tjy4mwq2"
 version = "0.9.4"
 fallback_branch = "minds-v0.9.4"
-rollout_percentage = 20
+rollout_percentage = 100
 platforms = ["mac", "linux"]
 mac_minimum_system_version = "22.0.0"
 

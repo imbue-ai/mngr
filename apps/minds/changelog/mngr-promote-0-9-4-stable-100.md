@@ -1,0 +1,1 @@
+- Imbue Studio 0.9.4 reaches every stable desktop install: the stable channel's rollout moves from 20% to 100% for mac (macOS 13 and later) and Linux. macOS 12 installs stay on 0.8.5.
