@@ -1,0 +1,5 @@
+- Recorded the Imbue Studio 0.9.4 release in `docs/deploy/history/minds-v0.9.4.md`: the cut from a frozen `main`, the template re-cut that brought in #670 with #1252, the pair and tag runs, the services deploys on both tiers, the staging rehearsal, the production bakes (including the 2026-10-29 and 2026-10-31 top-ups and the row a workspace move evicted), and the alpha, beta and stable promotions, stable going from 20% to 100%.
+
+- Recorded the Imbue Studio 0.9.5 release in `docs/deploy/history/minds-v0.9.5.md`: the fast-forward cut from `main`, the tag run, the production bake of twelve rows with no services deploy and no staging rehearsal, the alpha promotion on mac, Linux and the web, and what was left undone.
+
+- Reset `docs/deploy/next_deploy.md` after both releases; corrected the 0.9.4 changelog to say the web chrome's sign-out key fix ships through the services deploy; and `docs/deploy/ops/services.md`'s diff of what a deploy would ship now covers everything the connector image ships: its `frontend/`, `frontend_web/` and `email_templates/` trees, its image requirements, and the `modal_app_kit`, `imbue_common` and gen-2 slice-script sources.
