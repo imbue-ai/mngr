@@ -57,9 +57,9 @@ platforms = ["mac", "linux"]
 mac_minimum_system_version = "22.0.0"
 
 [channels.alpha]
-build_id = "2610286tjy4mwq2"
-version = "0.9.4"
-fallback_branch = "minds-v0.9.4"
+build_id = "261031sx3nysvlr"
+version = "0.9.5"
+fallback_branch = "minds-v0.9.5"
 rollout_percentage = 100
 platforms = ["mac", "linux"]
 mac_minimum_system_version = "22.0.0"
