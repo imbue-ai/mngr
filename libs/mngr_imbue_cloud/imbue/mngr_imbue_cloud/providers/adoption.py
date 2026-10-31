@@ -45,6 +45,7 @@ the install) or already serves the new one (finish by pinning it).
 import base64
 import hashlib
 import shlex
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -68,6 +69,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.outer_host import SSH_KEEPALIVE_INTERVAL_SECONDS
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import HostKeyPin
 from imbue.mngr.providers.host_key_store import drop_bootstrap_pins
@@ -192,6 +194,13 @@ class BoundEndpoints(FrozenModel):
     vps_address: str = Field(description="The box address both endpoints were forwarded on")
     ssh_port: int = Field(description="Box port the VM-root sshd was pinned at")
     container_ssh_port: int = Field(description="Box port the container sshd was pinned at")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(),
+        description=(
+            "The slice's published ports at the same placement (specs/published-ports): no pins live "
+            "there, but a restore re-picks them with the sshd ports, so they are compared beside them"
+        ),
+    )
 
     @property
     def vm_endpoint(self) -> tuple[str, int]:
@@ -212,6 +221,9 @@ class SliceAdoptionTarget(FrozenModel):
     host_state_dir: Path = Field(description="Client-side per-host state dir (keys, marker, pending rotations)")
     known_hosts_path: Path = Field(description="The per-host known_hosts file backed by the host-key store")
     client_public_key: str = Field(description="This host's per-host client public key (one OpenSSH line)")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="The slice's published ports at this placement, recorded beside the pins"
+    )
 
 
 @pure
@@ -660,7 +672,12 @@ def rotate_endpoint_host_key(
     )
     record_bound_endpoints(
         target.host_state_dir,
-        BoundEndpoints(vps_address=target.address, ssh_port=target.vm_port, container_ssh_port=target.container_port),
+        BoundEndpoints(
+            vps_address=target.address,
+            ssh_port=target.vm_port,
+            container_ssh_port=target.container_port,
+            published_endpoints=target.published_endpoints,
+        ),
     )
     _clear_pending_host_key_rotation(target.host_state_dir, kind)
     return pending.new_public_key
@@ -931,6 +948,7 @@ def rebind_host_key_pins_to_endpoints(
     address: str,
     vm_port: int,
     container_port: int,
+    published_endpoints: Sequence[PublishedEndpoint] = (),
 ) -> None:
     """Move the host's pins to the lease's current endpoints when they moved; a pure-local check.
 
@@ -941,7 +959,9 @@ def rebind_host_key_pins_to_endpoints(
     differ, the VM pin moves to ``(address, vm_port)`` and the container pin
     to ``(address, container_port)`` with origins intact (never a new trust
     decision), anything the host had pinned elsewhere is dropped, and the
-    file is rewritten.
+    file is rewritten. The published endpoints are recorded beside the two
+    sshd endpoints (a restore re-picks them together), so a record whose
+    published ports went stale is rewritten too, with the pins untouched.
 
     A device with no record of the host yet (a second device that only synced
     the record) is seeded from its user-origin pins: pins already at the
@@ -956,7 +976,12 @@ def rebind_host_key_pins_to_endpoints(
     host with no user-origin pins is unadopted here: nothing happens, and the
     caller's connector-key fallback applies.
     """
-    current = BoundEndpoints(vps_address=address, ssh_port=vm_port, container_ssh_port=container_port)
+    current = BoundEndpoints(
+        vps_address=address,
+        ssh_port=vm_port,
+        container_ssh_port=container_port,
+        published_endpoints=tuple(published_endpoints),
+    )
     record = load_host_key_record(known_hosts_path, host_id)
     if record is None:
         return

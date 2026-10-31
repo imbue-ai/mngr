@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 11 (tracks `CONTRACT_VERSION` in
+Version: 12 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v11)
+## Message inventory (v12)
 
 ### workspace -> embedder
 
@@ -67,6 +67,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-local-files` | `{}` | Open the shell's workspace-options panel on its Permissions tab at the Local files section, where the user shares files and folders from this computer with the workspace and turns syncing on. Sent only to an embedder whose `embedder-capabilities` carries `opensLocalFiles: true`. |
 | `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
 | `minds:highlight-chrome` | `{ anchor }` | Pulse a ring around one of the chrome's own controls while the workspace's tour talks about it: `anchor` is one of `workspace-switcher`, `permissions`, `settings`, `share`, `help`, or `null` to clear the ring. Fire-and-forget (no ack); the tour's words never depend on the ring, so a chrome that ignores it reads the same. |
+| `minds:immersive-request` | `{ windowId, on }` | Enter (`on: true`) or leave (`on: false`) immersive mode for this window: the chrome takes the workspace frame Fullscreen-API fullscreen, locks the keyboard so every key reaches the frame (Escape included; holding Escape is Chromium's own way out), and silences its own accelerators and key relays while it lasts (`specs/screen-studio-integration/spec.md`). Sent only to a chrome whose `minds:embedder-capabilities` carried `immersive: true`, and synchronously from the user's click when entering, so the chrome receives it inside the gesture's transient activation. The chrome answers with `minds:immersive-changed`. |
 
 ### embedder -> workspace
 
@@ -77,10 +78,11 @@ see the `*_PATTERN` constants in the module.
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:provider-sign-in-ack` | `{ relay }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
-| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, and offers no way to reach the Local files settings. |
+| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, and never asks for immersive mode. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when given, else at its kept frame. This desktop app sends no `frame`. |
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:`, `tel:` or custom-scheme URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`; a custom-scheme link, only to one that announced `opensCustomSchemeLinks: true` too. |
+| `minds:immersive-changed` | `{ on, keyboardLocked, error? }` | Immersive mode is now on or off. `keyboardLocked` says whether the keyboard lock was obtained (a plain browser may refuse it, or ask the user once, while fullscreen stands: immersive mode is then on without the lock). `error` is a short string (at most 256 characters) when a `minds:immersive-request` could not be honoured, most often because fullscreen was refused after the gesture's activation had expired. Sent after every change, including one the chrome made on its own: the user held Escape, the OS or the browser left fullscreen, the frame navigated to another workspace. Immersive mode is never persisted or restored. |
 
 The chrome also posts, with the same `{ type, ...fields }` envelope, a
 notification's `destination`: a message whose type an app's manifest
@@ -272,3 +274,14 @@ payloads -- to the console.
   its Local files section (`?tab=permissions&section=local-files`). A v11
   workspace facing an older chrome never hears `opensLocalFiles` and offers
   nothing; a v11 chrome facing an older workspace is never asked.
+- **12** -- added `immersive-request` (workspace -> embedder) and
+  `immersive-changed` (embedder -> workspace), plus the optional `immersive`
+  field on `embedder-capabilities`: the workspace Screen's immersive mode
+  (`specs/screen-studio-integration/spec.md`, section 5). Only the top-level
+  page can take the workspace frame Fullscreen-API fullscreen with the
+  keyboard locked (`navigator.keyboard.lock()` rejects from any iframe), so
+  the workspace asks and the chrome does it, silencing its own accelerators
+  and key relays while it lasts. Window ids are validated against
+  `WINDOW_ID_PATTERN`, the flags as booleans, the error as a short string. A
+  workspace facing an older chrome never sees `immersive: true` and never
+  asks; an older workspace ignores `immersive-changed`.

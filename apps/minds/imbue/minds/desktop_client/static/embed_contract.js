@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "11";
+export const CONTRACT_VERSION = "12";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -117,6 +117,15 @@ export const OPEN_LOCAL_FILES = "minds:open-local-files";
 // chrome that does not know the anchor ignores it, and the tour's words never
 // depend on the ring.
 export const HIGHLIGHT_CHROME = "minds:highlight-chrome";
+// workspace -> embedder: enter (`on: true`) or leave (`on: false`) immersive
+// mode for this window: the chrome takes the workspace frame Fullscreen-API
+// fullscreen, locks the keyboard so every key reaches the frame, and silences
+// its own accelerators and key relays (the Screen integration spec). Payload:
+// { windowId, on }. Sent only to a chrome whose EMBEDDER_CAPABILITIES carried
+// `immersive: true`, and from a user gesture when entering (the chrome needs
+// the gesture's activation for the fullscreen request). The chrome answers
+// with IMMERSIVE_CHANGED.
+export const IMMERSIVE_REQUEST = "minds:immersive-request";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -145,12 +154,13 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks?, opensLocalFiles? }: `opensExternalLinks: true` says
-// it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
-// custom-scheme links there too, and `opensLocalFiles: true` that it takes
-// OPEN_LOCAL_FILES. A workspace that never receives it (an older chrome, a
-// plain browser) keeps its pull-out gesture off, opens external links itself,
-// and offers no way to reach the Local files settings.
+// opensCustomSchemeLinks?, opensLocalFiles?, immersive? }: `opensExternalLinks: true`
+// says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
+// custom-scheme links there too, `opensLocalFiles: true` that it takes
+// OPEN_LOCAL_FILES, and `immersive: true` that it takes IMMERSIVE_REQUEST. A
+// workspace that never receives it (an older chrome, a plain browser) keeps
+// its pull-out gesture off, opens external links itself, offers no way to
+// reach the Local files settings, and never asks for immersive mode.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -182,6 +192,14 @@ export const TEAR_OUT = "minds:tear-out";
 // OPEN_EXTERNAL). Sent only to a page that announced WORKSPACE_READY with
 // `opensLinks: true`.
 export const OPEN_LINK = "minds:open-link";
+// embedder -> workspace: immersive mode is now on or off. Payload:
+// { on, keyboardLocked, error? }: `keyboardLocked` says whether the keyboard
+// lock was obtained (a plain browser may refuse it while fullscreen stands);
+// `error` is a short string when an IMMERSIVE_REQUEST could not be honoured
+// (fullscreen refused, most often because the gesture's activation had
+// expired). Sent after every change, including one the chrome made on its own
+// (the user held Escape, the OS left fullscreen, the frame navigated).
+export const IMMERSIVE_CHANGED = "minds:immersive-changed";
 
 // The chrome controls a workspace may ask to have ringed (HIGHLIGHT_CHROME):
 // the workspace switcher, the three workspace tabs, and the help button.
@@ -198,6 +216,8 @@ export const MAX_WINDOW_TITLE_LENGTH = 256;
 // Upper bound on an OPEN_LINK or OPEN_EXTERNAL URL, bounding the work it can
 // demand.
 export const MAX_OPEN_LINK_URL_LENGTH = 8192;
+// Upper bound on an IMMERSIVE_CHANGED error string.
+export const MAX_IMMERSIVE_ERROR_LENGTH = 256;
 
 // Request ids are server-issued (`evt-<uuid hex>`). Only a conservative
 // charset + length is accepted so a malicious page cannot smuggle path or
@@ -349,6 +369,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [OPEN_EXTERNAL]: function (data) {
     return isLinkUrlValid(data.url);
   },
+  [IMMERSIVE_REQUEST]: function (data) {
+    return isWindowIdValid(data.windowId) && typeof data.on === 'boolean';
+  },
   [OPEN_LOCAL_FILES]: function () {
     return true;
   },
@@ -387,7 +410,8 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     return (
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
-      isOptionalBoolean(data.opensLocalFiles)
+      isOptionalBoolean(data.opensLocalFiles) &&
+      isOptionalBoolean(data.immersive)
     );
   },
   [REATTACH_WINDOW]: function (data) {
@@ -398,6 +422,11 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   },
   [OPEN_LINK]: function (data) {
     return isLinkUrlValid(data.url);
+  },
+  [IMMERSIVE_CHANGED]: function (data) {
+    if (typeof data.on !== 'boolean' || typeof data.keyboardLocked !== 'boolean') return false;
+    if (data.error === undefined) return true;
+    return typeof data.error === 'string' && data.error.length <= MAX_IMMERSIVE_ERROR_LENGTH;
   },
 };
 

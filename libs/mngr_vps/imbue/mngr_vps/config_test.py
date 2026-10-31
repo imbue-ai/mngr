@@ -8,7 +8,9 @@ from pydantic import ValidationError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.config import fold_legacy_root_disk_size_key
@@ -106,3 +108,24 @@ def test_fold_legacy_root_disk_size_key_passes_a_non_mapping_through() -> None:
 
 def test_offline_capable_config_defaults_the_root_disk_to_thirty_gb() -> None:
     assert OfflineCapableVpsProviderConfig(backend=ProviderBackendName("test-backend")).root_disk_size_gb == 30
+
+
+def test_offline_capable_config_parses_firewall_published_ports() -> None:
+    config = OfflineCapableVpsProviderConfig(
+        backend=ProviderBackendName("test-backend"), firewall_published_ports=("59000/udp", "8080")
+    )
+    assert config.firewall_published_port_declarations() == (
+        PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+        PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+    )
+    assert (
+        OfflineCapableVpsProviderConfig(backend=ProviderBackendName("x")).firewall_published_port_declarations() == ()
+    )
+
+
+@pytest.mark.parametrize("bad_entries", [("59000/sctp",), ("59000/udp", "59000/udp"), ("0",)])
+def test_offline_capable_config_rejects_bad_firewall_published_ports_at_load(bad_entries: tuple[str, ...]) -> None:
+    with pytest.raises(ValidationError, match="Invalid firewall_published_ports entry"):
+        OfflineCapableVpsProviderConfig(
+            backend=ProviderBackendName("test-backend"), firewall_published_ports=bad_entries
+        )

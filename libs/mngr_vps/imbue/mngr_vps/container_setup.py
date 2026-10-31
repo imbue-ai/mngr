@@ -1000,7 +1000,8 @@ def run_container(
     *,
     image: str,
     name: str,
-    port_mappings: Mapping[str, str],
+    # Each a full `docker run -p` value, e.g. "0.0.0.0:2222:22" or "0.0.0.0:59000:59000/udp".
+    publish_specs: Sequence[str],
     volumes: Sequence[str],
     labels: Mapping[str, str],
     extra_args: Sequence[str],
@@ -1014,8 +1015,8 @@ def run_container(
     gateway) are reachable from inside by a constant name.
     """
     args: list[str] = ["run", "-d", "--name", name, *OUTER_HOST_ADD_HOST_ARGS]
-    for host_bind, container_port in port_mappings.items():
-        args.extend(["-p", f"{host_bind}:{container_port}"])
+    for publish_spec in publish_specs:
+        args.extend(["-p", publish_spec])
     for vol in volumes:
         args.extend(["-v", vol])
     for key, value in labels.items():

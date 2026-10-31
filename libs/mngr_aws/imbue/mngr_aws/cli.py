@@ -31,6 +31,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
@@ -39,6 +40,7 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_prepare_published_ports
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
@@ -59,6 +61,7 @@ class _AwsOperatorCliOptions(CommonCliOptions):
 
 class _AwsPrepareCliOptions(_AwsOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
+    publish: tuple[str, ...]
 
 
 class _AwsCleanupCliOptions(_AwsOperatorCliOptions):
@@ -91,6 +94,7 @@ def _build_operator_client(
     sg_name: str | None,
     vpc_id: str | None,
     allowed_ssh_cidrs: tuple[str, ...],
+    published_ports: tuple[PublishedPortDeclaration, ...] = (),
 ) -> AwsVpsClient:
     """Construct an ``AwsVpsClient`` for the ``mngr aws`` operator commands.
 
@@ -108,9 +112,9 @@ def _build_operator_client(
     auto-created SGs -- an externally-managed SG is not theirs to create
     or delete.
 
-    ``prepare`` passes the effective ingress CIDRs; ``cleanup`` passes
-    ``()`` (it only deletes, never authorizes ingress, so the value is
-    unused on that path).
+    ``prepare`` passes the effective ingress CIDRs and the published ports to
+    open; ``cleanup`` passes ``()`` (it only deletes, never authorizes ingress,
+    so the values are unused on that path).
     """
     effective_region = region or base.default_region
     if sg_name is not None:
@@ -130,6 +134,7 @@ def _build_operator_client(
         security_group=effective_sg,
         vpc_id=effective_vpc_id,
         allowed_ssh_cidrs=allowed_ssh_cidrs,
+        published_ports=published_ports,
         container_ssh_port=base.container_ssh_port,
     )
 
@@ -359,13 +364,24 @@ def aws_cli_group() -> None:
         "Defaults to the provider config's allowed_ssh_cidrs. Tighten for production."
     ),
 )
+@optgroup.option(
+    "--publish",
+    "publish",
+    multiple=True,
+    help=(
+        "Published port (PORT or PORT/PROTOCOL) to open from every source, so hosts created with "
+        "`mngr create --publish` on this provider are reachable there. Repeat for multiple. "
+        "Defaults to the provider config's firewall_published_ports."
+    ),
+)
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     """Provision the AWS security group for mngr-managed instances.
 
     Creates (or reuses) the `mngr-aws` security group (ingress on tcp/22 +
-    tcp/<container_ssh_port> per allowed_ssh_cidrs). Idempotent: re-running
+    tcp/<container_ssh_port> per allowed_ssh_cidrs, plus every published port
+    from any source). Idempotent: re-running
     re-authorizes any missing ingress rules without duplicating. Needs
     ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup +
     ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
@@ -384,8 +400,11 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # resolved provider config's value. Non-empty tuple => caller supplied
     # explicit values, use them verbatim.
     effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
+    published_ports = resolve_prepare_published_ports(opts.publish, base)
     try:
-        client = _build_operator_client(base, opts.region, opts.sg_name, opts.vpc_id, effective_cidrs)
+        client = _build_operator_client(
+            base, opts.region, opts.sg_name, opts.vpc_id, effective_cidrs, published_ports=published_ports
+        )
     except (ValueError, BotoCoreError) as e:
         # ``ValueError`` covers the no-credentials case raised by
         # ``AwsProviderConfig.get_session``; ``BotoCoreError`` covers

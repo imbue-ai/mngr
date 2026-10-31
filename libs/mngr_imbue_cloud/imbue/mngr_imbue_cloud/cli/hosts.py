@@ -44,6 +44,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
 from imbue.mngr_imbue_cloud.providers.adoption import rebind_host_key_pins_to_endpoints
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
+from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_wire
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 
 
@@ -202,6 +203,7 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
         lease.vps_address,
         lease.ssh_port,
         lease.container_ssh_port,
+        published_endpoints=published_endpoints_from_wire(lease.published_ports, lease.vps_address),
     )
     # An unadopted host is adopted here first, which already rotates both host
     # keys as part of taking ownership; an adopted host gets verified/healed

@@ -126,6 +126,14 @@ Each container's sshd is published on a random host port. By default that port b
 
 The binding is fixed when the container is created: existing containers keep theirs across stop/start, and pick up the current setting on a snapshot restore or recreate.
 
+### Published ports
+
+`mngr create --publish <port>[/<protocol>]` (or the create template key `publish`) publishes a guest port the container's workload listens on, beside sshd and at the same address: `127.0.0.1` for a local daemon, every interface of the daemon host for a remote one, or `ssh_bind_address` when set.
+Docker picks the host port, and mngr reads it back from the container's port bindings after every start, so `mngr list --format json` reports it under `host.published_endpoints` (`guest_port`, `protocol`, `host`, `host_port`).
+A guest port declared for both `tcp` and `udp` gets one host port number on a local daemon, chosen free before the container runs; on a remote daemon Docker allocates the two independently.
+The host port stays with the container across stop and start; a snapshot restore creates a new container and so reports a fresh one, as it does for sshd.
+Declaring port 22 is refused, since sshd already owns it, and `-p` flags passed through `-s` keep working but are not reported as endpoints.
+
 ## Limitations
 
 - Tags are immutable after container creation (stored as Docker labels)

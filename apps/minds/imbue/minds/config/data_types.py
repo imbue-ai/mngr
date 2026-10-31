@@ -408,6 +408,12 @@ class PlanQuotasConfig(FrozenModel):
         description="Max machine data-disk GB summed across running + stopped remote machines"
     )
     max_shared_workspaces: NonNegativeInt = Field(description="Max workspaces the account may have shared at once")
+    max_turn_relay_gb_per_month: NonNegativeInt = Field(
+        description=(
+            "GB of WebRTC traffic the TURN relay may send to the account's viewers per calendar month "
+            "(0 refuses every relay credential mint; specs/turn-relay/spec.md)"
+        )
+    )
 
     def to_plan_row(self) -> dict[str, float]:
         """The connector-table column values for this plan (storage converted to bytes)."""
@@ -421,6 +427,7 @@ class PlanQuotasConfig(FrozenModel):
             "max_active_machine_units": int(self.max_active_machine_units),
             "max_total_machine_disk_gb": int(self.max_total_machine_disk_gb),
             "max_shared_workspaces": int(self.max_shared_workspaces),
+            "max_turn_relay_gb_per_month": int(self.max_turn_relay_gb_per_month),
         }
 
 

@@ -28,6 +28,7 @@ mngr aws prepare [OPTIONS]
 | `--sg-name` | text | Security group name to create / reuse. Defaults to the provider config's SG name. | None |
 | `--vpc-id` | text | VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the provider config's allowed_ssh_cidrs. Tighten for production. | None |
+| `--publish` | text | Published port (PORT or PORT/PROTOCOL) to open from every source, so hosts created with `mngr create --publish` on this provider are reachable there. Repeat for multiple. Defaults to the provider config's firewall_published_ports. | None |
 
 ## Common
 

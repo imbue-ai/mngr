@@ -33,6 +33,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -45,6 +46,7 @@ from imbue.mngr_gcp.errors import GcpStateBucketProvisioningError
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_gcp.state_bucket import GcsStateBucketError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_prepare_published_ports
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
@@ -68,6 +70,7 @@ class _GcpPrepareCliOptions(_GcpOperatorCliOptions):
     zone: str | None
     firewall_target_tag: str | None
     allowed_ssh_cidrs: tuple[str, ...]
+    publish: tuple[str, ...]
 
 
 class _GcpCleanupCliOptions(_GcpOperatorCliOptions):
@@ -104,6 +107,7 @@ def _build_operator_client(
     network: str | None,
     allowed_ssh_cidrs: tuple[str, ...],
     concurrency_group: ConcurrencyGroup,
+    published_ports: tuple[PublishedPortDeclaration, ...] = (),
 ) -> GcpVpsClient:
     """Construct a ``GcpVpsClient`` for the ``mngr gcp`` operator commands.
 
@@ -152,6 +156,7 @@ def _build_operator_client(
         firewall_name=firewall_name or base.firewall_name,
         firewall_target_tag=firewall_target_tag or base.firewall_target_tag,
         allowed_ssh_cidrs=allowed_ssh_cidrs,
+        published_ports=published_ports,
         container_ssh_port=base.container_ssh_port,
     )
 
@@ -389,10 +394,20 @@ def gcp_cli_group() -> None:
         "Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
+@optgroup.option(
+    "--publish",
+    "publish",
+    multiple=True,
+    help=(
+        "Published port (PORT or PORT/PROTOCOL) to open from every source in a second rule, so hosts created "
+        "with `mngr create --publish` on this provider are reachable there. Repeat for multiple. "
+        "Defaults to the resolved provider config's firewall_published_ports."
+    ),
+)
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Create (or reuse) the GCP firewall rule and GCS state bucket for mngr-managed instances.
+    """Create (or reuse) the GCP firewall rules and GCS state bucket for mngr-managed instances.
 
     Idempotent: re-running is a no-op when each resource already exists. Needs
     compute.firewalls.get + compute.firewalls.create + storage.buckets.get +
@@ -412,6 +427,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # resolved provider config's value. Non-empty tuple => caller supplied
     # explicit values, use them verbatim. Mirrors ``mngr aws prepare``.
     effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
+    published_ports = resolve_prepare_published_ports(opts.publish, base)
     try:
         client = _build_operator_client(
             base,
@@ -422,6 +438,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
             opts.network,
             effective_cidrs,
             mngr_ctx.concurrency_group,
+            published_ports=published_ports,
         )
     except google_auth_exceptions.GoogleAuthError as e:
         # GoogleAuthError is not an ``MngrError``, so wrap it for a clean CLI

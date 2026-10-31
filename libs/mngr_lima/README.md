@@ -49,6 +49,13 @@ mngr lima resize my-host --cpus 4 --memory 8 --disk 200
 
 The CPU count and memory are written into the instance's lima config, and `--disk` grows the data disk with `limactl disk resize` (a disk never shrinks, and a host on the exposed layout has no data disk to resize). A stopped VM is reconfigured at once. A running VM cannot be edited, so the new size is only recorded and `mngr start` applies it, as it does on every start: the recorded size is the source of truth for the VM. The data filesystem grows to fill its disk on every boot, so a grown disk is usable as soon as the VM is back up.
 
+## Published ports
+
+By default no guest port is forwarded to this machine except sshd, which lima handles through its own `ssh.localPort`.
+`mngr create @.lima --publish <port>[/<protocol>]` (or the create template key `publish`) forwards a guest port the VM's workload listens on: mngr picks a free loopback port at create, writes one `portForwards` rule per declaration into the instance's lima config ahead of the rules that ignore every other guest port, and records the endpoint (`127.0.0.1` and the chosen port) on the host, where `mngr list --format json` reports it under `host.published_endpoints`.
+A guest port declared for both `tcp` and `udp` gets one host port, and UDP rides on lima's default gRPC forwarder.
+The rules live in the instance's lima config, so they survive stop, start and `mngr lima resize`; the workload may bind the port on `0.0.0.0` or on `127.0.0.1`, and a user `--file` YAML cannot override them.
+
 ## What lives on which disk
 
 The boot disk holds the guest OS and whatever provisioning installs into it, and cannot grow after creation; the data disk backs `host_dir` (or the whole home tree with `volume_home_path`) and can. Every VM's journal is capped at 512 MiB so it cannot fill the boot disk. Anything else that grows over a host's life (package caches, build caches) belongs on the data disk; a workspace template can put it there itself, since the agent runs as root there.

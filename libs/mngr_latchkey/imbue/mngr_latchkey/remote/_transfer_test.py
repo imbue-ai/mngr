@@ -33,6 +33,7 @@ from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_ru
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
+from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
 from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
@@ -84,6 +85,15 @@ def _grant(vps: FakeVps, bundle: bytes, account: str, permissions_json: str = _S
         ),
         failure_description="grant",
     )
+
+
+def test_a_policy_is_provisioned_exactly_when_it_carries_a_rule() -> None:
+    """A rule-less policy is the default a provisioning pass hands a machine, and reads as no policy at all."""
+    host_id = HostId.generate()
+    assert is_policy_provisioned(host_id, _SLACK_ANY) is True
+    assert is_policy_provisioned(host_id, '{"rules": []}') is False
+    with pytest.raises(RemoteGatewayError, match=str(host_id)):
+        is_policy_provisioned(host_id, "not a policy")
 
 
 # The scripts, run by a real shell against the fake machine.

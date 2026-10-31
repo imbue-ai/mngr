@@ -116,6 +116,12 @@ contextBridge.exposeInMainWorld('mindsNative', {
   popoutWindowReturned: (workspaceId, windowId) =>
     ipcRenderer.send('popout-window-returned', { workspaceId, windowId }),
 
+  // Immersive mode (the Screen integration spec): while the workspace frame is
+  // fullscreen with the keyboard locked, this window's application-menu
+  // accelerators go off and main's key relays (escape-pressed,
+  // close-active-tab) pause, so every key reaches the frame.
+  setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
+
   // Link routing (electron/link-routing.js).
   reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
   openExternalLink: (url) => ipcRenderer.send('open-external-link', url),

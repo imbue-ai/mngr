@@ -31,7 +31,9 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -803,6 +805,38 @@ def test_parse_agents_from_json_extracts_host_state() -> None:
         "host-aaaa": HostState.RUNNING,
         "host-bbbb": HostState.DESTROYED,
     }
+
+
+def test_parse_agents_from_json_extracts_published_endpoints_and_skips_malformed_ones() -> None:
+    """``host.published_endpoints`` (the published-ports spec) is surfaced per agent; an older mngr emits none."""
+    json_output = json.dumps(
+        {
+            "agents": [
+                {
+                    "id": str(_AGENT_A),
+                    "host": {
+                        "id": str(HostId.generate()),
+                        "published_endpoints": [
+                            {"guest_port": 59000, "protocol": "UDP", "host": "127.0.0.1", "host_port": 32768},
+                            {"guest_port": "not-a-port", "protocol": "UDP", "host": "127.0.0.1", "host_port": 1},
+                        ],
+                    },
+                },
+                {"id": str(_AGENT_B), "host": {"id": str(HostId.generate())}},
+            ]
+        }
+    )
+    result = parse_agents_from_json(json_output)
+    assert result.published_endpoints_by_agent_id == {
+        str(_AGENT_A): (
+            PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=32768),
+        )
+    }
+    resolver = make_resolver_with_data(json_output)
+    assert resolver.get_published_endpoints(_AGENT_A) == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=32768)
+    ]
+    assert resolver.get_published_endpoints(_AGENT_B) == []
 
 
 def _pair_snapshot(

@@ -142,6 +142,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGa
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
@@ -2633,6 +2634,7 @@ def create_desktop_client(
     device_id: str = "",
     identity_cache: IdentityCache | None = None,
     forward_identity: ForwardIdentityPublisher | None = None,
+    turn_credential_broker: TurnCredentialBroker | None = None,
     connection_store: ConnectionStore | None = None,
     provider_materializer: ProviderSettingsMaterializer | None = None,
 ) -> Flask:
@@ -2862,6 +2864,7 @@ def create_desktop_client(
         workspace_update_service=workspace_update_service,
         identity_cache=identity_cache,
         forward_identity=forward_identity,
+        turn_credential_broker=turn_credential_broker,
     )
     set_state(app, state)
 

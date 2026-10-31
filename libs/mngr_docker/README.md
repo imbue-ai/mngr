@@ -24,11 +24,16 @@ mngr create @.docker -b --file=./Dockerfile -b .
 # Pass flags to docker run
 mngr create @.docker -s --cpus=4 -s --memory=16g
 
+# Publish a guest port the workload listens on (tcp by default) and read back where it landed
+mngr create @.docker --publish 59000/udp --publish 59000/tcp
+mngr list --format json   # host.published_endpoints: [{guest_port, protocol, host, host_port}, ...]
+
 # Change a running or stopped host's caps afterwards
 mngr docker resize my-host --cpus 4 --memory 8g
 ```
 
 Build arguments (`-b`) go straight to `docker build` and start arguments (`-s`) straight to `docker run`, so anything those CLIs support is available.
+Published ports are bound where sshd is (loopback for a local daemon, the daemon host for a remote one); the host port Docker picks is recorded on the host and re-read after every start, since Docker picks a fresh dynamic port on each `docker start` (and on a snapshot restore); only a guest port declared for both `tcp` and `udp` on a local daemon keeps one chosen host port for the host's life.
 
 ## Configuration
 

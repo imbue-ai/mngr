@@ -43,11 +43,15 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.published_ports import identity_published_endpoints
+from imbue.mngr.providers.published_ports import merge_published_endpoints
+from imbue.mngr.providers.published_ports import record_published_endpoints_on_host
 from imbue.mngr.utils.deps import GIT
 from imbue.mngr.utils.deps import JQ
 from imbue.mngr.utils.deps import TMUX
@@ -225,9 +229,7 @@ class LocalProviderInstance(BaseProviderInstance):
             mngr_ctx=self.mngr_ctx,
         )
 
-    # =========================================================================
     # Core Lifecycle Methods
-    # =========================================================================
 
     def create_host(
         self,
@@ -240,13 +242,16 @@ class LocalProviderInstance(BaseProviderInstance):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Create (or return) the local host.
 
         For the local provider, this always returns the same host representing
         the local computer. The name must be its recorded name or the
         ``localhost`` alias. The image and known_hosts parameters are ignored
-        since the local machine uses its own configuration.
+        since the local machine uses its own configuration. A published port
+        needs no publishing here: the workload binds it on this machine, so its
+        endpoint is the same port on loopback, merged into those recorded before.
         """
         TMUX.require()
         GIT.require()
@@ -260,6 +265,12 @@ class LocalProviderInstance(BaseProviderInstance):
 
             # Record BOOT activity for consistency. In this case it represents when mngr first created the local host
             host.record_activity(ActivitySource.BOOT)
+
+            if published_ports:
+                endpoints = merge_published_endpoints(
+                    host.get_published_endpoints(), identity_published_endpoints(published_ports)
+                )
+                record_published_endpoints_on_host(host, endpoints)
 
         return host
 
@@ -305,9 +316,7 @@ class LocalProviderInstance(BaseProviderInstance):
     def on_connection_error(self, host_id: HostId) -> None:
         pass
 
-    # =========================================================================
     # Discovery Methods
-    # =========================================================================
 
     def get_host(
         self,
@@ -352,9 +361,7 @@ class LocalProviderInstance(BaseProviderInstance):
         logger.trace("Discovered hosts for local provider {}", self.name)
         return [host_ref]
 
-    # =========================================================================
     # Snapshot Methods
-    # =========================================================================
 
     def create_snapshot(
         self,
@@ -391,9 +398,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         raise SnapshotsNotSupportedError(self.name)
 
-    # =========================================================================
     # Volume Methods
-    # =========================================================================
 
     @staticmethod
     def _volume_id_for_dir(dir_name: str) -> VolumeId:
@@ -457,9 +462,7 @@ class LocalProviderInstance(BaseProviderInstance):
         self.host_dir.mkdir(parents=True, exist_ok=True)
         return HostVolume(volume=LocalVolume(root_path=self.host_dir))
 
-    # =========================================================================
     # Host Mutation Methods
-    # =========================================================================
 
     def get_host_tags(
         self,
@@ -511,9 +514,7 @@ class LocalProviderInstance(BaseProviderInstance):
         host_obj.set_certified_data(recorded.model_copy_update(to_update(recorded.field_ref().host_name, str(name))))
         return self._create_host(name)
 
-    # =========================================================================
     # Connector Method
-    # =========================================================================
 
     def get_connector(
         self,
@@ -522,9 +523,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """Get the pyinfra connector for the local host."""
         return self._create_local_pyinfra_host()
 
-    # =========================================================================
     # Resource Methods (used by Host)
-    # =========================================================================
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for the local host.

@@ -3,6 +3,7 @@ import tempfile
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -34,9 +35,11 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
@@ -61,6 +64,8 @@ from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.primitives import read_host_public_key_with_legacy_fallback
+from imbue.mngr_vps.published_ports import reject_declarations_outside_firewall
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
@@ -292,6 +297,12 @@ class OfflineCapableVpsProvider(VpsProvider):
             updated_data = certified.model_copy_update(
                 to_update(certified.field_ref().stop_reason, None),
                 to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+                # The published ports are reachable at the VM's address, which an
+                # ephemeral-IP resume changes, so they follow vps_ip.
+                to_update(
+                    certified.field_ref().published_endpoints,
+                    tuple(vps_published_endpoints(new_ip, record.config.published_ports)),
+                ),
             )
             updated_record = record.model_copy_update(
                 to_update(record.field_ref().vps_ip, new_ip),
@@ -860,6 +871,28 @@ class OfflineCapableVpsProvider(VpsProvider):
         store.
         """
         ...
+
+    def _validate_published_ports_for_create(self, declarations: Sequence[PublishedPortDeclaration]) -> None:
+        """Refuse a declaration the cloud firewall ``mngr <cloud> prepare`` did not open.
+
+        The firewall rule is created once from the config's ``firewall_published_ports``, and
+        the create path deliberately has no firewall-management permissions, so a declaration
+        outside that list can only produce an unreachable endpoint.
+        """
+        if not declarations:
+            return
+        config = self.config
+        if not isinstance(config, OfflineCapableVpsProviderConfig):
+            raise VpsError(
+                f"Provider {self.name!r} publishes ports through a managed firewall but its config "
+                f"({type(config).__name__}) carries no firewall_published_ports"
+            )
+        reject_declarations_outside_firewall(
+            self.name,
+            declarations,
+            config.firewall_published_port_declarations(),
+            prepare_command=f"mngr {config.backend} prepare",
+        )
 
     def _validate_external_store_ready(self) -> None:
         """Fail fast (before launch) when the required offline state store is absent.

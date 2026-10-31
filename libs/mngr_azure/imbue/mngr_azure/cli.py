@@ -34,6 +34,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr_azure.client import AZURE_NETWORK_STEP
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
@@ -44,6 +45,7 @@ from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_prepare_published_ports
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
@@ -64,6 +66,7 @@ class _AzureOperatorCliOptions(CommonCliOptions):
 
 class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
+    publish: tuple[str, ...]
 
 
 class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
@@ -98,6 +101,7 @@ def _build_operator_client(
     region: str | None,
     resource_group: str | None,
     allowed_ssh_cidrs: tuple[str, ...],
+    published_ports: tuple[PublishedPortDeclaration, ...] = (),
 ) -> AzureVpsClient:
     """Construct an ``AzureVpsClient`` for the ``mngr azure`` operator commands.
 
@@ -128,6 +132,7 @@ def _build_operator_client(
         vnet_address_prefix=base.vnet_address_prefix,
         subnet_address_prefix=base.subnet_address_prefix,
         allowed_ssh_cidrs=allowed_ssh_cidrs,
+        published_ports=published_ports,
         container_ssh_port=base.container_ssh_port,
     )
 
@@ -362,6 +367,16 @@ def azure_cli_group() -> None:
         "Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
+@optgroup.option(
+    "--publish",
+    "publish",
+    multiple=True,
+    help=(
+        "Published port (PORT or PORT/PROTOCOL) the NSG allows from every source, so hosts created with "
+        "`mngr create --publish` on this provider are reachable there. Repeat for multiple. "
+        "Defaults to the resolved provider config's firewall_published_ports."
+    ),
+)
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
@@ -382,9 +397,17 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # resolved provider config's value. Non-empty tuple => caller supplied
     # explicit values, use them verbatim. Mirrors ``mngr aws prepare``.
     effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
+    published_ports = resolve_prepare_published_ports(opts.publish, base)
     try:
         client = with_progress_reporter(
-            _build_operator_client(base, opts.subscription_id, opts.region, opts.resource_group, effective_cidrs),
+            _build_operator_client(
+                base,
+                opts.subscription_id,
+                opts.region,
+                opts.resource_group,
+                effective_cidrs,
+                published_ports=published_ports,
+            ),
             mngr_ctx.progress_reporter,
         )
     except AzureError as e:
