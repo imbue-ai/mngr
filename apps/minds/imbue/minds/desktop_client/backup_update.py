@@ -97,7 +97,7 @@ _STASH_CONFLICT_GUIDANCE: Final[str] = (
     "they are preserved in the git stash (run `git stash pop` in the workspace)."
 )
 
-# Must exceed the gate probe script's own `uv run mngr list` budget (180s)
+# Must exceed the gate probe script's own `uv run --no-sync mngr list` budget (180s)
 # so a slow list surfaces as the script's structured "mngr list failed"
 # payload rather than an opaque exec timeout.
 _GATE_PROBE_TIMEOUT_SECONDS: Final[float] = 240.0

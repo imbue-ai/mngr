@@ -308,6 +308,10 @@ class SendFailureKind(StrEnum):
     # The message was typed and Enter sent, but nothing confirmed the agent took it. It may
     # already be in the agent's input or turn, so sending it again can deliver it twice.
     SUBMISSION_UNCONFIRMED = "submission_unconfirmed"
+    # The message was typed but the agent never took it: it was left in the agent's input box (after
+    # Enter, or with Enter never sent because it had not shown in time), and it was cleared from there.
+    # Nothing was delivered, so sending it again delivers it once.
+    NOT_SUBMITTED = "not_submitted"
     # Unclassified. The default, so an unlabelled failure keeps whatever the client does today.
     UNKNOWN = "unknown"
 
@@ -320,6 +324,10 @@ class SendMessageError(AgentError):
         self.reason = reason
         self.kind = kind
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
+
+
+class PastedMessageNotShownError(SendMessageError):
+    """The typed message never showed in the agent's input box, so Enter was not sent and nothing was submitted."""
 
 
 class MessageLockTimeoutError(AgentError):

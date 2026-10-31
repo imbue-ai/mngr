@@ -73,7 +73,7 @@ Key concepts in the Imbue Studio system:
 - **installation**: one copy of the desktop client's local state -- a single data directory (e.g. `~/.minds`), so one installation = one data directory.
   Its one-time code, session-signing key, sessions, and error-reporting consent all live in that data directory and do not carry across to another one on the same machine; `minds run` pointed at a different data directory is a different installation.
 
-- **bootstrap**: `uv run bootstrap`, the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the apps and background services.
+- **bootstrap**: `.venv/bin/bootstrap` (started after a `--frozen` sync, so no `uv` process stays resident above it), the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the apps and background services.
 
 - **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` -- or, where a template splits them out, in its own file pulled in by that config's `[include]` glob (logs under `/var/log/supervisor`).
   Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.

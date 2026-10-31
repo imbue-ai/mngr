@@ -114,9 +114,9 @@ def _make_stub_bin(
     """A PATH dir with stub `uv` and `supervisorctl` acting like a healthy machine.
 
     ``sync_ok=False`` fails `uv sync` (a post-restore failpoint for the
-    restore script); ``list_ok=False`` fails `uv run mngr list` (a broken
+    restore script); ``list_ok=False`` fails `uv run --no-sync mngr list` (a broken
     machine whose chat gate cannot answer); ``is_unknown_config_fatal=True``
-    fails every `uv run mngr` at config parse unless the tolerance is set (a
+    fails every `uv run --no-sync mngr` at config parse unless the tolerance is set (a
     machine whose settings.toml names config its own mngr does not know);
     ``supervisorctl_call_log`` and the ``supervisorctl_status_lines*`` rosters
     are forwarded to the supervisorctl stub for lifecycle-order and
@@ -129,7 +129,7 @@ def _make_stub_bin(
         f"  echo '{agents_json}'\n  exit 0\n" if list_ok else '  echo "injected mngr list failure" >&2\n  exit 1\n'
     )
     strict_config_response = (
-        'if [ "$1" = "run" ] && [ "$2" = "mngr" ] && [ "${MNGR_ALLOW_UNKNOWN_CONFIG:-}" != "1" ]; then\n'
+        'if [ "$1 $2 $3" = "run --no-sync mngr" ] && [ "${MNGR_ALLOW_UNKNOWN_CONFIG:-}" != "1" ]; then\n'
         "  echo \"Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\" >&2\n"
         "  exit 1\n"
         "fi\n"
@@ -137,7 +137,7 @@ def _make_stub_bin(
     uv_stub.write_text(
         "#!/bin/bash\n"
         + (strict_config_response if is_unknown_config_fatal else "")
-        + 'if [ "$1" = "run" ] && [ "$2" = "mngr" ] && [ "$3" = "list" ]; then\n'
+        + 'if [ "$1 $2 $3 $4" = "run --no-sync mngr list" ]; then\n'
         + list_response
         + "fi\n"
         + ("" if sync_ok else 'if [ "$1" = "sync" ]; then echo "injected uv sync failure" >&2; exit 1; fi\n')
@@ -578,11 +578,11 @@ def _write_stateful_mngr_uv_stub(stub_bin: Path, agents: list[dict[str, str]], s
         f"agents = {agents!r}\n"
         f"stop_log = {str(stop_log)!r}\n"
         "args = sys.argv[1:]\n"
-        "if args[:3] == ['run', 'mngr', 'stop']:\n"
+        "if args[:4] == ['run', '--no-sync', 'mngr', 'stop']:\n"
         "    with open(stop_log, 'a') as handle:\n"
-        "        handle.write(args[3] + '\\n')\n"
+        "        handle.write(args[4] + '\\n')\n"
         "    sys.exit(0)\n"
-        "if args[:3] == ['run', 'mngr', 'list']:\n"
+        "if args[:4] == ['run', '--no-sync', 'mngr', 'list']:\n"
         "    try:\n"
         "        stopped = open(stop_log).read().split()\n"
         "    except OSError:\n"
@@ -1306,7 +1306,7 @@ def test_restore_script_is_blocked_by_running_chats_and_mutates_nothing(tmp_path
 @pytest.mark.timeout(120)
 def test_restore_script_skips_the_chat_gate_only_when_forced(tmp_path: Path) -> None:
     # A workspace broken by an earlier failed restore may no longer answer
-    # `uv run mngr list`. That fails the gate (and the restore) -- unless the
+    # `uv run --no-sync mngr list`. That fails the gate (and the restore) -- unless the
     # user explicitly forced the restore, which skips only the chat half.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))

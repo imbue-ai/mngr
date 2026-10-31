@@ -1202,12 +1202,10 @@ def _build_mngr_create_command(
     intent and pass neither ``--reuse`` nor ``--update`` because
     mngr's ``--reuse`` matches on agent name without host scope.
 
-    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
-    flags here -- ``run_mngr_create`` populates them in the subprocess env
-    when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
-    create`` invocations from outside Imbue Studio too.
+    No Claude credentials ride the create: the workspace signs in to a provider
+    account from its own UI (an Imbue key comes from ``ai_keys``), so nothing here
+    or in DEFAULT_WORKSPACE_TEMPLATE forwards ``ANTHROPIC_API_KEY`` or
+    ``ANTHROPIC_BASE_URL``.
 
     ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
     new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
@@ -1402,7 +1400,7 @@ def _build_mngr_create_command(
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
-            # + ``pass_host_env`` for the LiteLLM creds, and the runtime-only
+            # + ``pass_host_env`` for ``MNGR_PREFIX``, and the runtime-only
             # lease-attribute ``-b`` flags stay inline because they vary per
             # invocation.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])

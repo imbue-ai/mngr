@@ -2,11 +2,11 @@
 
 This module owns the TUI-input pipeline: TUI-ready polling and the
 submit-and-confirm engine. The engine waits for the typed message to show in
-the pane, sends Enter, and then polls agent-supplied *durable evidence
-probes* (transcript records, marker files) until one proves the agent
-accepted the message.
-Confirmation never relies on ephemeral signals: tmux ``wait-for`` channels
-latch signals fired with no waiter (a signal is remembered until the next
+the pane, sends Enter, and then polls agent-supplied *evidence probes*
+(transcript records, marker files, the agent's screen) until one proves the
+agent accepted the message.
+Confirmation never relies on tmux ``wait-for`` channels: they latch signals
+fired with no waiter (a signal is remembered until the next
 waiter consumes it), which historically produced instant false-positive
 confirmations that reported success for messages that were never submitted.
 
@@ -37,6 +37,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import describe_failed_send_command
+from imbue.mngr.errors import PastedMessageNotShownError
 from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -50,7 +51,7 @@ _PASTE_VISIBLE_POLL_INTERVAL_SECONDS: Final[float] = 0.1
 # This can take a while, especially on Modal -- the process needs to actually
 # start and render the TUI before the indicator appears.
 TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
-# Default confirmation window: how long to poll for durable evidence that the
+# Default confirmation window: how long to poll for evidence that the
 # agent accepted the message. Needs to be fairly long: a message sent to a busy
 # codex/antigravity agent leaves no evidence until the prompt is dequeued at
 # the end of the running turn.
@@ -111,14 +112,32 @@ class SubmissionConfirmationPolicy(UpperCaseStrEnum):
     RELAXED = auto()
 
 
+class UnconfirmedSubmissionReading(UpperCaseStrEnum):
+    """What a TUI's own screen says about a send that is not confirmed: no probe confirmed it, or Enter was never sent.
+
+    TAKEN: the TUI holds the message and will record it when it can. NOT_TAKEN: the message never
+    left the input box, and was cleared from it. UNKNOWN: the screen says neither.
+    """
+
+    TAKEN = auto()
+    NOT_TAKEN = auto()
+    UNKNOWN = auto()
+
+
 @pure
 def is_slash_command_message(message: str) -> bool:
     """Whether a message is a TUI slash command (confirmed under the relaxed policy)."""
     return message.lstrip().startswith("/")
 
 
+# The confirmation script's variable holding the tmux target of the pane the message was typed into,
+# for a probe that reads the agent's screen: the pane's ID, or an exact-match ``=session:window``,
+# with the rendered target's shell quoting already removed, so a probe passes it to ``-t`` as it is.
+PANE_TARGET_SHELL_VARIABLE: Final[str] = "mngr_pane_target"
+
+
 class SubmissionEvidenceProbe(FrozenModel):
-    """A durable-evidence source polled to confirm that a message was accepted.
+    """An evidence source (a transcript, a marker file, the agent's screen) polled to confirm a message was accepted.
 
     Both commands are shell snippets run on the agent's host. The probe
     confirms when its poll output is non-empty AND differs from its baseline
@@ -130,10 +149,16 @@ class SubmissionEvidenceProbe(FrozenModel):
 
     name: str = Field(description="Short identifier used in logs and diagnostics")
     baseline_command: str = Field(
-        description="Shell snippet printing the probe's pre-Enter baseline token (may print nothing)"
+        description=(
+            "Shell snippet printing the probe's pre-Enter baseline token (may print nothing); may reference the "
+            f"agent's pane as ${PANE_TARGET_SHELL_VARIABLE}"
+        )
     )
     poll_command: str = Field(
-        description="Shell snippet printing the probe's current token; may reference the baseline as $base"
+        description=(
+            "Shell snippet printing the probe's current token; may reference the baseline as $base, and the "
+            f"agent's pane as ${PANE_TARGET_SHELL_VARIABLE}"
+        )
     )
     is_rejection: bool = Field(
         default=False,
@@ -458,7 +483,7 @@ def build_confirmation_command(
     # typing went to, or a split turns each pane read into a reading of another shell.
     target_arg = tmux_target if isinstance(tmux_target, str) else tmux_target.as_shell_arg()
     is_pane_message_probe_empty = pane_message_probe == ""
-    lines: list[str] = []
+    lines: list[str] = [f"{PANE_TARGET_SHELL_VARIABLE}={target_arg}"]
     if not is_pane_message_probe_empty:
         lines.extend(
             _build_pane_shows_message_function_lines(target_arg, pane_message_probe, paste_placeholder_prefixes)
@@ -554,9 +579,10 @@ def submit_message_and_confirm(
 
     Returns the parsed outcome; the caller decides how an unconfirmed outcome
     is surfaced (raise for normal messages, warn for slash commands). Raises
-    ``SendMessageError`` when the message never showed in the pane (Enter is
-    then never sent) or when the Enter keystroke itself could not be delivered
-    -- without Enter nothing was submitted under any policy. With no probes, a
+    ``PastedMessageNotShownError`` when the message never showed in the pane
+    (Enter is then never sent), and ``SendMessageError`` when the Enter keystroke
+    itself could not be delivered -- without Enter nothing was submitted under
+    any policy. With no probes, a
     script that failed or timed out raises too, since nothing else would show
     whether Enter was sent.
 
@@ -601,7 +627,7 @@ def submit_message_and_confirm(
         )
 
     if _PASTE_NOT_VISIBLE_MARKER in result.stdout:
-        raise SendMessageError(
+        raise PastedMessageNotShownError(
             str(agent.name),
             f"Timeout waiting for pasted content to appear (waited {_PASTE_VISIBLE_TIMEOUT_SECONDS:.1f}s)",
         )

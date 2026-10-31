@@ -79,7 +79,7 @@ def resolve_workspace_backup_code_path() -> str:
 
 
 def run_mngr(args: Sequence[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-    """Run `uv run mngr <args>` in this workspace, tolerating config it cannot parse.
+    """Run `uv run --no-sync mngr <args>` in this workspace, tolerating config it cannot parse.
 
     The workspace's .mngr/settings.toml is versioned with its template while the
     mngr that parses it is installed separately, so it can name config a plugin
@@ -89,7 +89,7 @@ def run_mngr(args: Sequence[str], timeout_seconds: float) -> subprocess.Complete
     """
     env = dict(os.environ)
     env["MNGR_ALLOW_UNKNOWN_CONFIG"] = "1"
-    return run_command(["uv", "run", "mngr", *args], timeout_seconds, env=env)
+    return run_command(["uv", "run", "--no-sync", "mngr", *args], timeout_seconds, env=env)
 
 
 def output_tail(completed: subprocess.CompletedProcess[str], max_chars: int) -> str:

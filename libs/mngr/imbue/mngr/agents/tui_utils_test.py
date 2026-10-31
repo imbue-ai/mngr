@@ -17,6 +17,7 @@ from imbue.mngr.agents.base_agent import SEND_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.agents.mock_host_test import ScriptedHost
 from imbue.mngr.agents.mock_host_test import run_bash_against_stand_in_pane
 from imbue.mngr.agents.tui_utils import EnterRetryGate
+from imbue.mngr.agents.tui_utils import PANE_TARGET_SHELL_VARIABLE
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationOutcome
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import _PANE_SHOWS_MESSAGE_FUNCTION
@@ -284,6 +285,25 @@ def test_confirmation_command_embeds_probe_names_quoted() -> None:
         window_seconds=5,
     )
     assert "'content probe'" in command
+
+
+def test_confirmation_command_gives_probes_the_bare_pane_target() -> None:
+    rendered_target = shlex.quote("=agent(1):0")
+    command = build_confirmation_command(
+        tmux_target=rendered_target,
+        probes=_make_probes(),
+        pane_message_probe="needle",
+        paste_placeholder_prefixes=_PASTE_PLACEHOLDER_PREFIXES,
+        enter_retry_gate=_NEEDLE_RETRY_GATE,
+        window_seconds=5,
+    )
+    pane_target_assignment = shlex.split(command)[2].splitlines()[0]
+
+    result = run_bash_against_stand_in_pane(
+        f"{pane_target_assignment}\ntmux display-message -t ${PANE_TARGET_SHELL_VARIABLE}", ""
+    )
+
+    assert result.stdout == "tmux display-message -t =agent(1):0\n"
 
 
 def test_confirmation_command_gates_retries_on_pane_content() -> None:

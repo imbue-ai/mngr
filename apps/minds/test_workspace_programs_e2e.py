@@ -59,7 +59,7 @@ def test_gate_probe_reads_the_real_workspace_chats_and_backup_ticks(
     assert probe.returncode == 0, (probe.stdout, probe.stderr)
     payload = extract_marker_json(probe.stdout, GATE_RESULT_MARKER)
     assert payload is not None, (probe.stdout, probe.stderr)
-    # No gate_error: the program ran the workspace's own `uv run mngr list` and
+    # No gate_error: the program ran the workspace's own `uv run --no-sync mngr list` and
     # found its agents in the real output.
     assert "gate_error" not in payload, payload
     assert isinstance(payload["running_chats"], list), payload

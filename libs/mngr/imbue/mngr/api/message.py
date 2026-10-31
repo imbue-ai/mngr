@@ -474,6 +474,7 @@ def send_message_with_resend_guidance(agent: AgentInterface, message: str, situa
                 | SendFailureKind.AGENT_UNREACHABLE
                 | SendFailureKind.STATE_UNKNOWN
                 | SendFailureKind.AGENT_NOT_FOUND
+                | SendFailureKind.NOT_SUBMITTED
                 | SendFailureKind.UNKNOWN
             ):
                 guidance = (

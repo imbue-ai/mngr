@@ -19,13 +19,17 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import UnconfirmedSubmissionReading
 from imbue.mngr.agents.tui_utils import _PANE_SHOWS_MESSAGE_FUNCTION
+from imbue.mngr.agents.tui_utils import _PASTE_NOT_VISIBLE_MARKER
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import InvalidPastePlaceholderPrefixesError
+from imbue.mngr.errors import PastedMessageNotShownError
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -225,16 +229,91 @@ def test_send_message_refuses_blank_message_without_touching_the_pane(blank_mess
     assert cast(ScriptedHost, agent.host).sent_commands == []
 
 
+_UNCONFIRMED_WINDOW: Final[CommandResult] = CommandResult(
+    stdout="MNGR_UNCONFIRMED\nMNGR_PROBE never base=[] final=[]\n", stderr="", success=False
+)
+
+
 @pytest.mark.allow_warnings
 def test_send_message_raises_when_strict_confirmation_times_out() -> None:
     """A normal message with probes that never confirm must fail loudly."""
     agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        CommandResult(stdout="MNGR_UNCONFIRMED\nMNGR_PROBE never base=[] final=[]\n", stderr="", success=False),
-        probes=[_never_confirming_probe()],
+        f"probe-banner {_RESUME_MESSAGE}", _UNCONFIRMED_WINDOW, probes=[_never_confirming_probe()]
     )
     with pytest.raises(SendMessageError, match="Timeout waiting for message submission evidence"):
         agent.send_message(_RESUME_MESSAGE)
+
+
+class _ScreenTakenTuiAgent(_RecordingTuiAgent):
+    def _read_unconfirmed_submission(
+        self, tmux_target: TmuxWindowTarget | str, message: str, pre_send_pane_content: str | None
+    ) -> UnconfirmedSubmissionReading:
+        return UnconfirmedSubmissionReading.TAKEN
+
+
+class _ScreenNotTakenTuiAgent(_RecordingTuiAgent):
+    def _read_unconfirmed_submission(
+        self, tmux_target: TmuxWindowTarget | str, message: str, pre_send_pane_content: str | None
+    ) -> UnconfirmedSubmissionReading:
+        return UnconfirmedSubmissionReading.NOT_TAKEN
+
+
+@pytest.mark.allow_warnings
+def test_a_send_the_screen_shows_taken_succeeds_though_nothing_recorded_it() -> None:
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}",
+        _UNCONFIRMED_WINDOW,
+        probes=[_never_confirming_probe()],
+        agent_class=_ScreenTakenTuiAgent,
+    )
+    agent.send_message(_RESUME_MESSAGE)
+    event_commands = [command for command in cast(ScriptedHost, agent.host).captured if "events/messages" in command]
+    assert len(event_commands) == 1
+    assert "submission_confirmed_by_screen" in event_commands[0]
+
+
+_PASTE_NEVER_SHOWN: Final[CommandResult] = CommandResult(
+    stdout=f"{_PASTE_NOT_VISIBLE_MARKER}\n", stderr="", success=False
+)
+
+
+@pytest.mark.parametrize(
+    "confirmation_result",
+    [
+        pytest.param(_UNCONFIRMED_WINDOW, id="unconfirmed-window"),
+        pytest.param(_PASTE_NEVER_SHOWN, id="paste-never-shown"),
+    ],
+)
+def test_a_message_the_screen_shows_never_taken_fails_as_not_submitted(confirmation_result: CommandResult) -> None:
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}",
+        confirmation_result,
+        probes=[_never_confirming_probe()],
+        agent_class=_ScreenNotTakenTuiAgent,
+    )
+    with pytest.raises(SendMessageError) as raised:
+        agent.send_message(_RESUME_MESSAGE)
+    assert raised.value.kind is SendFailureKind.NOT_SUBMITTED
+
+
+def test_a_paste_that_never_showed_keeps_its_own_failure_when_the_screen_settles_nothing() -> None:
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}", _PASTE_NEVER_SHOWN, probes=[_never_confirming_probe()]
+    )
+    with pytest.raises(PastedMessageNotShownError):
+        agent.send_message(_RESUME_MESSAGE)
+
+
+def test_a_paste_that_never_showed_is_not_reported_delivered_when_the_screen_reads_taken() -> None:
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}",
+        _PASTE_NEVER_SHOWN,
+        probes=[_never_confirming_probe()],
+        agent_class=_ScreenTakenTuiAgent,
+    )
+    with pytest.raises(PastedMessageNotShownError):
+        agent.send_message(_RESUME_MESSAGE)
+    assert not any("events/messages" in command for command in cast(ScriptedHost, agent.host).captured)
 
 
 @pytest.mark.allow_warnings
