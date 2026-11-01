@@ -6,6 +6,22 @@ RUN_RECORD_PATH: Final[str] = f"{UPDATE_STATE_DIR}/run.json"
 SCHEDULE_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/schedule.json"
 LAST_DISPATCH_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/last-dispatch.json"
 
+# The per-workspace update facts that live beside the schedule (user-profile-state spec,
+# section 7.4): the release the user skipped for this workspace, and which runs' note and
+# outcome they dismissed. Facts about one workspace every computer should agree on, so they
+# are kept in the workspace itself; each computer serves a cached copy while the workspace is
+# stopped and writes queued changes through on the ``read`` below.
+SKIPPED_TARGET_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/skipped-target.json"
+DISMISSALS_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/dismissals.json"
+
+# ``read``'s write-through flags: a queued skip (its target and when it was chosen, for
+# last-write-wins across computers) and queued dismissals (the dismissed run's start; a later
+# run's start covers an earlier one's, so the merge keeps the maximum).
+SKIP_TARGET_FLAG: Final[str] = "--skip-target"
+SKIP_TARGET_AT_FLAG: Final[str] = "--skip-target-at"
+DISMISS_NOTE_AT_FLAG: Final[str] = "--dismiss-note-at"
+DISMISS_OUTCOME_AT_FLAG: Final[str] = "--dismiss-outcome-at"
+
 # The cron drop-in that runs the dispatcher's tick, in the directory the cron daemon reads.
 DISPATCHER_CRON_NAME: Final[str] = "update-self-dispatch"
 LIVE_CRON_DIRECTORY: Final[str] = "/etc/cron.d"

@@ -160,17 +160,6 @@ def _override_from_raw(value: object) -> WorkspaceAutoUpdateOverride | None:
         return None
 
 
-def _update_window_from_table(table: dict[str, object]) -> tuple[int, int]:
-    """The window stored in ``table``'s ``window_*_hour`` keys, or the default when unusable."""
-    start = table.get("window_start_hour")
-    end = table.get("window_end_hour")
-    if isinstance(start, int) and isinstance(end, int) and is_usable_update_window(start, end):
-        return (start, end)
-    if start is not None or end is not None:
-        logger.warning("Ignoring an unusable update window ({}, {})", start, end)
-    return DEFAULT_UPDATE_WINDOW
-
-
 def _bool_from_raw(data: dict[str, object], key: str, default: bool) -> bool:
     """Read a top-level boolean out of an already-loaded config dict, or ``default`` when unset/malformed."""
     value = data.get(key)
@@ -188,9 +177,8 @@ def _style_from_raw(data: dict[str, object]) -> NotificationStyle:
     return DEFAULT_NOTIFICATION_STYLE
 
 
-def _write_notification_prefs_into_raw(data: dict[str, object], is_enabled: bool, style: NotificationStyle) -> None:
-    """Set the notification-prefs keys on an already-loaded config dict (the caller writes it)."""
-    data["notifications_enabled"] = is_enabled
+def _write_notification_style_into_raw(data: dict[str, object], style: NotificationStyle) -> None:
+    """Set the notification-style key on an already-loaded config dict (the caller writes it)."""
     data["notification_style"] = str(style)
     # CLEANUP: drop this pop once every install has written its prefs at least
     # once on a build without the browser-mode OS-permission hint (the key was
@@ -199,7 +187,12 @@ def _write_notification_prefs_into_raw(data: dict[str, object], is_enabled: bool
 
 
 def _has_notification_choice(data: dict[str, object]) -> bool:
-    """Existing saved preferences count as a choice, including on older installs."""
+    """A saved style counts as a choice; so does a master toggle an older install stored here.
+
+    The toggle moved to the per-account settings record, whose own choice the
+    caller ORs in; the key check stays for a config the migration has not
+    visited (it never writes the key back, so this only ever reads old state).
+    """
     return data.get("notification_style") in tuple(NotificationStyle) or isinstance(
         data.get("notifications_enabled"), bool
     )
@@ -380,77 +373,78 @@ class MindsConfig(MutableModel):
             data["providers"] = providers
             self._write_raw(data)
 
-    def get_update_window(self) -> tuple[int, int]:
-        """Return the local-clock hours [start, end) during which scheduled updates may run.
-
-        An unusable stored pair falls back to the default: raising would silently
-        stop every scheduled update with no surface to report it on.
-        """
-        with self._lock:
-            data = self._read_raw()
-            updates = _as_str_keyed_dict(data.get("updates"))
-            if updates is None:
-                return DEFAULT_UPDATE_WINDOW
-            return _update_window_from_table(updates)
-
-    def set_update_window(self, start_hour: int, end_hour: int) -> None:
-        """Persist the local-clock hours scheduled updates may run in."""
-        self._write_updates_keys({"window_start_hour": start_hour, "window_end_hour": end_hour})
-
     def _read_updates_table(self) -> dict[str, object]:
         """The ``[updates]`` table, empty when absent. Must hold ``self._lock``."""
         return _as_str_keyed_dict(self._read_raw().get("updates")) or {}
 
-    def _write_updates_keys(self, values: dict[str, object]) -> None:
-        """Set keys of the ``[updates]`` table in one read-modify-write."""
+    def read_account_keyed_settings_for_migration(self) -> dict[str, object]:
+        """The account-keyed values ``config.toml`` still holds, keyed by their settings-record names.
+
+        Only explicitly-stored, usable values are returned: absence means the
+        user never chose, which the settings record expresses by leaving the
+        key out. Empty once the migration has deleted the moved keys.
+        """
+        # CLEANUP: remove with settings/migration.py once every supported install has started a phase-3A build.
+        with self._lock:
+            data = self._read_raw()
+        values: dict[str, object] = {}
+        updates = _as_str_keyed_dict(data.get("updates")) or {}
+        start = updates.get("window_start_hour")
+        end = updates.get("window_end_hour")
+        if is_usable_update_window(start, end):
+            values["update_window_start_hour"] = start
+            values["update_window_end_hour"] = end
+        is_auto_update = updates.get("auto_update_workspaces")
+        if isinstance(is_auto_update, bool):
+            values["auto_update_workspaces"] = is_auto_update
+        decision = updates.get("auto_update_prompt_decision")
+        if isinstance(decision, str) and decision in tuple(AutoUpdatePromptDecision):
+            values["auto_update_prompt_decision"] = decision
+        is_enabled = data.get("notifications_enabled")
+        if isinstance(is_enabled, bool):
+            values["notifications_enabled"] = is_enabled
+        return values
+
+    def delete_account_keyed_settings_for_migration(self) -> None:
+        """Remove the moved account-keyed keys; the per-workspace skipped targets stay until their own phase."""
+        # CLEANUP: remove with settings/migration.py once every supported install has started a phase-3A build.
         with self._lock:
             data = self._read_raw()
             updates = _as_str_keyed_dict(data.get("updates")) or {}
-            updates.update(values)
-            data["updates"] = updates
+            for key in (
+                "window_start_hour",
+                "window_end_hour",
+                "auto_update_workspaces",
+                "auto_update_prompt_decision",
+            ):
+                updates.pop(key, None)
+            if updates:
+                data["updates"] = updates
+            else:
+                data.pop("updates", None)
+            data.pop("notifications_enabled", None)
             self._write_raw(data)
 
-    def get_auto_update_workspaces(self) -> bool:
-        """Return whether Imbue Studio arms every behind workspace without its own setting. Default: False."""
-        with self._lock:
-            return _bool_from_raw(self._read_updates_table(), "auto_update_workspaces", False)
-
-    def set_auto_update_workspaces(self, is_enabled: bool) -> None:
-        """Persist whether Imbue Studio arms every behind workspace without its own setting."""
-        self._write_updates_keys({"auto_update_workspaces": is_enabled})
-
-    def get_auto_update_prompt_decision(self) -> AutoUpdatePromptDecision | None:
-        """Return how the user answered the auto-update offer, or None while it has never been answered."""
-        with self._lock:
-            value = self._read_updates_table().get("auto_update_prompt_decision")
-        if not isinstance(value, str):
-            return None
-        try:
-            return AutoUpdatePromptDecision(value)
-        except ValueError:
-            logger.warning("Ignoring an unknown auto-update prompt decision {!r}", value)
-            return None
-
-    def set_auto_update_prompt_decision(self, decision: AutoUpdatePromptDecision) -> None:
-        """Record how the user answered the auto-update offer, so it is never shown again."""
-        self._write_updates_keys({"auto_update_prompt_decision": str(decision)})
-
-    def get_skipped_update_target(self, agent_id: str) -> str | None:
-        """Return the release the user skipped for this workspace under auto-update, or None."""
+    def read_skipped_update_targets_for_migration(self) -> dict[str, str]:
+        """The per-workspace skipped targets config.toml still holds, for the one-shot move into each workspace."""
+        # CLEANUP: remove with workspace_facts_migration.py once every supported install has
+        # started a phase-3B build.
         with self._lock:
             skipped = _as_str_keyed_dict(self._read_updates_table().get("skipped_targets")) or {}
-        value = skipped.get(agent_id)
-        return str(value) if isinstance(value, str) and value else None
+        return {agent_id: str(value) for agent_id, value in skipped.items() if isinstance(value, str) and value}
 
-    def set_skipped_update_target(self, agent_id: str, target_ref: str) -> None:
-        """Record the release the user skipped for this workspace under auto-update."""
+    def delete_skipped_update_targets_for_migration(self) -> None:
+        """Remove the moved skipped-target keys (their values now live in the facts cache and each workspace)."""
+        # CLEANUP: remove with workspace_facts_migration.py once every supported install has
+        # started a phase-3B build.
         with self._lock:
             data = self._read_raw()
             updates = _as_str_keyed_dict(data.get("updates")) or {}
-            skipped = _as_str_keyed_dict(updates.get("skipped_targets")) or {}
-            skipped[agent_id] = target_ref
-            updates["skipped_targets"] = skipped
-            data["updates"] = updates
+            updates.pop("skipped_targets", None)
+            if updates:
+                data["updates"] = updates
+            else:
+                data.pop("updates", None)
             self._write_raw(data)
 
     def get_workspace_auto_update_overrides(self) -> dict[str, WorkspaceAutoUpdateOverride]:
@@ -478,16 +472,15 @@ class MindsConfig(MutableModel):
             data["updates"] = updates
             self._write_raw(data)
 
-    def get_effective_auto_update(self, agent_id: str) -> EffectiveAutoUpdate:
-        """What auto-update does for this workspace: its own setting when it has one, else the app's."""
+    def get_workspace_auto_update_override(self, agent_id: str) -> WorkspaceAutoUpdateOverride | None:
+        """This workspace's own auto-update setting; None (logged when unusable) when it follows the app's.
+
+        Only the workspace's own setting is read here: the app-wide switch and
+        window it layers over are declared settings, resolved by their readers.
+        """
         with self._lock:
-            updates = self._read_updates_table()
-        by_workspace = _as_str_keyed_dict(updates.get("workspace_settings")) or {}
-        return effective_auto_update(
-            app_is_enabled=_bool_from_raw(updates, "auto_update_workspaces", False),
-            app_window=_update_window_from_table(updates),
-            override=_override_from_raw(by_workspace.get(agent_id)),
-        )
+            by_workspace = _as_str_keyed_dict(self._read_updates_table().get("workspace_settings")) or {}
+        return _override_from_raw(by_workspace.get(agent_id))
 
     def _get_bool(self, key: str, default: bool) -> bool:
         """Read a top-level boolean setting, returning ``default`` when unset or malformed."""
@@ -585,58 +578,32 @@ class MindsConfig(MutableModel):
             self._write_raw(data)
             return compute_version(enabled)
 
-    def get_notification_prefs(self) -> tuple[bool, NotificationStyle]:
-        """Return ``(is_enabled, style)`` from one atomic read.
+    def get_notification_style_with_choice(self) -> tuple[NotificationStyle, bool]:
+        """Read the delivery style and whether this file records a notification choice, in one snapshot.
 
-        Reading the fields via separate locked calls could observe a
-        concurrent writer's update to only one of them -- a combination that
-        :meth:`set_notification_prefs` never actually persisted together. One
-        lock acquisition here mirrors that write's atomicity on the read side.
-        """
-        is_enabled, style, _has_chosen = self.get_notification_prefs_with_choice()
-        return is_enabled, style
-
-    def get_notification_prefs_with_choice(self) -> tuple[bool, NotificationStyle, bool]:
-        """Read the preferences and whether the user has chosen them in one snapshot."""
-        with self._lock:
-            data = self._read_raw()
-            return (
-                _bool_from_raw(data, "notifications_enabled", True),
-                _style_from_raw(data),
-                _has_notification_choice(data),
-            )
-
-    def set_notification_prefs(
-        self,
-        is_enabled: bool,
-        style: NotificationStyle,
-    ) -> None:
-        """Persist both notification preferences in one read-modify-write.
-
-        A single lock acquisition and a single atomic file write, so two
-        concurrent writers can never interleave into a record that mixes one
-        writer's toggle with the other's style.
+        The master toggle lives in the per-account settings record; a choice
+        made only there is the caller's to OR in.
         """
         with self._lock:
             data = self._read_raw()
-            _write_notification_prefs_into_raw(data, is_enabled, style)
-            self._write_raw(data)
+            return (_style_from_raw(data), _has_notification_choice(data))
 
-    def set_notification_prefs_if_version_matches(
+    def set_notification_style_if_version_matches(
         self,
         expected_version: str,
-        compute_version: Callable[[bool, NotificationStyle, bool], str],
-        is_enabled: bool,
+        compute_version: Callable[[NotificationStyle, bool], str],
         style: NotificationStyle,
+        # Whether a notification choice exists outside this file (the
+        # account settings records): the served version was computed with it
+        # ORed in, so the check here must be too.
+        is_chosen_elsewhere: bool,
     ) -> str | None:
-        """Atomically compare-and-swap the notification-prefs record under one lock hold.
+        """Atomically compare-and-swap the notification style under one lock hold.
 
         Checks ``expected_version`` against the version ``compute_version``
-        derives from the record's CURRENT stored values, and only then
+        derives from the style's CURRENT stored value, and only then
         writes -- both the check and the write inside one lock acquisition.
-        Unlike calling :meth:`get_notification_prefs` and
-        :meth:`set_notification_prefs` separately (two lock acquisitions
-        with a gap between them), this closes the window where two
+        Separate locked get and set calls would leave a window where two
         concurrent writers starting from the same version could both pass
         the check and the second would silently clobber the first with no
         conflict reported to either. Returns the new version, or None on a
@@ -644,10 +611,10 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            current_is_enabled = _bool_from_raw(data, "notifications_enabled", True)
             current_style = _style_from_raw(data)
-            if compute_version(current_is_enabled, current_style, _has_notification_choice(data)) != expected_version:
+            has_chosen = _has_notification_choice(data) or is_chosen_elsewhere
+            if compute_version(current_style, has_chosen) != expected_version:
                 return None
-            _write_notification_prefs_into_raw(data, is_enabled, style)
+            _write_notification_style_into_raw(data, style)
             self._write_raw(data)
-            return compute_version(is_enabled, style, True)
+            return compute_version(style, True)

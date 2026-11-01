@@ -27,6 +27,8 @@ from imbue.minds.workspace_programs.backup_support import resolve_workspace_back
 from imbue.minds.workspace_programs.backup_support import service_state
 from imbue.minds.workspace_programs.backup_support import tag_exists
 from imbue.minds.workspace_programs.backup_support import tag_sort_key
+from imbue.minds.workspace_programs.backup_verification_flag import VERIFICATION_DISABLED_KEY
+from imbue.minds.workspace_programs.backup_verification_flag import read_verification_disabled
 from imbue.minds.workspace_programs.program_support import argv_value
 from imbue.minds.workspace_programs.program_support import emit_marker_json
 from imbue.minds.workspace_programs.program_support import run_command
@@ -162,8 +164,14 @@ def _workspace_uptime_seconds() -> float | None:
 def main(argv: Sequence[str]) -> None:
     minimum = argv_value(argv, "--minimum-tag", "")
     official_url = argv_value(argv, "--official-url", OFFICIAL_REMOTE_URL)
+    # The workspace's own verification flag gates the whole check: with verification turned
+    # off (here, possibly from another computer), the app wants no verdict, so the expensive
+    # reads are skipped and the answer carries the flag alone.
+    if read_verification_disabled():
+        emit_marker_json(CHECK_RESULT_MARKER, {"schema": 1, VERIFICATION_DISABLED_KEY: True})
+        return
     code_path = resolve_workspace_backup_code_path()
-    result: dict[str, object] = {"schema": 1}
+    result: dict[str, object] = {"schema": 1, VERIFICATION_DISABLED_KEY: False}
     result["uptime_seconds"] = _workspace_uptime_seconds()
     installed_version = _installed_backup_version()
     result["installed_version"] = installed_version

@@ -65,7 +65,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
     requests.push(url);
     if (init?.body !== undefined) bodies[url] = JSON.parse(String(init.body));
-    if (url === "/ui/api/settings")
+    // The prompt reads the window's account's record, so the path alone is matched.
+    if (url.split("?")[0] === "/ui/api/settings")
       return Promise.resolve(
         jsonResponse(
           settingsOverview({
@@ -1139,9 +1140,9 @@ describe("the Updates tab's automatic updates", () => {
     press(tab, "Not now");
     await settleAll();
 
-    expect(requests).toEqual(["/ui/api/settings/auto-update-prompt"]);
-    expect(bodies["/ui/api/settings/auto-update-prompt"]).toEqual({
-      decision: "declined",
+    expect(requests).toEqual(["/ui/api/settings/local"]);
+    expect(bodies["/ui/api/settings/local"]).toEqual({
+      auto_update_prompt_decision: "declined",
     });
     expect(byId(draw(BACKED), "ws-auto-update-pitch")).toBeUndefined();
     expect(byId(draw(BACKED), "ws-auto-update-choices")).toBeDefined();

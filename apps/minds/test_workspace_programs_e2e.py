@@ -103,7 +103,9 @@ def test_update_program_installs_its_own_archive_as_the_dispatcher_cron_runs(
         read = exec_in_workspace_container(
             running_workspace.container_name,
             f"cd {WORKSPACE_CONTAINER_ROOT} && "
-            + build_update_workspace_command("read", build_read_arguments(settings, is_sign_in_checked=False)),
+            + build_update_workspace_command(
+                "read", build_read_arguments(settings, is_sign_in_checked=False, fact_write_arguments=())
+            ),
             timeout=300,
         )
 

@@ -58,6 +58,13 @@
       "description": "Update the selected workspace's settings (color, account association)."
     },
     {
+      "permission": "minds-workspaces-account-settings",
+      "method": "PUT",
+      "path": { "kind": "targeted", "suffix": "/account-settings/keybindings$" },
+      "display_name": "Change account keybindings from a workspace",
+      "description": "Save the selected workspace's keyboard shortcut changes to its account, so they apply in every workspace."
+    },
+    {
       "permission": "minds-workspaces-recover",
       "method": ["GET", "POST"],
       "path": { "kind": "targeted", "suffix": "/(health|restart|machine-size)$" },
