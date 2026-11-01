@@ -56,6 +56,7 @@ from imbue.mngr_modal.modal_cli import parse_modal_app_listings
 from imbue.mngr_modal.modal_cli import parse_modal_volume_listings
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
+from imbue.modal_proxy.errors import is_deployed_app_limit_error
 from imbue.modal_proxy.testing import FakeModalInterface
 
 # Modal's server-side error for the workspace-wide ephemeral-app cap; matched on the
@@ -91,11 +92,17 @@ def _build_modal_provider(
 def _build_modal_provider_or_none_on_app_quota(
     instance_name: ProviderInstanceName, config: ModalProviderConfig, mngr_ctx: MngrContext
 ) -> ModalProviderInstance | None:
-    """One provider-build attempt for the quota-retry poll: None = cap hit, retry later."""
+    """One provider-build attempt for the quota-retry poll: None = ephemeral cap hit, retry later.
+
+    Only the ephemeral-app cap is worth waiting on. Modal words the deployed-app
+    cap the same way, but a deployed app leaves the count only when something
+    stops it or deletes its environment, so polling cannot outlast it.
+    """
     try:
         return _build_modal_provider(instance_name, config, mngr_ctx)
     except MngrError as e:
-        if _APP_QUOTA_ERROR_MARKER not in str(e):
+        message = str(e)
+        if _APP_QUOTA_ERROR_MARKER not in message or is_deployed_app_limit_error(message):
             raise
         logger.info("Modal ephemeral-app cap hit while creating test provider; will retry: {}", e)
         return None
@@ -137,7 +144,7 @@ def make_modal_provider_real(
         user_id=user_id_override,
     )
     instance_name = ProviderInstanceName("modal-test")
-    # The shared CI Modal workspace caps ephemeral apps at 100 across EVERY concurrent CI
+    # The shared CI modal-workspace caps ephemeral apps at 100 across EVERY concurrent CI
     # run, so when several branches' acceptance runs overlap, provider init can
     # transiently hit the cap. The colliding runs' apps drain within a few minutes as
     # their tests finish, so a paced retry rides out the contention instead of failing

@@ -17,6 +17,22 @@ class ModalSandboxDiedMngrError(ModalMngrError):
     """Raised when the Modal sandbox a command was running in is no longer alive."""
 
 
+class ModalDeployedAppLimitMngrError(ModalMngrError):
+    """Raised when the modal-workspace already holds its maximum number of deployed apps.
+
+    The cap is per modal-workspace, so this says nothing about the host being
+    created: every concurrent user of it hits the refusal at the same moment,
+    and it stays hit until someone stops deployed apps or deletes environments.
+    Named so that a burst of these is one greppable line rather than a generic
+    deploy failure that has to be read to be understood.
+    """
+
+    user_help_text = (
+        "The Modal account is out of deployed-app slots. Stop unused apps "
+        "(`modal app stop <id> --env <env>`) or delete the environments holding them."
+    )
+
+
 class ModalCliOutputError(ModalMngrError, ValueError):
     """Raised when a `modal ... list --json` payload does not carry the keys we read.
 

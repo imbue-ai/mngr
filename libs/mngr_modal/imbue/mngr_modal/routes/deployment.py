@@ -13,8 +13,10 @@ from tenacity import wait_exponential
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
+from imbue.mngr_modal.errors import ModalDeployedAppLimitMngrError
 from imbue.modal_proxy.direct import DEPLOY_ATTEMPT_TIMEOUT_SECONDS
 from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
+from imbue.modal_proxy.errors import ModalProxyDeployedAppLimitError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import ModalInterface
@@ -212,6 +214,10 @@ def deploy_function(
             # app published this very source -- including one of our own
             # attempts that Modal cut off after it had landed.
             raise
+        except ModalProxyDeployedAppLimitError as e:
+            raise ModalDeployedAppLimitMngrError(
+                f"Failed to deploy {function} function: modal-workspace deployed-app limit reached: {e}"
+            ) from e
         except ModalProxyError as e:
             raise MngrError(f"Failed to deploy {function} function: {e}") from e
 

@@ -56,6 +56,7 @@ from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyBlockStorageError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
+from imbue.modal_proxy.errors import ModalProxyDeployedAppLimitError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyImageBuilderLostError
@@ -71,6 +72,7 @@ from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_block_storage_server_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_deployed_app_limit_error
 from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
@@ -95,6 +97,11 @@ def _translate_modal_cli_not_found(e: FileNotFoundError) -> NoReturn:
 
 def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
     """Convert a modal exception to the corresponding ModalProxy exception."""
+    # Must stay ahead of the isinstance ladder: Modal sends the deployed-app cap
+    # as RESOURCE_EXHAUSTED, which maps to the retryable ModalProxyRateLimitError
+    # and would set _retry_transient spinning on a cap no wait can clear.
+    if is_deployed_app_limit_error(str(e)):
+        return ModalProxyDeployedAppLimitError(str(e))
     if isinstance(e, modal.exception.AuthError):
         return ModalProxyAuthError(str(e))
     # A transient status means Modal failed the request rather than answering it, and
@@ -891,6 +898,11 @@ class DirectModalInterface(ModalInterface):
             if is_image_builder_lost_error(output):
                 raise ModalProxyImageBuilderLostError(
                     f"Failed to deploy {script_path} (image build lost its worker): {output}"
+                )
+            # Nothing this deploy can wait for frees a slot.
+            if is_deployed_app_limit_error(output):
+                raise ModalProxyDeployedAppLimitError(
+                    f"Failed to deploy {script_path} (modal-workspace deployed-app limit reached): {output}"
                 )
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
 

@@ -1,0 +1,3 @@
+When the Modal workspace ran out of deployed-app slots, every Modal test that deploys failed at once, and none of them said so. The failure arrived as an undifferentiated `MngrError`, and the acceptance fixture -- which retries the ephemeral-app cap, worded almost identically -- polled for four minutes per test on a condition that cannot clear, logging the wrong cause the whole time.
+
+`mngr create` now raises `ModalDeployedAppLimitMngrError`, which names the cap and tells you how to free slots, so a burst of these is one greppable line. The acceptance fixture no longer retries it: only the ephemeral-app cap, which really does drain as concurrent runs finish, is still worth waiting on.

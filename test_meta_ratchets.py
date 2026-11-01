@@ -1549,10 +1549,12 @@ _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
         "mngr-level code (libs/mngr and the mngr plugins) speaks host/agent; 'workspace' is the "
         "minds-level term for the logical unit identified by its system-services agent id. Say "
         "host, agent, work dir, or project as appropriate (see "
-        "specs/machine-workspace-naming/decisions.md). The uv sense must be spelled 'uv-workspace'."
+        "specs/machine-workspace-naming/decisions.md). A foreign tool's own sense of the word "
+        "must be hyphenated to keep it distinct: 'uv-workspace', and 'modal-workspace' for the "
+        "Modal account-level container whose caps and plan Modal's own messages speak of."
     ),
-    # The uv sense is allowed when spelled "uv-workspace" (the lookbehind).
-    pattern_string=r"(?i)(?<!uv-)\bworkspaces?\b",
+    # The foreign senses are allowed when hyphenated (the lookbehinds).
+    pattern_string=r"(?i)(?<!uv-)(?<!modal-)\bworkspaces?\b",
 )
 
 _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE = RegexRatchetRule(

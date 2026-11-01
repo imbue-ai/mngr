@@ -99,6 +99,25 @@ def is_block_storage_server_error(message: str) -> bool:
     return _BLOCK_STORAGE_SERVER_ERROR_RE.search(message) is not None
 
 
+# Modal refuses a deploy once the modal-workspace holds its maximum number of
+# deployed apps. The cap is per modal-workspace, not per Modal environment, and
+# the digits vary with the plan. Matching "deployed apps" rather than the bare
+# "reached limit of" keeps the ephemeral-app cap -- which shares that wording -- out.
+_DEPLOYED_APP_LIMIT_RE = re.compile(r"reached limit of \d+ deployed apps", re.IGNORECASE)
+
+
+def is_deployed_app_limit_error(message: str) -> bool:
+    """Check whether a Modal failure is the modal-workspace's deployed-app cap being full.
+
+    The opposite of :func:`is_app_locked_error` in the one way that matters to a
+    caller: a deployed app is released only by an explicit ``modal app stop`` or
+    by deleting its environment, so no amount of waiting frees a slot. Callers
+    must fail rather than retry, and must not confuse this with the ephemeral-app
+    cap, which drains on its own as concurrent runs finish.
+    """
+    return _DEPLOYED_APP_LIMIT_RE.search(message) is not None
+
+
 class ModalProxyError(Exception):
     """Base error for modal_proxy operations."""
 
@@ -240,4 +259,15 @@ class ModalProxyDeployTimeoutError(ModalProxyDeployRetryableError):
 
     Whether the deploy landed before it was cut off is unknown. Deploying the
     same script twice is idempotent either way.
+    """
+
+
+class ModalProxyDeployedAppLimitError(ModalProxyError):
+    """Raised when the modal-workspace already holds its maximum number of deployed apps.
+
+    Deliberately not a ``ModalProxyTransientError``: the request was refused
+    rather than failed, and the condition is monotone. A deployed app leaves the
+    count only when something stops it or deletes its environment, so a retry
+    can only fail again. The cap is per modal-workspace, so every concurrent
+    user of it sees the refusal at once.
     """

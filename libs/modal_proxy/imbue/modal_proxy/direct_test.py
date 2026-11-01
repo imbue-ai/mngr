@@ -61,6 +61,7 @@ from imbue.modal_proxy.errors import ModalProxyBlockStorageError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
+from imbue.modal_proxy.errors import ModalProxyDeployedAppLimitError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyImageBuilderLostError
@@ -76,6 +77,7 @@ from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_block_storage_server_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_deployed_app_limit_error
 from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
@@ -1121,3 +1123,61 @@ def test_deploy_runs_the_cli_with_the_instance_tokens(tmp_path: Path, monkeypatc
 
     assert seen_env.read_text().strip() == "ak-instance:as-instance:marker-fn"
     assert os.environ["MODAL_TOKEN_ID"] == "ak-ambient", "the instance tokens never leak into this process"
+
+
+# The real Modal refusal when the modal-workspace has no deployed-app slots left.
+_DEPLOYED_APP_LIMIT_MESSAGE = "Deployment failed: reached limit of 1000 deployed apps"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param(_DEPLOYED_APP_LIMIT_MESSAGE, True, id="real_modal_message"),
+        pytest.param(
+            "Error: Modal provider 'modal' failed to initialize: "
+            "Deployment failed: reached limit of 1000 deployed apps\n"
+            "Please upgrade your workspace plan and re-deploy: https://modal.com/settings/imbue/plans",
+            True,
+            id="wrapped_in_provider_init_failure",
+        ),
+        pytest.param("REACHED LIMIT OF 1000 DEPLOYED APPS", True, id="case_insensitive"),
+        pytest.param("reached limit of 250 deployed apps", True, id="other_cap_size"),
+        # The ephemeral-app cap shares the "reached limit of" wording but drains on
+        # its own as concurrent runs finish, so it must stay retryable.
+        pytest.param(
+            "App creation failed: reached limit of 100 ephemeral apps", False, id="ephemeral_cap_is_not_this"
+        ),
+        pytest.param("Failed to deploy snapshot.py: some other error", False, id="unrelated_error"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_deployed_app_limit_error(message: str, expected: bool) -> None:
+    assert is_deployed_app_limit_error(message) is expected
+
+
+def test_deploy_reports_a_full_deployed_app_cap_as_not_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No wait frees a deployed-app slot, so the caller's deploy retry must not treat this as retryable."""
+    bin_dir = tmp_path / "bin"
+    counter = tmp_path / "count"
+    _write_fake_modal(bin_dir, counter, fail_times=10, error_message=_DEPLOYED_APP_LIMIT_MESSAGE)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(ModalProxyDeployedAppLimitError) as exc_info:
+        DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert not isinstance(exc_info.value, ModalProxyDeployRetryableError)
+
+
+def test_translate_modal_error_reads_the_deployed_app_cap_off_the_message() -> None:
+    """Modal signals the cap through the message, so the wire status must not decide it.
+
+    ``RESOURCE_EXHAUSTED`` maps to ``ResourceExhaustedError`` and thence to the
+    retryable ``ModalProxyRateLimitError``, which would send ``_retry_transient``
+    spinning on a cap that no wait can clear.
+    """
+    translated = _translate_modal_error(modal.exception.ResourceExhaustedError(_DEPLOYED_APP_LIMIT_MESSAGE))
+
+    assert isinstance(translated, ModalProxyDeployedAppLimitError)
+    assert not _is_transient_modal_error(translated)

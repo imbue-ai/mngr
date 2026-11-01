@@ -70,6 +70,7 @@ from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
 from imbue.mngr_modal.backend import app_registry_key
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.errors import ModalDeployedAppLimitMngrError
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
@@ -106,6 +107,7 @@ from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.data_types import StreamType
+from imbue.modal_proxy.errors import ModalProxyDeployedAppLimitError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
@@ -2736,6 +2738,68 @@ def test_deploy_function_retries_transient_post_deploy_not_found(
 
     assert "snapshot_and_shutdown" in url
     assert interface.not_found_remaining == 0
+
+
+class _DeployedAppLimitModalInterface(FakeModalInterface):
+    """FakeModalInterface whose deploys are refused for want of a deployed-app slot."""
+
+    deploy_attempts: int = Field(default=0, description="How many deploys were attempted")
+
+    def deploy(
+        self,
+        script_path: Path,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+        extra_env: Mapping[str, str] = {},
+    ) -> None:
+        self.deploy_attempts = self.deploy_attempts + 1
+        raise ModalProxyDeployedAppLimitError(
+            f"Failed to deploy {script_path} (modal-workspace deployed-app limit reached): "
+            "Deployment failed: reached limit of 1000 deployed apps"
+        )
+
+
+def test_deploy_function_names_the_deployed_app_limit_rather_than_a_generic_failure(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """A full modal-workspace is an account-level condition, not this deploy being wrong.
+
+    Every Modal test that deploys fails at once when it happens, so the error has
+    to name the cap in one line rather than arrive as an undifferentiated MngrError.
+    """
+    interface = _DeployedAppLimitModalInterface(root_dir=tmp_path / "modal_full", concurrency_group=cg)
+
+    with pytest.raises(ModalDeployedAppLimitMngrError) as exc_info:
+        deploy_function("snapshot_and_shutdown", f"test-app-{uuid4().hex}", f"test-env-{uuid4().hex}", interface)
+
+    assert "deployed-app limit" in str(exc_info.value)
+    assert exc_info.value.user_help_text is not None
+
+
+def test_ensure_function_deployed_does_not_retry_a_full_deployed_app_cap(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Its deploy retry is for failures that clear on their own, and a full cap never does.
+
+    The budget is kept short so that a regression -- this refusal becoming
+    retryable -- shows up as extra attempts rather than as a slow test.
+    """
+    interface = _DeployedAppLimitModalInterface(root_dir=tmp_path / "modal_full_retry", concurrency_group=cg)
+
+    with pytest.raises(ModalDeployedAppLimitMngrError):
+        ensure_function_deployed(
+            "snapshot_and_shutdown",
+            f"test-app-{uuid4().hex}",
+            f"test-env-{uuid4().hex}",
+            interface,
+            retry_budget_seconds=5.0,
+            max_backoff_seconds=0.1,
+        )
+
+    assert interface.deploy_attempts == 1
 
 
 def test_get_function_url_without_deploy_fails_fast_on_not_found(
