@@ -282,15 +282,18 @@ def _select_named_agent_refs(
 def get_compaction_agents(
     mngr_ctx: MngrContext,
     names: Sequence[AgentName] | None = None,
+    provider_names: Sequence[str] | None = None,
 ) -> list[AgentInterface]:
     """Discover all agents supporting compaction on online hosts, whether or not they are running.
 
     When names is given, only agents with those names are loaded, and a name that matches no
-    discovered agent is skipped rather than treated as an error.
+    discovered agent is skipped rather than treated as an error. When provider_names is given,
+    only those providers are asked, and the names are not first resolved to providers through
+    the discovery event log.
     """
     outcome = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=None if provider_names is None else tuple(provider_names),
         agent_identifiers=None if names is None else tuple(str(name) for name in names),
         include_destroyed=False,
         reset_caches=False,
@@ -385,6 +388,7 @@ def compact_stale_agents_by_name(
     mngr_ctx: MngrContext,
     names: Sequence[AgentName],
     now: datetime | None = None,
+    provider_names: Sequence[str] | None = None,
 ) -> list[AgentName]:
     """Compact whichever of the named agents are stale, returning the names that were compacted.
 
@@ -397,14 +401,16 @@ def compact_stale_agents_by_name(
     record) propagates and discards the result of the whole call, so an embedder should catch
     Exception at its own boundary.
 
-    Every agent with one of the names is a candidate, on whichever host or provider it lives. A name
-    that matches nothing costs a full discovery scan, so callers should pass names they have just
-    listed. Provider instances are cached per MngrContext: a caller that builds a context per call
+    Every agent with one of the names is a candidate, on whichever host or provider it lives, or on
+    the providers in provider_names when given. Without it the names are resolved to providers by
+    replaying the discovery event log, and a name that matches nothing costs a full discovery scan,
+    so callers should pass names they have just listed -- and the providers those agents are on,
+    when they know them. Provider instances are cached per MngrContext: a caller that builds a context per call
     must release them with `close_provider_instances_for_context(mngr_ctx)` afterwards.
     """
     if not names:
         return []
     # Resolved through discovery rather than find_all_agents, which fails the whole batch when any one
     # name is unmatched.
-    agents = get_compaction_agents(mngr_ctx, names=names)
+    agents = get_compaction_agents(mngr_ctx, names=names, provider_names=provider_names)
     return compact_stale_agents(mngr_ctx, agents=agents, now=now)

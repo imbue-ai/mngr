@@ -1,0 +1,1 @@
+`compact_stale_agents_by_name` and `get_compaction_agents` take an optional `provider_names`. When given, discovery asks only those providers and skips resolving the names by replaying the whole discovery event log, which an embedder calling once a minute (the minds chat app) paid on every call.
