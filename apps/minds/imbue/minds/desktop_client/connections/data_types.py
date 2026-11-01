@@ -9,11 +9,14 @@ from pydantic import SecretStr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.minds.desktop_client.account_documents.data_types import AccountDocumentRecord
+from imbue.minds.desktop_client.account_documents.data_types import DOCUMENT_STATE_ACTIVE
+from imbue.minds.desktop_client.account_documents.data_types import DOCUMENT_STATE_DELETED
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
 
-CONNECTION_STATE_ACTIVE = "active"
-CONNECTION_STATE_DELETED = "deleted"
+CONNECTION_STATE_ACTIVE = DOCUMENT_STATE_ACTIVE
+CONNECTION_STATE_DELETED = DOCUMENT_STATE_DELETED
 
 
 class ConnectionCredentialSource(UpperCaseStrEnum):
@@ -179,63 +182,18 @@ class ConnectionCredentials(FrozenModel):
         return plaintext
 
 
-class ConnectionReplicaRecord(FrozenModel):
-    """One connection document as held in the local replica (wire fields plus local-only state)."""
+class ConnectionReplicaRecord(AccountDocumentRecord):
+    """One connection document as held in the local replica: the generic row plus connection-only state."""
 
-    # A row a newer app wrote with an added local-only field must still load:
-    # a skipped row is dropped on the next save, and the local profile is never
-    # pushed, so nothing would bring it back.
-    model_config = ConfigDict(extra="ignore")
-
-    doc_id: str = Field(description="The connection id (the document id within the account)")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Raw metadata object, unknown keys intact")
-    encrypted_payload: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
     payload: dict[str, Any] | None = Field(
         default=None, description="Plaintext credentials; local profile only, never pushed"
     )
-    state: str = Field(default=CONNECTION_STATE_ACTIVE, description="'active' or 'deleted' (tombstone)")
-    revision: int = Field(default=0, description="Last server-acknowledged revision (0 = never pushed)")
-    document_format: int = Field(default=1, description="Semantic format of the document")
-    deleted_at: str | None = Field(default=None, description="Server tombstone stamp")
-    is_dirty: bool = Field(default=False, description="Local changes not yet pushed")
     validation_rollback: "ConnectionReplicaRecord | None" = Field(
         default=None,
         description=(
             "Local only, never sent: the row as it was before an in-place credential update whose new "
             "credentials are still being validated; restored if the validation fails or the app dies mid-update"
         ),
-    )
-
-    def to_wire(self, kind: str, push_revision: int, is_payload_included: bool) -> dict[str, object]:
-        """Render the document for a CLI push; the payload key is omitted (server keeps its blob) unless included."""
-        wire: dict[str, object] = {
-            "kind": kind,
-            "doc_id": self.doc_id,
-            "metadata": dict(self.metadata),
-            "state": self.state,
-            "revision": push_revision,
-            "document_format": self.document_format,
-        }
-        if is_payload_included:
-            wire["encrypted_payload"] = self.encrypted_payload
-        return wire
-
-
-@pure
-def connection_record_from_wire(wire: Mapping[str, object]) -> ConnectionReplicaRecord:
-    """Build a clean (non-dirty) replica row from a server wire document."""
-    raw_metadata = wire.get("metadata")
-    raw_payload = wire.get("encrypted_payload")
-    raw_deleted_at = wire.get("deleted_at")
-    return ConnectionReplicaRecord(
-        doc_id=str(wire.get("doc_id", "")),
-        metadata={str(key): value for key, value in raw_metadata.items()} if isinstance(raw_metadata, dict) else {},
-        encrypted_payload=str(raw_payload) if raw_payload is not None else None,
-        state=str(wire.get("state", CONNECTION_STATE_ACTIVE)),
-        revision=int(str(wire.get("revision", 0))),
-        document_format=int(str(wire.get("document_format", 1))),
-        deleted_at=str(raw_deleted_at) if raw_deleted_at is not None else None,
-        is_dirty=False,
     )
 
 
@@ -291,10 +249,3 @@ class ProviderMaterializationOutcome(UpperCaseStrEnum):
     UNCHANGED = auto()
     # The account listing failed, so the settings were left as they were.
     SKIPPED = auto()
-
-
-class ConnectionPullOutcome(FrozenModel):
-    """Result of pulling one account's connection documents."""
-
-    is_reached: bool = Field(description="Whether the connector answered")
-    is_changed: bool = Field(description="Whether any replica row changed")

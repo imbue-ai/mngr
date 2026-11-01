@@ -51,7 +51,7 @@ def _make_feed(
     preferences = NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
     return NotificationFeed(
         notification_dispatcher=dispatcher,
-        get_dispatch_preferences=lambda: preferences,
+        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: preferences,
         is_main_window_focused=lambda: is_main_window_focused,
         is_screen_locked=lambda: is_screen_locked,
         constructed_at=constructed_at,
@@ -305,7 +305,7 @@ def test_a_response_landing_between_the_dispatch_decision_and_the_dispatch_itsel
     preferences = NotificationDispatchPreferences(is_enabled=True, style=NotificationStyle.BOTH)
     feed: NotificationFeed
 
-    def get_dispatch_preferences() -> NotificationDispatchPreferences:
+    def get_dispatch_preferences(_account_id: str, _workspace_agent_id: str) -> NotificationDispatchPreferences:
         feed.reconcile((), {"evt-1": NotificationOutcome.APPROVED})
         return preferences
 

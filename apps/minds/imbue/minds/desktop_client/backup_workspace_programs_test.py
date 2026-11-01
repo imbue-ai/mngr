@@ -199,6 +199,22 @@ def test_a_program_runs_in_process_from_the_arguments_its_main_is_given(
     assert payload is not None
     assert payload["target_tag"] == "minds-v9.9.9"
     assert payload["code_state"] == "unverifiable"
+    assert payload["verification_disabled"] is False
+
+
+def test_the_check_answers_the_flag_alone_when_the_workspace_turned_verification_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A disabled workspace's check is one cheap read: the flag, and none of the expensive work."""
+    monkeypatch.chdir(tmp_path)
+    backup_toml = tmp_path / "data" / "system" / "backup.toml"
+    backup_toml.parent.mkdir(parents=True)
+    backup_toml.write_text("verification_disabled = true\n")
+
+    backup_check.main(["--minimum-tag", "minds-v9.9.9", "--official-url", str(tmp_path / "nowhere")])
+
+    payload = extract_marker_json(capsys.readouterr().out, CHECK_RESULT_MARKER)
+    assert payload == {"schema": 1, "verification_disabled": True}
 
 
 # The tests below marked flaky time out at the 10s per-test budget while shelling out

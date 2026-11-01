@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.backup_update import _restore_completion_warning
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_update import run_backup_update_sequence
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -56,6 +57,7 @@ def test_restore_fails_for_an_unknown_snapshot_without_dispatching_a_worker(tmp_
         agent_id=agent_id,
         paths=paths,
         resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        facts_cache=WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
         registry=registry,
         parent_cg=None,
         snapshot_id="ffffffffffffffff",
@@ -248,6 +250,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
         agent_id=agent_id,
         paths=paths,
         resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        facts_cache=WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
         registry=registry,
         parent_cg=None,
         is_stop_chats=False,
@@ -278,6 +281,7 @@ def test_the_mutating_apply_step_refuses_a_machine_below_the_in_place_floor(tmp_
         agent_id=agent_id,
         paths=paths,
         resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        facts_cache=WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
         registry=registry,
         parent_cg=None,
         is_stop_chats=False,

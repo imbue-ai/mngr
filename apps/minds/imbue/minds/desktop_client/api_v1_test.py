@@ -62,7 +62,6 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
-from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
@@ -4318,7 +4317,9 @@ def test_workspace_backup_check_reports_disabled_verification_without_exec(
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-    set_backup_verification_enabled(InstallationPaths(data_dir=tmp_path / "minds"), agent_id, False)
+    facts_cache = get_state(client.application).workspace_facts_cache
+    assert facts_cache is not None
+    facts_cache.set_backup_verification_enabled(agent_id, False)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
 
@@ -4800,16 +4801,17 @@ def test_backup_operation_status_surfaces_blocked_chats(tmp_path: Path) -> None:
 def test_backup_verification_toggle_round_trips(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
-    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    facts_cache = get_state(client.application).workspace_facts_cache
+    assert facts_cache is not None
     toggle_url = f"/api/v1/workspaces/{agent_id}/backup-service/verification"
 
     disabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": False})
     assert disabled.status_code == 200
-    assert is_backup_verification_enabled(paths, agent_id) is False
+    assert is_backup_verification_enabled(facts_cache, agent_id) is False
 
     enabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": True})
     assert enabled.status_code == 200
-    assert is_backup_verification_enabled(paths, agent_id) is True
+    assert is_backup_verification_enabled(facts_cache, agent_id) is True
 
 
 def test_backup_verification_toggle_requires_the_enabled_field(tmp_path: Path) -> None:

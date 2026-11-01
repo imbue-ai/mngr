@@ -44,7 +44,11 @@ export function workspaceUpdateSettings(model: SettingsModel): m.Children {
           describedBy: "auto-update-note-app",
           isWaiting: model.isAutoUpdateBusy,
           isDisabled: model.isAutoUpdateBusy,
-          onFlip: (isOn) => void model.setAutoUpdateEnabled(isOn),
+          onFlip: (isOn) =>
+            void model.setAutoUpdateEnabled(
+              getAppContext().shell.accountId,
+              isOn,
+            ),
         }),
       ],
     ),
@@ -60,7 +64,8 @@ export function workspaceUpdateSettings(model: SettingsModel): m.Children {
       idSuffix: "app",
       startHour: overview.update_window_start_hour,
       endHour: overview.update_window_end_hour,
-      onChange: (start, end) => void model.setUpdateWindow(start, end),
+      onChange: (start, end) =>
+        void model.setUpdateWindow(getAppContext().shell.accountId, start, end),
       class: "py-3 border-b border-subtle",
     }),
     m(

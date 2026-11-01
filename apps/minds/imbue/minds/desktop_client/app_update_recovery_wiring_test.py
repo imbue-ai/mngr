@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -59,6 +60,9 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
         mngr_caller=RecordingMngrCaller(),
         paths=InstallationPaths(data_dir=tmp_path / "data"),
         minds_config=None,
+        account_settings_store=None,
+        facts_cache=WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
+        session_store=None,
         system_interface_health_tracker=tracker,
         root_concurrency_group=root_concurrency_group,
         dispatch_recovery=dispatcher.dispatch_after_update_window,
@@ -96,6 +100,9 @@ def test_building_the_update_service_drops_the_schedules_an_older_build_kept(
         mngr_caller=RecordingMngrCaller(),
         paths=InstallationPaths(data_dir=tmp_path / "data"),
         minds_config=None,
+        account_settings_store=None,
+        facts_cache=WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
+        session_store=None,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         root_concurrency_group=root_concurrency_group,
         dispatch_recovery=lambda _agent_id: None,

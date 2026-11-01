@@ -77,6 +77,7 @@ function main(): void {
   const notificationsUi = new NotificationsUiController({
     isFeedOverlayOpen: () => shell.isNotificationsOpen,
     isPopoutWindow: () => shell.popoutRoute() !== null,
+    accountId: () => shell.accountId,
     onEntryOpened: () => shell.closeNotifications(),
     gestures,
   });

@@ -12,6 +12,8 @@ from uuid import uuid4
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
+from imbue.minds.desktop_client.account_settings_store import SETTINGS_DOCUMENT_KIND
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_fresh_device_scheduler
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -22,6 +24,8 @@ from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 
 
@@ -224,3 +228,72 @@ def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
         scheduler._pass_release.set()
         assert stop_returned.wait(timeout=5.0)
         stop_thread.join(timeout=5.0)
+
+
+def test_pass_pulls_and_pushes_the_settings_document_and_reports_a_pulled_change(tmp_path: Path) -> None:
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    # Another device already pushed its settings document.
+    pusher_store = AccountSettingsStore(data_dir=tmp_path / "pusher-settings", cli=cli)
+    pusher_store.apply_settings_values(user_id, {"auto_update_workspaces": True})
+    pusher_store.push_dirty(user_id, email)
+    record_store, session_store = make_sync_test_device(tmp_path, f"fresh-{uuid4().hex}", cli)
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "fresh-settings", cli=cli)
+    change_signals: list[bool] = []
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=make_resolver_with_data(agents_json=json.dumps({"agents": []})),
+        settings_store=settings_store,
+    )
+    scheduler.on_account_settings_changed = lambda: change_signals.append(True)
+
+    scheduler.run_one_pass()
+
+    # The pull landed the other device's document, with a local edit's side effects.
+    assert settings_store.read_settings(user_id).auto_update_workspaces is True
+    assert change_signals == [True]
+
+    # A local edit is pushed by the next pass; nothing pulled changed, so no new signal.
+    settings_store.apply_settings_values(user_id, {"notifications_enabled": False})
+    scheduler.run_one_pass()
+
+    pushed = cli.sync_documents_by_email[email][SETTINGS_DOCUMENT_KIND]["default"]["metadata"]
+    assert isinstance(pushed, dict)
+    assert pushed["notifications_enabled"] is False
+    assert change_signals == [True]
+
+
+def test_pass_syncs_workspace_profiles_and_flushes_queued_fact_writes(tmp_path: Path) -> None:
+    """Each pass ends with the workspace-boundary steps: the profile rewrite and the fact flush."""
+    cli = make_fake_imbue_cloud_cli()
+    record_store, session_store = make_sync_test_device(tmp_path, f"boundary-{uuid4().hex}", cli)
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    profile_writer = WorkspaceProfileWriter(
+        mngr_caller=RecordingMngrCaller(),
+        backend_resolver=resolver,
+        session_store=session_store,
+        device_id="device-1",
+        hashes_dir=tmp_path / "workspace_profile_hashes",
+    )
+    sync_calls: list[bool] = []
+    flush_calls: list[bool] = []
+
+    class _CountingWriter(WorkspaceProfileWriter):
+        def sync_profiles(self) -> None:
+            sync_calls.append(True)
+
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=resolver,
+        workspace_profile_writer=_CountingWriter(**dict(profile_writer)),
+        flush_workspace_fact_writes=lambda: flush_calls.append(True),
+    )
+
+    scheduler.run_one_pass()
+
+    assert sync_calls == [True]
+    assert flush_calls == [True]

@@ -37,6 +37,10 @@ from imbue.minds.desktop_client.update_status import parse_update_epoch
 from imbue.minds.desktop_client.update_status import parse_update_last_dispatch
 from imbue.minds.desktop_client.update_status import parse_update_run_record
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceSkippedTarget
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceUpdateDismissals
+from imbue.minds.desktop_client.workspace_facts_cache import parse_workspace_dismissals
+from imbue.minds.desktop_client.workspace_facts_cache import parse_workspace_skipped_target
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -162,6 +166,12 @@ class UpdateWorkspaceFacts(FrozenModel):
         description="Whether an account is signed in, asked only when the app's row or the schedule's skip says "
         "it was not; None when not asked"
     )
+    skipped_target: WorkspaceSkippedTarget | None = Field(
+        default=None, description="The workspace's skipped-target file (queued writes merged); None when none"
+    )
+    dismissals: WorkspaceUpdateDismissals | None = Field(
+        default=None, description="The workspace's dismissals file (queued writes merged); None when none"
+    )
 
 
 def build_update_workspace_command(mode: str, arguments: Sequence[str]) -> str:
@@ -191,8 +201,18 @@ def build_arm_arguments(settings: UpdateWorkspaceSettings, override_ref: str, *,
     return [*_settings_arguments(settings), "--override", override_ref, "--auto-armed", "1" if is_auto_armed else "0"]
 
 
-def build_read_arguments(settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool) -> list[str]:
-    return [*_settings_arguments(settings), *([UPDATE_COMMAND_CHECK_SIGN_IN_FLAG] if is_sign_in_checked else [])]
+def build_read_arguments(
+    settings: UpdateWorkspaceSettings,
+    *,
+    is_sign_in_checked: bool,
+    # The facts cache's queued write-through flags for this workspace (spec section 7.4).
+    fact_write_arguments: Sequence[str],
+) -> list[str]:
+    return [
+        *_settings_arguments(settings),
+        *([UPDATE_COMMAND_CHECK_SIGN_IN_FLAG] if is_sign_in_checked else []),
+        *fact_write_arguments,
+    ]
 
 
 def build_now_arguments(settings: UpdateWorkspaceSettings, override_ref: str) -> list[str]:
@@ -279,6 +299,8 @@ def parse_update_workspace_facts(payload: Mapping[str, object]) -> UpdateWorkspa
         last_dispatch=parse_update_last_dispatch(raw_dispatch) if raw_dispatch is not None else None,
         run_chat_id=run_chat_id if isinstance(run_chat_id, str) else None,
         is_signed_in=is_signed_in if isinstance(is_signed_in, bool) else None,
+        skipped_target=parse_workspace_skipped_target(payload.get("skipped_target")),
+        dismissals=parse_workspace_dismissals(payload.get("dismissals")),
     )
 
 
@@ -312,16 +334,26 @@ def cancel_update_schedule(mngr_caller: MngrCaller, workspace_address: str) -> U
 
 
 def read_update_facts(
-    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool
+    mngr_caller: MngrCaller,
+    workspace_address: str,
+    settings: UpdateWorkspaceSettings,
+    *,
+    is_sign_in_checked: bool,
+    fact_write_arguments: Sequence[str],
 ) -> UpdateCommandCall:
     """The sweep's read; an armed schedule is refreshed with ``settings`` on the way.
 
-    ``is_sign_in_checked`` asks whether an account is signed in, for a row a refusal says has none.
+    ``is_sign_in_checked`` asks whether an account is signed in, for a row a refusal says has
+    none. ``fact_write_arguments`` carries the facts cache's queued skip and dismissals, which
+    the program merges into the workspace's files before answering, so the one read is also the
+    write-through.
     """
     return run_update_workspace_command(
         mngr_caller,
         workspace_address,
         _READ_MODE,
-        build_read_arguments(settings, is_sign_in_checked=is_sign_in_checked),
+        build_read_arguments(
+            settings, is_sign_in_checked=is_sign_in_checked, fact_write_arguments=fact_write_arguments
+        ),
         _READ_TIMEOUT_SECONDS,
     )

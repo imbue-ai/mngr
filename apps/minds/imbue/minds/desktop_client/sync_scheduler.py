@@ -35,6 +35,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import IMBUE_CLOUD_AUTH_ERROR_CL
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import SyncCryptoError
@@ -152,6 +154,35 @@ class WorkspaceSyncScheduler(MutableModel):
     connection_store: ConnectionStore | None = Field(
         default=None, frozen=True, description="Cloud connection replicas pulled every pass; None disables"
     )
+    settings_store: AccountSettingsStore | None = Field(
+        default=None,
+        frozen=True,
+        description="Per-account settings replicas pulled and pushed every pass, after the connections; None disables",
+    )
+    on_account_settings_changed: Callable[[], None] | None = Field(
+        default=None,
+        description=(
+            "Invoked after a pass's pull changed any account's settings record, so the change lands like a "
+            "local edit (the updates frame republishes, the armed windows re-resolve); wired post-construction, "
+            "once the app holding those surfaces exists"
+        ),
+    )
+    workspace_profile_writer: WorkspaceProfileWriter | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Rewrites the profile snapshot of every running workspace whose resolved content moved "
+            "(spec section 8.2), at the end of each pass; None disables"
+        ),
+    )
+    flush_workspace_fact_writes: Callable[[], None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Writes queued per-workspace facts (today the backup-verification flag) into reachable "
+            "workspaces at the end of each pass; None disables"
+        ),
+    )
     provider_materializer: ProviderSettingsMaterializer | None = Field(
         default=None,
         frozen=True,
@@ -239,6 +270,7 @@ class WorkspaceSyncScheduler(MutableModel):
         convert_legacy_password_files(self.record_store.paths, list(accounts.keys()))
         outcome = self.record_store.reconcile(accounts, self.resolver)
         self._sync_connections(accounts)
+        self._sync_account_settings(accounts)
         self._resolve_initial_syncs(tracked_user_ids, accounts, outcome.is_pull_ok_by_user_id)
         if self.forward_identity is not None:
             no_longer_shared = self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
@@ -259,6 +291,10 @@ class WorkspaceSyncScheduler(MutableModel):
             self.on_discovery_bounce_needed()
         if self.backup_reaper is not None:
             self.backup_reaper.maybe_start_reap_pass(accounts)
+        if self.workspace_profile_writer is not None:
+            self.workspace_profile_writer.sync_profiles()
+        if self.flush_workspace_fact_writes is not None:
+            self.flush_workspace_fact_writes()
 
     def _sync_connections(self, accounts: Mapping[str, str]) -> None:
         """Pull every account's connections, push dirty rows, and re-materialize the provider blocks.
@@ -276,6 +312,26 @@ class WorkspaceSyncScheduler(MutableModel):
                 self.connection_store.push_dirty(user_id, account_email)
         if self.provider_materializer is not None:
             self.provider_materializer.materialize()
+
+    def _sync_account_settings(self, accounts: Mapping[str, str]) -> None:
+        """Pull every account's settings record and push the dirty ones (spec section 7.2).
+
+        A pull that changed any record has the same side effects as a local
+        edit, through ``on_account_settings_changed``: the device's record is
+        never pulled or pushed (the ``local`` pseudo-account is not in the
+        signed-in set), so it only ever changes through local edits, which
+        apply their own side effects.
+        """
+        if self.settings_store is None:
+            return
+        is_any_changed = False
+        for user_id, account_email in accounts.items():
+            outcome = self.settings_store.pull(user_id, account_email)
+            if outcome.is_reached:
+                self.settings_store.push_dirty(user_id, account_email)
+            is_any_changed = is_any_changed or outcome.is_changed
+        if is_any_changed and self.on_account_settings_changed is not None:
+            self.on_account_settings_changed()
 
     def _retire_accounts_with_dead_sessions(self, accounts: Mapping[str, str]) -> list[str]:
         """Sign out (locally) every account whose account instance discovery reports as unauthenticated

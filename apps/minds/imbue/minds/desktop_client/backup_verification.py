@@ -19,7 +19,10 @@ canonical env on the Imbue Studio side is *adopted*: the env is pulled into the 
 store during the check so status and management just start working.
 
 Offline workspaces report ``OFFLINE`` (no badge); workspaces with verification
-disabled report ``DISABLED`` and are never exec'd into. Cross-workspace
+disabled report ``DISABLED``. The flag lives in each workspace's own
+``backup.toml`` (cached per install while the workspace is stopped), and the
+check program answers it first -- cheaply, skipping the real work -- so a
+disabled workspace costs one small exec rather than a full check. Cross-workspace
 parallelism is the frontend's job -- there is deliberately no batch entry
 point here.
 """
@@ -49,7 +52,7 @@ from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agent
-from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.workspace_programs import backup_check
@@ -58,6 +61,7 @@ from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import parse_backup_code_state
 from imbue.minds.workspace_programs.backup_protocol import parse_backup_service_state
+from imbue.minds.workspace_programs.backup_verification_flag import VERIFICATION_DISABLED_KEY
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -290,13 +294,26 @@ def check_backup_service_for_workspace(
     agent_id: AgentId,
     *,
     resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> BackupServiceCheck:
-    """Run the full backup-service check for one workspace (exec + classify + adopt)."""
-    if not is_backup_verification_enabled(paths, agent_id):
-        return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
+    """Run the full backup-service check for one workspace (exec + classify + adopt).
+
+    The verification flag lives in the workspace's own ``backup.toml`` (spec section 7.4): an
+    offline workspace is answered from the install's cached copy, and an online one from the
+    check exec itself, whose program reads the flag first and answers it alone when
+    verification is off -- so a flag flipped on another computer is seen here on the next check.
+    A still-queued local toggle (the cache's dirty flag) wins until its write-through lands.
+    """
+    cached_record = facts_cache.read(agent_id)
+    is_cached_disabled = cached_record.is_backup_verification_disabled
     if not is_workspace_online(resolver, agent_id):
+        if is_cached_disabled:
+            return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
         return BackupServiceCheck(state=BackupServiceCheckState.OFFLINE)
+    if is_cached_disabled and cached_record.is_backup_verification_dirty:
+        # The user just turned it off here; nothing to verify while the write-through is queued.
+        return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
 
     command_str = build_workspace_program_command(
         backup_check, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
@@ -310,6 +327,10 @@ def check_backup_service_for_workspace(
     if result.returncode != 0 or result.is_timed_out:
         detail = (result.stderr or result.stdout).strip()[-500:]
         logger.debug("Backup check exec failed for {}: {}", agent_id, detail)
+        if is_cached_disabled:
+            # The workspace said verification is off at the last read; a check that cannot
+            # run now must not put a warning badge on it (same fallback as the offline path).
+            return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
         return BackupServiceCheck(
             state=BackupServiceCheckState.PROBLEMS,
             problems=(BackupServiceProblem.UNVERIFIABLE,),
@@ -318,12 +339,20 @@ def check_backup_service_for_workspace(
         )
     payload = extract_marker_json(result.stdout, CHECK_RESULT_MARKER)
     if payload is None:
+        if is_cached_disabled:
+            return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
         return BackupServiceCheck(
             state=BackupServiceCheckState.PROBLEMS,
             problems=(BackupServiceProblem.UNVERIFIABLE,),
             minimum_version=minimum_backup_tag(),
             detail="check produced no parseable result",
         )
+    # The workspace's own flag is the authority once read; a queued local toggle stays dirty
+    # until its own write-through lands.
+    is_workspace_disabled = payload.get(VERIFICATION_DISABLED_KEY) is True
+    facts_cache.adopt_backup_verification(agent_id, is_disabled=is_workspace_disabled, is_queued_write_applied=False)
+    if is_workspace_disabled:
+        return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
 
     canonical_env = read_canonical_env(paths, agent_id)
     check, env_to_adopt = classify_check_payload(payload, canonical_env=canonical_env)
