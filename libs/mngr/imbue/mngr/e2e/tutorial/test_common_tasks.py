@@ -68,12 +68,12 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     expect(pwd_result).to_succeed()
     expect(pwd_result.stdout).to_match(r"^/")
     # Step 3 checks the agent's transcript. The modal claude agent in the recipe
-    # produces a common transcript; the command-type stand-in here does not, so
-    # the exact recipe command reports that limitation. We still run the recipe
-    # command verbatim and assert on its real, observable behavior.
+    # writes a common transcript; the command-type stand-in here writes none, so
+    # the exact recipe command reports that nothing was found. We still run the
+    # recipe command verbatim and assert on its real, observable behavior.
     transcript_result = e2e.run("mngr transcript fix-bug --tail 3", comment="3. check transcript")
     expect(transcript_result).to_fail()
-    expect(transcript_result.stderr).to_contain("does not produce a common transcript")
+    expect(transcript_result.stderr).to_contain("No common transcript found")
     expect(e2e.run('mngr msg fix-bug -m "lint please"', comment="4. send a follow-up message")).to_succeed()
     # Step 5 connects to the agent to review interactively. `mngr conn` resolves
     # the agent and then hands off to an interactive tmux attach. The e2e harness

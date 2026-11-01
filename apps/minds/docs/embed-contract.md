@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 12 (tracks `CONTRACT_VERSION` in
+Version: 13 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v12)
+## Message inventory (v13)
 
 ### workspace -> embedder
 
@@ -56,7 +56,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-help` | `{ agentId? }` | Open the get-help / report-a-bug modal, optionally scoped to a workspace. |
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
-| `minds:open-share-settings` | `{ serviceName }` | Open the shell's share panel for this workspace, focused on that service. Fire-and-forget (no ack). |
+| `minds:open-share-settings` | `{ serviceName? }` | Open the shell's share panel for this workspace, focused on that service, or on the whole workspace when `serviceName` is absent. A present name must match `SERVICE_NAME_PATTERN`. Fire-and-forget (no ack). |
 | `minds:workspace-ready` | `{ opensLinks?, opensCustomSchemeLinks? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`, external links included; `false` or absent means it does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme links (`slack:`, `vscode:`) in `minds:open-link` too. A value that is not a boolean rejects the message. |
 | `minds:provider-sign-in` | `{ url, flowId }` | A provider sign-in is waiting on the user in a browser. The embedder listens for the sign-in's loopback callback, relays it into the workspace's flow `flowId`, and opens `url`. It replies with `minds:provider-sign-in-ack`. |
 | `minds:provider-sign-in-end` | `{ flowId }` | The sign-in `flowId` has ended (signed in, failed, or abandoned); the embedder stops listening on its port. Fire-and-forget (no ack). |
@@ -285,3 +285,8 @@ payloads -- to the console.
   `WINDOW_ID_PATTERN`, the flags as booleans, the error as a short string. A
   workspace facing an older chrome never sees `immersive: true` and never
   asks; an older workspace ignores `immersive-changed`.
+- **13** -- `open-share-settings`'s `serviceName` became optional: absent, the
+  share panel opens on the whole workspace (what the workspace shell's tray
+  share button of the multiplayer spec is to send). A chrome from before v13
+  drops the nameless message, so that button would do nothing there; a v13
+  chrome still takes the named form from an older workspace.

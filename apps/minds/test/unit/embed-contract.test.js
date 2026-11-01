@@ -197,8 +197,8 @@ test('embedder endpoint validates payload shapes before dispatch', () => {
   from({ type: contract.OPEN_REQUEST_MODAL });
   from({ type: contract.OPEN_HELP, agentId: 'agent-XYZ!' });
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: 'agent-abc123' });
-  // serviceName is required: absent, off-shape, and over-length are dropped.
-  from({ type: contract.OPEN_SHARE_SETTINGS });
+  // serviceName is optional (absent means the whole workspace, v13), but a present one is held to
+  // its shape: empty, off-shape, and over-length are dropped.
   from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: '' });
   from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'web/../admin' });
   from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'a'.repeat(65) });
@@ -208,12 +208,14 @@ test('embedder endpoint validates payload shapes before dispatch', () => {
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: 'host-abc123' });
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: '' });
   from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'system_interface' });
+  from({ type: contract.OPEN_SHARE_SETTINGS });
   assert.deepStrictEqual(seen, [
     ['help', 'agent-abc123'],
     ['help', undefined],
     ['keys', 'host-abc123'],
     ['keys', ''],
     ['share', 'system_interface'],
+    ['share', undefined],
   ]);
 });
 
@@ -505,8 +507,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 12', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '12');
+test('the contract is at version 13', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '13');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {

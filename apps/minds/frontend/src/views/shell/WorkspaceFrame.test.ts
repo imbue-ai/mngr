@@ -489,9 +489,9 @@ describe("buildEmbedHandlers", () => {
     expect(acks).toEqual([]);
   });
 
-  it("lands the Share tab untargeted when the name is absent", () => {
-    // Unreachable through the real endpoint (the validator requires
-    // serviceName); pins the handler's own tolerance.
+  it("lands the Share tab on the whole workspace when the name is absent", () => {
+    // The workspace shell's tray share button (the multiplayer spec) is to send the message
+    // without a name (contract v13).
     const { contract, handlers, navigations } = makeHandlers();
     handlers[contract.OPEN_SHARE_SETTINGS]({});
     expect(navigations).toEqual([

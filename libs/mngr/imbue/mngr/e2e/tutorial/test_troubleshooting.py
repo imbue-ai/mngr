@@ -153,22 +153,23 @@ def test_troubleshoot_transcript_for_errors(e2e: E2eSession) -> None:
 
     Scope: in the tutorial my-task is a transcript-producing (claude) agent; here
     we substitute the lightweight `command` agent used throughout these tutorial
-    tests, which deliberately produces no common transcript. So the exact tutorial
-    command runs but fails fast with a clear, actionable diagnostic naming the
-    agent and stating it "does not produce a common transcript" -- itself a useful
-    troubleshooting behavior to lock in.
+    tests, which writes no common transcript. So the exact tutorial command runs
+    but fails fast with a clear, actionable diagnostic naming the agent and
+    stating no common transcript was found -- itself a useful troubleshooting
+    behavior to lock in.
 
     Unlike the sibling diagnostics, this test is intentionally not marked
-    @pytest.mark.modal: the diagnostic is a client-side agent-type check, and
-    `mngr transcript` resolves the agent via the local discovery hint, so it never
-    scans the modal provider. The other thin tests use full-discovery commands
-    (mngr list/event) that do reach modal.
+    @pytest.mark.modal: the diagnostic is a client-side read of the agent's local
+    events directory (where no transcript file exists), and `mngr transcript`
+    resolves the agent via the local discovery hint, so it never scans the modal
+    provider. The other thin tests use full-discovery commands (mngr list/event)
+    that do reach modal.
     """
     _create_my_task(e2e, 101023)
     result = e2e.run("mngr transcript my-task --tail 10", comment="check transcript for error messages")
     expect(result).to_fail()
     expect(result.stderr).to_contain("my-task")
-    expect(result.stderr).to_contain("does not produce a common transcript")
+    expect(result.stderr).to_contain("No common transcript found")
 
 
 @pytest.mark.release
