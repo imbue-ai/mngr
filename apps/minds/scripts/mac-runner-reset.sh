@@ -167,8 +167,11 @@ if [[ -n "$URL" ]]; then
   log "downloading fresh app from $URL"
   TMP=$(mktemp -d)
   trap 'rm -rf "$TMP"' EXIT
-  # Install must fail loud: a run must never proceed against a stale app.
-  curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
+  # Install must fail loud: a run must never proceed against a stale app. The
+  # retries cover the CDN's transient HTTP/2 INTERNAL_ERROR resets, which
+  # otherwise fail the whole run in seconds.
+  curl -fSL --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors -o "$TMP/minds.zip" "$URL" \
+    || { log "ERROR: app download failed"; exit 1; }
   unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
   sudo mv "$TMP/$APP_NAME.app" "$APP_BUNDLE" || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
