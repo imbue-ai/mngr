@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr gcp prepare` creates a published-ports firewall rule for the config's `firewall_published_ports` (removed by `cleanup`); a `create --publish` must name only listed ports.
+
+### Fixed
+
+- Fixed: The GCP provider no longer probes the GCE metadata server (which raised the macOS "find devices on your local network" prompt) unless `use_gce_metadata_server = true`.
+
 ## [v0.2.1] - 2026-10-28
 
 ## [v0.2.0] - 2026-10-22

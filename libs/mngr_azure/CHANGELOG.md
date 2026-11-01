@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr azure prepare` opens the config's `firewall_published_ports` on the NSG; a `create --publish` must name only listed ports (published-ports contract).
+
+### Fixed
+
+- Fixed: The Azure provider no longer probes the instance metadata service (which raised the macOS "find devices on your local network" prompt) unless `use_managed_identity = true`.
+
 ## [v0.2.1] - 2026-10-28
 
 ## [v0.2.0] - 2026-10-22

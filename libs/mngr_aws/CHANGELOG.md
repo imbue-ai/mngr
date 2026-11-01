@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr aws prepare` opens the config's `firewall_published_ports` in its security group; a `create --publish` must name only listed ports (published-ports contract).
+
 ## [v0.2.1] - 2026-10-28
 
 ## [v0.2.0] - 2026-10-22

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The lima provider forwards ports declared with `mngr create --publish`, recording their loopback endpoints and keeping the rules across stop/start/resize (published-ports contract).
+
 ## [v0.2.1] - 2026-10-28
 
 ### Security

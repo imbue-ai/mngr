@@ -4,6 +4,15 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+The Azure provider's `DefaultAzureCredential` no longer tries a managed identity unless `use_managed_identity = true`, so it never probes the Azure instance metadata service (169.254.169.254). On macOS that probe raised the "find devices on your local network" prompt for the app running mngr, such as Imbue Studio, whenever an Azure subscription was resolvable. Set `use_managed_identity = true` when running mngr on an Azure VM or Container App that should authenticate with its managed identity; the Azure credentials error now names this option.
+
+## 2026-10-17
+
+`mngr azure prepare` adds an inbound allow rule from every source to the NSG for each port listed in the provider config's `firewall_published_ports` (or passed as `--publish PORT[/PROTOCOL]`), beside the SSH rules.
+A `mngr create --publish` on this provider must declare only ports in that list; any other declaration fails before any resource is created (`specs/published-ports/spec.md`).
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

@@ -4,6 +4,77 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+- The app-release runbook (`docs/deploy/ops/app-release.md`) records that a
+  channel publish does *not* start a smoke run, and gives the command to
+  dispatch one by hand against the build a promotion just published.
+
+- The services runbook (`docs/deploy/ops/services.md`) records that a
+  successful production deploy dispatches the Imbue Studio smoke run, where to
+  find the run, and what `--skip-smoke` does.
+
+The permission dialog for a catalog service that signs in through a browser now also offers to take the credentials typed in. The browser sign-in stays the default; a footnote under the Approve and Deny buttons ("Already have a token? Paste it instead of signing in") swaps it for the same credential form a service with no browser sign-in gets, with a way back to the sign-in on the form. The dialog's copy names what the form asks for (a token, for every browser service in the catalog) rather than "credentials". Approve then stores the typed values and grants without opening a browser, asking for an account name when the service already has an account, exactly as it does for AWS and the like. The switch only appears while the selected account needs credentials, and only when latchkey says the service takes set credentials and Imbue Studio can build a form from the service's credential command; a browser service that takes none, or whose command it cannot read, keeps the sign-in alone rather than showing an error.
+
+The predefined detail payload carries `is_browser_auth_supported` and now sends `manual_credentials` for browser services too; `will_open_browser` is gone, since the dialog reads the live account selection instead.
+
+The creation page no longer asks what you want to build or whether to see examples. Under the setup line, a first workspace's creation page now says "A few examples of how people build with Studio:" over a short recording, with no caption under it, and shows the loading box right away. The workspace's first chat carries the same turns and always closes on the welcome that asks what is annoying, overwhelming, or tedious. The create form's advanced switch is now "Show onboarding examples?".
+
+On the start flow's where-to-run question, the line under "Imbue Cloud — Recommended" now spans only the table's text rather than the chat's full width, and "Run it on this computer" and "Use your own cloud" now sit as links to the left of "Use Imbue Cloud" rather than under it.
+
+The returning user's log-in moved from that question to the start flow's title bar, as "Already set up? Log in" (formerly "I have an account (log in)"), so it can be pressed at any point of the onboarding, including while the opening lines are still typing and before the error-reporting question is answered. The title bar's logo there is a little larger and sits a little lower, where the loading screen now parks it too.
+
+The workspace docs (README, overview, glossary) describe the bootstrap as `.venv/bin/bootstrap`, started after a `--frozen` sync, matching the paired template change that keeps any `uv` process from staying resident above supervisord.
+
+The `agent_creator` comments no longer say the template forwards `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` into a new workspace: a workspace signs in to a provider account from its own UI, and the paired template change drops the last two templates (gcp and azure) that still forwarded them.
+
+The in-workspace programs that run a workspace's own one-offs -- the backup and update programs' `mngr` calls, the update dispatcher's and the account probe's run of an older template's account resolver -- use `uv run --no-sync`, so they never relock or sync the workspace's environment.
+
+The pool-slice verification script in `docs/deploy/ops/pool-hosts.md` lists a parked slice's agents with `uv run --no-sync mngr list` too, so the probe, which runs as root, never syncs the workspace's environment.
+
+The published `imbue-studio` skill's frontmatter carries `metadata.author: imbue`, the marker the paired template's built-in skills carry; the template vendors this skill.
+
+# Share settings for the whole workspace (embed contract v13)
+
+`minds:open-share-settings` now takes an optional `serviceName`: a message
+without one opens the workspace-options panel's Share tab on the whole
+workspace rather than on one app, which is what the workspace shell's tray
+share button (the multiplayer refinements in default-workspace-template) is to
+send.
+A present name is still held to `SERVICE_NAME_PATTERN`; an empty string is
+refused as before. A desktop from before v13 (v12 added the
+Screen's immersive mode) drops the nameless message.
+
+- Browser-created alpha workspaces pin to `minds-v0.9.5`, now that production is baked at that tag, so the alpha channel serves Imbue Studio 0.9.5 on mac, Linux and the web.
+
+- Recorded the Imbue Studio 0.9.4 release in `docs/deploy/history/minds-v0.9.4.md`: the cut from a frozen `main`, the template re-cut that brought in #670 with #1252, the pair and tag runs, the services deploys on both tiers, the staging rehearsal, the production bakes (including the 2026-10-29 and 2026-10-31 top-ups and the row a workspace move evicted), and the alpha, beta and stable promotions, stable going from 20% to 100%.
+
+- Recorded the Imbue Studio 0.9.5 release in `docs/deploy/history/minds-v0.9.5.md`: the fast-forward cut from `main`, the tag run, the production bake of twelve rows with no services deploy and no staging rehearsal, the alpha promotion on mac, Linux and the web, and what was left undone.
+
+- Reset `docs/deploy/next_deploy.md` after both releases; corrected the 0.9.4 changelog to say the web chrome's sign-out key fix ships through the services deploy; and `docs/deploy/ops/services.md`'s diff of what a deploy would ship now covers everything the connector image ships: its `frontend/`, `frontend_web/` and `email_templates/` trees, its image requirements, and the `modal_app_kit`, `imbue_common` and gen-2 slice-script sources.
+
+On a fresh install, Imbue Studio now creates its mngr profile at startup, before mngr is loaded, and writes its settings overrides into it straight away. The default AWS, GCP, Azure, Modal and Imbue Cloud provider instances are therefore disabled from the first mngr process on, so the first provider discovery no longer builds them.
+
+## 2026-10-17
+
+- The embed contract is at version 12: `minds:immersive-request` (workspace to chrome, `{ windowId, on }`) and `minds:immersive-changed` (chrome to workspace, `{ on, keyboardLocked, error? }`), plus the optional `immersive: true` field on `minds:embedder-capabilities`. A workspace Screen window can ask the Imbue Studio chrome for immersive mode: the workspace frame goes Fullscreen-API fullscreen with the keyboard locked, so every key (Ctrl+W, Ctrl+N, F11, Escape included) reaches the remote desktop; holding Escape leaves. The chrome announces the capability, ends the mode whenever fullscreen ends by any route, and reports every transition. The frame's sandbox list gains `allow-pointer-lock`.
+
+- The desktop app silences its application-menu accelerators and its `before-input-event` key relays (`escape-pressed`, `close-active-tab`) while a window's frame is immersive, and installs a default-session permission handler: Electron's grant-everything default stays, written down, and `fullscreen`, `keyboardLock` and `pointerLock` are granted only to a page whose top-level origin is the chrome's own, so no Chrome lock prompt appears inside the app.
+
+- Two agent-reachable routes for the workspace Screen's service, through the latchkey `minds-api-proxy`: `GET /api/v1/agents/<agent_id>/media-endpoints` answers where the workspace host's published ports are reachable from this desktop (read from the host record discovery keeps current; empty for a host with none), and `GET /api/v1/agents/<agent_id>/ice-servers` answers TURN relay servers minted from the connector for the signed-in account that owns the workspace, cached per account and refreshed at half life, or an empty list with status 200 when no account is signed in, when the connector refuses, or when the workspace's primary agent carries the `network_restricted=true` label (a relay credential would be an egress tunnel around the host's network restriction). The desktop stamps that label at create when the Modal build options it passes restrict the sandbox's outbound network (`--offline`, `--cidr-allowlist`; the create form offers neither today), and every mint names the workspace's host as `workspace_id` so the connector's credential ledger attributes it. The discovery consumer and `mngr list` parser now carry `host.published_endpoints`.
+
+- Tier bring-up (`docs/deploy/setup/tier-bringup.md`, `vault.md`) covers the Cloudflare Realtime TURN key the connector mints the Screen's relay credentials from (`secrets/minds/<tier>/turn`: the key id and the key API token; the usage sweep queries analytics with the tier's existing `CLOUDFLARE_API_TOKEN`, which also needs `Realtime: Edit` to create the key through the API) and the Cloudflare billing notification on the key's monthly spend; `docs/deploy/ops/turn-kill-switch.md` is the runbook for rotating the key, which invalidates every outstanding credential at once, and for the narrower per-account measures.
+
+- Every tier's `deploy.toml` gains `max_turn_relay_gb_per_month` on every plan (20 / 50 / 200 GB for free / explorer / ally, 0 for guest) and the `turn` secret in `[secrets] services`, which `minds-admin env deploy` pushes from `secrets/minds/<tier>/turn`; the entry must exist (empty values allowed) before a tier's next deploy.
+
+- `docs/deploy/setup/host-pool-setup.md` explains that a pool host publishes exactly the ports the bake's create templates declare, that pool hosts baked before published ports existed never match a lease that declares them, and that the pool must be rebaked at a template tag that starts declaring ports before that tag is promoted.
+
+- `test_mngr_settings.py::test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_stream` no longer resets its stub connector's refresh connection: CI once saw the stub reset it instead of answering `200 {"status": "ERROR"}`, so the stub now drains the refresh request body before answering, and the flaky mark it carried while CI confirmed that is gone.
+
+- A new Imbue Cloud (or other remote) workspace's own latchkey gateway now receives the desktop's policy -- the baseline rules plus the workspace's registered agent -- instead of staying on the rule-less deny-all default it was seeded with, which answered every `/minds-api-proxy/api/v1/agents/<id>/...` call from inside the workspace (the Screen's `media-endpoints` and `ice-servers` among them) with `403 Request not permitted`. The agent auto-registration's push to the machine is held when the machine has not been provisioned yet (the provisioning pass records the machine's key a few seconds after `mngr create` returns, and the registration used to find no machine in between): the desktop polls for the machine's key for up to ten minutes and carries the push the moment it appears, and a push still held after that goes out on the next resolver change that finds the key; and a read of the machine no longer adopts its empty policy over the desktop's copy; it seeds the machine from the copy instead. An already-affected workspace recovers on the next app start without any user action: the registration rebuilds the emptied local copy from the baseline and pushes it.
+
+- The desktop's relay broker now leaves a trace of every outcome in the app's log: a mint (the account, the workspace it was attributed to and the expiry, at debug), a refusal or an unreachable connector (at warning, with the workspace), a cached credential served through a failed refresh, and an `ice-servers` answer that is empty because the app has no broker or the broker has nothing for the account (at debug, naming the agent), so a Screen that fell back to the screencast can be explained from `minds.log`.
+
 ## 2026-10-30
 
 - Removed the unmaintained full-lifecycle Electron harness, `apps/minds/scripts/electron_full_flow_e2e.py` (formerly run by `just minds-test-electron-flow`). It had not got past its create step since the create form stopped rendering `#configure-toggle` on 2026-06-24.

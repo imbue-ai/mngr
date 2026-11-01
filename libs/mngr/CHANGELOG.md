@@ -6,6 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr create --publish <port>[/<protocol>]` declares ports to publish on a new host (create-template key `publish`), reported as `published_endpoints` by `mngr create`/`mngr list --format json` and the discovery stream.
+
+### Changed
+
+- Changed: A strict `mngr message` send that no evidence confirms is now settled from the agent's screen before being reported, adding the `NOT_SUBMITTED` send-failure kind.
+- Changed: `mngr transcript` now renders any agent that writes the on-disk common-transcript convention, not only those whose class implements the mixin.
+
 ### Fixed
 
 - Fixed: `mngr connect` (and `create`/`start --connect`) now recovers when its SSH session to a remote agent drops (e.g. after the laptop sleeps): it resets the terminal modes the session enabled, restores and restarts a host that paused while disconnected, and exits non-zero when the session cannot be reattached.

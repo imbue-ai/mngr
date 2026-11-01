@@ -14,6 +14,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: The VPS gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing truncated Slack replies for datalib.
 - Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
+- Fixed: A machine policy with no rules is treated as unprovisioned, so a read or provisioning pass seeds it from this computer's policy instead of adopting the deny-all default.
 
 ## [v0.2.1] - 2026-10-28
 

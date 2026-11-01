@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Imbue Cloud slices publish the ports a create declares, reported as `published_endpoints`; `ShareInfo` and the lease wire types gain `published_ports`/`media_port` (published-ports contract).
+
 ### Changed
 
 - Changed: The connector client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
@@ -13,6 +17,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Removed
 
 - Removed: The connector client's unused `auth_get_user` method and the unauthenticated `GET /auth/users/{user_id}` route it bound to; `GET /users/{user_id}` (signed-in callers only) remains the way to read a user's identity record by id.
+
+### Fixed
+
+- Fixed: The slice bake's derived-image step runs the template's Screen env.d unit instead of a deleted script, so seeding a box image against a post-Screen-migration template works again.
 
 ## [v0.3.1] - 2026-10-28
 

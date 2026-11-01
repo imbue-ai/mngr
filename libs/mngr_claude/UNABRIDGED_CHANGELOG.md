@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+A message sent to a claude agent that is still running its SessionStart hooks now confirms within a second or two instead of being reported as unconfirmed after the 90 s window. Claude takes the message off its input box at once but records it in its transcript only when the hooks finish; a new `screen-taken` evidence probe watches its screen for the message shown submitted above an input row that no longer holds it. If the window still ends unconfirmed, the input box settles it: the message shown submitted as a turn the screen did not show before the send, with an empty box, means claude holds it and the send succeeds; the message still in the box means claude never took it, so it is cleared from there and the send fails as `not_submitted`, and sending it again delivers it once.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

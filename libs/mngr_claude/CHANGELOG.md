@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: A message sent to a claude agent still running its SessionStart hooks now confirms within seconds instead of being reported unconfirmed after the 90s window.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Added

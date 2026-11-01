@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The VPS providers publish ports declared with `mngr create --publish` (recorded as `published_endpoints`); cloud VPS providers gain a `firewall_published_ports` config key their `prepare` opens (published-ports contract).
+
 ## [v0.1.11] - 2026-10-28
 
 ## [v0.1.10] - 2026-10-22

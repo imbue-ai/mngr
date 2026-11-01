@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+When the Modal workspace ran out of deployed-app slots, every Modal test that deploys failed at once, and none of them said so. The failure arrived as an undifferentiated `MngrError`, and the acceptance fixture -- which retries the ephemeral-app cap, worded almost identically -- polled for four minutes per test on a condition that cannot clear, logging the wrong cause the whole time.
+
+`mngr create` now raises `ModalDeployedAppLimitMngrError`, which names the cap and tells you how to free slots, so a burst of these is one greppable line. The acceptance fixture no longer retries it: only the ephemeral-app cap, which really does drain as concurrent runs finish, is still worth waiting on.
+
+## 2026-10-17
+
+The modal provider publishes the TCP ports declared with `mngr create --publish <port>` (`specs/published-ports/spec.md`): each becomes a sandbox tunnel beside the SSH one, the tunnel's host and port are read back after every sandbox start (a snapshot restore allocates fresh tunnels) and recorded on the host for `mngr list --format json`.
+A `udp` declaration fails the create before any sandbox is created, since Modal tunnels carry TCP only, and declaring port 22 is refused since it is the SSH tunnel.
+
 ## 2026-10-29
 
 The snapshot-and-shutdown route test uses `httpx2` instead of `httpx`, matching the rest of the repo.

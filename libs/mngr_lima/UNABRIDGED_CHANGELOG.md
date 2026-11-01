@@ -4,6 +4,11 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-17
+
+The lima provider forwards the ports declared with `mngr create --publish <port>[/<protocol>]` (`specs/published-ports/spec.md`): a free loopback host port is chosen at create (one number for a guest port declared with both protocols), one `portForwards` rule per declaration is written into the instance's lima config ahead of the rules that ignore every other guest port, and the endpoints (`127.0.0.1` plus the chosen port) are recorded on the host for `mngr list --format json`.
+The rules stay in the instance's config across stop, start and `mngr lima resize`, UDP rides on lima's default gRPC forwarder, and declaring port 22 is refused since lima forwards the VM's sshd itself.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The Modal provider publishes TCP ports declared with `mngr create --publish` as sandbox tunnels, reported as `host.published_endpoints` (UDP and port 22 refused).
+
+### Changed
+
+- Changed: `mngr create` raises `ModalDeployedAppLimitMngrError` when the Modal workspace is out of deployed-app slots, naming the cap and how to free slots.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Security

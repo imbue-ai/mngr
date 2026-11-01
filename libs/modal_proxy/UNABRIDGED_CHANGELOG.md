@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+Modal refuses a deploy once the workspace holds its maximum number of deployed apps, and it words that refusal almost exactly like the ephemeral-app cap. The two are not alike: an ephemeral app drains on its own as concurrent runs finish, while a deployed app leaves the count only when something stops it or deletes its environment. Treating them as one meant waiting out a condition that no wait can clear.
+
+`modal_proxy` now tells them apart. `is_deployed_app_limit_error` matches the deployed-app wording specifically, and a refusal raises the new `ModalProxyDeployedAppLimitError`, which is deliberately neither a transient error nor a `ModalProxyDeployRetryableError`, so no retry -- the transient one or a caller's deploy retry -- waits on it. The cap is read off the message before the wire status is consulted -- Modal sends it as `RESOURCE_EXHAUSTED`, which would otherwise have been translated to a retryable rate-limit error and sent the transient retry spinning.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

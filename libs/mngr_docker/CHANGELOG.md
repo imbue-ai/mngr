@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: The docker provider publishes ports declared with `mngr create --publish`, recording them as `host.published_endpoints` and replaying them on snapshot restore (published-ports contract).
+
 ## [v0.1.1] - 2026-10-28
 
 ## [v0.1.0] - 2026-10-22

@@ -4,6 +4,15 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31
+
+The GCP provider no longer probes the GCE metadata server (169.254.169.254) for credentials unless `use_gce_metadata_server = true`. On a machine with neither `GOOGLE_APPLICATION_CREDENTIALS` nor a `gcloud auth application-default login` file, provider discovery now fails fast with a credentials error instead of contacting that link-local address. On macOS that contact raised the "find devices on your local network" prompt for Imbue Studio on a fresh install. Set `use_gce_metadata_server = true` to authenticate through a GCE / Cloud Run / GKE instance's attached service account.
+
+## 2026-10-17
+
+`mngr gcp prepare` creates a second tag-targeted firewall rule (`<firewall_name>-published`) opening the ports listed in the provider config's `firewall_published_ports` (or passed as `--publish PORT[/PROTOCOL]`) from every source, patches that rule's ports when the list changed since it was created, and `mngr gcp cleanup` deletes it beside the SSH rule.
+A `mngr create --publish` on this provider must declare only ports in that list; any other declaration fails before any resource is created (`specs/published-ports/spec.md`).
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

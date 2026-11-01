@@ -168,6 +168,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Promoted Imbue Studio 0.9.4 to the beta desktop and browser channels (beta workspaces pin `minds-v0.9.4`, mac now requires macOS 13); stable stays 0.8.5.
 - Added: Cut the Imbue Studio 0.9.5 release and promoted it to the desktop alpha channel — a patch release carrying a redesigned workspace-update experience (titlebar status pill, rebuilt Settings > Updates tab, per-workspace update settings), HTTP clients moved to httpx2, first-run certificate verification against the OS trust store, >2 GiB backup exports, and bundled Latchkey 3.21.0.
 - Added: Bundled Latchkey 3.21.0 adds the Asana connector, shown with its brand mark in the Permissions tab.
+- Added: Workspace Screen immersive mode (embed contract v12): a Screen window can go fullscreen with the keyboard locked so every key reaches the remote desktop.
+- Added: Agent-reachable `media-endpoints` and `ice-servers` routes (per-account Cloudflare TURN credentials) for the workspace Screen, via the latchkey `minds-api-proxy`.
+- Added: `minds:open-share-settings` accepts an optional `serviceName` to open the whole-workspace Share tab (embed contract v13).
+- Added: The browser sign-in permission dialog can accept a pasted token instead of opening a browser.
 
 ### Changed
 
@@ -359,6 +363,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: A popped-out window no longer merges back when dragged over the window showing its workspace; its close control and the taskbar's "Bring back to desktop" remain the ways back, and the re-dock drop target and desktop ghost are gone.
 - Changed: The backup, restore and apply-update gates count a chat whose state can't be read (UNKNOWN) as running, so they don't run underneath a live chat on a loaded workspace.
 - Changed: Completed the Imbue Studio 0.9.4 stable rollout to 100% of mac (macOS 13+) and Linux installs; macOS 12 stays on 0.8.5.
+- Changed: Streamlined the workspace creation/onboarding page, dropping the build-goal and examples questions and moving returning-user log-in to the title bar.
+- Changed: On a fresh install, Imbue Studio creates its mngr profile at startup, disabling the default cloud providers from the first mngr process.
 
 ### Deprecated
 
@@ -526,6 +532,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Exporting a workspace backup as a zip no longer fails with a 500 when the snapshot contains a file larger than 2 GiB (zip entries now use ZIP64 headers).
 - Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
 - Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
+- Fixed: A new remote workspace's latchkey gateway now receives the desktop's policy instead of a deny-all default that had rejected the Screen's in-workspace API calls.
 
 ### Security
 
