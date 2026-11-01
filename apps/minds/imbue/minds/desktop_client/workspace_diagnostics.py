@@ -34,19 +34,28 @@ background -- cannot see each other's files, nothing ever needs deleting up
 front, and no Sentry attachment group can sweep a staged file onto an
 unrelated event. Leftover staging is the operating system's ordinary temp
 cleanup's to reclaim.
+
+Collections of one workspace never overlap, though: ``WorkspaceCollectionQueue``
+runs them one at a time, and reports that wait together for the same boxes
+share one collection and its staged archive.
 """
 
 import base64
 import os
 import tempfile
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
@@ -67,10 +76,11 @@ from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 # is one line of base64 on stdout, decoding to the archive.
 WORKSPACE_COLLECTOR_PATH: Final[str] = "/home/user/workspace/system/scripts/collect_bug_report_diagnostics.py"
 
-# Whole-collection budget. Passed to ``mngr exec --timeout`` (capping the
-# in-container work) and used as the outer subprocess timeout (capping the
-# provider round-trip on top of it), so a wedged workspace cannot stretch a bug
-# report's collection beyond this. The collector carries its own, shorter
+# Whole-collection budget. Passed to ``mngr exec --timeout`` and used as the
+# outer subprocess timeout, so a wedged workspace cannot hold a bug report's
+# collection open beyond this. Neither stops the collector inside the
+# workspace: an exec that ends early leaves it to finish on its own, bounded by
+# its own step timeouts. The collector carries its own, shorter
 # scanner timeout so a slow secret scan degrades to a withheld-content note
 # instead of blowing the whole budget.
 #
@@ -150,6 +160,70 @@ class WorkspaceCollectionResult(FrozenModel):
     )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+
+# What a report sharing a collection is told when that collection raised; the report that ran it logged why.
+_SHARED_COLLECTION_FAILED_NOTE: Final[str] = (
+    "workspace collection failed while another report filed from this workspace was running it"
+)
+
+# One collection: the workspace, and whether its logs and its chats were asked for.
+_CollectionKey = tuple[str, bool, bool]
+
+
+class WorkspaceCollectionQueue(MutableModel):
+    """Runs one bug-report collection at a time per workspace.
+
+    A report filed while its workspace is still collecting for an earlier one waits for that collection to end and
+    then collects afresh, rather than running a second collection beside it on a workspace already slow to answer,
+    or sharing one that started before it was filed and so may miss what it reports. Reports that wait together for
+    the same boxes share the one collection that runs next.
+    """
+
+    _waiting_collection_by_key: dict[_CollectionKey, Future[WorkspaceCollectionResult]] = PrivateAttr(
+        default_factory=dict
+    )
+    _running_lock_by_workspace_agent_id: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def collect_fresh(
+        self,
+        workspace_agent_id: str,
+        include_logs: bool,
+        include_transcript: bool,
+        collect: Callable[[], WorkspaceCollectionResult],
+    ) -> WorkspaceCollectionResult:
+        """The result of a collection that starts after this call, once the workspace has no other running.
+
+        That is ``collect``'s result, or the result of the same collection another report is already waiting to run.
+        """
+        key: _CollectionKey = (workspace_agent_id, include_logs, include_transcript)
+        owned: Future[WorkspaceCollectionResult] = Future()
+        with self._lock:
+            waiting = self._waiting_collection_by_key.get(key)
+            if waiting is None:
+                self._waiting_collection_by_key[key] = owned
+            running_lock = self._running_lock_by_workspace_agent_id.setdefault(workspace_agent_id, threading.Lock())
+        if waiting is not None:
+            logger.info("Joining the workspace collection already queued for {}", workspace_agent_id)
+            return waiting.result()
+
+        if not running_lock.acquire(blocking=False):
+            logger.info("Queueing a workspace collection for {} behind the one running", workspace_agent_id)
+            running_lock.acquire()
+        try:
+            # Once it starts, a collection takes no more sharers: a report filed from now on needs a later one.
+            with self._lock:
+                del self._waiting_collection_by_key[key]
+            # A collection that raised still resolves its sharers, with a note their status documents can carry.
+            result = WorkspaceCollectionResult(note=_SHARED_COLLECTION_FAILED_NOTE)
+            try:
+                result = collect()
+            finally:
+                owned.set_result(result)
+        finally:
+            running_lock.release()
+        return result
 
 
 def make_staging_dir() -> Path:

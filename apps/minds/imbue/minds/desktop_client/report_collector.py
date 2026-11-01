@@ -505,12 +505,17 @@ def collect_and_upload_report_attachments(*, pending: _PendingReportCollection, 
     (or the root group) can see it.
     """
     logger.info("Collecting the bug-report workspace archive for event {} in the background", event_id)
-    result = _collect_for_report(
-        pending.state,
-        workspace_agent_id=pending.workspace_agent_id,
-        include_logs=pending.include_logs,
-        include_transcript=pending.include_transcript,
-        staging_dir=pending.staging_dir,
+    result = pending.state.workspace_collection_queue.collect_fresh(
+        pending.workspace_agent_id,
+        pending.include_logs,
+        pending.include_transcript,
+        lambda: _collect_for_report(
+            pending.state,
+            workspace_agent_id=pending.workspace_agent_id,
+            include_logs=pending.include_logs,
+            include_transcript=pending.include_transcript,
+            staging_dir=pending.staging_dir,
+        ),
     )
     if result.staged_zip_path is not None:
         pending.uploader.upload_reserved_report_file(pending.reserved_zip_key, result.staged_zip_path)
