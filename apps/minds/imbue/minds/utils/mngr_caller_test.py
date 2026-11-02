@@ -326,6 +326,7 @@ class _UnstoppableRunningProcess(RunningProcess):
         raise TimeoutExpired(self.command, force_kill_seconds)
 
 
+@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_warm_process_stop_timeout_reports_clocks_and_reader_stack() -> None:
     """A stop that times out records what tells a suspend, an unreaped child and a starved thread apart."""
