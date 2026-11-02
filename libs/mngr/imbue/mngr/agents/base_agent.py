@@ -493,7 +493,8 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Default just runs start_action without waiting for readiness confirmation.
 
         Implementations that override this should raise AgentStartError if the agent
-        doesn't signal readiness within the timeout.
+        doesn't signal readiness within the timeout, and SendMessageError if it cannot
+        take input (e.g. a dialog holds it).
         """
         start_action()
 

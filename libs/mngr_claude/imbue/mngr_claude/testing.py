@@ -10,6 +10,25 @@ STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT: Final[str] = (
 # A human typed the hint's words.
 STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT: Final[str] = '!\xa0\x1b[39mTry "how do I log an error?"\x1b[7m \x1b[0m'
 
+# Captured from the claude build `CLAUDE_CODE_VERSION` names, started with --dangerously-skip-permissions
+# and no skipDangerousModePermissionPrompt in its settings. Esc on it exits Claude.
+BYPASS_PERMISSIONS_WARNING_PANE: Final[str] = (
+    "────────────────────────────────────────\n"
+    "  WARNING: Claude Code running in Bypass Permissions mode\n"
+    "\n"
+    "  In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\n"
+    "  This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.\n"
+    "\n"
+    "  By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\n"
+    "\n"
+    "  https://code.claude.com/docs/en/security\n"
+    "\n"
+    "  ❯ No, exit\n"
+    "    Yes, I accept\n"
+    "\n"
+    "  Enter to confirm · Esc to cancel\n"
+)
+
 
 def _build_styled_input_box_pane(rule_colour_sgr: str, styled_input_row: str, styled_footer: str) -> str:
     rule = rule_colour_sgr + "─" * 40

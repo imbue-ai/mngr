@@ -27,6 +27,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SendFailureKind
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
@@ -55,6 +57,7 @@ from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.progress import NullProgressReporter
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr.utils.testing import make_ctx_with_plugins
+from imbue.mngr.utils.testing import tmux_session_cleanup
 
 
 def test_write_host_env_vars_writes_explicit_env_vars(
@@ -131,11 +134,6 @@ def test_write_host_env_vars_skips_when_empty(
     assert host_env == {}
 
 
-# =============================================================================
-# _run_post_host_create_commands Tests
-# =============================================================================
-
-
 def test_run_post_host_create_commands_no_op_on_empty_tuple(
     local_host: Host,
     temp_host_dir: Path,
@@ -183,11 +181,6 @@ def test_run_post_host_create_commands_raises_on_first_failure(
     assert not marker.exists()
 
 
-# =============================================================================
-# _run_post_host_create_outer_commands Tests
-# =============================================================================
-
-
 def test_run_post_host_create_outer_commands_no_op_on_empty_tuple(
     local_host: Host,
     temp_host_dir: Path,
@@ -212,11 +205,6 @@ def test_run_post_host_create_outer_commands_raises_when_no_outer(
     assert not marker.exists()
 
 
-# =============================================================================
-# resolve_target_host Tests
-# =============================================================================
-
-
 def test_resolve_target_host_with_existing_host(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
@@ -227,11 +215,6 @@ def test_resolve_target_host_with_existing_host(
 
     resolved = resolve_target_host(local_host, temp_mngr_ctx)
     assert resolved.id == local_host.id
-
-
-# =============================================================================
-# _generate_unique_host_name Tests
-# =============================================================================
 
 
 def test_generate_unique_host_name_avoids_existing_names(
@@ -368,12 +351,10 @@ def test_write_host_env_vars_later_env_file_overrides_earlier(
     assert host_env["SECOND_ONLY"] == "present"
 
 
-# =============================================================================
 # destroy_new_host_on_create_failure -- a host we just created for a --new-host
 # create must be torn down if a later step fails, so we never leak it (and, for
 # non-idle-shutdown providers like imbue_cloud, its lease). Gated by the debug
 # retain flag.
-# =============================================================================
 
 _RETAIN_FLAG = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
 
@@ -474,11 +455,9 @@ def test_destroy_new_host_on_create_failure_retains_host_when_debug_flag_set(
     assert provider.destroyed_host_ids == []
 
 
-# =============================================================================
 # End-to-end: a --new-host create that fails at/before the initial-message send
 # must tear the new host down (single continuous guard around the whole flow),
 # unless the debug retain flag is set.
-# =============================================================================
 
 
 @contextmanager
@@ -624,31 +603,50 @@ class _NeverReadyAgent(SendKeysAgent[AgentTypeConfig]):
         raise AgentStartError(str(self.name), "simulated readiness timeout")
 
 
+class _StartupDialogAgent(SendKeysAgent[AgentTypeConfig]):
+    """Agent whose readiness wait starts the process and then finds a dialog holding its input."""
+
+    def wait_for_ready_signal(
+        self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        start_action()
+        raise SendMessageError(str(self.name), "simulated startup dialog", SendFailureKind.INPUT_BLOCKED)
+
+
 @pytest.mark.tmux
+@pytest.mark.parametrize(
+    ("agent_class", "expected_reason"),
+    [(_NeverReadyAgent, "simulated readiness timeout"), (_StartupDialogAgent, "simulated startup dialog")],
+    ids=["readiness-timeout", "startup-dialog"],
+)
 def test_create_on_existing_host_tears_down_agent_when_readiness_wait_fails(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
+    agent_class: type[SendKeysAgent[AgentTypeConfig]],
+    expected_reason: str,
 ) -> None:
-    """A create whose readiness wait times out destroys the half-started agent.
+    """A create whose readiness wait times out or finds the input held destroys the half-started agent.
 
     The agent process is already running when the wait gives up; without the
     teardown it would linger as a registered, running agent while create()
     reports failure (the zombie the chat UI then mistakes for a live agent).
     """
-    register_agent_class("never-ready", _NeverReadyAgent)
-    register_agent_config("never-ready", AgentTypeConfig)
+    register_agent_class("failing-readiness", agent_class)
+    register_agent_config("failing-readiness", AgentTypeConfig)
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     with allow_warnings():
-        with pytest.raises(AgentStartError, match="simulated readiness timeout"):
+        with pytest.raises(
+            AgentStartError, match=f"^Failed to start agent failing-readiness-agent: {expected_reason}$"
+        ):
             create(
                 source_location=HostLocation(host=host, path=temp_work_dir),
                 target_host=host,
                 agent_options=CreateAgentOptions(
-                    name=AgentName("never-ready-agent"),
-                    agent_type=AgentTypeName("never-ready"),
+                    name=AgentName("failing-readiness-agent"),
+                    agent_type=AgentTypeName("failing-readiness"),
                     command=CommandString("sleep 60"),
                     transfer_mode=TransferMode.NONE,
                     label_options=AgentLabelOptions(),
@@ -658,6 +656,55 @@ def test_create_on_existing_host_tears_down_agent_when_readiness_wait_fails(
             )
 
     assert host.get_agents() == []
+
+
+@pytest.mark.tmux
+def test_create_update_keeps_an_existing_agent_whose_restart_cannot_take_input(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    register_agent_class("startup-dialog", _StartupDialogAgent)
+    register_agent_config("startup-dialog", AgentTypeConfig)
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    agent_name = AgentName("updated-agent")
+
+    with tmux_session_cleanup(f"{temp_mngr_ctx.config.prefix}{agent_name}"):
+        original = create(
+            source_location=HostLocation(host=host, path=temp_work_dir),
+            target_host=host,
+            agent_options=CreateAgentOptions(
+                name=agent_name,
+                agent_type=AgentTypeName(PLACEHOLDER_AGENT_TYPE),
+                command=CommandString("sleep 60"),
+                transfer_mode=TransferMode.NONE,
+                label_options=AgentLabelOptions(),
+            ),
+            mngr_ctx=temp_mngr_ctx,
+            create_work_dir=False,
+        )
+        host.stop_agents([original.agent.id])
+
+        with pytest.raises(AgentStartError, match="^Failed to start agent updated-agent: simulated startup dialog$"):
+            create(
+                source_location=HostLocation(host=host, path=temp_work_dir),
+                target_host=host,
+                agent_options=CreateAgentOptions(
+                    name=agent_name,
+                    agent_id=original.agent.id,
+                    agent_type=AgentTypeName("startup-dialog"),
+                    command=CommandString("sleep 60"),
+                    transfer_mode=TransferMode.NONE,
+                    target_path=original.agent.work_dir,
+                    label_options=AgentLabelOptions(),
+                    is_update=True,
+                ),
+                mngr_ctx=temp_mngr_ctx,
+                create_work_dir=False,
+            )
+
+        assert [agent.id for agent in host.get_agents()] == [original.agent.id]
 
 
 def test_plan_create_steps_lists_only_the_phases_that_apply() -> None:

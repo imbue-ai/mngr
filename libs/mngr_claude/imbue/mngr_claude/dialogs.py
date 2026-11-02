@@ -15,7 +15,8 @@ Three kinds of surface, told apart by what answering one costs:
   NON-BENIGN, RECOGNISED   A confirmation holding the input, where a wrong answer changes
                            something. Answered only if the operator opted in
                            (``sensibly_deal_with_dialogs``), and only ever on the option
-                           this module names for it.
+                           this module names for it. One it names no option for, such as
+                           the bypass-permissions warning, is never answered.
   UNRECOGNISED             Something owns the input and we cannot name it, so we cannot
                            know whether answering it is benign. Raised.
 
@@ -437,6 +438,14 @@ class Dialog(FrozenModel, ABC):
         contain the user's own code or a diff).
         """
 
+    def get_startup_message(self) -> str:
+        """What the user is told when this stops an agent from starting, or empty when there is no specific remedy.
+
+        Unlike :meth:`get_message` it cannot send the user to the agent's terminal: a newly created
+        agent that stops on it is removed.
+        """
+        return ""
+
     @abstractmethod
     def matches(self, pane_content: str) -> bool: ...
 
@@ -608,6 +617,42 @@ class PluginInstall(MatchesPattern, Answerable):
         return "Claude is waiting for you to say whether to install a plugin. Answer it in the agent's terminal."
 
 
+# BLOCKING -- recognised, never answered
+
+
+class BypassPermissionsWarning(MatchesPattern, Blocking):
+    """The startup warning for bypass-permissions mode, shown until the user's settings carry ``skipDangerousModePermissionPrompt``.
+
+    Not benign despite its ``Esc to cancel`` footer: Esc exits Claude.
+    """
+
+    def get_nickname(self) -> str:
+        return "Bypass permissions warning"
+
+    def get_pattern(self) -> re.Pattern[str]:
+        # Its confirm option, which no other claude surface uses.
+        return re.compile(r"Yes, I accept")
+
+    def matches(self, pane_content: str) -> bool:
+        # Only as a whole, indented option row beside the Esc footer among the bottom rows: the
+        # label is also an ordinary sentence, and any row of a draft in the input box can say it.
+        option_row = re.compile(
+            rf"^[ \t]+(?:{INPUT_PROMPT_GLYPH}[ \t]+)?{self.get_pattern().pattern}[ \t]*$", re.MULTILINE
+        )
+        return option_row.search(get_benign_footer_region(pane_content)) is not None and GenericBenign().matches(
+            pane_content
+        )
+
+    def get_message(self) -> str:
+        return "Claude is waiting for you to accept Bypass Permissions mode. Answer it in the agent's terminal."
+
+    def get_startup_message(self) -> str:
+        return (
+            "Claude asks you to accept Bypass Permissions mode before it starts. Run "
+            "`claude --dangerously-skip-permissions` once, choose 'Yes, I accept', then try again."
+        )
+
+
 # BENIGN -- always handled, never selectable
 
 
@@ -668,9 +713,10 @@ class GenericBenign(MatchesPattern, SelfClearing):
         "esc to clear"   clears the COMPOSER INPUT -- not a dialog at all; that is
                          the send path's pre-existing-input concern
 
-    Tried AFTER every named class. Several ACCEPT dialogs carry an ``Esc to cancel`` footer
+    Tried AFTER every named class. Several named dialogs carry an ``Esc to cancel`` footer
     of their own, so matching this first would Escape a model-switch confirmation and
-    silently cancel the user's own change.
+    silently cancel the user's own change, or Escape the bypass-permissions warning and
+    exit Claude.
     """
 
     def get_nickname(self) -> str:
@@ -790,8 +836,8 @@ class Unrecognized(Dialog):
 # The registry -- ORDER IS LOAD-BEARING
 
 # classify() returns on first match, so:
-#   1. named ACCEPT classes first -- several carry an "Esc to cancel" footer of their own,
-#      and GenericBenign would Escape them
+#   1. named ACCEPT and BLOCKING classes first -- several carry an "Esc to cancel" footer of
+#      their own, and GenericBenign would Escape them
 #   2. named BENIGN next
 #   3. GenericBenign, the footer catch-all
 # Unrecognized is not listed: it is reached structurally, by the missing input prompt.
@@ -804,13 +850,14 @@ DIALOGS: Final[tuple[Dialog, ...]] = (
     # matched wherever they occur.
     EmptyShellMode(),
     PendingShellCommand(),
-    # Answerable next: several carry an "Esc to cancel" footer of their own, and GenericBenign
-    # would otherwise Escape them -- silently cancelling the user's change.
+    # Answerable and blocking dialogs next: several carry an "Esc to cancel" footer of their own,
+    # and GenericBenign would otherwise Escape them -- cancelling the user's change, or exiting Claude.
     ModelSwitchWarning(),
     EffortSwitchWarning(),
     UsageLimitReached(),
     LspPluginInstall(),
     PluginInstall(),
+    BypassPermissionsWarning(),
     # Named self-clearing surfaces, then the footer catch-all.
     StatusWindow(),
     GenericBenign(),
@@ -818,7 +865,7 @@ DIALOGS: Final[tuple[Dialog, ...]] = (
 
 # The two tokens `sensibly_deal_with_dialogs` accepts in place of a nickname.
 #
-# ALL_KNOWN_DIALOGS means "every dialog this module names, answered on the option it names".
+# ALL_KNOWN_DIALOGS means "every dialog this module names an option for, answered on that option".
 # Each of those options was chosen by a person who looked at that dialog, so the set grows as
 # the catalogue does without ever becoming a guess.
 #

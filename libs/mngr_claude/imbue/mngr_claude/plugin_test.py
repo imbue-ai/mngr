@@ -52,6 +52,7 @@ from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import NoCommandDefinedError
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
@@ -99,6 +100,7 @@ from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import get_managed_settings_path
+from imbue.mngr_claude.dialogs import BypassPermissionsWarning
 from imbue.mngr_claude.dialogs import EmptyShellMode
 from imbue.mngr_claude.dialogs import PendingShellCommand
 from imbue.mngr_claude.dialogs import classify
@@ -141,6 +143,7 @@ from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import should_trust_work_dir
+from imbue.mngr_claude.testing import BYPASS_PERMISSIONS_WARNING_PANE
 from imbue.mngr_claude.testing import STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT
 from imbue.mngr_claude.testing import STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT
 from imbue.mngr_claude.testing import build_styled_prompt_pane
@@ -2521,6 +2524,75 @@ def test_startup_dialog_report_sees_the_bare_bang_strand_behind_the_hint(
         agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=lambda: None, timeout=0.1)
 
     assert exc_info.value.dialog_description == EmptyShellMode().get_nickname()
+    assert exc_info.value.reason == "Claude stopped on a dialog (Empty shell mode) while starting."
+
+
+def test_startup_bypass_permissions_warning_reports_how_to_accept_it_before_retrying(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [BYPASS_PERMISSIONS_WARNING_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+    agent.session_started_ready_at_position = 1
+
+    with pytest.raises(DialogDetectedError) as exc_info:
+        agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=lambda: None, timeout=0.1)
+
+    assert exc_info.value.reason == BypassPermissionsWarning().get_startup_message()
+    assert exc_info.value.kind == SendFailureKind.INPUT_BLOCKED
+    assert agent.pressed_keys == []
+    assert agent.enter_press_count == 0
+
+
+def test_send_preflight_refuses_the_bypass_permissions_warning_without_a_keypress(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Escape on the warning exits Claude, so even the most permissive dialog setting presses nothing."""
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        preserve_sessions_on_destroy=False,
+        sensibly_deal_with_dialogs=("ALL_KNOWN_AND_UNKNOWN_DIALOGS",),
+    )
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [BYPASS_PERMISSIONS_WARNING_PANE],
+        config,
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    with pytest.raises(DialogDetectedError) as exc_info:
+        agent._preflight_send_message(_TARGET)
+
+    assert exc_info.value.reason == BypassPermissionsWarning().get_message()
+    assert exc_info.value.kind == SendFailureKind.INPUT_BLOCKED
+    assert agent.pressed_keys == []
+    assert agent.enter_press_count == 0
+
+
+def test_send_preflight_escapes_a_benign_dialog_through_the_agents_named_key_seam(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A dialog keypress the preflight makes is one a key-recording agent sees."""
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [_MODEL_PICKER_PANE, _NORMAL_READY_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._preflight_send_message(_TARGET)
+
+    assert agent.pressed_keys == ["Escape"]
 
 
 def test_post_submit_dialog_observe_seconds_defaults_to_module_constant() -> None:

@@ -23,6 +23,7 @@ from imbue.mngr.errors import DuplicateAgentIdOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
@@ -447,7 +448,8 @@ def create(
                         # pane; pi waits for its session-started sentinel file); its base
                         # implementation just runs start_action, so a plain command agent that
                         # does not override it starts exactly as before, with no wait.
-                        # Raises AgentStartError if the agent doesn't signal readiness in time.
+                        # Raises AgentStartError if the agent doesn't signal readiness in time, and
+                        # SendMessageError if it cannot take input.
                         logger.info("Starting agent {} ...", agent.name)
                         timeout = (
                             agent_options.ready_timeout_seconds
@@ -474,6 +476,15 @@ def create(
                             )
                             host.destroy_agent(agent)
                             raise
+                        except SendMessageError as e:
+                            # The agent never became able to take input, e.g. a startup dialog
+                            # holds it or the TUI never drew its ready indicator. One this create
+                            # made is torn down for the same reason as above; an updated agent
+                            # existed before this create and keeps its state.
+                            if not agent_options.is_update:
+                                logger.warning("Agent {} could not start; tearing it down", agent.name)
+                                host.destroy_agent(agent)
+                            raise AgentStartError(str(agent.name), e.reason) from e
                         if initial_message is not None:
                             logger.info("Sending initial message...")
                             send_message_with_resend_guidance(agent, initial_message, "created and started")

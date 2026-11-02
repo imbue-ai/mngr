@@ -448,8 +448,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=(),
         description="Nicknames of claude dialogs mngr may answer on the user's behalf when one is "
         "holding the TUI's input at send time (see mngr_claude.dialogs.SELECTABLE_NICKNAMES). Two "
-        "tokens stand in for a list. 'ALL_KNOWN_DIALOGS' is every dialog mngr can name, each "
-        "answered on the option named for it, so it grows with the catalogue without ever becoming "
+        "tokens stand in for a list. 'ALL_KNOWN_DIALOGS' is every dialog mngr names an option for, "
+        "each answered on that option, so it grows with the catalogue without ever becoming "
         "a guess. 'ALL_KNOWN_AND_UNKNOWN_DIALOGS' adds a fallback for surfaces mngr cannot name: "
         "press '1'. That one IS a guess -- an unnamed dialog's first option is unknown by "
         "definition -- and is only sent to a pane showing a numbered selector; if the surface "
@@ -2407,10 +2407,10 @@ class _ClaudeDialogPane(FrozenModel):
         self._press_and_settle(lambda: self.agent._press_enter(self.resolved_target))
 
     def press_down(self) -> None:
-        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.resolved_target, "Down"))
+        self._press_and_settle(lambda: self.agent._press_key(self.resolved_target, "Down"))
 
     def press_key(self, key: str) -> None:
-        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.resolved_target, key))
+        self._press_and_settle(lambda: self.agent._press_key(self.resolved_target, key))
 
     def accepts(self, nickname: str) -> bool:
         return is_nonbenign_answer_allowed(nickname, self.agent.agent_config.sensibly_deal_with_dialogs)
@@ -2920,7 +2920,8 @@ class ClaudeAgent(
         Polls for the 'session_started' file that the SessionStart hook creates.
         This indicates Claude Code has started and is ready for input.
 
-        Raises AgentStartError if the agent doesn't signal readiness within the timeout.
+        Raises AgentStartError if the agent doesn't signal readiness within the timeout, and
+        DialogDetectedError if a dialog it can name holds the pane instead.
         """
         if timeout is None:
             timeout = _READY_SIGNAL_TIMEOUT_SECONDS
@@ -2965,7 +2966,10 @@ class ClaudeAgent(
             startup_dialog = classify(self._capture_input_box_pane_content(self.tmux_target) or "")
             if startup_dialog is not None and not isinstance(startup_dialog, Unrecognized):
                 raise DialogDetectedError(
-                    str(self.name), startup_dialog.get_nickname(), startup_dialog.get_message() or None
+                    str(self.name),
+                    startup_dialog.get_nickname(),
+                    startup_dialog.get_startup_message()
+                    or f"Claude stopped on a dialog ({startup_dialog.get_nickname()}) while starting.",
                 )
 
             # No dialog explains the silence; give the session a short grace to signal anyway.

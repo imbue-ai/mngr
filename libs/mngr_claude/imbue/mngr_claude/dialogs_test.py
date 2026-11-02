@@ -12,6 +12,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr_claude.dialogs import ALL_KNOWN_AND_UNKNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import ALL_KNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import Answerable
+from imbue.mngr_claude.dialogs import BypassPermissionsWarning
 from imbue.mngr_claude.dialogs import CLAUDE_CODE_VERSION
 from imbue.mngr_claude.dialogs import DIALOGS
 from imbue.mngr_claude.dialogs import DialogBlocked
@@ -38,6 +39,7 @@ from imbue.mngr_claude.dialogs import is_option_highlighted
 from imbue.mngr_claude.dialogs import is_pending_shell_command
 from imbue.mngr_claude.dialogs import is_restored_compact_command
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
+from imbue.mngr_claude.testing import BYPASS_PERMISSIONS_WARNING_PANE
 from imbue.mngr_claude.testing import STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT
 from imbue.mngr_claude.testing import STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT
 from imbue.mngr_claude.testing import build_styled_shell_mode_pane
@@ -328,6 +330,28 @@ def test_dangerous_rm_prompt_is_denied_even_when_unknown_dialogs_are_answered() 
     assert pane.keys == ["Escape"]
 
 
+@pytest.mark.parametrize(
+    ("pane", "highlighted_option"),
+    [
+        (BYPASS_PERMISSIONS_WARNING_PANE, "No, exit"),
+        (
+            BYPASS_PERMISSIONS_WARNING_PANE.replace(
+                "  ❯ No, exit\n    Yes, I accept", "    No, exit\n  ❯ Yes, I accept"
+            ),
+            "Yes, I accept",
+        ),
+    ],
+    ids=["highlight-on-exit", "highlight-on-accept"],
+)
+def test_bypass_permissions_warning_is_refused_without_a_keypress(pane: str, highlighted_option: str) -> None:
+    assert f"  ❯ {highlighted_option}\n" in pane
+    fake_pane = FakePane([pane], accepts=frozenset({BypassPermissionsWarning().get_nickname(), "Unrecognized"}))
+    with pytest.raises(DialogBlocked) as excinfo:
+        deal_with_dialogs(fake_pane)
+    assert excinfo.value.nickname == BypassPermissionsWarning().get_nickname()
+    assert fake_pane.keys == []
+
+
 def test_unknown_token_grants_only_unknown_and_known_token_never_does() -> None:
     assert is_nonbenign_answer_allowed("Unrecognized", (ALL_KNOWN_AND_UNKNOWN_DIALOGS,)) is True
     assert is_nonbenign_answer_allowed("Unrecognized", (ALL_KNOWN_DIALOGS,)) is False
@@ -494,6 +518,19 @@ def test_messages_do_not_leak_config_names() -> None:
     """The modal is for the user, not the operator."""
     for dialog in (*DIALOGS, Unrecognized()):
         assert "sensibly_deal_with_dialogs" not in dialog.get_message()
+        assert "sensibly_deal_with_dialogs" not in dialog.get_startup_message()
+
+
+def test_startup_messages_never_send_the_user_to_the_agents_terminal() -> None:
+    """A newly created agent that stops on a startup dialog is removed, so there is no terminal to go to."""
+    for dialog in (*DIALOGS, Unrecognized()):
+        assert "terminal" not in dialog.get_startup_message()
+
+
+def test_bypass_permissions_warning_at_startup_says_how_to_accept_it_before_retrying() -> None:
+    startup_message = BypassPermissionsWarning().get_startup_message()
+    assert "claude --dangerously-skip-permissions" in startup_message
+    assert "Yes, I accept" in startup_message
 
 
 # regressions
@@ -528,6 +565,60 @@ def test_a_reply_asking_whether_to_install_something_is_not_the_plugin_offer() -
         "  ? for shortcuts\n"
     )
     assert classify(pane) is None
+
+
+@pytest.mark.parametrize(
+    "pane",
+    [
+        (
+            "assistant: Yes, I accept that trade-off.\n"
+            "\n"
+            "────────────────────────────\n"
+            "❯ \n"
+            "────────────────────────────\n"
+            "  ? for shortcuts\n"
+        ),
+        (
+            "assistant: Shall I go ahead?\n"
+            "\n"
+            "────────────────────────────\n"
+            "❯ Yes, I accept\n"
+            "────────────────────────────\n"
+            "  ? for shortcuts\n"
+        ),
+        (
+            "assistant: Shall I go ahead?\n"
+            "\n"
+            "────────────────────────────\n"
+            "❯ Go ahead.\n"
+            "  Yes, I accept\n"
+            "────────────────────────────\n"
+            "  ? for shortcuts\n"
+        ),
+    ],
+    ids=["in-a-reply", "in-a-draft", "on-a-draft-continuation-row"],
+)
+def test_yes_i_accept_in_a_reply_or_a_draft_is_not_the_bypass_permissions_warning(pane: str) -> None:
+    assert classify(pane) is None
+
+
+@pytest.mark.parametrize(
+    "pane",
+    [
+        (" Do you accept the proposed plan?\n\n ❯ 1. Yes, I accept\n   2. No\n\n Enter to select · Esc to cancel\n"),
+        (
+            " Submit feedback\n"
+            "\n"
+            " Describe the issue:\n"
+            "   Yes, I accept that this is a bug.\n"
+            "\n"
+            " Enter to submit · Esc to cancel\n"
+        ),
+    ],
+    ids=["a-numbered-option", "a-sentence-on-a-dialog-row"],
+)
+def test_yes_i_accept_on_another_dialogs_row_is_not_the_bypass_permissions_warning(pane: str) -> None:
+    assert isinstance(classify(pane), GenericBenign)
 
 
 def test_dialog_is_found_with_the_users_own_turns_echoed_above_it() -> None:
