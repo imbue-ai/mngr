@@ -475,8 +475,22 @@ def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password
         return True if email in page.inner_text("body") else None
 
     _wait_until(f"the signed-in account {email} to appear on /accounts", _SIGN_IN_TIMEOUT_SECONDS, account_listed)
+    _mark_onboarding_complete(page)
     logger.info("Signed in as {}", email)
     return origin
+
+
+def _mark_onboarding_complete(page: Page) -> None:
+    """Record the install as past the start flow, the way the flow's own "Already set up? Log in" does.
+
+    A home page redirects a fresh install to the start flow until onboarding is complete
+    or a workspace exists (LandingPage.ts), and these tests reach every page by URL.
+    """
+    status = page.evaluate(
+        """() => fetch('/ui/api/onboarding/complete', {method: 'POST', credentials: 'same-origin'})
+               .then((resp) => resp.status)"""
+    )
+    assert status == 200, f"marking onboarding complete failed: HTTP {status}"
 
 
 def _account_group_url(origin: str, agent_id: str) -> str:
@@ -515,8 +529,16 @@ def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: s
     page.click(link_button_selector)
     # The link click PATCHes the association from the page itself; navigating
     # away immediately would abort that in-flight request, so wait for the
-    # same page to flip to the linked state first.
-    page.wait_for_selector('#account-section:has-text("Linked to")', timeout=60_000)
+    # request to land first: the page either flips to the linked state or, when
+    # the window was on another account, leaves for its own hub because the
+    # workspace now belongs to the linked account's window (SettingsGroups.ts).
+    _wait_until(
+        "the link to land (the linked state, or the window leaving for its hub)",
+        60,
+        lambda: True
+        if "/options" not in page.url or page.query_selector('#account-section:has-text("Linked to")') is not None
+        else None,
+    )
 
     def associated() -> bool | None:
         page.goto(account_url, wait_until="domcontentloaded")
@@ -612,16 +634,17 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
     logger.info("Master password {} via settings", "cleared" if new_password == "" else "updated")
 
 
-def _goto_landing(page: Page, origin: str) -> None:
-    """Open the landing page.
+def _goto_landing(page: Page, origin: str, account_id: str) -> None:
+    """Open the account's home page.
 
-    No consent detour: the SPA shows the error-reporting consent screen only
-    on its own /consent route, which nothing but the Electron shell's
-    cold-start first-window routing opens (the legacy frontend's server-side
-    gate on ``/`` is gone), so an explicit load of ``/`` always renders the
-    landing -- and nothing these tests drive is gated on answering it.
+    Every window shows one account, and a home page lists only that account's
+    workspaces, its providers section and its unlock banner, so the tests name
+    the account rather than load ``/`` (which lands on the window's current
+    account, the device's on a fresh install). No consent detour: the SPA shows
+    the error-reporting consent screen only on its own /consent route, which
+    nothing but the Electron shell's cold-start first-window routing opens.
     """
-    page.goto(f"{origin}/", wait_until="domcontentloaded")
+    page.goto(f"{origin}/account/{account_id}/", wait_until="domcontentloaded")
 
 
 # The snapshot table's per-row Download control (SnapshotTable.ts; the rows
@@ -730,9 +753,9 @@ def _landing_state_snapshot(page: Page) -> str:
         return f"(snapshot unavailable: {e})"
 
 
-def _wait_for_unlock_banner(page: Page, origin: str) -> None:
+def _wait_for_unlock_banner(page: Page, origin: str, account_id: str) -> None:
     def banner_present() -> bool | None:
-        _goto_landing(page, origin)
+        _goto_landing(page, origin, account_id)
         return True if page.query_selector("#sync-unlock-banner") is not None else None
 
     try:
@@ -743,7 +766,7 @@ def _wait_for_unlock_banner(page: Page, origin: str) -> None:
         raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
 
 
-def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: bool = True) -> None:
+def _unlock_via_banner(page: Page, origin: str, account_id: str, password: str, expect_success: bool = True) -> None:
     """Drive the landing unlock banner; asserts the expected outcome.
 
     The unlock POST runs from the page itself, so both outcomes are awaited
@@ -751,14 +774,14 @@ def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: b
     success the banner unmounts once the reloaded extras drop the locked
     account, on failure its inline alert appears (LandingPage.ts).
     """
-    _wait_for_unlock_banner(page, origin)
+    _wait_for_unlock_banner(page, origin, account_id)
     page.fill("#sync-unlock-password", password)
     page.click("#sync-unlock-btn")
     if expect_success:
         page.wait_for_selector("#sync-unlock-banner", state="detached", timeout=60_000)
 
         def banner_gone() -> bool | None:
-            _goto_landing(page, origin)
+            _goto_landing(page, origin, account_id)
             return True if page.query_selector("#sync-unlock-banner") is None else None
 
         _wait_until("the unlock banner to stay cleared after unlocking", 60, banner_gone)
@@ -768,11 +791,11 @@ def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: b
         logger.info("Wrong password was refused by the unlock banner, as expected")
 
 
-def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
+def _assert_remote_row_visible(page: Page, origin: str, account_id: str, agent_id: str) -> None:
     """The workspace renders as a greyed other-device row with a remove control."""
 
     def remote_row() -> bool | None:
-        _goto_landing(page, origin)
+        _goto_landing(page, origin, account_id)
         card = page.query_selector(f'[data-agent-id="{agent_id}"]')
         if card is None:
             return None
@@ -925,9 +948,11 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
             origin = _sign_in_headless(
                 runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
             )
-            _unlock_via_banner(page, origin, f"wrong-{master_password}", expect_success=False)
-            _unlock_via_banner(page, origin, master_password)
-            _assert_remote_row_visible(page, origin, agent_id)
+            _unlock_via_banner(
+                page, origin, sync_e2e_account.user_id, f"wrong-{master_password}", expect_success=False
+            )
+            _unlock_via_banner(page, origin, sync_e2e_account.user_id, master_password)
+            _assert_remote_row_visible(page, origin, sync_e2e_account.user_id, agent_id)
             zip_path = _download_backup_zip(page, origin, agent_id, tmp_path)
 
         _assert_zip_contains_sentinel(zip_path, sentinel_content)
@@ -1039,8 +1064,8 @@ def test_legacy_association_files_migrate_into_synced_records(
             origin = _sign_in_headless(
                 runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
             )
-            _unlock_via_banner(page, origin, legacy_password)
-            _assert_remote_row_visible(page, origin, agent_id)
+            _unlock_via_banner(page, origin, sync_e2e_account.user_id, legacy_password)
+            _assert_remote_row_visible(page, origin, sync_e2e_account.user_id, agent_id)
     finally:
         _destroy_test_containers_best_effort(runtime)
 
@@ -1142,7 +1167,7 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             assert record_scrubbed is not None
             assert record_scrubbed.display_name == record_one.display_name, "Metadata must survive the scrub"
             # This hosting install keeps its key: the landing shows no unlock banner.
-            _goto_landing(page, origin)
+            _goto_landing(page, origin, sync_e2e_account.user_id)
             assert page.query_selector("#sync-unlock-banner") is None, (
                 "Clearing the password must not lock the device that holds the key"
             )
@@ -1162,8 +1187,8 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             origin = _sign_in_headless(
                 runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
             )
-            _unlock_via_banner(page, origin, password_three)
-            _assert_remote_row_visible(page, origin, agent_id)
+            _unlock_via_banner(page, origin, sync_e2e_account.user_id, password_three)
+            _assert_remote_row_visible(page, origin, sync_e2e_account.user_id, agent_id)
     finally:
         _destroy_test_containers_best_effort(runtime)
 
@@ -1311,7 +1336,7 @@ def test_cloud_connection_syncs_across_devices(
         assert store_a.list_connections(user_id) == []
 
 
-def _unlock_via_api(page: Page, origin: str, password: str) -> None:
+def _unlock_via_api(page: Page, origin: str, account_id: str, password: str) -> None:
     """Enter the master password through the app's unlock API, from the app's own page.
 
     Posts the same ``/_chrome/sync-unlock`` request the landing banner sends
@@ -1319,7 +1344,7 @@ def _unlock_via_api(page: Page, origin: str, password: str) -> None:
     banner's render; the banner's own flow is what ``_unlock_via_banner``
     drives in the other tests here.
     """
-    _goto_landing(page, origin)
+    _goto_landing(page, origin, account_id)
     result = page.evaluate(
         """(password) => fetch('/_chrome/sync-unlock', {
                method: 'POST',
@@ -1338,7 +1363,7 @@ def _unlock_via_api(page: Page, origin: str, password: str) -> None:
 _PANEL_ROW_WAIT_SECONDS: Final[int] = 5
 
 
-def _wait_for_connection_in_panel(page: Page, origin: str, instance_name: str) -> str:
+def _wait_for_connection_in_panel(page: Page, origin: str, account_id: str, instance_name: str) -> str:
     """Open the landing providers panel and wait for the connection's row; returns the row's text.
 
     The panel body renders on the redraw after the toggle click, so the row is
@@ -1346,7 +1371,7 @@ def _wait_for_connection_in_panel(page: Page, origin: str, instance_name: str) -
     is opened only while closed (no provider row is on the page), so a landing
     reload that resets it is re-opened on the next poll.
     """
-    _goto_landing(page, origin)
+    _goto_landing(page, origin, account_id)
 
     def connection_row() -> str | None:
         toggle = page.query_selector("#landing-providers button")
@@ -1471,12 +1496,12 @@ def test_cloud_connection_added_on_one_device_reaches_the_app_on_another(
         # The connection reaches the panel (locked: no DEK here yet) before the
         # unlock, the order a real user sees: the unlock banner only appears once
         # the pulled connection marks the account locked on this device.
-        row_text = _wait_for_connection_in_panel(page, origin, instance_name)
+        row_text = _wait_for_connection_in_panel(page, origin, user_id, instance_name)
         assert alias in row_text
         assert "Modal" in row_text
         # The device section lists this device's docker provider alongside the account's connection.
         _wait_for_device_provider_ok(page, "docker")
-        _unlock_via_api(page, origin, master_password)
+        _unlock_via_api(page, origin, user_id, master_password)
 
         mngr_host_dir_b = mngr_host_dir_for(runtime.root_name)
         block = _wait_until(
