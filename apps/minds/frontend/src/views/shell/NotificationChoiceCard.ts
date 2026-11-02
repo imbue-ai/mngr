@@ -1,4 +1,5 @@
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import type {
   NotificationsUiController,
   NotificationStyle,
@@ -46,7 +47,11 @@ export function NotificationChoiceCard(): m.Component<{
                 {
                   variant: style === "both" ? "primary" : "secondary",
                   disabled: controller.isSavingChoice,
-                  onclick: () => void controller.chooseNotificationStyle(style),
+                  onclick: () =>
+                    void controller.chooseNotificationStyle(
+                      style,
+                      getAppContext().shell.accountId,
+                    ),
                 },
                 label,
               ),

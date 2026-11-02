@@ -7,6 +7,7 @@
 // desktop-only and has no jinja original.
 
 import m from "mithril";
+import { getAppContext } from "../../../app-context";
 import type {
   PeekedChannel,
   UpdateChannel,
@@ -142,7 +143,7 @@ function notificationsPanel(model: SettingsModel): m.Children {
     is_enabled: boolean;
     style: NotificationStyle;
   }): void => {
-    void model.setNotificationPrefs(next);
+    void model.setNotificationPrefs(getAppContext().shell.accountId, next);
   };
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Notifications"),

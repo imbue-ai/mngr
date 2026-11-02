@@ -188,8 +188,13 @@ class NotificationFeed(MutableModel):
     notification_dispatcher: NotificationDispatcher | None = Field(
         frozen=True, description="OS notification dispatcher; None disables OS dispatch entirely"
     )
-    get_dispatch_preferences: Callable[[], NotificationDispatchPreferences] = Field(
-        frozen=True, description="Live reader of the stored notification preferences"
+    get_dispatch_preferences: Callable[[str, str], NotificationDispatchPreferences] = Field(
+        frozen=True,
+        description=(
+            "Live reader of the stored notification preferences for one entry, given its account id "
+            "('' for none) and its workspace agent id ('' for an account-level entry): the master "
+            "toggle is account-keyed, so the entry's account answers it"
+        ),
     )
     is_main_window_focused: Callable[[], bool] = Field(
         frozen=True, description="Live reader of whether any connected main window has focus"
@@ -569,7 +574,7 @@ class NotificationFeed(MutableModel):
         if self.notification_dispatcher is None:
             logger.debug("notification {}: no dispatcher configured", entry.id)
             return
-        preferences = self.get_dispatch_preferences()
+        preferences = self.get_dispatch_preferences(entry.account_id, entry.workspace_agent_id)
         if not preferences.is_enabled:
             logger.debug("notification {}: master notifications toggle is off", entry.id)
             return

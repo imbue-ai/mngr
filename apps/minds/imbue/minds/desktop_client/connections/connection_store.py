@@ -1,15 +1,17 @@
 """Local replica + sync engine for per-account cloud connections.
 
-Mirrors ``WorkspaceRecordStore``: one replica file per account under
-``<data_dir>/connections/``, dirty rows that win until pushed, CAS pushes with
-one rebase on conflict, and tombstones that delete the local row once it is
-clean. The credentials payload stays encrypted at rest and is decrypted on
-demand with the account DEK. The local profile (``local.json``) holds
-unsynced connections with a plaintext payload and is never pushed.
+The generic replica/push/pull machinery (one replica file per account, dirty
+rows that win until pushed, CAS pushes with one rebase on conflict, tombstones
+that delete the local row once it is clean) lives in the account-documents
+base store; this subclass layers the connection-specific parts on top. The
+credentials payload stays encrypted at rest and is decrypted on demand with
+the account DEK, the local profile (``local.json``) holds unsynced connections
+with a plaintext payload and is never pushed, and an in-place credential
+update is fenced from sync by its validation rollback until the route settles
+it.
 """
 
 import json
-import threading
 from base64 import b64decode
 from base64 import b64encode
 from collections.abc import Mapping
@@ -21,26 +23,23 @@ from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
-from pydantic import PrivateAttr
 from pydantic import ValidationError
 
 from imbue.imbue_common.model_update import to_update
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
 from imbue.imbue_common.secret_wrapping import encrypt_secrets
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import dek_store
+from imbue.minds.desktop_client.account_documents.store import AccountDocumentStore
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_ACTIVE
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
 from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.data_types import ConnectionMetadata
-from imbue.minds.desktop_client.connections.data_types import ConnectionPullOutcome
 from imbue.minds.desktop_client.connections.data_types import ConnectionReplicaRecord
 from imbue.minds.desktop_client.connections.data_types import ConnectionView
-from imbue.minds.desktop_client.connections.data_types import connection_record_from_wire
 from imbue.minds.desktop_client.connections.data_types import credential_source_name
 from imbue.minds.desktop_client.connections.data_types import credential_source_of_raw_metadata
 from imbue.minds.desktop_client.connections.data_types import parse_connection_backend
@@ -53,16 +52,13 @@ from imbue.minds.desktop_client.connections.primitives import SUPPORTED_CREDENTI
 from imbue.minds.desktop_client.connections.primitives import connection_instance_name
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import ConnectionNotFoundError
 from imbue.minds.errors import ConnectionRemovedElsewhereError
 from imbue.minds.errors import ConnectionRequiresMasterPasswordError
 from imbue.minds.errors import ConnectionTooNewError
 from imbue.minds.errors import ConnectionUpdateInProgressError
 from imbue.minds.errors import WorkspaceSyncError
-from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_imbue_cloud.wire_types import SUPPORTED_DOCUMENT_FORMAT
 
 _CONNECTIONS_DIRNAME: Final[str] = "connections"
@@ -160,77 +156,52 @@ def _check_no_update_in_progress(record: ConnectionReplicaRecord) -> None:
         )
 
 
-class ConnectionStore(MutableModel):
-    """Owns the per-account connection replica files, the local profile, and every document push/pull.
-
-    Thread-safe via one internal lock; CLI calls happen outside the lock so a
-    slow connector round-trip never blocks readers.
-    """
+class ConnectionStore(AccountDocumentStore[ConnectionReplicaRecord]):
+    """Owns the per-account connection replica files, the local profile, and every document push/pull."""
 
     paths: InstallationPaths = Field(frozen=True, description="Minds data dir (replica + keys live under it)")
-    cli: ImbueCloudCli | None = Field(default=None, frozen=True, description="Transport; None disables pushes/pulls")
     device_label: str = Field(frozen=True, description="This device's human-readable name")
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _records_by_user_id: dict[str, dict[str, ConnectionReplicaRecord]] = PrivateAttr(default_factory=dict)
-    _is_loaded: bool = PrivateAttr(default=False)
 
-    # Replica persistence
-    def _connections_dir(self) -> Path:
+    # The generic store's kind configuration
+    def _document_kind(self) -> str:
+        return CONNECTION_DOCUMENT_KIND
+
+    def _replica_dir(self) -> Path:
         return self.paths.data_dir / _CONNECTIONS_DIRNAME
 
-    def _replica_path(self, user_id: str) -> Path:
-        return self._connections_dir() / f"{user_id}.json"
+    def _file_entries_key(self) -> str:
+        return "connections"
 
-    def _load_unlocked(self) -> None:
-        if self._is_loaded:
-            return
-        self._records_by_user_id = {}
-        connections_dir = self._connections_dir()
-        if connections_dir.is_dir():
-            for path in sorted(connections_dir.glob("*.json")):
-                user_id = path.stem
-                try:
-                    raw = json.loads(path.read_text())
-                except (OSError, json.JSONDecodeError) as e:
-                    logger.warning("Ignoring unreadable connection replica {}: {}", path, e)
-                    continue
-                entries = raw.get("connections", []) if isinstance(raw, dict) else None
-                if not isinstance(entries, list):
-                    logger.warning("Ignoring connection replica {} without a connections list", path)
-                    continue
-                by_doc_id: dict[str, ConnectionReplicaRecord] = {}
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        logger.warning(
-                            "Skipping a connection replica entry in {} that is not an object: {!r}", path, entry
-                        )
-                        continue
-                    try:
-                        record = ConnectionReplicaRecord.model_validate(entry)
-                    except ValueError as e:
-                        logger.warning("Skipping malformed connection record in {}: {}", path, e)
-                        continue
-                    by_doc_id[record.doc_id] = record
-                self._records_by_user_id[user_id] = by_doc_id
-        self._is_loaded = True
+    def _record_type(self) -> type[ConnectionReplicaRecord]:
+        return ConnectionReplicaRecord
 
-    def _save_unlocked(self, user_id: str) -> None:
-        path = self._replica_path(user_id)
-        by_doc_id = self._records_by_user_id.get(user_id, {})
-        payload = {"connections": [record.model_dump(mode="json") for record in by_doc_id.values()]}
-        atomic_write(path, json.dumps(payload, indent=2))
+    def _too_new_error(self) -> ConnectionTooNewError:
+        return ConnectionTooNewError(CONNECTION_TOO_NEW_MESSAGE)
 
-    def _set_record_unlocked(self, user_id: str, record: ConnectionReplicaRecord) -> None:
-        self._load_unlocked()
-        self._records_by_user_id.setdefault(user_id, {})[record.doc_id] = record
-        self._save_unlocked(user_id)
+    def _removed_elsewhere_error(self) -> ConnectionRemovedElsewhereError:
+        return ConnectionRemovedElsewhereError("This connection was removed on another device")
 
-    def _drop_record_unlocked(self, user_id: str, doc_id: str) -> None:
-        self._load_unlocked()
-        by_doc_id = self._records_by_user_id.get(user_id, {})
-        if doc_id in by_doc_id:
-            del by_doc_id[doc_id]
-            self._save_unlocked(user_id)
+    def _is_record_too_new(self, record: ConnectionReplicaRecord) -> bool:
+        return is_connection_metadata_too_new(record)
+
+    def _is_dirty_push_deferred(self, record: ConnectionReplicaRecord) -> bool:
+        """A never-acknowledged ACTIVE row is an add whose credentials are still being validated
+        (the add route pushes it itself with :meth:`push_connection`, so a pass that ran meanwhile
+        must not sync it to other devices first), and a row carrying a rollback is an update the
+        update route settles; a sync pass leaves both alone."""
+        if record.revision == 0 and record.state == CONNECTION_STATE_ACTIVE:
+            return True
+        return record.validation_rollback is not None
+
+    def _is_pull_update_blocked(self, local: ConnectionReplicaRecord) -> bool:
+        """Mid-update: the route settles the row (clears or restores) before any sync touches it."""
+        return local.validation_rollback is not None
+
+    def _is_payload_included_on_push(self) -> bool:
+        """Always: a pasted row carries its blob, while a tombstone and a local-profile row send an
+        explicit null so the server clears any blob it holds (an update that switched a connection
+        from pasted keys to a local profile must not leave the old secret stored)."""
+        return True
 
     def retain_unpushed_removals(self, user_id: str) -> None:
         """Forget an account's replica on signout, except the removals its session could not push.
@@ -315,9 +286,7 @@ class ConnectionStore(MutableModel):
 
     # Read API
     def list_connections(self, user_id: str) -> list[ConnectionReplicaRecord]:
-        with self._lock:
-            self._load_unlocked()
-            return list(self._records_by_user_id.get(user_id, {}).values())
+        return self.list_records(user_id)
 
     def list_active_connections(self, user_id: str) -> list[ConnectionReplicaRecord]:
         return [record for record in self.list_connections(user_id) if record.state == CONNECTION_STATE_ACTIVE]
@@ -702,137 +671,19 @@ class ConnectionStore(MutableModel):
         except (ImbueCloudCliError, WorkspaceSyncError) as e:
             logger.warning("Queued the tombstone for connection {} (push failed: {})", doc_id, e)
 
-    # Push / pull
-    def _push_document(
-        self, user_id: str, account_email: str, record: ConnectionReplicaRecord
-    ) -> ConnectionReplicaRecord:
-        """CAS-push one document; on a revision conflict, rebase once onto the stored revision (local wins)."""
-        if self.cli is None:
-            raise WorkspaceSyncError("connection sync is not configured (no imbue_cloud CLI)")
-        if is_connection_metadata_too_new(record):
-            raise ConnectionTooNewError(CONNECTION_TOO_NEW_MESSAGE)
-        # The payload key is always sent: a pasted row carries its blob, while a
-        # tombstone and a local-profile row send an explicit null so the server
-        # clears any blob it holds (an update that switched a connection from
-        # pasted keys to a local profile must not leave the old secret stored).
-        wire = record.to_wire(CONNECTION_DOCUMENT_KIND, record.revision + 1, is_payload_included=True)
-        try:
-            stored = self.cli.sync_document_push(account_email, wire)
-        except ImbueCloudSyncConflictCliError as conflict:
-            if conflict.stored_record is None:
-                if record.state == CONNECTION_STATE_DELETED:
-                    # The server holds no row (e.g. retention purged another device's
-                    # tombstone), so the delete is already complete there.
-                    logger.debug("Connection {} is already gone on the server; dropping its tombstone", record.doc_id)
-                    with self._lock:
-                        self._drop_record_unlocked(user_id, record.doc_id)
-                    return record.model_copy_update(to_update(record.field_ref().is_dirty, False))
-                raise
-            stored_record = connection_record_from_wire(conflict.stored_record)
-            if is_connection_metadata_too_new(stored_record):
-                raise ConnectionTooNewError(CONNECTION_TOO_NEW_MESSAGE) from conflict
-            if stored_record.state == CONNECTION_STATE_DELETED:
-                if record.state == CONNECTION_STATE_DELETED:
-                    # Both sides removed it: the delete is complete, whichever device landed it.
-                    with self._lock:
-                        self._drop_record_unlocked(user_id, record.doc_id)
-                    return stored_record
-                raise ConnectionRemovedElsewhereError("This connection was removed on another device") from conflict
-            server_revision = int(str(conflict.stored_record.get("revision", 0)))
-            rebased = record.to_wire(CONNECTION_DOCUMENT_KIND, server_revision + 1, is_payload_included=True)
-            stored = self.cli.sync_document_push(account_email, rebased)
-        acked = record.model_copy_update(
-            to_update(record.field_ref().revision, int(str(stored.get("revision", record.revision + 1)))),
-            to_update(record.field_ref().is_dirty, False),
-        )
-        with self._lock:
-            if acked.state == CONNECTION_STATE_DELETED:
-                self._drop_record_unlocked(user_id, acked.doc_id)
-            else:
-                self._set_record_unlocked(user_id, acked)
-        return acked
-
     def push_connection(self, user_id: str, account_email: str, doc_id: str) -> ConnectionReplicaRecord:
         """Push one connection now (the add route's synchronous push after the credentials validated).
 
         Raises ``WorkspaceSyncError`` when the push fails, leaving the row dirty
         (``ConnectionRemovedElsewhereError`` when another device removed it).
         """
-        with self._lock:
-            self._load_unlocked()
-            record = self._records_by_user_id.get(user_id, {}).get(doc_id)
+        record = self.get_record(user_id, doc_id)
         if record is None:
             raise ConnectionNotFoundError(f"No connection {doc_id} for owner {user_id[:8]}")
         try:
             return self._push_document(user_id, account_email, record)
         except ImbueCloudCliError as e:
             raise WorkspaceSyncError(f"could not push the connection to the connector: {e}") from e
-
-    def push_dirty(self, user_id: str, account_email: str) -> None:
-        """Push the dirty rows a sync pass may flush: edits and tombstones of rows the server has acknowledged.
-
-        A never-acknowledged ACTIVE row (revision 0) is an add whose credentials
-        are still being validated; the add route pushes it itself with
-        :meth:`push_connection`, so a pass that ran meanwhile must not sync it
-        to other devices first.
-        """
-        for record in self.list_connections(user_id):
-            if not record.is_dirty or (record.revision == 0 and record.state == CONNECTION_STATE_ACTIVE):
-                continue
-            if record.validation_rollback is not None:
-                # An update whose credentials are still being validated; the update route pushes it itself.
-                continue
-            try:
-                self._push_document(user_id, account_email, record)
-            except ConnectionRemovedElsewhereError as e:
-                # The server's tombstone wins over the local edit; without dropping the
-                # row, the dirty copy would win every pull and fail every push.
-                logger.warning("Dropping the local change to connection {}: {}", record.doc_id, e)
-                with self._lock:
-                    self._drop_record_unlocked(user_id, record.doc_id)
-            except (ImbueCloudCliError, WorkspaceSyncError) as e:
-                logger.warning("Deferred dirty connection push for {}: {}", record.doc_id, e)
-
-    def pull(self, user_id: str, account_email: str) -> ConnectionPullOutcome:
-        """Merge the server's connection documents into the replica (dirty rows win until pushed)."""
-        if self.cli is None:
-            return ConnectionPullOutcome(is_reached=False, is_changed=False)
-        try:
-            wire_documents = self.cli.sync_documents_pull(account_email, CONNECTION_DOCUMENT_KIND)
-        except ImbueCloudCliError as e:
-            logger.warning("Could not pull the connections of {}: {}", account_email, e)
-            return ConnectionPullOutcome(is_reached=False, is_changed=False)
-        with self._lock:
-            self._load_unlocked()
-            by_doc_id = self._records_by_user_id.setdefault(user_id, {})
-            before = dict(by_doc_id)
-            server_doc_ids: set[str] = set()
-            for wire in wire_documents:
-                server_record = connection_record_from_wire(wire)
-                server_doc_ids.add(server_record.doc_id)
-                local = by_doc_id.get(server_record.doc_id)
-                if local is not None and local.validation_rollback is not None:
-                    # Mid-update: the route settles the row (clears or restores) before any sync touches it.
-                    continue
-                if local is not None and local.is_dirty:
-                    if not is_connection_metadata_too_new(server_record):
-                        continue
-                    # This app could never push over a row a newer app wrote, so the server copy wins.
-                    logger.warning(
-                        "Dropping the unpushed local change to connection {}: a newer app version rewrote it",
-                        server_record.doc_id,
-                    )
-                if server_record.state == CONNECTION_STATE_DELETED:
-                    by_doc_id.pop(server_record.doc_id, None)
-                    continue
-                by_doc_id[server_record.doc_id] = server_record
-            for doc_id in list(by_doc_id):
-                if doc_id not in server_doc_ids and not by_doc_id[doc_id].is_dirty:
-                    del by_doc_id[doc_id]
-            is_changed = by_doc_id != before
-            if is_changed:
-                self._save_unlocked(user_id)
-        return ConnectionPullOutcome(is_reached=True, is_changed=is_changed)
 
     # Clear-password re-homing
     def rehome_account_connections_to_local(self, user_id: str, account_email: str) -> list[str]:

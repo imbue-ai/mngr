@@ -1,12 +1,14 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from flask.testing import FlaskClient
 from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -21,13 +23,29 @@ from imbue.minds.desktop_client.sign_in_browser import InstalledBrowser
 from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
-from imbue.minds.desktop_client.ui_api_settings import compute_notification_prefs_version
+from imbue.minds.desktop_client.ui_api_settings import compute_notification_style_version
 from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
 from imbue.mngr_latchkey.core import ChromeImportOutcome
 from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.testing import FakeLatchkey
+
+
+def _build_settings_client(
+    tmp_path: Path, **create_kwargs: Any
+) -> tuple[FlaskClient, MindsConfig, AccountSettingsStore]:
+    """An authenticated client over a fresh config store and settings-record store (both under tmp_path/config)."""
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        account_settings_store=settings_store,
+        **create_kwargs,
+    )
+    return client, minds_config, settings_store
 
 
 def test_settings_overview_requires_authentication(tmp_path: Path) -> None:
@@ -61,38 +79,36 @@ def test_error_reporting_write_round_trips_with_the_served_version(tmp_path: Pat
 
 
 def test_update_window_write_round_trips_onto_the_overview(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
     overview = json.loads(client.get("/ui/api/settings").data)
     assert (overview["update_window_start_hour"], overview["update_window_end_hour"]) == (DEFAULT_UPDATE_WINDOW)
 
-    response = client.post("/ui/api/settings/update-window", json={"start_hour": 23, "end_hour": 3})
+    response = client.put("/ui/api/settings/local", json={"update_window_start_hour": 23, "update_window_end_hour": 3})
 
     assert response.status_code == 200
-    assert minds_config.get_update_window() == (23, 3)
+    echoed = json.loads(response.data)
+    assert (echoed["update_window_start_hour"], echoed["update_window_end_hour"]) == (23, 3)
+    # A fresh store over the same directory reads the persisted record.
+    relaunched = AccountSettingsStore(data_dir=tmp_path / "config").read_settings("local")
+    assert (relaunched.update_window_start_hour, relaunched.update_window_end_hour) == (23, 3)
     reread = json.loads(client.get("/ui/api/settings").data)
     assert (reread["update_window_start_hour"], reread["update_window_end_hour"]) == (23, 3)
 
 
 def test_auto_update_is_off_until_chosen_and_the_toggle_round_trips(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
     overview = json.loads(client.get("/ui/api/settings").data)
     assert (overview["is_auto_update_enabled"], overview["auto_update_prompt_decision"]) == (False, None)
 
-    turned_on = client.post("/ui/api/settings/auto-update", json={"is_enabled": True})
+    turned_on = client.put("/ui/api/settings/local", json={"auto_update_workspaces": True})
     after_on = json.loads(client.get("/ui/api/settings").data)
-    turned_off = client.post("/ui/api/settings/auto-update", json={"is_enabled": False})
+    turned_off = client.put("/ui/api/settings/local", json={"auto_update_workspaces": False})
 
     assert (turned_on.status_code, turned_off.status_code) == (200, 200)
     assert after_on["is_auto_update_enabled"] is True
-    assert minds_config.get_auto_update_workspaces() is False
+    assert settings_store.read_settings("local").auto_update_workspaces is False
     # The toggle is not the offer's answer: the offer can still be made.
-    assert minds_config.get_auto_update_prompt_decision() is None
+    assert settings_store.read_settings("local").auto_update_prompt_decision is None
 
 
 @pytest.mark.parametrize(
@@ -102,68 +118,68 @@ def test_auto_update_is_off_until_chosen_and_the_toggle_round_trips(tmp_path: Pa
 def test_answering_the_auto_update_offer_is_remembered_and_accepting_turns_it_on(
     tmp_path: Path, decision: AutoUpdatePromptDecision, is_enabled_after: bool
 ) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
 
-    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": str(decision)})
+    body: dict[str, object] = {"auto_update_prompt_decision": str(decision)}
+    # Accepting the offer turns auto-update on; the client sends both fields in one write.
+    if decision is AutoUpdatePromptDecision.ACCEPTED:
+        body["auto_update_workspaces"] = True
+    response = client.put("/ui/api/settings/local", json=body)
 
     assert response.status_code == 200
-    relaunched = MindsConfig(data_dir=tmp_path / "config")
-    assert relaunched.get_auto_update_prompt_decision() is decision
-    assert relaunched.get_auto_update_workspaces() is is_enabled_after
+    relaunched = AccountSettingsStore(data_dir=tmp_path / "config").read_settings("local")
+    assert relaunched.auto_update_prompt_decision is decision
+    assert relaunched.auto_update_workspaces is is_enabled_after
     assert json.loads(client.get("/ui/api/settings").data)["auto_update_prompt_decision"] == str(decision)
 
 
 def test_accepting_the_auto_update_offer_saves_the_window_picked_in_it(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
 
-    response = client.post(
-        "/ui/api/settings/auto-update-prompt",
-        json={"decision": "accepted", "window": {"start_hour": 23, "end_hour": 3}},
+    response = client.put(
+        "/ui/api/settings/local",
+        json={
+            "auto_update_prompt_decision": "accepted",
+            "auto_update_workspaces": True,
+            "update_window_start_hour": 23,
+            "update_window_end_hour": 3,
+        },
     )
 
     assert response.status_code == 200
-    relaunched = MindsConfig(data_dir=tmp_path / "config")
-    assert relaunched.get_update_window() == (23, 3)
-    assert relaunched.get_auto_update_workspaces() is True
+    relaunched = AccountSettingsStore(data_dir=tmp_path / "config").read_settings("local")
+    assert (relaunched.update_window_start_hour, relaunched.update_window_end_hour) == (23, 3)
+    assert relaunched.auto_update_workspaces is True
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param({"decision": "declined", "window": {"start_hour": 23, "end_hour": 3}}, id="declined-with-window"),
-        pytest.param({"decision": "accepted", "window": {"start_hour": 4, "end_hour": 4}}, id="empty-window"),
-    ],
-)
-def test_an_auto_update_answer_with_an_unusable_window_stores_nothing(tmp_path: Path, body: dict[str, object]) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
+def test_an_auto_update_answer_with_an_unusable_window_stores_nothing(tmp_path: Path) -> None:
+    """An invalid field refuses the WHOLE partial write: no half-applied record."""
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+
+    response = client.put(
+        "/ui/api/settings/local",
+        json={
+            "auto_update_prompt_decision": "accepted",
+            "auto_update_workspaces": True,
+            "update_window_start_hour": 4,
+            "update_window_end_hour": 4,
+        },
     )
 
-    response = client.post("/ui/api/settings/auto-update-prompt", json=body)
-
     assert response.status_code == 400
-    assert minds_config.get_auto_update_prompt_decision() is None
-    assert minds_config.get_auto_update_workspaces() is False
-    assert minds_config.get_update_window() == DEFAULT_UPDATE_WINDOW
+    stored = settings_store.read_settings("local")
+    assert stored.auto_update_prompt_decision is None
+    assert stored.auto_update_workspaces is False
+    assert (stored.update_window_start_hour, stored.update_window_end_hour) == DEFAULT_UPDATE_WINDOW
 
 
 def test_an_unknown_auto_update_answer_is_rejected_without_being_stored(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
 
-    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": "maybe"})
+    response = client.put("/ui/api/settings/local", json={"auto_update_prompt_decision": "maybe"})
 
     assert response.status_code == 400
-    assert minds_config.get_auto_update_prompt_decision() is None
+    assert settings_store.read_settings("local").auto_update_prompt_decision is None
 
 
 _FIREFOX = InstalledBrowser(
@@ -230,30 +246,115 @@ def test_a_chosen_sign_in_browser_that_was_removed_reads_as_the_default(tmp_path
 @pytest.mark.parametrize(
     "body",
     (
-        {"start_hour": 2, "end_hour": 24},
-        {"start_hour": -1, "end_hour": 5},
-        {"start_hour": 3, "end_hour": 3},
-        {"start_hour": 2},
-        {"start_hour": 2, "end_hour": "midnight"},
+        {"update_window_start_hour": 2, "update_window_end_hour": 24},
+        {"update_window_start_hour": -1, "update_window_end_hour": 5},
+        {"update_window_start_hour": 3, "update_window_end_hour": 3},
+        {"update_window_start_hour": 2},
+        {"update_window_start_hour": 2, "update_window_end_hour": "midnight"},
     ),
     ids=["hour-too-high", "hour-negative", "empty-window", "half-a-window", "not-a-number"],
 )
 def test_an_unusable_update_window_is_rejected_without_being_stored(tmp_path: Path, body: dict[str, object]) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
 
-    response = client.post("/ui/api/settings/update-window", json=body)
+    response = client.put("/ui/api/settings/local", json=body)
 
     assert response.status_code == 400
-    assert minds_config.get_update_window() == DEFAULT_UPDATE_WINDOW
+    stored = settings_store.read_settings("local")
+    assert (stored.update_window_start_hour, stored.update_window_end_hour) == DEFAULT_UPDATE_WINDOW
 
 
-def test_update_window_write_requires_authentication(tmp_path: Path) -> None:
+def test_account_settings_routes_require_authentication(tmp_path: Path) -> None:
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
 
-    assert client.post("/ui/api/settings/update-window", json={"start_hour": 1, "end_hour": 4}).status_code == 401
+    assert client.get("/ui/api/settings/local").status_code == 401
+    assert (
+        client.put(
+            "/ui/api/settings/local", json={"update_window_start_hour": 1, "update_window_end_hour": 4}
+        ).status_code
+        == 401
+    )
+
+
+def test_each_account_id_reads_and_writes_its_own_record(tmp_path: Path) -> None:
+    """Phase 3A: an account's write lands on its record alone; other accounts keep their defaults."""
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
+
+    put = client.put(
+        "/ui/api/settings/3df53b67-59bc-4bcb-9219-e267ac80a470",
+        json={"update_window_start_hour": 22, "update_window_end_hour": 6},
+    )
+
+    assert put.status_code == 200
+    for_account = json.loads(client.get("/ui/api/settings/3df53b67-59bc-4bcb-9219-e267ac80a470").data)
+    for_device = json.loads(client.get("/ui/api/settings/local").data)
+    assert for_account == {
+        "settings_format": 1,
+        "update_window_start_hour": 22,
+        "update_window_end_hour": 6,
+        "auto_update_workspaces": False,
+        "auto_update_prompt_decision": None,
+        "notifications_enabled": True,
+    }
+    assert (for_device["update_window_start_hour"], for_device["update_window_end_hour"]) == DEFAULT_UPDATE_WINDOW
+
+
+def test_settings_overview_resolves_the_account_parameter(tmp_path: Path) -> None:
+    """The overview's account-keyed values are the named account's, so the page and its record agree."""
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values("3df53b67-59bc-4bcb-9219-e267ac80a470", {"auto_update_workspaces": True})
+
+    for_account = json.loads(client.get("/ui/api/settings?account=3df53b67-59bc-4bcb-9219-e267ac80a470").data)
+    for_device = json.loads(client.get("/ui/api/settings").data)
+
+    assert for_account["is_auto_update_enabled"] is True
+    assert for_device["is_auto_update_enabled"] is False
+
+
+def test_settings_overview_refuses_a_malformed_account_parameter(tmp_path: Path) -> None:
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
+
+    assert client.get("/ui/api/settings?account=not%20an%20id").status_code == 400
+
+
+def test_a_record_written_by_a_newer_app_refuses_writes_with_409_but_still_serves(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.seed_if_absent("local", {"settings_format": 2, "auto_update_workspaces": True})
+
+    served = client.get("/ui/api/settings/local")
+    refused = client.put("/ui/api/settings/local", json={"notifications_enabled": False})
+
+    assert served.status_code == 200
+    assert json.loads(served.data)["auto_update_workspaces"] is True
+    assert refused.status_code == 409
+    assert "newer version" in json.loads(refused.data)["error"]
+
+
+def test_account_settings_routes_refuse_a_path_that_is_not_an_account_id(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    assert client.get("/ui/api/settings/not%20an%20id").status_code == 400
+    assert client.put("/ui/api/settings/not%20an%20id", json={"notifications_enabled": False}).status_code == 400
+
+
+def test_account_settings_put_without_a_settings_store_is_rejected_with_503(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    assert client.put("/ui/api/settings/local", json={"notifications_enabled": False}).status_code == 503
+
+
+def test_the_master_notifications_toggle_is_written_through_the_account_settings_put(tmp_path: Path) -> None:
+    client, minds_config, settings_store = _build_settings_client(tmp_path)
+
+    response = client.put("/ui/api/settings/local", json={"notifications_enabled": False})
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["notifications_enabled"] is False
+    assert settings_store.read_settings("local").notifications_enabled is False
+    # The style is untouched, and either key counts as a saved notification choice.
+    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.BOTH, False)
+    prefs = json.loads(client.get("/ui/api/settings").data)["notification_prefs"]
+    assert (prefs["is_enabled"], prefs["has_chosen"]) == (False, True)
 
 
 def test_error_reporting_write_with_a_malformed_body_is_rejected_with_400(tmp_path: Path) -> None:
@@ -318,7 +419,7 @@ def test_settings_overview_carries_the_default_notification_prefs_with_their_own
         "is_enabled": True,
         "style": "both",
         "has_chosen": False,
-        "version": compute_notification_prefs_version(is_enabled=True, style="both", has_chosen=False),
+        "version": compute_notification_style_version(style="both", has_chosen=False),
     }
 
 
@@ -343,14 +444,14 @@ def test_notification_prefs_write_round_trips_with_the_served_version(tmp_path: 
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": False, "style": "cards"},
+        json={"style": "cards"},
         headers={"If-Match": served_version},
     )
 
     assert response.status_code == 200
-    new_version = compute_notification_prefs_version(is_enabled=False, style="cards", has_chosen=True)
+    new_version = compute_notification_style_version(style="cards", has_chosen=True)
     assert json.loads(response.data)["version"] == new_version
-    assert minds_config.get_notification_prefs() == (False, "cards")
+    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.CARDS, True)
     # The next overview serves the written values under the new version.
     assert json.loads(client.get("/ui/api/settings").data)["notification_prefs"]["version"] == new_version
 
@@ -365,27 +466,26 @@ def test_choosing_default_notifications_is_persisted_and_rejects_another_windows
     assert prefs["style"] == "both"
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": True, "style": "both"},
+        json={"style": "both"},
         headers={"If-Match": prefs["version"]},
     )
     assert response.status_code == 200
     assert json.loads(response.data)["version"] != prefs["version"]
-    assert MindsConfig(data_dir=config_dir).get_notification_prefs_with_choice() == (True, "both", True)
+    assert MindsConfig(data_dir=config_dir).get_notification_style_with_choice() == (NotificationStyle.BOTH, True)
     assert json.loads(client.get("/ui/api/settings").data)["notification_prefs"]["has_chosen"] is True
     stale = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": True, "style": "cards"},
+        json={"style": "cards"},
         headers={"If-Match": prefs["version"]},
     )
     assert stale.status_code == 412
 
 
-def test_notification_prefs_write_lands_both_values_in_one_config_write(tmp_path: Path) -> None:
-    """The route persists the record through one atomic read-modify-write.
+def test_notification_style_write_lands_in_one_config_write(tmp_path: Path) -> None:
+    """The route persists the style through one atomic read-modify-write.
 
-    Two separate setter calls would open a window where a concurrent writer
-    interleaves into a record mixing one writer's toggle with the other's
-    style; a single write means every stored record is exactly one request's.
+    The version check and the write share one lock hold, so a concurrent
+    writer starting from the same version cannot slip in between them.
     """
     minds_config = WriteCountingMindsConfig(data_dir=tmp_path / "config")
     client, _app, _auth_store = build_desktop_client_for_test(
@@ -395,13 +495,13 @@ def test_notification_prefs_write_lands_both_values_in_one_config_write(tmp_path
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": False, "style": "os"},
+        json={"style": "os"},
         headers={"If-Match": served_version},
     )
 
     assert response.status_code == 200
     assert minds_config.write_count == 1
-    assert minds_config.get_notification_prefs() == (False, "os")
+    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.OS, True)
 
 
 def test_notification_prefs_write_with_a_malformed_style_is_rejected_with_400(tmp_path: Path) -> None:
@@ -413,12 +513,12 @@ def test_notification_prefs_write_with_a_malformed_style_is_rejected_with_400(tm
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": True, "style": "shout"},
+        json={"style": "shout"},
         headers={"If-Match": served_version},
     )
 
     assert response.status_code == 400
-    assert minds_config.get_notification_prefs()[1] == "both"
+    assert minds_config.get_notification_style_with_choice()[0] == "both"
 
 
 def test_notification_prefs_write_with_a_stale_version_is_rejected_with_412(tmp_path: Path) -> None:
@@ -426,19 +526,20 @@ def test_notification_prefs_write_with_a_stale_version_is_rejected_with_412(tmp_
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path, is_authenticated=True, minds_config=minds_config
     )
-    stale_version = compute_notification_prefs_version(is_enabled=True, style="both", has_chosen=False)
-    # Another window changes the prefs after this page loaded its version.
-    minds_config.set_notification_prefs(is_enabled=True, style=NotificationStyle.OS)
+    stale_version = compute_notification_style_version(style="both", has_chosen=False)
+    # Another window changes the style after this page loaded its version.
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "config.toml").write_text('notification_style = "os"\n')
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": True, "style": "cards"},
+        json={"style": "cards"},
         headers={"If-Match": stale_version},
     )
 
     assert response.status_code == 412
     # The stale write must not have clobbered the newer value.
-    assert minds_config.get_notification_prefs()[1] == "os"
+    assert minds_config.get_notification_style_with_choice()[0] == "os"
 
 
 def test_notification_prefs_write_without_if_match_is_rejected_with_428(tmp_path: Path) -> None:
@@ -449,11 +550,11 @@ def test_notification_prefs_write_without_if_match_is_rejected_with_428(tmp_path
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": False, "style": "both"},
+        json={"style": "cards"},
     )
 
     assert response.status_code == 428
-    assert minds_config.get_notification_prefs()[0] is True
+    assert minds_config.get_notification_style_with_choice()[0] == "both"
 
 
 def test_notification_prefs_write_without_a_minds_config_is_rejected_with_503(tmp_path: Path) -> None:
@@ -461,7 +562,7 @@ def test_notification_prefs_write_without_a_minds_config_is_rejected_with_503(tm
 
     response = client.post(
         "/ui/api/settings/notifications",
-        json={"is_enabled": False, "style": "both"},
+        json={"style": "both"},
         headers={"If-Match": "anything"},
     )
 
@@ -469,12 +570,9 @@ def test_notification_prefs_write_without_a_minds_config_is_rejected_with_503(tm
 
 
 def test_test_notification_pushes_one_banner_through_the_dispatcher_whatever_the_prefs_say(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    minds_config.set_notification_prefs(is_enabled=False, style=NotificationStyle.CARDS)
     dispatcher = RecordingNotificationDispatcher(is_electron=True)
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config, notification_dispatcher=dispatcher
-    )
+    client, _minds_config, settings_store = _build_settings_client(tmp_path, notification_dispatcher=dispatcher)
+    settings_store.apply_settings_values("local", {"notifications_enabled": False})
 
     response = client.post("/ui/api/settings/notifications/test")
 

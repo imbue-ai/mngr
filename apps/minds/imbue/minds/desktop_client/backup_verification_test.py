@@ -4,9 +4,12 @@ import base64
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 
+from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_verification import BACKUP_STALE_AFTER_SECONDS
 from imbue.minds.desktop_client.backup_verification import BACKUP_STALE_MINIMUM_UPTIME_SECONDS
@@ -14,9 +17,12 @@ from imbue.minds.desktop_client.backup_verification import BackupServiceCheckSta
 from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_TAG_ENV_VAR
+from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
 from imbue.minds.desktop_client.backup_verification import classify_check_payload
 from imbue.minds.desktop_client.backup_verification import is_backup_history_stale
 from imbue.minds.desktop_client.backup_verification import minimum_backup_tag
+from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.mngr.primitives import AgentId
 
 _CANONICAL_ENV = "RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n"
 
@@ -244,3 +250,18 @@ def test_with_added_problem_flips_the_state_and_is_idempotent() -> None:
 
     reflagged = flagged.with_added_problem(BackupServiceProblem.BACKUPS_STALE)
     assert reflagged.problems == (BackupServiceProblem.BACKUPS_STALE,)
+
+
+def test_an_offline_workspace_answers_from_the_cached_verification_flag(tmp_path: Path) -> None:
+    """A stopped workspace cannot be read, so the install's cached flag decides DISABLED vs OFFLINE."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    facts_cache = WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache")
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    agent_id = AgentId.generate()
+
+    offline = check_backup_service_for_workspace(paths, agent_id, resolver=resolver, facts_cache=facts_cache)
+    assert offline.state == BackupServiceCheckState.OFFLINE
+
+    facts_cache.set_backup_verification_enabled(agent_id, False)
+    disabled = check_backup_service_for_workspace(paths, agent_id, resolver=resolver, facts_cache=facts_cache)
+    assert disabled.state == BackupServiceCheckState.DISABLED
