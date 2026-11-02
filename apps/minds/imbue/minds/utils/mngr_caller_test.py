@@ -316,6 +316,9 @@ def test_warm_process_that_ignores_sigterm_is_killed_when_terminated(mngr_caller
         os.close(held_socket_fd)
 
 
+_READER_LOOP_FRAME = "imbue.concurrency_group.subprocess_utils.run_local_command_modern_version"
+
+
 class _UnstoppableRunningProcess(RunningProcess):
     """Times out every stop without asking the reader thread to shut down, so it stays put for inspection."""
 
@@ -327,6 +330,13 @@ class _UnstoppableRunningProcess(RunningProcess):
 def test_warm_process_stop_timeout_reports_clocks_and_reader_stack() -> None:
     """A stop that times out records what tells a suspend, an unreaped child and a starved thread apart."""
     running_process = run_background(["sleep", "30"], process_class=_UnstoppableRunningProcess)
+    # The stop is what a starved reader thread looks like once it is in its read loop; stopping
+    # while the thread is still setting that loop up reports its setup frame instead.
+    wait_for(
+        lambda: _READER_LOOP_FRAME in (running_process.get_reader_thread_stack() or ()),
+        timeout=10.0,
+        error_message="The reader thread never reached its read loop",
+    )
     parent_connection, child_connection = Pipe()
     child_connection.close()
     with ConcurrencyGroup(name="test-warm-process-stop-timeout") as concurrency_group:
@@ -342,4 +352,4 @@ def test_warm_process_stop_timeout_reports_clocks_and_reader_stack() -> None:
     record = error_records[0]
     assert "Timed out stopping a warm mngr process (after_call_timeout=True, join_wall_seconds=" in record
     assert "join_monotonic_seconds=" in record
-    assert "imbue.concurrency_group.subprocess_utils.run_local_command_modern_version" in record
+    assert _READER_LOOP_FRAME in record
