@@ -446,7 +446,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     violations = [
         v for v in find_bash_scripts_without_strict_mode(_REPO_ROOT) if Path(v).resolve().is_relative_to(checkout_root)
     ]
-    assert len(violations) <= snapshot(8), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(21), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 

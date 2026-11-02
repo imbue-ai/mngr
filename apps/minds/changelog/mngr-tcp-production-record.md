@@ -1,0 +1,5 @@
+Record the production run of the CVE-2026-98432 kernel rollout in the rollout runbook (`docs/deploy/history/rollouts/cve-2026-98432-guest-kernel.md`): every production edge host, box and leased slice VM is on 6.12.113, the 194 never-leased available rows were destroyed and 40 rebaked from the fixed guest image, and the lessons from the run (reading a lane's box list on its own descriptor, confirming a scheduled reboot timer, retrying dropped dials) are written down for the next fleet sweep.
+
+`next_deploy.md`: the available-row counts line now reflects the rebaked pool, the US-EAST-VA capacity item is discharged (the region's never-leased old rows are gone), and the `6bccf020` item is discharged (the box was drained and repaved the same day).
+
+The operator drivers the run ended with (lane and box reboot, edge-host reboot, bakes from tag worktrees, slice verification, pool row export) are kept beside the runbook under `docs/deploy/history/rollouts/cve-2026-98432-guest-kernel-drivers-temporary/`, marked `CLEANUP` for deletion once the second pass over the stopped workspaces is done.
