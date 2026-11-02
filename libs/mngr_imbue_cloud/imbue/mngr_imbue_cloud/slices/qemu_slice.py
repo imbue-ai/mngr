@@ -237,6 +237,7 @@ ExecStartPre=+{GEN2_HELPER_PATH} setup %i
 ExecStart={qemu_command}
 ExecStop=+{GEN2_HELPER_PATH} powerdown %i
 ExecStopPost=+{GEN2_HELPER_PATH} teardown %i
+TimeoutStartSec={GEN2_SLICE_UNIT_START_TIMEOUT_SECONDS}
 TimeoutStopSec=180
 Restart=no
 {sandbox_directives}
@@ -334,8 +335,27 @@ env_get() {{
     printf '%s' "$value"
 }}
 
-uplink_interface() {{
+# The default route's interface, or nothing when the box has no default route.
+current_uplink_interface() {{
     ip route | awk '/^default/ {{print $5; exit}}'
+}}
+
+# The box's DHCP client can reach network-online.target before the default
+# route is installed, and a unit started in that window would feed an empty
+# interface name to the forwarding sysctl and fail. So setup awaits the route,
+# bounded (the unit's TimeoutStartSec covers the wait).
+await_uplink_interface() {{
+    local attempt interface
+    for attempt in $(seq 1 {GEN2_UPLINK_ROUTE_WAIT_SECONDS}); do
+        interface=$(current_uplink_interface)
+        if [ -n "$interface" ]; then
+            printf '%s' "$interface"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "refusing: no default route after {GEN2_UPLINK_ROUTE_WAIT_SECONDS}s, so the uplink interface is unknown" >&2
+    exit 4
 }}
 
 delete_tagged_nft_rules() {{
@@ -355,6 +375,12 @@ delete_tagged_nft_rules() {{
 
 case "$VERB" in
 setup)
+    # Every slice unit starts its setup at once on a rebooted box, and the
+    # uplink's shared qdisc and forwarding are check-then-add, so two setups
+    # interleaving there leave the second failing on the root qdisc the first
+    # just added. One box-wide lock serializes the whole verb (it takes seconds).
+    exec 8>"{GEN2_HELPER_SETUP_LOCK_PATH}"
+    flock 8
     # The user/tap names are pinned to the (systemd-supplied, trusted) ordinal;
     # everything else must be numeric (or dotted-numeric for the addresses).
     MNGR_SLICE_USER=$(env_get MNGR_SLICE_USER "mngr-slice-$ORDINAL")
@@ -421,7 +447,7 @@ setup)
     fi
     ip addr replace "$MNGR_SLICE_GATEWAY_IP/$MNGR_SLICE_PREFIX_LENGTH" dev "$MNGR_SLICE_TAP"
     ip link set "$MNGR_SLICE_TAP" up
-    UPLINK="$(uplink_interface)"
+    UPLINK="$(await_uplink_interface)"
     sysctl -q -w "net.ipv4.conf.$MNGR_SLICE_TAP.forwarding=1"
     sysctl -q -w "net.ipv4.conf.$UPLINK.forwarding=1"
     # Loopback-addressed connections (the image-cache transfer targets
@@ -602,11 +628,16 @@ QMP_POWERDOWN
 teardown)
     delete_tagged_nft_rules
     TAP="mslice$ORDINAL"
-    UPLINK="$(uplink_interface)"
-    CLASS_MINOR=$(printf '%x' $(( 16 + ORDINAL )))
-    TC_MARK=$(( {GEN2_TC_MARK_BASE} + ORDINAL ))
-    tc filter del dev "$UPLINK" parent 1: protocol all prio 10 handle "$TC_MARK" fw 2>/dev/null || true
-    tc class del dev "$UPLINK" parent 1:1 classid "1:$CLASS_MINOR" 2>/dev/null || true
+    # Teardown converges from any state, a box without a default route included
+    # (ExecStopPost runs after a setup that gave up waiting for one): with no
+    # uplink there is no tc class or filter to delete, and the tap still goes.
+    UPLINK="$(current_uplink_interface)"
+    if [ -n "$UPLINK" ]; then
+        CLASS_MINOR=$(printf '%x' $(( 16 + ORDINAL )))
+        TC_MARK=$(( {GEN2_TC_MARK_BASE} + ORDINAL ))
+        tc filter del dev "$UPLINK" parent 1: protocol all prio 10 handle "$TC_MARK" fw 2>/dev/null || true
+        tc class del dev "$UPLINK" parent 1:1 classid "1:$CLASS_MINOR" 2>/dev/null || true
+    fi
     ip link del "$TAP" 2>/dev/null || true
     ;;
 *)
@@ -616,6 +647,17 @@ teardown)
 esac
 """
 
+
+# The box-wide lock the helper's setup verb holds, so concurrent slice starts never
+# interleave on the uplink's shared qdisc and sysctls.
+GEN2_HELPER_SETUP_LOCK_PATH: Final[str] = "/run/mngr-slice-helper-setup.lock"
+# How long the helper's setup step waits for the box's default route at boot.
+GEN2_UPLINK_ROUTE_WAIT_SECONDS: Final[int] = 90
+# The unit's start budget bounds the helper's setup (ExecStartPre). Every slice
+# unit starts at once at boot, so one slice's setup spends the route wait plus
+# every earlier slice's setup (queued behind the lock) inside its own budget,
+# which systemd's 90 s default does not hold.
+GEN2_SLICE_UNIT_START_TIMEOUT_SECONDS: Final[int] = 600
 
 # The exact systemctl verbs the slice service user may run on the per-ordinal slice units:
 # the single source of truth for both the sudoers grants below and the box

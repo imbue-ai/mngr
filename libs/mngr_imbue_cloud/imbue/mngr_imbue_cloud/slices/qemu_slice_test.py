@@ -23,7 +23,10 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_UPLINK_SHAPING_PERCENT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.testing import assert_valid_bash
 from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_DHCP_UNIT_SANDBOX_DIRECTIVES
+from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_HELPER_SETUP_LOCK_PATH
+from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_SLICE_UNIT_START_TIMEOUT_SECONDS
 from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_UNIT_SANDBOX_DIRECTIVES
+from imbue.mngr_imbue_cloud.slices.qemu_slice import GEN2_UPLINK_ROUTE_WAIT_SECONDS
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_boot_wait_script
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_reserve_script
 from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_start_command
@@ -149,6 +152,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \\
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny
 ExecStop=+/usr/local/sbin/mngr-slice-helper powerdown %i
 ExecStopPost=+/usr/local/sbin/mngr-slice-helper teardown %i
+TimeoutStartSec=600
 TimeoutStopSec=180
 Restart=no
 NoNewPrivileges=yes
@@ -631,3 +635,41 @@ def test_boot_wait_script_polls_the_routed_vm_address() -> None:
     # Wall-time deadlined so the timeout marker always lands before the SSH
     # session's own (only slightly larger) deadline kills the script.
     assert 'while [ "$SECONDS" -lt 100 ]; do' in script
+
+
+def test_helper_script_waits_for_the_default_route_before_enabling_forwarding_on_the_uplink() -> None:
+    helper = render_slice_helper_script()
+    await_function = helper[helper.index("await_uplink_interface() {") : helper.index("delete_tagged_nft_rules() {")]
+    assert f"seq 1 {GEN2_UPLINK_ROUTE_WAIT_SECONDS}" in await_function
+    assert "interface=$(current_uplink_interface)" in await_function
+    assert 'if [ -n "$interface" ]; then' in await_function
+    assert "refusing: no default route" in await_function
+    assert "exit 4" in await_function
+    assert "ip route | awk '/^default/ {print $5; exit}'" in helper
+    # The sysctls still run on the awaited name, never on an empty one.
+    setup_verb = helper[helper.index("\nsetup)") : helper.index("\npowerdown)")]
+    assert 'UPLINK="$(await_uplink_interface)"' in setup_verb
+    assert 'sysctl -q -w "net.ipv4.conf.$UPLINK.forwarding=1"' in setup_verb
+    # Teardown must converge without a default route too, so it never waits for one.
+    teardown_verb = helper[helper.index("\nteardown)") :]
+    assert 'UPLINK="$(current_uplink_interface)"' in teardown_verb
+    assert "await_uplink_interface" not in teardown_verb
+    assert 'if [ -n "$UPLINK" ]; then' in teardown_verb
+    assert 'ip link del "$TAP" 2>/dev/null || true' in teardown_verb
+    assert_valid_bash(helper)
+
+
+def test_helper_script_serializes_setup_under_one_box_wide_lock() -> None:
+    helper = render_slice_helper_script()
+    setup_verb = helper[helper.index("\nsetup)") : helper.index("MNGR_SLICE_USER=$(env_get")]
+    assert f'exec 8>"{GEN2_HELPER_SETUP_LOCK_PATH}"' in setup_verb
+    assert "flock 8" in setup_verb
+    # The uplink's root qdisc add stays check-then-add; the lock is what keeps two setups from racing it.
+    assert 'tc qdisc add dev "$UPLINK" root handle 1: htb default 2' in helper
+
+
+def test_unit_start_timeout_covers_the_route_wait_and_the_setups_queued_behind_the_lock() -> None:
+    unit = render_slice_unit_file()
+    assert f"TimeoutStartSec={GEN2_SLICE_UNIT_START_TIMEOUT_SECONDS}" in unit
+    # The route wait alone would exhaust systemd's 90 s default; the queued setups need room past it.
+    assert GEN2_SLICE_UNIT_START_TIMEOUT_SECONDS > 2 * GEN2_UPLINK_ROUTE_WAIT_SECONDS
