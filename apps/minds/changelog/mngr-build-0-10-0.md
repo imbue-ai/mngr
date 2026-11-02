@@ -3,3 +3,5 @@
 - The warm-mngr-process stop-timeout test waits for the reader thread to reach its read loop before stopping it, so it no longer fails when the stop lands while the thread is still setting that loop up.
 
 - The release-tier tests follow the product again: the raw pool-lease deployment tests (lease isolation, machine resize, stop and start) declare the ports the bake template publishes, which a lease has required since the Screen's ICE ports, and the workspace-sync Electron tests drive the signed-in account's own home page, mark onboarding complete on a fresh install, and expect a workspace link to move the window to its hub, as every window shows one account now.
+
+- Recorded the 0.10.0 cut in `docs/deploy/history/minds-v0.10.0.md`, reset `docs/deploy/next_deploy.md` to what the release's rehearsal, deploy, bake and promotion still owe, and added two failure modes to the app-release runbook: a revoked CI Anthropic key (the first reply never arrives while every real-Claude release test fails with 401) and release-tier tests that only run on a release dispatch going stale.
