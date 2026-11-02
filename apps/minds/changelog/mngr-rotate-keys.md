@@ -1,0 +1,1 @@
+- `docs/deploy/setup/vault.md` documents the monorepo CI credentials under `secrets/mngr/ci` (who reads them, how to rotate them with `scripts/rotate_mngr_ci_credentials.py`, and what to redeploy afterwards). The next-deploy checklist drops its item about minting a dedicated CI Anthropic key, which is done.
