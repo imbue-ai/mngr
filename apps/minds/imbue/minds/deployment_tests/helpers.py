@@ -11,10 +11,12 @@ import os
 import re
 import subprocess
 import time
+import tomllib
 from collections.abc import Iterator
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Final
 
 import httpx2
@@ -41,6 +43,7 @@ from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 
@@ -89,6 +92,32 @@ _CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
 # treats a lease without the field as a client from before gen-2 and answers it
 # with the update-required refusal, since no gen-1 rows can be leased.
 LEASE_MAX_BOX_GENERATION: Final[int] = FIRST_QEMU_BOX_GENERATION
+
+# The create templates the pool bake stacks (``DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES``
+# in the operator CLI), whose declared ports every baked row carries.
+_POOL_BAKE_CREATE_TEMPLATES: Final[tuple[str, ...]] = ("main", "pool_host")
+
+
+def pool_lease_published_ports(template_worktree: Path) -> list[dict[str, object]]:
+    """The ``published_ports`` a raw ``/hosts/lease`` must declare to match a row baked from this template.
+
+    The connector leases a row only to a create declaring exactly the ports the row was
+    baked with (specs/published-ports), so a lease placed outside ``mngr create`` declares
+    the bake templates' ``publish`` set, read the way the bake's own create reads it: the
+    stacked templates' ``publish`` lists, each later template extending the earlier ones.
+    """
+    settings = tomllib.loads((template_worktree / ".mngr" / "settings.toml").read_text())
+    create_templates = settings.get("create_templates", {})
+    declared: list[str] = []
+    for template_name in _POOL_BAKE_CREATE_TEMPLATES:
+        template = create_templates.get(template_name, {})
+        declared = [str(value) for value in template.get("publish", declared)]
+        declared.extend(str(value) for value in template.get("publish__extend", ()))
+    declarations = parse_published_port_declarations(declared)
+    return [
+        {"guest_port": declaration.guest_port, "protocol": declaration.protocol.value.lower()}
+        for declaration in declarations
+    ]
 
 
 def ci_admin_auth_header() -> dict[str, str]:
