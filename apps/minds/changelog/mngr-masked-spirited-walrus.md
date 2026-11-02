@@ -1,0 +1,1 @@
+The macOS lifecycle e2e case "#481 closing the window during startup" now waits for the first window to show `shell.html` before closing it. Reading the URL once could catch the window before its first page load and fail `macos_launch` in launch-to-msg.

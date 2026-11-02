@@ -187,7 +187,8 @@ test.describe('healthy app', () => {
 
     // Close while the window is still the shell.html loading takeover -- the
     // whole point is that the startup sequence loses its window mid-flight.
-    expect(await liveUrl(mainWindow)).toContain('shell.html');
+    // firstWindow can resolve on the window's blank document, before shell.html commits.
+    await expect.poll(() => liveUrl(mainWindow)).toContain('shell.html');
     await closeAllWindows(app);
 
     // The one-time login code sat inside a guard on that window's survival,
