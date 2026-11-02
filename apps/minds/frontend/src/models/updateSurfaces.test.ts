@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { UiWorkspaceUpdate } from "../channel/messages";
 import { OUT_OF_DATE_UPDATE } from "../testing";
 import {
+  kernelCardFor,
   updateNavDotFor,
   updatePillFor,
   updateTabActionsFor,
@@ -594,5 +595,120 @@ describe("the Updates tab, in the states the mockup does not draw", () => {
     };
     const status = updateTabStatusFor(refused, false, false, false, "");
     expect(updateTabActionsFor(refused, status, false, "")).toEqual([]);
+  });
+});
+
+describe("the kernel security card", () => {
+  const VULNERABLE: UiWorkspaceUpdate = {
+    ...CURRENT,
+    kernel: {
+      status: "VULNERABLE",
+      running_kernel: "6.12.96+deb13-cloud-arm64",
+      fixed_version: "6.12.113-1",
+      is_fix_offered: true,
+      activity: "IDLE",
+      failure: "",
+      is_fix_landed: false,
+    },
+  };
+
+  it("pills and cards a machine whose template is current but whose kernel is not", () => {
+    expect(updatePillFor(VULNERABLE, false, false, false)).toMatchObject({
+      state: "kernel-update",
+      label: "Security update available",
+      tone: "attention",
+      target: "tab",
+    });
+    expect(kernelCardFor(VULNERABLE)).toMatchObject({ state: "offered", actionLabel: "Restart machine" });
+    expect(kernelCardFor(VULNERABLE)?.line).toContain("6.12.96+deb13-cloud-arm64");
+  });
+
+  it("lets a template security update go first", () => {
+    const both: UiWorkspaceUpdate = { ...VULNERABLE, availability: "SECURITY_UPDATE", current_version: "minds-v0.8.7" };
+    expect(updatePillFor(both, false, false, false)?.state).toBe("security-update");
+    expect(updateBadgeFor(both, false)?.state).toBe("security-update");
+  });
+
+  it("says nothing of a machine whose kernel is fixed, unread, or not the app's to restart", () => {
+    const fixed: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      kernel: { ...VULNERABLE.kernel, status: "FIXED", is_fix_offered: false },
+    };
+    const unread: UiWorkspaceUpdate = { ...CURRENT, kernel: { status: "UNKNOWN" } };
+    const vulnerableElsewhere: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      kernel: { ...VULNERABLE.kernel, is_fix_offered: false },
+    };
+    for (const update of [fixed, unread, vulnerableElsewhere, CURRENT]) {
+      expect(updatePillFor(update, false, false, false)).toBeNull();
+      expect(updateBadgeFor(update, false)).toBeNull();
+      expect(kernelCardFor(update)).toBeNull();
+    }
+  });
+
+  it("follows the restart through its steps and says how it ended", () => {
+    const restarting: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      kernel: { ...VULNERABLE.kernel, activity: "RESTARTING" },
+    };
+    expect(updatePillFor(restarting, false, false, false)).toMatchObject({
+      state: "kernel-restarting",
+      isDotPulsing: true,
+    });
+    expect(updateBadgeFor(restarting, false)).toMatchObject({ state: "kernel-restarting", isSpinnerShown: true });
+    expect(kernelCardFor(restarting)).toMatchObject({ state: "in-progress", actionLabel: null });
+    expect(kernelCardFor(restarting)?.line).toContain("Every chat");
+
+    const failed: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      kernel: { ...VULNERABLE.kernel, failure: "Couldn't stop the machine: vm busy" },
+    };
+    expect(kernelCardFor(failed)).toMatchObject({
+      state: "failed",
+      line: "Couldn't stop the machine: vm busy",
+      actionLabel: "Try again",
+    });
+    expect(updatePillFor(failed, false, false, false)?.state).toBe("kernel-update");
+
+    const landed: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      kernel: {
+        ...VULNERABLE.kernel,
+        status: "FIXED",
+        running_kernel: "6.12.113+deb13-cloud-arm64",
+        is_fix_offered: false,
+        is_fix_landed: true,
+      },
+    };
+    expect(kernelCardFor(landed)).toMatchObject({ state: "landed", actionLabel: null });
+    expect(kernelCardFor(landed)?.line).toContain("6.12.113+deb13-cloud-arm64");
+    expect(updatePillFor(landed, false, false, false)).toBeNull();
+    expect(updateBadgeFor(landed, false)).toBeNull();
+  });
+
+  it("withholds the template actions while the machine restarts for its kernel", () => {
+    const restarting: UiWorkspaceUpdate = {
+      ...OUT_OF_DATE_UPDATE,
+      kernel: { ...VULNERABLE.kernel, activity: "RESTARTING" },
+    };
+    const status = updateTabStatusFor(restarting, false, false, false, "");
+    expect(status.situation).toBe("offered");
+    expect(updateTabActionsFor(restarting, status, false, "")).toEqual([]);
+  });
+
+  it("holds the kernel pill back while a template run is in flight", () => {
+    const running: UiWorkspaceUpdate = { ...VULNERABLE, activity: "RUNNING", chat_agent_id: CHAT };
+    expect(updatePillFor(running, true, false, true)?.state).toBe("updating");
+  });
+
+  it("ranks the restart under way above the last run's outcome, on the row as on the pill", () => {
+    const restartingAfterFailure: UiWorkspaceUpdate = {
+      ...VULNERABLE,
+      verdict: "STUCK",
+      chat_agent_id: CHAT,
+      kernel: { ...VULNERABLE.kernel, activity: "RESTARTING" },
+    };
+    expect(updateBadgeFor(restartingAfterFailure, false)?.state).toBe("kernel-restarting");
+    expect(updatePillFor(restartingAfterFailure, false, false, true)?.state).toBe("kernel-restarting");
   });
 });

@@ -96,6 +96,11 @@ from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.kernel_fix import KernelFixRunner
+from imbue.minds.desktop_client.kernel_security import KernelMachineAccess
+from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
+from imbue.minds.desktop_client.kernel_security import kernel_machine_access_for_provider
+from imbue.minds.desktop_client.kernel_security import read_kernel_probe
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
@@ -2334,14 +2339,16 @@ class _LegacyUiStateDeriver(MutableModel):
 
 
 class _UpdateRunHostLifecycle(MutableModel):
-    """Brings a stopped machine up for an "Update now"; it stays up afterwards.
+    """The host stop and start the update flows run to completion: an "Update now" brings a stopped
+    machine up (it stays up afterwards), and the kernel restart takes the machine down and brings it back.
 
     Goes through :func:`perform_mind_host_action` rather than shelling out to
-    ``mngr`` directly, so an update run leaves the same host-state override and
-    unattended-recovery marks behind as a start the user asked for. A raw
-    ``mngr start`` here would wake a machine the app had stopped without
+    ``mngr`` directly, so these leave the same host-state override and
+    unattended-recovery marks behind as a stop or start the user asked for. A
+    raw ``mngr start`` here would wake a machine the app had stopped without
     clearing its suppression mark, leaving it excluded from recovery for the
-    rest of the process's life.
+    rest of the process's life; a raw ``mngr stop`` would leave recovery free
+    to restart a machine the app took down on purpose.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -2361,9 +2368,16 @@ class _UpdateRunHostLifecycle(MutableModel):
 
         Synchronous because the dispatch's next step execs into the machine.
         """
+        return self._act_and_wait(agent_id, MindHostAction.START)
+
+    def stop_and_wait(self, agent_id: AgentId) -> MindHostActionOutcome:
+        """Stop the machine's host, blocking until ``mngr`` returns, for a restart onto a new kernel."""
+        return self._act_and_wait(agent_id, MindHostAction.STOP)
+
+    def _act_and_wait(self, agent_id: AgentId, action: MindHostAction) -> MindHostActionOutcome:
         return perform_mind_host_action(
             workspace_agent_id=agent_id,
-            action=MindHostAction.START,
+            action=action,
             backend_resolver=self.backend_resolver,
             mngr_binary=self.mngr_binary,
             mngr_host_dir=self.mngr_host_dir,
@@ -2589,6 +2603,7 @@ def _build_workspace_update_service(
         read_zone=read_host_timezone,
         paths=paths,
     )
+    kernel_access = _KernelMachineAccessResolver(backend_resolver=backend_resolver)
     detector = WorkspaceUpdateDetector(
         store=state_store,
         backend_resolver=backend_resolver,
@@ -2602,6 +2617,10 @@ def _build_workspace_update_service(
             minds_config, account_settings_store, session_store, facts_cache, agent_id
         ),
         arm_for_auto_update=lambda agent_id: _arm_for_auto_update(app, agent_id),
+        kernel_transport_for=kernel_access.transport_for,
+        read_kernel_probe=lambda agent_id, transport: read_kernel_probe(
+            mngr_caller, transport, build_agent_address(agent_id, backend_resolver)
+        ),
     )
     host_lifecycle = _UpdateRunHostLifecycle(
         flask_app=app,
@@ -2610,6 +2629,16 @@ def _build_workspace_update_service(
         concurrency_group=root_concurrency_group,
         mngr_binary=mngr_binary,
         mngr_host_dir=mngr_host_dir,
+    )
+    kernel_fix = KernelFixRunner(
+        state_store=state_store,
+        mngr_caller=mngr_caller,
+        backend_resolver=backend_resolver,
+        concurrency_group=root_concurrency_group,
+        kernel_access_for=kernel_access,
+        stop_workspace=host_lifecycle.stop_and_wait,
+        start_workspace=host_lifecycle.start_and_wait,
+        on_fix_ended=lambda agent_id: _reread_machine_after_kernel_fix(detector, agent_id),
     )
     return WorkspaceUpdateService(
         state_store=state_store,
@@ -2621,7 +2650,32 @@ def _build_workspace_update_service(
         facts_cache=facts_cache,
         minds_config=minds_config,
         start_workspace=host_lifecycle.start_and_wait,
+        kernel_fix=kernel_fix,
     )
+
+
+def _reread_machine_after_kernel_fix(detector: WorkspaceUpdateDetector, agent_id: AgentId) -> None:
+    """A restart ended: whatever the sweep last read of the machine is stale, so it reads again."""
+    detector.invalidate_cached_kernel(agent_id)
+    detector.invalidate_cached_version(agent_id)
+    detector.request_pass()
+
+
+class _KernelMachineAccessResolver(MutableModel):
+    """How each workspace's machine is reached and restarted for its kernel, from the provider discovery places it on."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Names each workspace's provider.")
+
+    def __call__(self, agent_id: AgentId) -> KernelMachineAccess | None:
+        display = self.backend_resolver.get_agent_display_info(agent_id)
+        return kernel_machine_access_for_provider(display.provider_name if display is not None else None)
+
+    def transport_for(self, agent_id: AgentId) -> KernelProbeTransport | None:
+        """The sweep's probe transport alone; None for a machine the app does not probe."""
+        access = self(agent_id)
+        return access.transport if access is not None else None
 
 
 def _create_ui_state_publisher(

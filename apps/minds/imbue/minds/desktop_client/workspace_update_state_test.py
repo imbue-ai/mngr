@@ -17,11 +17,17 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.kernel_security import KernelProbe
+from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
+from imbue.minds.desktop_client.testing import FIXED_KERNEL_PROBE
+from imbue.minds.desktop_client.testing import VULNERABLE_KERNEL_PROBE
 from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
+from imbue.minds.desktop_client.update_status import KernelFixActivity
+from imbue.minds.desktop_client.update_status import KernelSecurityStatus
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
@@ -451,6 +457,8 @@ def _detector(
     read_update_facts: Callable[[AgentId, bool], UpdateWorkspaceFacts | None] | None = None,
     auto_update_policy: AutoUpdatePolicy | None = None,
     armed: list[AgentId] | None = None,
+    kernel_transport: KernelProbeTransport | None = None,
+    read_kernel_probe: Callable[[AgentId, KernelProbeTransport], KernelProbe | None] | None = None,
 ) -> WorkspaceUpdateDetector:
     armed_ids = armed if armed is not None else []
     return WorkspaceUpdateDetector(
@@ -469,6 +477,8 @@ def _detector(
             else AutoUpdatePolicy(is_enabled=False, skipped_target_ref="")
         ),
         arm_for_auto_update=armed_ids.append,
+        kernel_transport_for=lambda _agent_id: kernel_transport,
+        read_kernel_probe=(read_kernel_probe if read_kernel_probe is not None else lambda _agent_id, _transport: None),
     )
 
 
@@ -1557,3 +1567,199 @@ def test_the_sweep_arms_a_behind_workspace_under_auto_update_and_shows_a_stopped
 
     assert armed == [behind_id]
     assert store.get(stopped_id).is_scheduled is False
+
+
+# The kernel axis
+
+
+def _detect_version(store: WorkspaceUpdateStateStore, agent_id: AgentId, version: str) -> None:
+    store.record_detection(
+        agent_id,
+        detection=UpdateDetection(availability=UpdateAvailability.UP_TO_DATE),
+        current_version=version,
+        supported_version=version,
+        is_readable=True,
+    )
+
+
+def test_a_machine_is_badged_vulnerable_with_the_fix_offered_once_its_template_can_install_it(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+
+    _detect_version(store, agent_id, "minds-v0.8.7")
+    too_old = store.get(agent_id).kernel
+    _detect_version(store, agent_id, "minds-v0.9.1")
+    fixable = store.get(agent_id).kernel
+
+    assert too_old.status is KernelSecurityStatus.VULNERABLE
+    assert too_old.is_fix_offered is False
+    assert fixable.is_fix_offered is True
+    assert fixable.running_kernel == "6.12.96+deb13-cloud-arm64"
+    assert fixable.fixed_version == "6.12.113-1"
+
+
+def test_a_machine_the_app_does_not_probe_stays_unknown_with_nothing_offered(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    _detect_version(store, agent_id, "minds-v0.9.1")
+
+    store.record_kernel_probe(agent_id, transport=None, probe=None)
+
+    kernel = store.get(agent_id).kernel
+    assert kernel.status is KernelSecurityStatus.UNKNOWN
+    assert kernel.is_fix_offered is False
+
+
+def test_a_probe_that_did_not_answer_keeps_the_last_reading(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.OUTER, probe=VULNERABLE_KERNEL_PROBE)
+
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.OUTER, probe=None)
+
+    assert store.get(agent_id).kernel.status is KernelSecurityStatus.VULNERABLE
+
+
+def test_the_restart_is_claimed_once_and_its_end_records_the_boot_it_verified(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    _detect_version(store, agent_id, "minds-v0.9.1")
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+
+    assert store.try_begin_kernel_fix(agent_id)
+    assert not store.try_begin_kernel_fix(agent_id)
+    assert store.get(agent_id).kernel.activity is KernelFixActivity.INSTALLING
+    store.set_kernel_fix_activity(agent_id, KernelFixActivity.RESTARTING)
+    assert store.get(agent_id).is_kernel_fix_in_flight
+    store.end_kernel_fix(agent_id, probe=FIXED_KERNEL_PROBE, failure="")
+
+    kernel = store.get(agent_id).kernel
+    assert kernel.activity is KernelFixActivity.IDLE
+    assert kernel.status is KernelSecurityStatus.FIXED
+    assert kernel.is_fix_landed is True
+    assert kernel.is_fix_offered is False
+
+
+def test_a_restart_that_failed_keeps_the_badge_and_says_why(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    _detect_version(store, agent_id, "minds-v0.9.1")
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+    assert store.try_begin_kernel_fix(agent_id)
+
+    store.end_kernel_fix(agent_id, probe=None, failure="Couldn't stop the machine: vm busy")
+
+    kernel = store.get(agent_id).kernel
+    assert kernel.status is KernelSecurityStatus.VULNERABLE
+    assert kernel.is_fix_offered is True
+    assert kernel.failure == "Couldn't stop the machine: vm busy"
+    assert kernel.is_fix_landed is False
+    # A new press starts clean.
+    assert store.try_begin_kernel_fix(agent_id)
+    assert store.get(agent_id).kernel.failure == ""
+
+
+def test_the_restart_and_a_template_run_refuse_to_claim_the_same_row(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    restarting_id = AgentId.generate()
+    updating_id = AgentId.generate()
+    assert store.try_begin_kernel_fix(restarting_id)
+    assert store.try_begin_run(updating_id, target_override="")
+
+    assert not store.try_begin_run(restarting_id, target_override="")
+    assert not store.try_begin_kernel_fix(updating_id)
+    store.end_kernel_fix(restarting_id, probe=None, failure="")
+    assert store.try_begin_run(restarting_id, target_override="")
+
+
+def test_a_sweep_landing_mid_restart_leaves_the_restart_alone(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+    assert store.try_begin_kernel_fix(agent_id)
+
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+
+    assert store.get(agent_id).kernel.activity is KernelFixActivity.INSTALLING
+
+
+def test_forgetting_a_workspace_drops_its_kernel_slice(tmp_path: Path) -> None:
+    store = make_update_state_store(tmp_path)
+    agent_id = AgentId.generate()
+    store.record_kernel_probe(agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE)
+
+    store.forget(agent_id)
+
+    assert str(agent_id) not in store.snapshot()
+
+
+class _KernelProbeReads:
+    """Records which workspaces the sweep probed, answering each with the same probe."""
+
+    def __init__(self, probe: KernelProbe | None) -> None:
+        self.probe = probe
+        self.probed: list[tuple[AgentId, KernelProbeTransport]] = []
+
+    def __call__(self, agent_id: AgentId, transport: KernelProbeTransport) -> KernelProbe | None:
+        self.probed.append((agent_id, transport))
+        return self.probe
+
+
+@pytest.mark.parametrize(
+    ("transport", "host_state", "is_probe_expected"),
+    [
+        (KernelProbeTransport.AGENT, HostState.RUNNING, True),
+        (KernelProbeTransport.OUTER, HostState.RUNNING, True),
+        # A stopped machine is never started to be probed.
+        (KernelProbeTransport.AGENT, HostState.STOPPED, False),
+        (None, HostState.RUNNING, False),
+    ],
+)
+def test_the_sweep_probes_the_kernel_of_a_running_machine_the_app_holds_root_on(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    transport: KernelProbeTransport | None,
+    host_state: HostState,
+    is_probe_expected: bool,
+) -> None:
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: host_state})
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.9.1"})
+    reads = _KernelProbeReads(VULNERABLE_KERNEL_PROBE)
+    detector = _detector(
+        tmp_path, resolver, caller, root_concurrency_group, kernel_transport=transport, read_kernel_probe=reads
+    )
+
+    detector.run_pass()
+
+    assert reads.probed == ([(agent_id, transport)] if is_probe_expected else [])
+    kernel = detector.store.get(agent_id).kernel
+    assert kernel.status is (KernelSecurityStatus.VULNERABLE if is_probe_expected else KernelSecurityStatus.UNKNOWN)
+    assert kernel.is_fix_offered is is_probe_expected
+
+
+def test_a_kernel_read_holds_between_sweeps_until_the_restart_invalidates_it(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.9.1"})
+    reads = _KernelProbeReads(VULNERABLE_KERNEL_PROBE)
+    detector = _detector(
+        tmp_path,
+        resolver,
+        caller,
+        root_concurrency_group,
+        kernel_transport=KernelProbeTransport.AGENT,
+        read_kernel_probe=reads,
+    )
+
+    detector.run_pass()
+    detector.run_pass()
+    reads.probe = FIXED_KERNEL_PROBE
+    detector.invalidate_cached_kernel(agent_id)
+    detector.run_pass()
+
+    assert len(reads.probed) == 2
+    assert detector.store.get(agent_id).kernel.status is KernelSecurityStatus.FIXED

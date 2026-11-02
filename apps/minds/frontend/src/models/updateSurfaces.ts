@@ -8,8 +8,12 @@ import {
   displayVersion,
   isArmedByAutoUpdate,
   isHandledByAutoUpdate,
+  isKernelFixInFlight,
+  isKernelFixOffered,
   isRecreationRequired,
+  isRunInFlight,
   isSecurityUpdate,
+  kernelFixActivityLine,
   isUpdateDispatchable,
   isUpdateOffered,
   isUpdateSkipped,
@@ -42,7 +46,9 @@ export interface UpdatePill {
     | "failed"
     | "needs-sign-in"
     | "needs-recreation"
-    | "updated-with-note";
+    | "updated-with-note"
+    | "kernel-restarting"
+    | "kernel-update";
   label: string;
   /** "attention" is the solid orange pill: the update needs the user. "quiet"
    * is the grey pill with a dot: information only. */
@@ -77,6 +83,7 @@ const NEEDS_ANSWER_TOOLTIP = "This workspace's update needs your answer in its c
 const NEEDS_ANSWER_NO_CHAT_TOOLTIP = "This workspace's update needs your answer.";
 const OUT_OF_DATE_TOOLTIP = "This workspace is running an older version of Imbue Studio.";
 const SECURITY_TOOLTIP = "An update for this workspace is available, which includes a critical security fix.";
+const KERNEL_TOOLTIP = "This workspace's machine needs a restart to apply a kernel security fix.";
 
 /**
  * The titlebar pill for one workspace's update, or null for none: a run in
@@ -140,6 +147,16 @@ export function updatePillFor(
       break;
   }
   if (update === null) return null;
+  if (isKernelFixInFlight(update))
+    return {
+      state: "kernel-restarting",
+      label: "Restarting for security update…",
+      tone: "quiet",
+      dot: "warning",
+      isDotPulsing: true,
+      tooltip: kernelFixActivityLine(update),
+      target: "tab",
+    };
   switch (updateRunOutcome(update)) {
     case "not-started":
       return attentionPill("not-started", "Update didn't start", "This workspace's update didn't start.", "tab");
@@ -175,19 +192,24 @@ export function updatePillFor(
       "This workspace can't update until an AI account is signed in to it.",
       "tab",
     );
-  if (!isUpdateOffered(update) || (update.is_scheduled ?? false)) return null;
-  if (isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return null;
-  if (isSecurityUpdate(update))
-    return attentionPill("security-update", "Security update available", SECURITY_TOOLTIP, "tab");
-  return {
-    state: "out-of-date",
-    label: "Update available",
-    tone: "quiet",
-    dot: "warning",
-    isDotPulsing: false,
-    tooltip: OUT_OF_DATE_TOOLTIP,
-    target: "tab",
-  };
+  if (isUpdateOffered(update) && !(update.is_scheduled ?? false)) {
+    if (isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return null;
+    if (isSecurityUpdate(update))
+      return attentionPill("security-update", "Security update available", SECURITY_TOOLTIP, "tab");
+    return {
+      state: "out-of-date",
+      label: "Update available",
+      tone: "quiet",
+      dot: "warning",
+      isDotPulsing: false,
+      tooltip: OUT_OF_DATE_TOOLTIP,
+      target: "tab",
+    };
+  }
+  // The template is settled; the machine under it still needs its kernel restart.
+  if (isKernelFixOffered(update) && !isRunInFlight(update))
+    return attentionPill("kernel-update", "Security update available", KERNEL_TOOLTIP, "tab");
+  return null;
 }
 
 function attentionPill(
@@ -538,6 +560,8 @@ export function updateTabActionsFor(
   isAutoUpdateEnabled: boolean,
   chatAgentId: string,
 ): UpdateTabAction[] {
+  // The machine is going down for its kernel; the kernel card is the tab's one action until it is back.
+  if (isKernelFixInFlight(update)) return [];
   const openChat = (variant: UpdateTabAction["variant"]): UpdateTabAction[] =>
     chatAgentId ? [{ kind: "open-chat", label: "Open chat", variant }] : [];
   const pressPair = (): UpdateTabAction[] => {
@@ -630,3 +654,58 @@ export const SECURITY_FIX_DETAILS =
   "browsers and operating systems) were compromised, which means they could be used to impersonate a real " +
   "website. This update stops your workspace from trusting them, so your data and credentials only reach the " +
   "sites they're meant for.";
+
+/** The kernel security fix a machine restart applies, as the tab's card says it. Rewritten whenever
+ * the app's kernel floor moves, since that advisory is the one every machine below the floor lacks. */
+export const KERNEL_FIX_TITLE = "This workspace's machine needs a restart to apply a kernel security fix.";
+export const KERNEL_FIX_DETAILS =
+  "CVE-2026-98432 is a bug in the Linux kernel's handling of network connections that could let an attacker " +
+  "crash the machine or run code on it. Debian has fixed it in a newer kernel. The kernel is part of the " +
+  "machine that runs this workspace, not of the workspace itself, so updating the workspace does nothing for " +
+  "it: the machine has to install the new kernel and restart onto it, which Imbue Studio does for you.";
+export const KERNEL_FIX_RESTART_LINE =
+  "Restarting interrupts every chat in this workspace, and the workspace comes back on its own a minute or two " +
+  "later. Nothing in it is lost.";
+
+/** What the Updates tab's kernel card says for one machine, or null when it has nothing to say. */
+export interface KernelCard {
+  state: "offered" | "in-progress" | "failed" | "landed";
+  title: string;
+  line: string;
+  /** The button, or null while there is nothing to press. */
+  actionLabel: string | null;
+}
+
+export function kernelCardFor(update: UiWorkspaceUpdate): KernelCard | null {
+  const kernel = update.kernel;
+  if (kernel === undefined) return null;
+  const running = kernel.running_kernel ? `kernel ${kernel.running_kernel}` : "an older kernel";
+  if (isKernelFixInFlight(update))
+    return {
+      state: "in-progress",
+      title: "Restarting onto the new kernel",
+      line: kernelFixActivityLine(update),
+      actionLabel: null,
+    };
+  if (kernel.is_fix_landed ?? false)
+    return {
+      state: "landed",
+      title: "Machine restarted onto the new kernel",
+      line: `This workspace's machine now runs ${running}, which includes the security fix.`,
+      actionLabel: null,
+    };
+  if (!isKernelFixOffered(update)) return null;
+  if (kernel.failure)
+    return {
+      state: "failed",
+      title: "The restart didn't land",
+      line: kernel.failure,
+      actionLabel: "Try again",
+    };
+  return {
+    state: "offered",
+    title: KERNEL_FIX_TITLE,
+    line: `This workspace's machine runs ${running}; the fix is in ${kernel.fixed_version || "a newer one"}.`,
+    actionLabel: "Restart machine",
+  };
+}

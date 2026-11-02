@@ -61,6 +61,7 @@ from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.kernel_security import KernelProbe
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogin
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
@@ -1063,6 +1064,47 @@ def scripted_chat_callback_server(
     finally:
         server.shutdown()
         server.server_close()
+
+
+# One machine's kernel as ``uname -r`` names it, below the floor and (after its restart) at it.
+VULNERABLE_KERNEL_NAME: Final[str] = "6.12.96+deb13-cloud-arm64"
+FIXED_KERNEL_NAME: Final[str] = "6.12.113+deb13-cloud-arm64"
+KERNEL_METAPACKAGE_NAME: Final[str] = "linux-image-cloud-arm64"
+# The same machine as the sweep reads it.
+VULNERABLE_KERNEL_PROBE: Final[KernelProbe] = KernelProbe(
+    running_kernel=VULNERABLE_KERNEL_NAME,
+    boot_id="boot-1",
+    metapackage=KERNEL_METAPACKAGE_NAME,
+    installed_package_version="",
+)
+FIXED_KERNEL_PROBE: Final[KernelProbe] = KernelProbe(
+    running_kernel=FIXED_KERNEL_NAME,
+    boot_id="boot-2",
+    metapackage=KERNEL_METAPACKAGE_NAME,
+    installed_package_version="6.12.113-1",
+)
+
+
+def machine_script_output(
+    running: str, *, boot_id: str = "boot-1", installed: str = "", status: str | None = None, detail: str = ""
+) -> str:
+    """What one run of the kernel machine script prints: its probe line, and its verdict line when it reached one."""
+    lines = [
+        f"MINDS_KERNEL probe=1 running={running} boot_id={boot_id} metapackage={KERNEL_METAPACKAGE_NAME} "
+        f"installed={installed}"
+    ]
+    if status is not None:
+        encoded = base64.b64encode(detail.encode("utf-8")).decode("ascii")
+        lines.append(f"MINDS_KERNEL status={status} detail_b64={encoded}")
+    return "\n".join(lines) + "\n"
+
+
+def services_agent_listing_line(agent_id: AgentId | str) -> str:
+    """The workspace's own services agent as the run probe's listing names it: always running, never a chat.
+
+    In a real workspace its id is the workspace's own agent id.
+    """
+    return f"system-services\tRUNNING\t{agent_id}\t\n"
 
 
 def exec_json_envelope(

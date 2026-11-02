@@ -22,6 +22,9 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.minds.desktop_client.kernel_fix import FORCEABLE_KERNEL_FIX_OUTCOMES
+from imbue.minds.desktop_client.kernel_fix import KERNEL_FIX_REFUSAL_MESSAGE_BY_OUTCOME
+from imbue.minds.desktop_client.kernel_fix import KernelFixDispatchOutcome
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.responses import make_response
@@ -51,6 +54,7 @@ from imbue.mngr.primitives import AgentId
 _DISPATCH_STATUS_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, int]] = {
     UpdateDispatchOutcome.DISPATCHED: 200,
     UpdateDispatchOutcome.ALREADY_RUNNING: 409,
+    UpdateDispatchOutcome.KERNEL_RESTART_IN_FLIGHT: 409,
     UpdateDispatchOutcome.NEEDS_SIGN_IN: 409,
     UpdateDispatchOutcome.UNSUPPORTED: 409,
     UpdateDispatchOutcome.START_FAILED: 502,
@@ -312,6 +316,39 @@ def _handle_sign_in(agent_id: str) -> Response:
     return _json_response({"ok": True})
 
 
+class UiKernelFixRequest(FrozenModel):
+    """Body of the kernel-fix route: whether to restart even while a chat is working, or the chats cannot be listed."""
+
+    force: bool = Field(default=False, description="Go ahead past a running or unlistable chat")
+
+
+def _handle_kernel_fix(agent_id: str) -> Response:
+    """POST /ui/api/updates/<agent_id>/kernel-fix: restart this machine onto the fixed kernel.
+
+    A refusal that a repeated press may get past says so with ``is_force_offered``
+    and names the chats in the way, so the surface can ask before it presses again.
+    """
+    resolved = _resolve_machine_request(agent_id)
+    if isinstance(resolved, Response):
+        return resolved
+    service, parsed_id = resolved
+    body = request.get_json(silent=True, force=True)
+    try:
+        write = UiKernelFixRequest.model_validate(body if isinstance(body, dict) else {})
+    except ValidationError as e:
+        logger.debug("Rejected a malformed kernel-fix body: {}", e)
+        return _error_response("Invalid JSON body", 400)
+    dispatch = service.kernel_fix.dispatch(parsed_id, is_forced=write.force)
+    if dispatch.outcome is KernelFixDispatchOutcome.DISPATCHED:
+        return _json_response({"ok": True})
+    payload: dict[str, object] = {
+        "error": KERNEL_FIX_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome],
+        "is_force_offered": dispatch.outcome in FORCEABLE_KERNEL_FIX_OUTCOMES,
+        "running_chats": list(dispatch.running_chats),
+    }
+    return _json_response(payload, 409)
+
+
 def _handle_set_auto_update_override(agent_id: str) -> Response:
     """POST /ui/api/updates/<agent_id>/auto-update: set or clear this workspace's own auto-update setting."""
     resolved = _resolve_machine_request(agent_id)
@@ -472,6 +509,7 @@ def register_update_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/updates/<agent_id>/sign-in", view_func=_handle_sign_in, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/dismiss", view_func=_handle_dismiss_run_outcome, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/note/dismiss", view_func=_handle_dismiss_note, methods=["POST"])
+    blueprint.add_url_rule("/api/updates/<agent_id>/kernel-fix", view_func=_handle_kernel_fix, methods=["POST"])
     blueprint.add_url_rule(
         "/api/updates/<agent_id>/auto-update", view_func=_handle_set_auto_update_override, methods=["POST"]
     )

@@ -45,6 +45,8 @@ from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
+from imbue.minds.desktop_client.update_status import KernelFixActivity
+from imbue.minds.desktop_client.update_status import KernelSecurityStatus
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateStartedBy
@@ -512,6 +514,35 @@ class UiWorkspaceAutoUpdateOverride(FrozenModel):
     )
 
 
+class UiWorkspaceKernel(FrozenModel):
+    """Whether a workspace's machine runs a kernel with the current kernel security fix, and what the app is doing about it.
+
+    A separate axis from the template version: the kernel is the machine's, and
+    updating the template does nothing for it. Only machines the app created and
+    holds root on are ever read; the rest stay UNKNOWN with nothing offered.
+    """
+
+    status: KernelSecurityStatus = Field(
+        default=KernelSecurityStatus.UNKNOWN, description="Fixed, vulnerable, or not read"
+    )
+    running_kernel: str = Field(default="", description="The kernel the machine runs (``uname -r``), '' when unread")
+    fixed_version: str = Field(default="", description="The kernel package version the machine must run at or above")
+    is_fix_offered: bool = Field(
+        default=False,
+        description="Whether the app can restart this machine onto the fixed kernel from here: a vulnerable "
+        "machine it can reach, whose template resolves the fixed package or already has it installed",
+    )
+    activity: KernelFixActivity = Field(
+        default=KernelFixActivity.IDLE, description="What the app's own restart onto the fixed kernel is doing"
+    )
+    failure: str = Field(
+        default="", description="Why the last restart onto the fixed kernel did not land; '' when it did, or none ran"
+    )
+    is_fix_landed: bool = Field(
+        default=False, description="Whether the app's own restart brought this machine onto the fixed kernel"
+    )
+
+
 class UiWorkspaceUpdate(FrozenModel):
     """One workspace's update situation: what the store composes and what the SPA reads, one model.
 
@@ -632,6 +663,10 @@ class UiWorkspaceUpdate(FrozenModel):
     auto_update_override: UiWorkspaceAutoUpdateOverride | None = Field(
         default=None, description="The workspace's own auto-update setting; None while it follows the app's"
     )
+    kernel: UiWorkspaceKernel = Field(
+        default_factory=UiWorkspaceKernel,
+        description="The machine's kernel against the app's kernel security floor, and the restart that applies it",
+    )
 
     @property
     def is_update_offered(self) -> bool:
@@ -660,6 +695,11 @@ class UiWorkspaceUpdate(FrozenModel):
     def is_run_in_flight(self) -> bool:
         """Whether a run is live: a second dispatch is refused and the row reports the run."""
         return self.activity in IN_FLIGHT_ACTIVITIES
+
+    @property
+    def is_kernel_fix_in_flight(self) -> bool:
+        """Whether the app is moving this machine onto the fixed kernel right now."""
+        return self.kernel.activity is not KernelFixActivity.IDLE
 
 
 class UiWorkspaceUpdatesMessage(FrozenModel):

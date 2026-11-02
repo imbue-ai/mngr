@@ -24,12 +24,14 @@ from imbue.minds.desktop_client.testing import build_resolver_with_system_servic
 from imbue.minds.desktop_client.testing import exited_process_pid
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
+from imbue.minds.desktop_client.testing import services_agent_listing_line
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.testing import write_background_task_marker
 from imbue.minds.desktop_client.update_apply_window import APPLY_GRACE_SECONDS
 from imbue.minds.desktop_client.update_apply_window import RUN_STATUS_PATH
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_apply_window import active_chat_agent_names
 from imbue.minds.desktop_client.update_apply_window import build_update_run_probe_args
 from imbue.minds.desktop_client.update_apply_window import parse_update_run_probe
 from imbue.minds.desktop_client.update_status import UpdateActivity
@@ -861,3 +863,35 @@ def test_an_outage_outlasting_the_stuck_threshold_while_its_record_is_read_is_no
     release_read.set()
     assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
     assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+
+
+def test_the_chats_a_restart_would_interrupt_are_the_running_or_busy_ones_but_never_the_services_agent() -> None:
+    listing = (
+        services_agent_listing_line("agent-" + "a" * 32)
+        + "chat-running\tRUNNING\tagent-"
+        + "1" * 32
+        + "\t\n"
+        + "chat-idle\tWAITING\tagent-"
+        + "2" * 32
+        + "\t\n"
+        + "chat-busy\tWAITING\tagent-"
+        + "3" * 32
+        + "\t\n"
+        + "chat-done\tSTOPPED\tagent-"
+        + "4" * 32
+        + "\t\n"
+        + "chat-unknown\tUNKNOWN\tagent-"
+        + "5" * 32
+        + "\t\n"
+    )
+    busy = "chat-id-3\tagent-" + "3" * 32 + "\tchat-busy\ttrue\t1\n"
+
+    names = active_chat_agent_names(update_run_probe_stdout(agents=listing, busy=busy), frozenset({"system-services"}))
+
+    assert names == ["chat-running", "chat-busy", "chat-unknown"]
+
+
+def test_a_listing_that_did_not_answer_leaves_the_chats_unknown_rather_than_empty() -> None:
+    assert active_chat_agent_names(update_run_probe_stdout(agents=None), frozenset()) is None
+    assert active_chat_agent_names("", frozenset()) is None
+    assert active_chat_agent_names(update_run_probe_stdout(agents=""), frozenset()) == []

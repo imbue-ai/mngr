@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.state import get_state
@@ -32,12 +33,14 @@ from imbue.minds.desktop_client.testing import CUT_OFF_ON_REACHED_HOST_EXEC_RESU
 from imbue.minds.desktop_client.testing import NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT
 from imbue.minds.desktop_client.testing import UPDATE_CHAT_ID
 from imbue.minds.desktop_client.testing import UPDATE_CHAT_NAME
+from imbue.minds.desktop_client.testing import VULNERABLE_KERNEL_PROBE
 from imbue.minds.desktop_client.testing import armed_update_schedule_file
 from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import landed_verdict
+from imbue.minds.desktop_client.testing import services_agent_listing_line
 from imbue.minds.desktop_client.testing import update_command_answer
 from imbue.minds.desktop_client.testing import update_program_invocation
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
@@ -53,6 +56,7 @@ from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import _SIGN_IN_OPENED_SENTINEL
+from imbue.minds.desktop_client.update_status import KernelFixActivity
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
@@ -1774,3 +1778,85 @@ def test_an_empty_custom_window_is_refused_with_what_to_change(
         "The update window needs a start and end that differ",
     )
     assert minds_config.get_workspace_auto_update_overrides() == {}
+
+
+# The kernel-fix route
+
+
+def _offer_kernel_fix(app: Flask, agent_id: AgentId) -> None:
+    _mark(app, agent_id, UpdateAvailability.UP_TO_DATE, "minds-v0.9.1")
+    _service(app).state_store.record_kernel_probe(
+        agent_id, transport=KernelProbeTransport.AGENT, probe=VULNERABLE_KERNEL_PROBE
+    )
+
+
+def _wait_for_kernel_fix_to_end(app: Flask, agent_id: AgentId) -> None:
+    store = _service(app).state_store
+    assert poll_until(lambda: store.get(agent_id).kernel.activity is KernelFixActivity.IDLE, timeout=10.0)
+
+
+def test_a_kernel_fix_is_refused_where_none_is_offered(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0))
+    _mark_up_to_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/kernel-fix")
+
+    assert response.status_code == 409
+    body = json.loads(response.data)
+    assert body["is_force_offered"] is False
+    assert "no kernel update" in body["error"]
+
+
+def test_a_kernel_fix_names_the_chats_in_its_way_and_a_forced_press_goes_ahead(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    listing = services_agent_listing_line(agent_id) + "chat-busy\tRUNNING\tagent-" + "1" * 32 + "\t\n"
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(agents=listing)),
+    )
+    _offer_kernel_fix(app, agent_id)
+
+    refused = _post(client, f"/ui/api/updates/{agent_id}/kernel-fix")
+    forced = _post(client, f"/ui/api/updates/{agent_id}/kernel-fix", {"force": True})
+    _wait_for_kernel_fix_to_end(app, agent_id)
+
+    assert refused.status_code == 409
+    refusal = json.loads(refused.data)
+    assert refusal["is_force_offered"] is True
+    assert refusal["running_chats"] == ["chat-busy"]
+    assert forced.status_code == 200
+    # The press claimed the restart; this test app's machine is not one it can restart, which the row says.
+    assert _published(app, agent_id).kernel.failure != ""
+
+
+def test_a_kernel_fix_with_no_chat_in_the_way_is_dispatched(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(
+            returncode=0, stdout=update_run_probe_stdout(agents=services_agent_listing_line(agent_id))
+        ),
+    )
+    _offer_kernel_fix(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/kernel-fix")
+    _wait_for_kernel_fix_to_end(app, agent_id)
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"ok": True}
+
+
+def test_a_kernel_fix_needs_the_update_surface_and_a_session(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    client, _app = _build_client(tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0))
+
+    response = _post(client, "/ui/api/updates/not-an-agent-id/kernel-fix")
+
+    assert response.status_code == 400

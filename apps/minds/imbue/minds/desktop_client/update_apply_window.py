@@ -359,6 +359,30 @@ def _classify_agent_listing(
     return UpdateAgentLiveness.ALIVE, not is_worker_moving
 
 
+def active_chat_agent_names(stdout: str, excluded_agents: frozenset[str]) -> list[str] | None:
+    """The chats a machine restart would interrupt, from the run probe's output; None when the listing did not answer.
+
+    A chat counts when its agent is RUNNING, or WAITING with a turn or background
+    task that will resume it; one whose state could not be read counts too, since
+    it may be mid-turn. ``excluded_agents`` name, by agent name or id, the agents
+    that are not chats (the workspace's own services agent, which is always running).
+    """
+    lines = stdout.splitlines()
+    agent_lines = _section(lines, AGENTS_BEGIN_SENTINEL, AGENTS_END_SENTINEL)
+    stripped = [line.strip() for line in agent_lines or [] if line.strip()]
+    if agent_lines is None or AGENTS_FAILED_SENTINEL in stripped:
+        return None
+    busy_agents = _parse_busy_agents(_section(lines, BUSY_BEGIN_SENTINEL, BUSY_END_SENTINEL))
+    return [
+        agent.name
+        for agent in _listed_agents(stripped)
+        if agent.name not in excluded_agents
+        and agent.agent_id not in excluded_agents
+        and agent.state not in _ENDED_AGENT_STATES
+        and not _is_idle(agent, busy_agents)
+    ]
+
+
 def parse_update_run_probe(stdout: str, chat_agent_name: str, chat_agent_id: str = "") -> UpdateRunProbe:
     """Classify the probe's output; missing run sentinels mean unanswered, not "no run".
 

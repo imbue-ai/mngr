@@ -77,6 +77,29 @@ class UpdateAvailability(UpperCaseStrEnum):
     the user must create a new workspace and migrate into it."""
 
 
+class KernelSecurityStatus(UpperCaseStrEnum):
+    """Whether the kernel a workspace's machine is running carries the fix the app's floor names."""
+
+    FIXED = auto()
+    """The machine runs a kernel at or above the floor."""
+    VULNERABLE = auto()
+    """A positive read of a kernel below the floor."""
+    UNKNOWN = auto()
+    """Not read: a machine the app does not probe, one that is stopped, or a read that did not answer."""
+
+
+class KernelFixActivity(UpperCaseStrEnum):
+    """What the app is doing to move a machine onto the fixed kernel right now."""
+
+    IDLE = auto()
+    INSTALLING = auto()
+    """Installing the kernel package inside the machine; nothing running is disturbed."""
+    RESTARTING = auto()
+    """The machine is going down and coming back on the new kernel; every chat's process ends."""
+    VERIFYING = auto()
+    """The machine is back; the app is reading which kernel it booted."""
+
+
 class UpdateUnknownReason(UpperCaseStrEnum):
     """Which side of the comparison had no version, when the answer is UNKNOWN.
 

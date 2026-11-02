@@ -18,6 +18,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.kernel_fix import KernelFixRunner
 from imbue.minds.desktop_client.minds_config import EffectiveAutoUpdate
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import CANCELLED_UPDATE_COMMAND_RESULT
@@ -110,6 +111,8 @@ def _build_service(
             read_update_facts=lambda agent_id, is_sign_in_checked: None,
             read_auto_update_policy=lambda agent_id: AutoUpdatePolicy(is_enabled=False, skipped_target_ref=""),
             arm_for_auto_update=lambda agent_id: None,
+            kernel_transport_for=lambda _agent_id: None,
+            read_kernel_probe=lambda _agent_id, _transport: None,
         ),
         apply_window=apply_window,
         mngr_caller=caller,
@@ -127,6 +130,16 @@ def _build_service(
         if facts_cache is not None
         else WorkspaceFactsCache(records_dir=tmp_path / "workspace_facts_cache"),
         start_workspace=_record_start(started if started is not None else [], failure_reason=start_failure_reason),
+        kernel_fix=KernelFixRunner(
+            state_store=store,
+            mngr_caller=caller,
+            backend_resolver=backend_resolver,
+            concurrency_group=concurrency_group,
+            kernel_access_for=lambda _agent_id: None,
+            stop_workspace=_record_start([], failure_reason=None),
+            start_workspace=_record_start([], failure_reason=None),
+            on_fix_ended=lambda _agent_id: None,
+        ),
     )
 
 
@@ -831,6 +844,21 @@ def test_an_update_now_that_finds_a_run_under_way_adopts_that_run(
     assert state.chat_agent_id == UPDATE_CHAT_ID
     assert state.target_override == ""
     assert state.dispatch_failure == ""
+
+
+def test_an_update_now_during_the_kernel_restart_is_refused_without_reaching_the_machine(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0))
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+    assert service.state_store.try_begin_kernel_fix(agent_id)
+
+    dispatch = service.dispatch_update(agent_id)
+
+    assert dispatch.outcome is UpdateDispatchOutcome.KERNEL_RESTART_IN_FLIGHT
+    assert caller.calls == []
+    assert service.state_store.get(agent_id).is_run_in_flight is False
 
 
 def test_an_update_now_refused_for_another_flows_lease_unlocks_the_row_and_says_why(

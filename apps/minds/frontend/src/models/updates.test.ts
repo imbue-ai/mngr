@@ -791,3 +791,60 @@ describe("UpdatesStore's auto-update and sign-in", () => {
     expect(store.signInFailureFor("agent-a")).toBeNull();
   });
 });
+
+describe("the kernel fix action", () => {
+  it("reads a refusal the reader may go past, with the chats in the way", async () => {
+    const store = new UpdatesStore();
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ error: "A chat is still working.", is_force_offered: true, running_chats: ["chat-one"] }),
+          { status: 409 },
+        ),
+      );
+    });
+
+    const refused = await store.applyKernelFix("agent-a");
+
+    expect(refused).toEqual({
+      isOk: false,
+      error: "A chat is still working.",
+      detail: "",
+      isForceOffered: true,
+      runningChats: ["chat-one"],
+    });
+    expect(bodies).toEqual([JSON.stringify({ force: false })]);
+  });
+
+  it("sends the go-ahead past the chats as a forced press", async () => {
+    const store = new UpdatesStore();
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+
+    const result = await store.applyKernelFix("agent-a", true);
+
+    expect(result.isOk).toBe(true);
+    expect(bodies).toEqual([JSON.stringify({ force: true })]);
+  });
+
+  it("badges the kernel restart on offer only once the template is settled", () => {
+    const kernel = {
+      status: "VULNERABLE" as const,
+      running_kernel: "6.12.96+deb13-cloud-arm64",
+      fixed_version: "6.12.113-1",
+      is_fix_offered: true,
+      activity: "IDLE" as const,
+    };
+    const current = { ...OUT_OF_DATE_UPDATE, availability: "UP_TO_DATE" as const, kernel };
+    expect(updateBadgeFor(current, false)).toMatchObject({ state: "kernel-update", tone: "error", label: "Security update" });
+    expect(updateBadgeFor({ ...OUT_OF_DATE_UPDATE, kernel }, false)?.state).toBe("out-of-date");
+    expect(updateBadgeFor({ ...current, kernel: { ...kernel, activity: "INSTALLING" } }, false)?.state).toBe(
+      "kernel-restarting",
+    );
+  });
+});

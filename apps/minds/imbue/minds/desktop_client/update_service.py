@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
+from imbue.minds.desktop_client.kernel_fix import KernelFixRunner
 from imbue.minds.desktop_client.minds_config import EffectiveAutoUpdate
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
@@ -114,6 +115,8 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
     DISPATCHED = auto()
     ALREADY_RUNNING = auto()
     """An update was already under way there; the row now reports that one."""
+    KERNEL_RESTART_IN_FLIGHT = auto()
+    """The app is restarting the machine onto a new kernel, which would end the run's agent."""
     NEEDS_SIGN_IN = auto()
     """The workspace has no signed-in AI account its update chat could run on."""
     UNSUPPORTED = auto()
@@ -135,6 +138,9 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
 # and the run slice records it, so the Updates tab says the same thing whether it stayed open.
 DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
     UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this workspace.",
+    UpdateDispatchOutcome.KERNEL_RESTART_IN_FLIGHT: (
+        "This workspace's machine is restarting for a kernel security update. Try again once it is back."
+    ),
     UpdateDispatchOutcome.NEEDS_SIGN_IN: "Sign in to an AI account in this workspace, then try again.",
     UpdateDispatchOutcome.UNSUPPORTED: (
         "This workspace is too old to update itself. Ask an agent inside it for help, "
@@ -332,6 +338,9 @@ class WorkspaceUpdateService(MutableModel):
             "unrecoverable for the rest of the session. The machine stays up afterwards."
         ),
     )
+    kernel_fix: KernelFixRunner = Field(
+        frozen=True, description="Restarts a workspace's machine onto the fixed kernel, on the user's press."
+    )
     # agent_id_str -> consecutive WAITING polls; only the poll thread touches it.
     _waiting_streak_by_agent: dict[str, int] = PrivateAttr(default_factory=dict)
     # agent_id_str -> passes since a STALLED row was last probed; only the poll thread touches it.
@@ -366,7 +375,12 @@ class WorkspaceUpdateService(MutableModel):
         be gone by the time the answer comes back.
         """
         if not self.state_store.try_begin_run(agent_id, target_override=target_override or ""):
-            return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING)
+            is_kernel_restarting = self.state_store.get(agent_id).is_kernel_fix_in_flight
+            return UpdateDispatch(
+                outcome=UpdateDispatchOutcome.KERNEL_RESTART_IN_FLIGHT
+                if is_kernel_restarting
+                else UpdateDispatchOutcome.ALREADY_RUNNING
+            )
         dispatch: UpdateDispatch | None = None
         try:
             dispatch = self._start_claimed_run(agent_id, target_override or "")

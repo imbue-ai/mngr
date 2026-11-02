@@ -11,6 +11,11 @@ the workspace's own upstream). The version comes from the workspace's own git. T
 create-time label never moves after an update, so it is used only when it sorts below
 the in-place cutoff: no update can have taken such a workspace past it. The git read
 is an ``mngr exec``, so it only ever runs in the background sweep, never on a render path.
+
+The machine's kernel is a second axis the same sweep reads, for the machines the app
+holds root on (``kernel_security``): a kernel below the app's kernel security floor is
+reported beside the template verdict, with the restart that applies the fix offered
+where the app can run it. Updating the template changes nothing about the kernel.
 """
 
 import threading
@@ -21,6 +26,8 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Final
+from typing import Generic
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -33,10 +40,18 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.kernel_security import KERNEL_SECURITY_FLOOR_PACKAGE_VERSION
+from imbue.minds.desktop_client.kernel_security import KernelProbe
+from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
+from imbue.minds.desktop_client.kernel_security import classify_kernel
+from imbue.minds.desktop_client.kernel_security import is_kernel_fix_offered
 from imbue.minds.desktop_client.minds_version import parse_minds_version
+from imbue.minds.desktop_client.ui_models import UiWorkspaceKernel
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
+from imbue.minds.desktop_client.update_status import KernelFixActivity
+from imbue.minds.desktop_client.update_status import KernelSecurityStatus
 from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
@@ -246,6 +261,22 @@ class _ScheduleFacts(FrozenModel):
 _ARM_LANDED_MARGIN: Final[timedelta] = timedelta(minutes=10)
 
 
+class _KernelFacts(FrozenModel):
+    """The kernel half of a workspace's update state: the machine's last probe, and the app's own restart onto the fix."""
+
+    transport: KernelProbeTransport | None = Field(
+        default=None, description="How the machine is reached as root; None for a machine the app does not probe"
+    )
+    probe: KernelProbe | None = Field(default=None, description="The last answered probe; None until one answers")
+    activity: KernelFixActivity = Field(default=KernelFixActivity.IDLE)
+    failure: str = Field(default="", description="Why the last restart onto the fix did not land; '' when none")
+    is_fix_landed: bool = Field(default=False, description="Whether the app's own restart landed the fix")
+
+    @property
+    def status(self) -> KernelSecurityStatus:
+        return classify_kernel(self.probe, KERNEL_SECURITY_FLOOR_PACKAGE_VERSION)
+
+
 def _is_landed_arm_of(schedule: UpdateScheduleRecord | None, previous: _ScheduleFacts, run: _RunFacts) -> bool:
     """Whether ``schedule`` is new to the row and was armed by the attempt whose failure the row records."""
     if schedule is None or schedule.armed_at is None or run.dispatch_failure is None:
@@ -287,8 +318,26 @@ def _without_outcome(record: UpdateRunStatus) -> UpdateRunStatus:
     )
 
 
-def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _ScheduleFacts) -> UiWorkspaceUpdate:
-    """One workspace's three slices as the one model every reader sees."""
+def _compose_kernel(detected: _DetectionFacts, kernel: _KernelFacts) -> UiWorkspaceKernel:
+    """The kernel slice as the reader sees it; whether the fix is offered needs the template version too."""
+    status = kernel.status
+    return UiWorkspaceKernel(
+        status=status,
+        running_kernel=kernel.probe.running_kernel if kernel.probe is not None else "",
+        fixed_version=KERNEL_SECURITY_FLOOR_PACKAGE_VERSION,
+        is_fix_offered=is_kernel_fix_offered(
+            status, kernel.transport, kernel.probe, detected.current_version, KERNEL_SECURITY_FLOOR_PACKAGE_VERSION
+        ),
+        activity=kernel.activity,
+        failure=kernel.failure,
+        is_fix_landed=kernel.is_fix_landed,
+    )
+
+
+def _compose(
+    detected: _DetectionFacts, run: _RunFacts, schedule_facts: _ScheduleFacts, kernel: _KernelFacts
+) -> UiWorkspaceUpdate:
+    """One workspace's four slices as the one model every reader sees."""
     is_waiting = run.activity is UpdateActivity.WAITING
     schedule = schedule_facts.record
     dispatch = schedule_facts.last_dispatch
@@ -322,6 +371,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         last_dispatch_target_ref=dispatch.target_ref if dispatch is not None else "",
         dispatch_failure=run.dispatch_failure.message if run.dispatch_failure is not None else "",
         dispatch_failure_detail=run.dispatch_failure.detail if run.dispatch_failure is not None else "",
+        kernel=_compose_kernel(detected, kernel),
     )
 
 
@@ -348,6 +398,7 @@ class WorkspaceUpdateStateStore(MutableModel):
     _detected_by_agent: dict[str, _DetectionFacts] = PrivateAttr(default_factory=dict)
     _run_by_agent: dict[str, _RunFacts] = PrivateAttr(default_factory=dict)
     _schedule_by_agent: dict[str, _ScheduleFacts] = PrivateAttr(default_factory=dict)
+    _kernel_by_agent: dict[str, _KernelFacts] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnUpdateStateChangedCallback] = PrivateAttr(default_factory=list)
 
     def add_on_change_callback(self, callback: OnUpdateStateChangedCallback) -> None:
@@ -404,12 +455,82 @@ class WorkspaceUpdateStateStore(MutableModel):
                 aid_str in self._detected_by_agent
                 or aid_str in self._run_by_agent
                 or aid_str in self._schedule_by_agent
+                or aid_str in self._kernel_by_agent
             )
             self._detected_by_agent.pop(aid_str, None)
             self._run_by_agent.pop(aid_str, None)
             self._schedule_by_agent.pop(aid_str, None)
+            self._kernel_by_agent.pop(aid_str, None)
         if is_present:
             self._fire_on_change()
+
+    def record_kernel_probe(
+        self, agent_id: AgentId, *, transport: KernelProbeTransport | None, probe: KernelProbe | None
+    ) -> None:
+        """Store what the sweep read of the machine's kernel; a probe that did not answer keeps the last one.
+
+        The app's own restart is left alone: a sweep landing mid-restart reads the
+        machine before or after the restart, and the restart's own verification is
+        what ends it.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            previous = self._kernel_by_agent.get(aid_str, _KernelFacts())
+            facts = previous.model_copy_update(
+                to_update(previous.field_ref().transport, transport),
+                to_update(previous.field_ref().probe, probe if probe is not None else previous.probe),
+            )
+            is_changed = facts != previous
+            self._kernel_by_agent[aid_str] = facts
+        if is_changed:
+            self._fire_on_change()
+
+    def try_begin_kernel_fix(self, agent_id: AgentId) -> bool:
+        """Claim the machine's restart onto the fixed kernel, returning whether this caller won it.
+
+        A run in flight holds the row as well: the restart would end its agent mid-run.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._kernel_by_agent.get(aid_str, _KernelFacts())
+            if facts.activity is not KernelFixActivity.IDLE:
+                return False
+            if self._run_by_agent.get(aid_str, _RunFacts()).activity in IN_FLIGHT_ACTIVITIES:
+                return False
+            self._kernel_by_agent[aid_str] = facts.model_copy_update(
+                to_update(facts.field_ref().activity, KernelFixActivity.INSTALLING),
+                to_update(facts.field_ref().failure, ""),
+                to_update(facts.field_ref().is_fix_landed, False),
+            )
+        self._fire_on_change()
+        return True
+
+    def set_kernel_fix_activity(self, agent_id: AgentId, activity: KernelFixActivity) -> None:
+        """Move the claimed restart on to its next step."""
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._kernel_by_agent.get(aid_str, _KernelFacts())
+            self._kernel_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().activity, activity))
+        self._fire_on_change()
+
+    def end_kernel_fix(self, agent_id: AgentId, *, probe: KernelProbe | None, failure: str) -> None:
+        """End the claimed restart: with the probe that verified it, or why it did not land."""
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._kernel_by_agent.get(aid_str, _KernelFacts())
+            landed_probe = probe if probe is not None else facts.probe
+            self._kernel_by_agent[aid_str] = facts.model_copy_update(
+                to_update(facts.field_ref().activity, KernelFixActivity.IDLE),
+                to_update(facts.field_ref().probe, landed_probe),
+                to_update(facts.field_ref().failure, failure),
+                to_update(
+                    facts.field_ref().is_fix_landed,
+                    not failure
+                    and classify_kernel(landed_probe, KERNEL_SECURITY_FLOOR_PACKAGE_VERSION)
+                    is KernelSecurityStatus.FIXED,
+                ),
+            )
+        self._fire_on_change()
 
     def record_schedule(
         self,
@@ -531,12 +652,15 @@ class WorkspaceUpdateStateStore(MutableModel):
         it spawns, and more than one caller dispatches. The claim is the run's start;
         anything the run record reports from before it is an earlier run's. The
         chat's name is the workspace's to pick, so the claim names none until
-        :meth:`adopt_dispatched_chat`.
+        :meth:`adopt_dispatched_chat`. The app's own kernel restart holds the row
+        too: it stops the machine the run would be spawned in.
         """
         aid_str = str(agent_id)
         with self._lock:
             facts = self._run_by_agent.get(aid_str, _RunFacts())
             if facts.activity in IN_FLIGHT_ACTIVITIES:
+                return False
+            if self._kernel_by_agent.get(aid_str, _KernelFacts()).activity is not KernelFixActivity.IDLE:
                 return False
             self._run_by_agent[aid_str] = facts.model_copy_update(
                 to_update(facts.field_ref().activity, UpdateActivity.STARTING),
@@ -850,17 +974,24 @@ class WorkspaceUpdateStateStore(MutableModel):
             detected = self._detected_by_agent.get(aid_str, _DetectionFacts())
             run = self._run_by_agent.get(aid_str, _RunFacts())
             schedule = self._schedule_by_agent.get(aid_str, _ScheduleFacts())
-        return _compose(detected, run, schedule)
+            kernel = self._kernel_by_agent.get(aid_str, _KernelFacts())
+        return _compose(detected, run, schedule, kernel)
 
     def snapshot(self) -> dict[str, UiWorkspaceUpdate]:
         """The composed state for every workspace any writer has touched."""
         with self._lock:
-            agent_ids = set(self._detected_by_agent) | set(self._run_by_agent) | set(self._schedule_by_agent)
+            agent_ids = (
+                set(self._detected_by_agent)
+                | set(self._run_by_agent)
+                | set(self._schedule_by_agent)
+                | set(self._kernel_by_agent)
+            )
             return {
                 aid_str: _compose(
                     self._detected_by_agent.get(aid_str, _DetectionFacts()),
                     self._run_by_agent.get(aid_str, _RunFacts()),
                     self._schedule_by_agent.get(aid_str, _ScheduleFacts()),
+                    self._kernel_by_agent.get(aid_str, _KernelFacts()),
                 )
                 for aid_str in agent_ids
             }
@@ -878,10 +1009,13 @@ _SHUTDOWN_CHECK_INTERVAL_SECONDS: Final[float] = 1.0
 _MAX_CONCURRENT_VERSION_READS: Final[int] = 4
 
 
-class _CachedVersionRead(FrozenModel):
-    """One successful in-workspace git read, and when it landed."""
+ReadT = TypeVar("ReadT")
 
-    version_ref: str = Field(description="The ``minds-v*`` tag that was read")
+
+class _CachedRead(FrozenModel, Generic[ReadT]):
+    """One successful read from a machine (its git version, its kernel), and when it landed."""
+
+    value: ReadT = Field(description="What was read")
     read_at_monotonic: float = Field(description="``time.monotonic()`` when the read landed")
     is_reread_due: bool = Field(
         default=False,
@@ -960,12 +1094,23 @@ class WorkspaceUpdateDetector(MutableModel):
     arm_for_auto_update: Callable[[AgentId], None] = Field(
         frozen=True, description="Arms a workspace's update through the update service, as the user's Schedule does"
     )
+    kernel_transport_for: Callable[[AgentId], KernelProbeTransport | None] = Field(
+        frozen=True,
+        description="How a workspace's machine is reached as root for its kernel probe; None for a machine the app "
+        "does not probe (Imbue Cloud, Modal, the user's own Docker host)",
+    )
+    read_kernel_probe: Callable[[AgentId, KernelProbeTransport], KernelProbe | None] = Field(
+        frozen=True,
+        description="Runs the kernel probe as root on the workspace's machine, never starting a stopped one; None "
+        "when it did not answer",
+    )
     interval_seconds: float = Field(default=_DETECTION_INTERVAL_SECONDS, description="Seconds between backstop sweeps")
 
     _wake_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _cached_read_by_agent: dict[str, _CachedVersionRead] = PrivateAttr(default_factory=dict)
+    _cached_read_by_agent: dict[str, _CachedRead[str]] = PrivateAttr(default_factory=dict)
+    _cached_kernel_by_agent: dict[str, _CachedRead[KernelProbe]] = PrivateAttr(default_factory=dict)
     _signature_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _last_topology_signature: frozenset[tuple[str, bool]] | None = PrivateAttr(default=None)
     _is_started: bool = PrivateAttr(default=False)
@@ -1011,6 +1156,11 @@ class WorkspaceUpdateDetector(MutableModel):
         with self._cache_lock:
             self._cached_read_by_agent.pop(str(agent_id), None)
 
+    def invalidate_cached_kernel(self, agent_id: AgentId) -> None:
+        """Forget the cached kernel probe of a machine that just restarted."""
+        with self._cache_lock:
+            self._cached_kernel_by_agent.pop(str(agent_id), None)
+
     def run_pass(self) -> None:
         """One synchronous detection sweep over every active workspace."""
         supported_version = self.read_supported_version()
@@ -1030,6 +1180,8 @@ class WorkspaceUpdateDetector(MutableModel):
         with self._cache_lock:
             for stale_id_str in set(self._cached_read_by_agent) - active_id_strs:
                 del self._cached_read_by_agent[stale_id_str]
+            for stale_id_str in set(self._cached_kernel_by_agent) - active_id_strs:
+                del self._cached_kernel_by_agent[stale_id_str]
 
     def _detect_all(self, host_state_by_agent: Mapping[AgentId, HostState | None], supported_version: str) -> None:
         """Detect every workspace, reading concurrently so no badge waits on discovery's unstable ordering.
@@ -1086,6 +1238,7 @@ class WorkspaceUpdateDetector(MutableModel):
             supported_version=supported_version,
             is_readable=facts is not None,
         )
+        self._detect_kernel(agent_id, host_state)
         if not is_host_readable:
             self.store.record_schedule(agent_id, schedule=None, last_dispatch=None, is_signed_in=None)
             return
@@ -1105,44 +1258,70 @@ class WorkspaceUpdateDetector(MutableModel):
             logger.info("Arming the update of {} under auto-update", agent_id)
             self.arm_for_auto_update(agent_id)
 
+    def _detect_kernel(self, agent_id: AgentId, host_state: HostState | None) -> None:
+        """Read the machine's kernel the way the version is read, for the machines the app holds root on."""
+        transport = self.kernel_transport_for(agent_id)
+        probe = (
+            self._cached_or_fresh(
+                self._cached_kernel_by_agent, agent_id, host_state, lambda: self.read_kernel_probe(agent_id, transport)
+            )
+            if transport is not None
+            else None
+        )
+        self.store.record_kernel_probe(agent_id, transport=transport, probe=probe)
+
     def _read_git_version(self, agent_id: AgentId, host_state: HostState | None) -> str | None:
         """The workspace's own ``minds-v*`` tag, from the cache or a fresh exec.
 
-        A read this session holds for as long as the machine is known: its
-        version moves only when an update lands inside it, which invalidates the
-        cache, so neither a stretch of unreadability (a stop, a start the app
-        itself announced, a discovery gap) nor a read that failed (an exec
-        timeout under slow discovery) is evidence that the last read is wrong.
+        ``read_workspace_git_version`` would answer too, but runs a further exec for
+        the upgrade-merge history that detection has no use for.
+        """
+        return self._cached_or_fresh(
+            self._cached_read_by_agent,
+            agent_id,
+            host_state,
+            lambda: read_workspace_current_version(
+                agent_address=build_agent_address(agent_id, self.backend_resolver), mngr_caller=self.mngr_caller
+            ),
+        )
+
+    def _cached_or_fresh(
+        self,
+        cache: dict[str, _CachedRead[ReadT]],
+        agent_id: AgentId,
+        host_state: HostState | None,
+        read: Callable[[], ReadT | None],
+    ) -> ReadT | None:
+        """One machine fact from its cache, or from ``read`` when the cache cannot answer for it.
+
+        A read this session holds for as long as the machine is known: the fact
+        moves only when something the app sees happens inside the machine (an
+        update lands, the machine restarts), which invalidates the cache, so
+        neither a stretch of unreadability (a stop, a start the app itself
+        announced, a discovery gap) nor a read that failed (an exec timeout under
+        slow discovery) is evidence that the last read is wrong.
 
         A machine that was unreadable is re-read as soon as it is readable again,
         whatever the cache's age. Only a successful read is cached: an empty read
         may be transient, and caching it would pin a machine that just came up at
-        "unknown" for a whole interval. ``read_workspace_git_version`` would
-        answer too, but runs a further exec for the upgrade-merge history that
-        detection has no use for.
+        "unknown" for a whole interval.
         """
         aid_str = str(agent_id)
         with self._cache_lock:
-            cached = self._cached_read_by_agent.get(aid_str)
+            cached = cache.get(aid_str)
             if not is_workspace_readable(host_state):
                 if cached is not None:
-                    self._cached_read_by_agent[aid_str] = cached.model_copy_update(
-                        to_update(cached.field_ref().is_reread_due, True)
-                    )
-                return cached.version_ref if cached is not None else None
+                    cache[aid_str] = cached.model_copy_update(to_update(cached.field_ref().is_reread_due, True))
+                return cached.value if cached is not None else None
             is_fresh = cached is not None and time.monotonic() - cached.read_at_monotonic < self.interval_seconds
             if cached is not None and is_fresh and not cached.is_reread_due:
-                return cached.version_ref
-        version = read_workspace_current_version(
-            agent_address=build_agent_address(agent_id, self.backend_resolver), mngr_caller=self.mngr_caller
-        )
-        if version is None:
-            return cached.version_ref if cached is not None else None
+                return cached.value
+        value = read()
+        if value is None:
+            return cached.value if cached is not None else None
         with self._cache_lock:
-            self._cached_read_by_agent[aid_str] = _CachedVersionRead(
-                version_ref=version, read_at_monotonic=time.monotonic()
-            )
-        return version
+            cache[aid_str] = _CachedRead[ReadT](value=value, read_at_monotonic=time.monotonic())
+        return value
 
     def _is_stopping(self) -> bool:
         return self._stop_event.is_set() or self.concurrency_group.is_shutting_down()

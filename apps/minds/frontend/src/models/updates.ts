@@ -21,6 +21,33 @@ const UNKNOWN_UPDATE: UiWorkspaceUpdate = {
   activity: "IDLE",
 };
 
+/** Whether the app can restart this machine onto the fixed kernel from here: a
+ * vulnerable machine it holds root on, whose template can install the package
+ * or already has it installed. Nothing is offered for a machine that is fixed,
+ * unread, or someone else's to update. */
+export function isKernelFixOffered(update: UiWorkspaceUpdate): boolean {
+  return update.kernel?.is_fix_offered ?? false;
+}
+
+/** Whether the app is moving this machine onto the fixed kernel right now. */
+export function isKernelFixInFlight(update: UiWorkspaceUpdate): boolean {
+  return (update.kernel?.activity ?? "IDLE") !== "IDLE";
+}
+
+/** What the restart onto the fixed kernel is doing, as one line. */
+export function kernelFixActivityLine(update: UiWorkspaceUpdate): string {
+  switch (update.kernel?.activity ?? "IDLE") {
+    case "INSTALLING":
+      return "Installing the kernel update. Nothing is interrupted yet.";
+    case "RESTARTING":
+      return "Restarting the machine. Every chat in this workspace stops until it is back.";
+    case "VERIFYING":
+      return "The machine is back. Checking which kernel it started with.";
+    case "IDLE":
+      return "";
+  }
+}
+
 /** Whether a run is live: the row reports it and a second dispatch is refused.
  * WAITING counts: the agent is alive and still owns the workspace. */
 export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
@@ -322,6 +349,8 @@ export type UpdateBadgeState =
   | "needs-sign-in"
   | "skipped"
   | "security-update"
+  | "kernel-restarting"
+  | "kernel-update"
   | "out-of-date"
   | "unknown";
 export type UpdateBadgeTone = "neutral" | "warn" | "error";
@@ -408,6 +437,16 @@ export function updateBadgeFor(
     };
   }
   if (update === null) return null;
+  // The machine is going down and coming back on its new kernel: the row says so, as it does for a run.
+  if (isKernelFixInFlight(update)) {
+    return {
+      state: "kernel-restarting",
+      tone: "neutral",
+      label: "Restarting for security update",
+      tooltip: kernelFixActivityLine(update),
+      isSpinnerShown: true,
+    };
+  }
   const outcome = updateRunOutcome(update);
   if (outcome === "not-started") {
     return {
@@ -498,6 +537,16 @@ export function updateBadgeFor(
       tone: "warn",
       label: "Update available",
       tooltip: "See the update available for this workspace",
+      isSpinnerShown: false,
+    };
+  }
+  // The template is current (or merely a patch behind), and the machine under it still runs an old kernel.
+  if (isKernelFixOffered(update)) {
+    return {
+      state: "kernel-update",
+      tone: "error",
+      label: "Security update",
+      tooltip: "This workspace's machine needs a restart to apply a kernel security fix",
       isSpinnerShown: false,
     };
   }
@@ -762,6 +811,15 @@ export class UpdatesStore {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/schedule/cancel`, {});
   }
 
+  /** Restart this machine onto the fixed kernel. `isForced` goes ahead past a
+   * chat that is working, or chats that could not be listed, which the first
+   * press is refused for with `isForceOffered`. */
+  async applyKernelFix(agentId: string, isForced = false): Promise<UpdateActionResult> {
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/kernel-fix`, {
+      force: isForced,
+    });
+  }
+
   /** Skip the app's current release for this machine: it cancels any schedule
    * and any decision its last run is waiting on, and the machine is neither
    * updated automatically nor reminded about until a newer release. */
@@ -844,6 +902,10 @@ export interface UpdateActionResult {
    * Rendered apart from `error`, which stays a sentence: these are their words,
    * not ours. */
   detail: string;
+  /** A refusal a repeated press may go past, once the reader has said so. */
+  isForceOffered?: boolean;
+  /** The chats the refusal names as in the way, by agent name. */
+  runningChats?: string[];
 }
 
 async function postUpdateAction(url: string, body: Record<string, unknown>): Promise<UpdateActionResult> {
@@ -859,10 +921,17 @@ async function postUpdateAction(url: string, body: Record<string, unknown>): Pro
     return { isOk: false, error: "The request failed (network error).", detail: "" };
   }
   if (response.ok) return { isOk: true, error: "", detail: "" };
-  const payload = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
+  const payload = (await response.json().catch(() => null)) as {
+    error?: string;
+    detail?: string;
+    is_force_offered?: boolean;
+    running_chats?: string[];
+  } | null;
   return {
     isOk: false,
     error: payload?.error ?? `HTTP ${response.status}`,
     detail: payload?.detail ?? "",
+    isForceOffered: payload?.is_force_offered === true,
+    runningChats: Array.isArray(payload?.running_chats) ? payload.running_chats.map(String) : [],
   };
 }

@@ -9,16 +9,20 @@ import type {
   WorkspaceAutoUpdateMode,
 } from "../../../channel/messages";
 import {
+  KERNEL_FIX_DETAILS,
+  KERNEL_FIX_RESTART_LINE,
   SECURITY_FIX_DETAILS,
   SECURITY_FIX_TITLE,
   UPDATE_COST_NOTES,
   isSituationSettledByLeaving,
   isSkipOffered,
   isSpecificVersionOffered,
+  kernelCardFor,
   updateTabActionsFor,
   updateTabStatusFor,
 } from "../../../models/updateSurfaces";
 import type {
+  KernelCard,
   UpdateStatusIcon,
   UpdateStatusTone,
   UpdateTabAction,
@@ -73,6 +77,12 @@ interface UpdatesGroupState {
   specificVersion: string;
   /** Changes on each arrival from another surface, so the status block flashes once. */
   flashKey: number;
+  /** The kernel card's question: the first press's confirmation, or the go-ahead past the chats it named. */
+  kernelPrompt: { kind: "confirm" } | { kind: "force"; message: string } | null;
+  /** The kernel restart press waiting on its answer; its button spins. */
+  isKernelPending: boolean;
+  kernelError: { message: string; detail: string } | null;
+  isKernelDetailsOpen: boolean;
 }
 
 function freshState(): UpdatesGroupState {
@@ -87,6 +97,10 @@ function freshState(): UpdatesGroupState {
     isSpecificVersionOpen: false,
     specificVersion: "",
     flashKey: 0,
+    kernelPrompt: null,
+    isKernelPending: false,
+    kernelError: null,
+    isKernelDetailsOpen: false,
   };
 }
 
@@ -562,6 +576,7 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
             ],
           ),
         ],
+        kernelCardView(agentId, update, local),
         m("div", { class: "mt-8" }, [
           m(SectionHeader, "Automatic updates"),
           automaticUpdatesSection(agentId, autoUpdate, local),
@@ -569,6 +584,131 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
       ]);
     },
   };
+}
+
+/** The colour the kernel card's title takes, by what it says. */
+const KERNEL_CARD_TEXT: Record<KernelCard["state"], string> = {
+  offered: "text-warning",
+  failed: "text-important",
+  "in-progress": "text-info",
+  landed: "text-success",
+};
+
+/**
+ * The machine's kernel security card: the restart on offer, its progress, why
+ * it did not land, or that it did. A press asks once, since the restart ends
+ * every chat; a refusal naming chats still at work asks again before going
+ * ahead past them.
+ */
+function kernelCardView(agentId: string, update: UiWorkspaceUpdate, local: UpdatesGroupState): m.Children {
+  const card = kernelCardFor(update);
+  if (card === null) {
+    // A card shown later is a new situation; a press's leftovers are not its.
+    local.kernelPrompt = null;
+    local.kernelError = null;
+    local.isKernelDetailsOpen = false;
+    return null;
+  }
+  const updates = getAppContext().stores.updates;
+  const press = (isForced: boolean): void => {
+    local.isKernelPending = true;
+    local.kernelError = null;
+    local.kernelPrompt = null;
+    void updates.applyKernelFix(agentId, isForced).then((result) => {
+      local.isKernelPending = false;
+      if (!result.isOk) {
+        if (result.isForceOffered ?? false) {
+          const chats = result.runningChats ?? [];
+          const named = chats.length > 0 ? ` (${chats.join(", ")})` : "";
+          local.kernelPrompt = { kind: "force", message: `${result.error}${named} Restart anyway?` };
+        } else {
+          local.kernelError = { message: result.error, detail: result.detail };
+        }
+      }
+      m.redraw();
+    });
+  };
+  const isDetailsOffered = card.state === "offered" || card.state === "failed";
+  const prompt = local.kernelPrompt;
+  const controls: m.Children =
+    prompt !== null
+      ? m("div", { id: "ws-kernel-confirm", class: "flex flex-col gap-2" }, [
+          m(
+            "p",
+            { class: "type-helper text-primary" },
+            prompt.kind === "confirm" ? KERNEL_FIX_RESTART_LINE : prompt.message,
+          ),
+          m("div", { class: "flex flex-wrap items-center gap-2" }, [
+            m(
+              Button,
+              {
+                variant: "primary",
+                id: prompt.kind === "confirm" ? "ws-kernel-restart-confirm" : "ws-kernel-restart-force",
+                disabled: local.isKernelPending,
+                onclick: () => press(prompt.kind === "force"),
+              },
+              local.isKernelPending ? m(Spinner, { size: "sm" }) : prompt.kind === "confirm" ? "Restart now" : "Restart anyway",
+            ),
+            m(
+              Button,
+              { variant: "secondary", disabled: local.isKernelPending, onclick: () => (local.kernelPrompt = null) },
+              "Cancel",
+            ),
+          ]),
+        ])
+      : card.actionLabel !== null
+        ? m(
+            Button,
+            {
+              variant: "primary",
+              id: "ws-kernel-restart",
+              disabled: local.isKernelPending,
+              onclick: () => (local.kernelPrompt = { kind: "confirm" }),
+            },
+            local.isKernelPending ? m(Spinner, { size: "sm" }) : card.actionLabel,
+          )
+        : null;
+  return m(
+    "div",
+    {
+      id: "ws-kernel-card",
+      "data-state": card.state,
+      class: "mt-4 rounded-lg border border-default px-3 py-2.5",
+    },
+    [
+      m(
+        "p",
+        { id: "ws-kernel-title", class: `flex items-center gap-1.5 type-body font-medium ${KERNEL_CARD_TEXT[card.state]}` },
+        [card.state === "in-progress" ? m(Spinner, { size: "sm" }) : SHIELD_ALERT_ICON, card.title],
+      ),
+      m("p", { id: "ws-kernel-line", class: "mt-1 type-body text-primary" }, card.line),
+      isDetailsOffered
+        ? m(
+            Collapsible,
+            {
+              id: "kernel-fix-details",
+              isOpen: local.isKernelDetailsOpen,
+              onToggle: () => (local.isKernelDetailsOpen = !local.isKernelDetailsOpen),
+              extra: "mt-1",
+              triggerExtra: "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
+              panelExtra: "mt-1 type-body text-primary",
+              summary: m("span", "See details"),
+            },
+            m("p", KERNEL_FIX_DETAILS),
+          )
+        : null,
+      isDetailsOffered && prompt === null
+        ? m("p", { class: "mt-2 type-helper text-secondary" }, KERNEL_FIX_RESTART_LINE)
+        : null,
+      local.kernelError !== null
+        ? m(Notice, { variant: "error", extra: "mt-3", id: "ws-kernel-error" }, [
+            local.kernelError.message,
+            machineVerdict(local.kernelError.detail),
+          ])
+        : null,
+      controls !== null ? m("div", { class: "mt-3" }, controls) : null,
+    ],
+  );
 }
 
 /** The status block's text: its title and versions, its line with the
