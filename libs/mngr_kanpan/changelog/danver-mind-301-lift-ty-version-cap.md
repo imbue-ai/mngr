@@ -1,0 +1,1 @@
+MIND-301: `_build_focus_map` declares urwid's own `Hashable` attribute-map types, which urwid's `AttrMap` signature requires. Tests that render an agent row share a `_rendered_segments` helper typed against `Columns`, and the `PrField` immutability test uses `assert_model_is_frozen`. Type-checker-only; the board renders exactly as before.

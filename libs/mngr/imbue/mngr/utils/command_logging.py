@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -12,7 +12,7 @@ _command_log_suppression_reason: ContextVar[str | None] = ContextVar(
 
 
 @contextmanager
-def commands_kept_out_of_logs(reason: str) -> Iterator[None]:
+def commands_kept_out_of_logs(reason: str) -> Generator[None, None, None]:
     """Keep the text of every command a host runs on this execution context out of the logs.
 
     For commands whose *text* is itself a secret -- a script carrying credential material, or one

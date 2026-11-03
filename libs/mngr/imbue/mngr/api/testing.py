@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import types
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,7 +30,7 @@ def created_host(
     provider: ProviderInstanceInterface,
     host_name: HostName,
     **create_kwargs: Any,
-) -> Iterator[OnlineHostInterface]:
+) -> Generator[OnlineHostInterface, None, None]:
     """Create a host via ``provider`` and destroy it on exit.
 
     Replaces the create-host / ``try``-``finally``-``destroy_host`` boilerplate that

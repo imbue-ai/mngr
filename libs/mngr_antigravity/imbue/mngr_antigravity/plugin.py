@@ -599,7 +599,7 @@ class AntigravityAgent(
     # fresh start AND a resume, and only once the input row is actually drawn. The rule
     # spans the terminal width, which at the minimum width is just two ``─`` -- hence
     # ``{2,}`` rather than a longer run.
-    TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
+    TUI_READY_INDICATOR = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
 
     # agy shows a pasted message as e.g. ``[Pasted text #1 +20 lines]`` or ``[Pasted text #1 1500 chars]``.
     PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]] = ("[Pasted text ",)

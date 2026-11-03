@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
@@ -91,7 +91,7 @@ class _RecordedAccess(MachineAccess):
     opening_refusal: str = Field(default="", description="When set, the reason the machine cannot be opened at all.")
 
     @contextmanager
-    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Iterator[MachineCredentials]:
+    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
         del workspace_agent_id, host_id
         if self.opening_refusal:
             raise MachineUnreachableError(self.opening_refusal)

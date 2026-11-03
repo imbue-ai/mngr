@@ -28,7 +28,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -89,7 +89,7 @@ def _run_converter(state_dir: Path) -> str:
 
 
 @contextmanager
-def _running_watcher(state_dir: Path) -> Iterator[None]:
+def _running_watcher(state_dir: Path) -> Generator[None, None, None]:
     """Run the real poll daemon (no --single-pass) for the block; its loop never exits on its own.
 
     On exit the daemon's whole process group, including any converter it was

@@ -18,7 +18,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -738,7 +738,7 @@ class _RefusingRefreshConnectorHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _refusing_refresh_connector() -> Iterator[str]:
+def _refusing_refresh_connector() -> Generator[str, None, None]:
     """Serve the refusing connector on a loopback port; yields its base URL."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _RefusingRefreshConnectorHandler)
     thread = threading.Thread(target=server.serve_forever, name="refusing-connector", daemon=True)
@@ -760,7 +760,7 @@ _OTHER_DEFAULT_PROVIDER_NAMES = ("docker", "lima", "local", "vultr", "ovh", "ssh
 @contextmanager
 def _streaming_discovery(
     mngr_host_dir: Path, home: Path, stderr_path: Path, consumer: EnvelopeStreamConsumer
-) -> Iterator[subprocess.Popen[str]]:
+) -> Generator[subprocess.Popen[str], None, None]:
     """Run the venv's real ``mngr observe --discovery-only`` against the stubbed host dir, feeding its stdout
     into ``consumer`` the way ``mngr forward --observe-via-file`` envelopes the shared discovery log."""
     environment = {**os.environ, "HOME": str(home), "MNGR_HOST_DIR": str(mngr_host_dir)}

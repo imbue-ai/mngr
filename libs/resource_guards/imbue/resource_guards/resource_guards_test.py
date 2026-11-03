@@ -1289,7 +1289,7 @@ def test_custom_sdk_guard_end_to_end(
 
     def install() -> None:
         originals["send"] = FakeClient.send
-        FakeClient.send = guarded_send  # ty: ignore[invalid-assignment]
+        FakeClient.send = guarded_send
 
     def cleanup() -> None:
         if "send" in originals:
@@ -1965,9 +1965,6 @@ def test_make_guarded_fixture_wrapper_plain_fixture_applies_env(
     assert os.environ.get("_TEST_FIXTURE_FLAG") is None
 
 
-# --- _check_fixture_blocked_after_setup ---
-
-
 def test_check_fixture_blocked_after_setup_passes_when_clean(
     isolated_guard_state: None,
     tmp_path: Path,
@@ -2030,9 +2027,6 @@ def test_check_fixture_blocked_after_setup_chains_setup_exception(
         )
 
     assert exc_info.value.__cause__ is original
-
-
-# --- _check_fixture_at_scope_end ---
 
 
 def test_check_fixture_at_scope_end_passes_when_clean(

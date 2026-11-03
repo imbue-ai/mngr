@@ -4,7 +4,7 @@ Per CLAUDE.md, this module has no test of its own; it is exercised through the t
 """
 
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from pydantic import PrivateAttr
@@ -43,7 +43,7 @@ class _CapturingTransport(Transport):
 @contextmanager
 def capturing_sentry_client(
     before_send: Callable[[Event, Hint], Event | None] | None = None,
-) -> Iterator[list[Event]]:
+) -> Generator[list[Event], None, None]:
     """Bind an isolated, active Sentry client that appends delivered events to the yielded list.
 
     Capture is synchronous, so the yielded list is already populated inside the block.
@@ -75,7 +75,7 @@ def capturing_sentry_client(
 
 
 @contextmanager
-def registered_attachments_uploader(uploader: sentry_core.ErrorAttachmentsS3Uploader) -> Iterator[None]:
+def registered_attachments_uploader(uploader: sentry_core.ErrorAttachmentsS3Uploader) -> Generator[None, None, None]:
     """Make ``uploader`` the process-wide attachments uploader for the duration of the block.
 
     ``submit_manual_bug_report`` consults that process-global before it does anything else, so a test
@@ -104,7 +104,7 @@ class _RecordingS3Uploader(s3_uploader._S3Uploader):
 
 
 @contextmanager
-def recording_s3_bucket() -> Iterator[list[tuple[str, bytes]]]:
+def recording_s3_bucket() -> Generator[list[tuple[str, bytes]], None, None]:
     """Make S3 uploads resolve against ``TEST_S3_BUCKET``, yielding the ``(key, contents)`` recorded.
 
     Without this, every ``s3://`` URI in the suite is None and every upload a no-op, so a test cannot

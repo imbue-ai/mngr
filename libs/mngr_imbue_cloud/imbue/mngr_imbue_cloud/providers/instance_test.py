@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -500,7 +500,7 @@ class _FakeImbueCloudProvider(_NoWorkspacesMixin, ImbueCloudProvider):
         return [self._lease] if self._lease is not None else []
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         yield cast(OuterHostInterface, self._outer)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
@@ -1074,7 +1074,7 @@ class _MultiHostDiscoveryProvider(_NoWorkspacesMixin, ImbueCloudProvider):
         return list(self._leases)
 
     @contextmanager
-    def _tracking_in_flight(self) -> Iterator[None]:
+    def _tracking_in_flight(self) -> Generator[None, None, None]:
         with self._in_flight_lock:
             self._in_flight_count += 1
             self._max_in_flight = max(self._max_in_flight, self._in_flight_count)
@@ -1257,7 +1257,7 @@ class _LogCapture:
 
 
 @contextmanager
-def _capture_logs() -> Iterator[_LogCapture]:
+def _capture_logs() -> Generator[_LogCapture, None, None]:
     """Context manager that installs a loguru sink and yields a _LogCapture."""
     cap = _LogCapture()
     handler_id = logger.add(cap.sink, level="TRACE", format="{message}")

@@ -1,7 +1,7 @@
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -455,7 +455,7 @@ def _has_left_the_unchanged_file(target: Path, file_descriptor: int, content: by
 
 
 @contextmanager
-def _running_publisher(tmp_path: Path, cgroup_parent: Path, volume_dir: Path) -> Iterator[Path]:
+def _running_publisher(tmp_path: Path, cgroup_parent: Path, volume_dir: Path) -> Generator[Path, None, None]:
     """Run the rendered publisher against one fake container until the block exits, yielding its docker call log.
 
     Its PATH holds only the fake docker, so any other program it tried to start would fail.

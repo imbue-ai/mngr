@@ -18,7 +18,7 @@ import os
 import re
 import tempfile
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from enum import auto
@@ -180,7 +180,7 @@ def internal_mngr_credential(
     environ: Mapping[str, str],
     is_vault_fallback_allowed: bool,
     parent_concurrency_group: ConcurrencyGroup | None,
-) -> Iterator[InternalMngrCredential]:
+) -> Generator[InternalMngrCredential, None, None]:
     """What one ``mngr create`` needs so its build can fetch the template's mngr pin.
 
     A public pin (or a template with none) gets nothing. A private pin gets the token in the

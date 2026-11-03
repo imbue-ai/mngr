@@ -7,6 +7,7 @@ import sys
 import threading
 import zipfile
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
@@ -305,7 +306,7 @@ def _hint_for_raised(exception: BaseException) -> Hint:
     try:
         raise exception
     except type(exception):
-        return cast(Hint, {"exc_info": sys.exc_info()})
+        return {"exc_info": sys.exc_info()}
 
 
 def test_drop_interrupt_events_drops_keyboard_interrupt() -> None:
@@ -332,8 +333,8 @@ def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() ->
     # Ordinary exceptions (the common case) and events without exc_info pass straight through.
     event: Event = {"message": "x"}
     assert _drop_interrupt_events(event, _hint_for_raised(ValueError("real error"))) is event
-    assert _drop_interrupt_events(event, cast(Hint, {})) is event
-    assert _drop_interrupt_events(event, cast(Hint, {"exc_info": (None, None, None)})) is event
+    assert _drop_interrupt_events(event, {}) is event
+    assert _drop_interrupt_events(event, {"exc_info": (None, None, None)}) is event
 
 
 def test_add_extra_info_hook_skips_attachments_when_reporting_disabled() -> None:
@@ -959,7 +960,7 @@ _RATE_LIMITED_RESPONSE = (
 
 
 @contextmanager
-def _local_http_server(handle_connection: Callable[[socket.socket, int], None]) -> Iterator[int]:
+def _local_http_server(handle_connection: Callable[[socket.socket, int], None]) -> Generator[int, None, None]:
     """Serve loopback connections with `handle_connection`, given each connection and its 1-based index."""
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1025,7 +1026,7 @@ def _answer_then_strand_the_first_connection(connection: socket.socket, index: i
 
 
 @contextmanager
-def _transport_pool() -> Iterator[urllib3.PoolManager]:
+def _transport_pool() -> Generator[urllib3.PoolManager, None, None]:
     """A pool built from the options the transport gives urllib3 for its own."""
     options = dict(DEFAULT_OPTIONS)
     options["dsn"] = "https://public@o1.ingest.us.sentry.io/1"

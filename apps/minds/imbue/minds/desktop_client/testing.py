@@ -12,7 +12,7 @@ import subprocess
 import threading
 import uuid
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -418,7 +418,7 @@ _WSGI_SERVER_STOP_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 @contextmanager
-def serve_wsgi_server_in_thread(server: wsgi.Server, thread_name: str) -> Iterator[None]:
+def serve_wsgi_server_in_thread(server: wsgi.Server, thread_name: str) -> Generator[None, None, None]:
     """Bind a cheroot server and serve it on a daemon thread for the duration of the block.
 
     The server is prepared (bound and listening) before the block runs, so a
@@ -435,7 +435,7 @@ def serve_wsgi_server_in_thread(server: wsgi.Server, thread_name: str) -> Iterat
 
 
 @contextmanager
-def capture_error_logs() -> Iterator[list[str]]:
+def capture_error_logs() -> Generator[list[str], None, None]:
     """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).
 
     Every RECOVERY_FAILED transition must reach error reporting (Principle 3:
@@ -964,7 +964,7 @@ def write_forward_ca_for_test(ca_cert_path: Path) -> LocalCertificateAuthority:
 @contextmanager
 def scripted_workspace_probe_server(
     not_ready_count: int, ca_cert_path: Path, on_first_request: Callable[[], None] | None = None
-) -> Iterator[int]:
+) -> Generator[int, None, None]:
     """Serve a plugin stand-in on loopback, yielding its port.
 
     Answers 503 for the first ``not_ready_count`` probes and 200 thereafter, so a
@@ -1041,7 +1041,7 @@ class _ScriptedChatCallbackHandler(BaseHTTPRequestHandler):
 @contextmanager
 def scripted_chat_callback_server(
     answer_status: int, answer_body: bytes, ca_cert_path: Path
-) -> Iterator[tuple[int, list[RecordedCallbackRequest]]]:
+) -> Generator[tuple[int, list[RecordedCallbackRequest]], None, None]:
     """Serve a TLS stand-in for the forward plugin fronting a chat app's callback route.
 
     Every POST is recorded and answered with ``answer_status`` and ``answer_body``. Yields the
@@ -1681,7 +1681,7 @@ class StaticPendingRequests(MutableModel, PendingRequestsInterface):
 def desktop_state_app_context(
     tmp_path: Path,
     pending_requests: StaticPendingRequests | None = None,
-) -> Iterator[StaticPendingRequests]:
+) -> Generator[StaticPendingRequests, None, None]:
     """A minimal Flask app context carrying a DesktopClientState, for direct handler calls.
 
     Handler unit tests invoke grant/deny methods without the full desktop

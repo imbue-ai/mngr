@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -84,7 +84,7 @@ def log_call(func: Callable[P, R]) -> Callable[P, R]:
 
 
 @contextmanager
-def log_span(message: str, *args: Any, **context: Any) -> Iterator[None]:
+def log_span(message: str, *args: Any, **context: Any) -> Generator[None, None, None]:
     """Context manager that logs a debug message on entry and a trace message with timing on exit.
 
     On entry, emits logger.debug(message, *args).
@@ -110,7 +110,7 @@ def log_span(message: str, *args: Any, **context: Any) -> Iterator[None]:
 
 
 @contextmanager
-def info_span(message: str, *args: Any, **context: Any) -> Iterator[None]:
+def info_span(message: str, *args: Any, **context: Any) -> Generator[None, None, None]:
     """Context manager that logs an info message on entry and a trace message with timing on exit.
 
     On entry, emits logger.info(message, *args).
@@ -133,7 +133,9 @@ def info_span(message: str, *args: Any, **context: Any) -> Iterator[None]:
 
 
 @contextmanager
-def trace_span(message: str, *args: Any, _is_trace_span_enabled: bool = True, **context: Any) -> Iterator[None]:
+def trace_span(
+    message: str, *args: Any, _is_trace_span_enabled: bool = True, **context: Any
+) -> Generator[None, None, None]:
     """Context manager that logs a trace message on entry and a trace message with timing on exit.
 
     On entry, emits logger.trace(message, *args).
@@ -247,7 +249,7 @@ _ROTATION_LOCK_WARNING_SECONDS: Final[float] = 3.0
 
 
 @contextmanager
-def rotation_lock(directory: Path) -> Iterator[None]:
+def rotation_lock(directory: Path) -> Generator[None, None, None]:
     """Acquire an exclusive file lock for rotation operations in a directory.
 
     Uses fcntl.flock which is automatically released when the fd is closed,

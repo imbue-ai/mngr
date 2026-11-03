@@ -498,35 +498,35 @@ class TypeCheckOutcome(FrozenModel):
 
     @property
     def is_failure(self) -> bool:
-        """Whether this run should fail the type-check gate."""
-        return self.return_code != 0 or len(self.error_diagnostics) > 0
+        """Whether this run should fail the type-check gate: any diagnostic, warnings included, or a non-zero exit."""
+        return self.return_code != 0 or len(self.error_diagnostics) > 0 or len(self.warning_diagnostics) > 0
 
     @property
     def failure_message(self) -> str:
         """The gate's failure message, leading with the diagnostics that caused the failure.
 
-        Only meaningful when ``is_failure``. Warnings come after the errors and are labelled:
-        ty exits zero on a warning-only run, so a warning is never why this gate failed. Order
-        matters because only the first line reaches the junit ``message`` attribute and the CI
-        check-run summary, and ty sorts its own output by path rather than by severity.
+        Only meaningful when ``is_failure``. Warnings fail the gate as well as errors, and are
+        listed after them. Order matters because only the first line reaches the junit
+        ``message`` attribute and the CI check-run summary, and ty sorts its own output by path
+        rather than by severity.
         """
-        if self.error_diagnostics:
+        counts = [
+            f"{count} {kind}"
+            for count, kind in (
+                (len(self.error_diagnostics), "error(s)"),
+                (len(self.warning_diagnostics), "warning(s)"),
+            )
+            if count
+        ]
+        if counts:
             lines = [
-                f"Type checker found {len(self.error_diagnostics)} error(s) (ty exit code {self.return_code}):",
+                f"Type checker found {' and '.join(counts)} (ty exit code {self.return_code}):",
                 "",
                 *self.error_diagnostics,
-            ]
-        else:
-            lines = [f"Type checker exited {self.return_code} without reporting an error-severity diagnostic."]
-
-        if self.warning_diagnostics:
-            lines += [
-                "",
-                f"ty also reported {len(self.warning_diagnostics)} warning(s); ty exits zero on warnings, "
-                "so none of these caused this failure:",
-                "",
                 *self.warning_diagnostics,
             ]
+        else:
+            lines = [f"Type checker exited {self.return_code} without reporting a diagnostic."]
 
         if self.unrecognized_output:
             lines += ["", "Type checker output that this check could not parse:", "", *self.unrecognized_output]
@@ -570,7 +570,7 @@ def parse_type_check_output(stdout: str, stderr: str, return_code: int) -> TypeC
 
 
 def check_no_type_errors(project_root: Path) -> None:
-    """Run the type checker (ty) and raise AssertionError if any type errors are found."""
+    """Run the type checker (ty) and raise AssertionError if it reports any diagnostic, warnings included."""
     result = subprocess.run(
         ["uv", "run", "ty", "check", "--output-format", "concise", "--color", "never"],
         cwd=project_root,

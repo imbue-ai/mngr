@@ -1,5 +1,5 @@
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextlib import nullcontext
 from pathlib import Path
@@ -66,7 +66,7 @@ _RETAIN_FAILED_HOSTS_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HO
 @contextmanager
 def destroy_new_host_on_create_failure(
     host: OnlineHostInterface, provider: ProviderInstanceInterface | None
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Destroy a freshly-created host if the create fails, so we don't leak it.
 
     ``provider`` is the provider that created the host for a ``--new-host``

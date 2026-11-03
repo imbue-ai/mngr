@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -2745,7 +2745,7 @@ class _UnconstructableProviderBackend(ProviderBackendInterface):
 
 
 @contextmanager
-def _registered_unconstructable_backend() -> Iterator[None]:
+def _registered_unconstructable_backend() -> Generator[None, None, None]:
     _backend_registry[_UNCONSTRUCTABLE_BACKEND_NAME] = _UnconstructableProviderBackend
     _provider_config_registry[_UNCONSTRUCTABLE_BACKEND_NAME] = ProviderInstanceConfig
     try:

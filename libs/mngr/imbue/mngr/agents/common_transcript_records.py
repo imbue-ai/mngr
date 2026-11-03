@@ -213,7 +213,7 @@ class StreamObservationResult(AtifObservationResult):
     The call id is required; call-id-less results ride inline on their system step.
     """
 
-    source_call_id: str
+    source_call_id: str  # ty: ignore[invalid-mutable-override]
 
 
 class ObservationRecord(_AtifRecordModel):

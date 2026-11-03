@@ -1,11 +1,11 @@
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from imbue.imbue_common.test_profiles import detect_branch
 from imbue.imbue_common.test_profiles import load_profiles
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.imbue_common.testing import assert_model_is_frozen
 
 _SAMPLE_CONFIG = """\
 [profiles.mngr]
@@ -24,9 +24,6 @@ def _write_sample_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "test_profiles.toml"
     config_path.write_text(_SAMPLE_CONFIG)
     return tmp_path
-
-
-# -- load_profiles -----------------------------------------------------------
 
 
 def test_load_profiles_returns_empty_for_missing_file(tmp_path: Path) -> None:
@@ -64,11 +61,7 @@ def test_load_profiles_are_frozen(tmp_path: Path) -> None:
 
     result = load_profiles(config_path)
 
-    with pytest.raises(ValidationError):
-        result[0].name = "changed"
-
-
-# -- detect_branch -----------------------------------------------------------
+    assert_model_is_frozen(type(result[0]))
 
 
 def test_detect_branch_uses_github_head_ref_for_prs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,9 +99,6 @@ def test_detect_branch_falls_back_to_git(monkeypatch: pytest.MonkeyPatch) -> Non
     # the important thing is that detect_branch doesn't crash.
     if branch is not None:
         assert len(branch) > 0
-
-
-# -- resolve_active_profile ---------------------------------------------------
 
 
 def test_resolve_explicit_all_disables_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

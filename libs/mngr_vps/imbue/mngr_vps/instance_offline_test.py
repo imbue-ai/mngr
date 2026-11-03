@@ -1,7 +1,7 @@
 """Tests for the offline VPS provider subsystem (external HostStateStore mirror)."""
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -115,7 +115,7 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         pass
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         yield _LocalFakeOuter(id=HostId.generate(), connector=_make_local_connector())
 
     def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
@@ -232,7 +232,7 @@ class _HostKeyWaitProvider(_ResumeMirrorProvider):
         self._expected_key_arg = expected_host_public_key
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         self._calls.append("open_outer")
         yield _LocalFakeOuter(id=HostId.generate(), connector=_make_local_connector())
 

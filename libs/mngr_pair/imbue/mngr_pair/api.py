@@ -4,10 +4,10 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
-from typing import Iterator
 from typing import assert_never
 
 from loguru import logger
@@ -663,7 +663,7 @@ def _remote_unison_transport(
     endpoint: SshEndpoint | None,
     host: OnlineHostInterface,
     cg: ConcurrencyGroup,
-) -> Iterator[tuple[Path | None, Path | None]]:
+) -> Generator[tuple[Path | None, Path | None], None, None]:
     """Yield the ``-sshcmd`` wrapper path and ``-servercmd`` path for one pairing.
 
     Both are ``None`` for a local pairing, which runs a single unison process and
@@ -699,7 +699,7 @@ def pair_files(
     is_ignoring_archives: bool = False,
     is_syncing_links: bool = True,
     on_transfer_change: TransferCallback | None = None,
-) -> Iterator[UnisonSyncer]:
+) -> Generator[UnisonSyncer, None, None]:
     """Start continuous file synchronization between an agent and a local directory.
 
     This function first synchronizes git state if both paths are git repositories,

@@ -6,7 +6,7 @@ import sys
 import threading
 import traceback
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -522,12 +522,12 @@ class BufferingStreamWrapper(io.TextIOBase):
         self._errors = getattr(original_stream, "errors", "strict")
 
     @property
-    def encoding(self) -> str:
+    def encoding(self) -> str:  # ty: ignore[invalid-property-type-override]
         """Return the encoding of the original stream."""
         return self._encoding
 
     @property
-    def errors(self) -> str:
+    def errors(self) -> str:  # ty: ignore[invalid-property-type-override]
         """Return the error handling mode of the original stream."""
         return self._errors
 
@@ -593,7 +593,7 @@ class LoggingSuppressor:
         console_level: LogLevel,
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         clear_screen: bool = True,
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Context manager that enables suppression and restores on exit."""
         cls.enable(console_level, buffer_size)
         try:

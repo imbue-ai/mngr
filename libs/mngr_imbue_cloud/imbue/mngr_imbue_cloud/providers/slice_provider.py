@@ -1,6 +1,6 @@
 import base64
 import shlex
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -784,7 +784,7 @@ class SliceVpsDockerProvider(VpsProvider):
     @contextmanager
     def _transfer_key_authorized(
         self, cache: BoxImageCacheInterface, outer: OuterHostInterface
-    ) -> Iterator[TransferKey]:
+    ) -> Generator[TransferKey, None, None]:
         """Yield a unique ephemeral transfer key authorized on the slice's VM root; tear it down after.
 
         The box uses the key to docker save/load over its own loopback to the slice's
@@ -832,7 +832,7 @@ class SliceVpsDockerProvider(VpsProvider):
         return Path(self.slice_config.pool_private_key_path)
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         # Slices are reached with the tier's SSH CA certificate regardless of host,
         # so the host id selects nothing here.
         del host_id

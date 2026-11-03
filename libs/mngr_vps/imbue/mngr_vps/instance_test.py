@@ -1,7 +1,7 @@
 """Tests for VPS provider instance utilities."""
 
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -758,7 +758,7 @@ class _CaptureDeleteProvider(MinimalVpsProvider):
         return cast(SnapshotCapableRealizer, realizer)
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         yield cast(OuterHostInterface, object())
 
     def _write_and_mirror(self, host_store: Any, record: VpsHostRecord) -> None:
@@ -1385,7 +1385,7 @@ class _FailAfterProvisionProvider(MinimalVpsProvider):
         return VpsInstanceId("i-leaked"), "203.0.113.9"
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         raise _OuterOpenFailure("simulated outer connection failure after provisioning")
         yield
 
@@ -1432,7 +1432,7 @@ class _BootstrapProvisionProvider(MinimalVpsProvider):
         pass
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         self._outer_host_ids.append(host_id)
         yield cast(OuterHostInterface, object())
 
@@ -1560,7 +1560,7 @@ class _DestroyProbeProvider(MinimalVpsProvider):
     """Destroys a host whose record is seeded in the cache, with the outer connection stubbed out."""
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         yield cast(OuterHostInterface, object())
 
 

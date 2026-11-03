@@ -22,6 +22,7 @@ an unmigrated writer appended is ever lost when the file is re-rendered.
 import fcntl
 import re
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
@@ -30,7 +31,6 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
-from typing import Iterator
 
 from loguru import logger
 from pydantic import Field
@@ -402,7 +402,7 @@ def _render_known_hosts(known_hosts_path: Path, state: HostKeyStoreState) -> Non
 
 
 @contextmanager
-def _locked_store(known_hosts_path: Path) -> Iterator[None]:
+def _locked_store(known_hosts_path: Path) -> Generator[None, None, None]:
     lock_path = known_hosts_path.with_name(known_hosts_path.name + _LOCK_SUFFIX)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock_file:

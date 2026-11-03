@@ -1,6 +1,6 @@
 """Tests for AWS provider backend registration."""
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
@@ -584,7 +584,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
 
     class _OuterRaisingAwsProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
             raise _OnVolumeReached("base SSH teardown must not run for a stopped host")
             yield
 
@@ -677,7 +677,7 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 
     class _OuterRaisingProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
             # The unreachable yield below keeps this a generator function (which
             # @contextmanager requires); the raise fires before it is ever reached.
             raise _OnVolumeReached("on-volume persist path entered")

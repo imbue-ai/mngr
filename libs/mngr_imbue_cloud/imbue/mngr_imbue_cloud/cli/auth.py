@@ -11,7 +11,7 @@ import sys
 import threading
 import urllib.parse
 import webbrowser
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from enum import auto
 from pathlib import Path
@@ -707,7 +707,9 @@ def _write_login_url_file(url_file: str, login_url: str) -> None:
 
 
 @contextmanager
-def _serve_login_callback(server: http.server.HTTPServer, capture_box: _CallbackCaptureBox) -> Iterator[None]:
+def _serve_login_callback(
+    server: http.server.HTTPServer, capture_box: _CallbackCaptureBox
+) -> Generator[None, None, None]:
     """Serve the loopback callback listener for the duration of the block.
 
     However the block ends, a callback page still waiting for the outcome is
@@ -746,7 +748,7 @@ def _renew_listener_lease_until_stopped(
 
 
 @contextmanager
-def _exit_cleanly_on_sigterm() -> Iterator[None]:
+def _exit_cleanly_on_sigterm() -> Generator[None, None, None]:
     """Turn SIGTERM into a normal exit for the block, so its cleanup runs.
 
     Only the main thread can install a signal handler; elsewhere (an embedder
@@ -763,7 +765,7 @@ def _exit_cleanly_on_sigterm() -> Iterator[None]:
 
 
 @contextmanager
-def _hold_listener_lease(client: ImbueCloudConnectorClient, code_challenge: str) -> Iterator[None]:
+def _hold_listener_lease(client: ImbueCloudConnectorClient, code_challenge: str) -> Generator[None, None, None]:
     """Keep the connector's lease on this sign-in's listener alive for the block, then release it.
 
     Before handing the browser to the loopback port, the connector checks

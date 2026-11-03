@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from datetime import datetime
@@ -17,7 +18,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Iterator
 from typing import Mapping
 from typing import ParamSpec
 from typing import Sequence
@@ -1734,7 +1734,9 @@ log "=== Shutdown script completed ==="
         return self.modal_app.app
 
     @contextmanager
-    def _watch_build_output(self, dockerfile: Path | None, captured_length_before_build: int) -> Iterator[None]:
+    def _watch_build_output(
+        self, dockerfile: Path | None, captured_length_before_build: int
+    ) -> Generator[None, None, None]:
         """Feed the build's captured output to the step-count parser on a side thread while the build runs."""
         total_steps = count_dockerfile_instructions(dockerfile.read_text()) if dockerfile is not None else None
         watcher = ModalBuildOutputWatcher(

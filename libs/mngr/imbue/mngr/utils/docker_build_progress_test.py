@@ -167,7 +167,8 @@ def test_parser_counts_each_build_stage_of_a_multi_stage_dockerfile_and_never_go
     advances = _advances(output)
 
     assert advances == snapshot([(0, 2), (1, 2), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5)])
-    completed = [done for done, _ in advances]
+    completed = [done for done, _ in advances if done is not None]
+    assert len(completed) == len(advances)
     assert completed == sorted(completed)
 
 

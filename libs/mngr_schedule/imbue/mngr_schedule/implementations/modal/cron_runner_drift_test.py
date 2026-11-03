@@ -23,6 +23,7 @@ catches refactors a parser would miss.
 import contextlib
 import json
 import sys
+from collections.abc import Generator
 from collections.abc import Iterator
 from types import ModuleType
 
@@ -36,7 +37,7 @@ _CRON_RUNNER_MODULE: str = "imbue.mngr_schedule.implementations.modal.cron_runne
 
 
 @contextlib.contextmanager
-def _isolated_module(module_name: str) -> Iterator[None]:
+def _isolated_module(module_name: str) -> Generator[None, None, None]:
     """Pop ``module_name`` from sys.modules for the duration of the block,
     then restore the prior entry on exit.
 

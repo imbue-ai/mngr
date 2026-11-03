@@ -7,7 +7,7 @@ real call is made.
 """
 
 import fcntl
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,7 +32,7 @@ def _refresh_lock_path(sessions_dir: Path, user_id: SuperTokensUserId) -> Path:
 
 
 @contextmanager
-def _refresh_lock(sessions_dir: Path, user_id: SuperTokensUserId) -> Iterator[None]:
+def _refresh_lock(sessions_dir: Path, user_id: SuperTokensUserId) -> Generator[None, None, None]:
     """Hold an exclusive cross-process flock around a refresh-rotate-save sequence.
 
     Why this matters: SuperTokens treats *any* re-use of the same refresh

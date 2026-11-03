@@ -56,7 +56,7 @@ import json
 import math
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -320,7 +320,7 @@ def assert_vps_root_keys_are_per_host() -> None:
 
 
 @contextmanager
-def _provider_wide_vps_root_key_layout() -> Iterator[Path]:
+def _provider_wide_vps_root_key_layout() -> Generator[Path, None, None]:
     """Temporarily move the trip's per-host VM-root key up to the retired provider-wide location.
 
     A host created before per-host VM-root keys existed authorizes exactly the material at

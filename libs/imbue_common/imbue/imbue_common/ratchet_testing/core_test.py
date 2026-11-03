@@ -3,7 +3,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import GitCommandError
@@ -15,6 +14,7 @@ from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_text_files_
 from imbue.imbue_common.ratchet_testing.core import _read_file_contents
 from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
 from imbue.imbue_common.ratchet_testing.core import get_ratchet_failures
+from imbue.imbue_common.testing import assert_model_is_frozen
 
 
 def test_file_extension_with_dot() -> None:
@@ -78,14 +78,7 @@ def test_ratchet_match_chunk_creation() -> None:
 
 
 def test_ratchet_match_chunk_is_frozen() -> None:
-    chunk = RatchetMatchChunk(
-        file_path=Path("/tmp/test.py"),
-        matched_content="test",
-        start_line=LineNumber(1),
-        end_line=LineNumber(1),
-    )
-    with pytest.raises(ValidationError):
-        chunk.start_line = LineNumber(2)
+    assert_model_is_frozen(RatchetMatchChunk)
 
 
 def test_get_non_ignored_files_returns_matching_files(git_repo: Path) -> None:

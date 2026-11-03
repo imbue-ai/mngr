@@ -1,5 +1,5 @@
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Final
@@ -17,7 +17,7 @@ _MIN_READ_TIMEOUT_SECONDS: Final[float] = 1.0
 
 
 @contextmanager
-def reads_bounded_for(timeout_seconds: float) -> Iterator[None]:
+def reads_bounded_for(timeout_seconds: float) -> Generator[None, None, None]:
     """Bound every host read issued on this execution context to a shared wall-clock budget.
 
     While active, each command or file read a host issues is given the remaining budget as its

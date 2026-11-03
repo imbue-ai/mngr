@@ -4,7 +4,7 @@ import os
 import queue
 import threading
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
@@ -1379,7 +1379,7 @@ class AgentObserver(MutableModel):
             self._emit_listed_agent_states(result.agents, listing_start)
 
     @contextmanager
-    def _listing(self) -> Iterator[int]:
+    def _listing(self) -> Generator[int, None, None]:
         """Open a listing against the removal fence, yielding the removal count it began at."""
         with self._removal_fence_lock:
             listing_start = self._removal_count

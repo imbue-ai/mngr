@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from imbue.imbue_common.testing import assert_model_is_frozen
 from imbue.mngr.config.data_types import LoggingConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
@@ -77,17 +78,7 @@ def test_ci_field_display_unknown() -> None:
 
 
 def test_pr_field_is_frozen() -> None:
-    pr = PrField(
-        number=42,
-        title="Add feature X",
-        state=PrState.OPEN,
-        url="https://github.com/org/repo/pull/42",
-        head_branch="mngr/my-agent",
-        is_draft=False,
-        created=datetime(2025, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
-    )
-    with pytest.raises(ValidationError):
-        pr.number = 99
+    assert_model_is_frozen(PrField)
 
 
 def test_agent_board_entry_construction() -> None:

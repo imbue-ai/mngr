@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -498,7 +498,7 @@ def _summarize_concurrency_exception_group(group: ConcurrencyExceptionGroup) -> 
 
 
 @contextmanager
-def translate_outer_concurrency_errors(operation_description: str) -> Iterator[None]:
+def translate_outer_concurrency_errors(operation_description: str) -> Generator[None, None, None]:
     """Re-raise raw concurrency-group failures as ContainerSetupError (a MngrError).
 
     The outer-host docker/rsync/snapshot helpers run their work inside

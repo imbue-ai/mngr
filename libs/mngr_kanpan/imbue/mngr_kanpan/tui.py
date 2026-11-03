@@ -471,7 +471,6 @@ class _KanpanState(MutableModel):
     focused_instance_key: AgentInstanceKey | None = None
     # Steady-state footer left text (shown when nothing higher-priority is active)
     steady_footer_text: str = "  Loading..."
-    # --- Footer rendering (single-owner model) ---
     # The footer-left widget has exactly one writer (`_render_footer`), which picks
     # what to show from the fields below by priority. This prevents the flicker that
     # arose when several independent alarm loops (refresh spinner, batch action,
@@ -525,7 +524,6 @@ class _KanpanState(MutableModel):
     # CEL filter expressions passed from CLI
     include_filters: tuple[str, ...] = ()
     exclude_filters: tuple[str, ...] = ()
-    # --- Peek panel (None name => panel closed) ---
     # Name of the agent currently shown in the peek panel (for the panel title and focus).
     peek_agent_name: AgentName | None = None
     # Instance key of that agent (a host-scoped mngr address), used to resolve the
@@ -570,7 +568,6 @@ class _KanpanState(MutableModel):
     active_legend_prefix: str = ""
     # The `?` overlay widget while it is open (None otherwise).
     help_overlay: Any = None
-    # --- Footer prompt (None => no prompt open) ---
     # The open one-line input and the handler that answers it.
     open_prompt: _OpenPrompt | None = None
     # Single-worker executor for prompted commands, kept off the shared `executor` so a
@@ -584,7 +581,6 @@ class _KanpanState(MutableModel):
     batch_executor: ThreadPoolExecutor | None = None
     # How many marked operations may be in flight at once (from plugin config).
     batch_concurrency: int = 4
-    # --- Search prompt (None input => closed) ---
     # The Frame's footer: a blank row above the belt. Focused while the prompt is open,
     # since Frame routes keys only to the part it has focus on.
     footer_pile: Any = None
@@ -3432,9 +3428,9 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
 def _build_focus_map(
     mark_attr_names: tuple[str, ...],
     col_attr_names: tuple[str, ...],
-) -> dict[str | None, str]:
+) -> dict[Hashable | None, Hashable]:
     """Attribute map that renders an agent row as the focused one."""
-    focus_map: dict[str | None, str] = {None: "reversed"}
+    focus_map: dict[Hashable | None, Hashable] = {None: "reversed"}
     for attr in _AGENT_LINE_ATTRS + mark_attr_names + col_attr_names:
         focus_map[attr] = f"{attr}_focus"
     return focus_map

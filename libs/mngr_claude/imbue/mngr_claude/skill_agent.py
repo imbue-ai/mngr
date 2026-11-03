@@ -70,7 +70,7 @@ class SkillProvisionedAgent(ClaudeAgent):
     to define which skill to install.
     """
 
-    agent_config: SkillProvisionedAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
+    agent_config: SkillProvisionedAgentConfig = Field(frozen=True, repr=False, description="Agent type config")  # ty: ignore[invalid-mutable-override]
 
     _skill_name: ClassVar[str]
     _skill_content: ClassVar[str]

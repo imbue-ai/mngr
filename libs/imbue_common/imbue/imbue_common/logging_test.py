@@ -1,7 +1,7 @@
 """Tests for logging module."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -41,7 +41,7 @@ class LogCapture:
 
 
 @contextmanager
-def capture_logs() -> Iterator[LogCapture]:
+def capture_logs() -> Generator[LogCapture, None, None]:
     """Context manager that installs a loguru sink and yields a LogCapture."""
     cap = LogCapture()
     handler_id = logger.add(cap.sink, level="TRACE", format="{message}")

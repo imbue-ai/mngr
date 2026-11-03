@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -1131,7 +1131,7 @@ class _LockRecordingHost(Host):
     )
 
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Iterator[None]:
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
         self.lock_timeouts.append(timeout_seconds)
         if self.is_lock_refused:
             raise LockNotHeldError("Timed out waiting to acquire the host lock")

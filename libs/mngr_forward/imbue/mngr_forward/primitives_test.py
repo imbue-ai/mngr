@@ -68,9 +68,6 @@ def test_subdomain_pattern_rejects_invalid_hosts(host: str) -> None:
     assert FORWARD_SUBDOMAIN_PATTERN.match(host) is None
 
 
-# --- parse_forward_host: the (workspace, service) coordinates ---------------
-
-
 @pytest.mark.parametrize(
     "host, coordinate, service_name, service_labels, workspace_domain",
     [
@@ -117,9 +114,6 @@ def test_parse_forward_host_invalid(host: str) -> None:
     assert parse_forward_host(host) is None
 
 
-# --- ServiceLabel -----------------------------------------------------------
-
-
 @pytest.mark.parametrize("value", ["terminal", "openvscode", "my-app2", "a", "0x", "system_interface"])
 def test_service_label_accepts_hostname_safe_names(value: str) -> None:
     assert ServiceLabel(value) == value
@@ -139,4 +133,4 @@ def test_reverse_tunnel_spec_allows_zero_remote() -> None:
 
 def test_reverse_tunnel_spec_rejects_zero_local() -> None:
     with pytest.raises(ValueError):
-        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]
+        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)

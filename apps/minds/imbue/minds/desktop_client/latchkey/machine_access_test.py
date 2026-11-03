@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
@@ -51,7 +51,7 @@ class _StubProvider(MutableModel):
         self.is_listing_fresh = True
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         if not self.is_listing_fresh:
             raise HostNotFoundError(ProviderInstanceName("imbue_cloud"), host_id)
         yield self.outer
@@ -161,7 +161,7 @@ def _settings_registering(provider_name: str) -> str:
 @contextmanager
 def _settings_only_access(
     tmp_path: Path, access_class: type[MachineAccess] = MachineAccess
-) -> Iterator[MachineAccess]:
+) -> Generator[MachineAccess, None, None]:
     """A ``MachineAccess`` that loads its provider set from the real mngr settings."""
     latchkey_directory = tmp_path / "settings-latchkey"
     latchkey_directory.mkdir()

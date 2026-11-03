@@ -4,7 +4,7 @@ Lives here rather than in ``core_test.py`` because a failed spawn waits out the
 gateway's full bind timeout.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -23,7 +23,7 @@ _STARTUP_EXIT_CODE = 3
 
 
 @contextmanager
-def _captured_log_records() -> Iterator[list[tuple[str, str]]]:
+def _captured_log_records() -> Generator[list[tuple[str, str]], None, None]:
     """Collect every loguru record emitted inside the block as ``(level name, message)``."""
     captured: list[tuple[str, str]] = []
     sink_id = logger.add(lambda m: captured.append((m.record["level"].name, m.record["message"])), level=0)

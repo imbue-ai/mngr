@@ -23,7 +23,7 @@ import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -201,7 +201,7 @@ class ProgressReporterInterface(MutableModel, ABC):
         label: str,
         parent_id: ProgressStepId | None = None,
         total: int | None = None,
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Report a step around a block, completing it only when the block exits normally.
 
         A failure leaves the step started: the operation's error follows, and a

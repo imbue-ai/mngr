@@ -17,7 +17,7 @@ can be reached.
 
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
@@ -327,7 +327,7 @@ class StoppedHostProviderBackend(ProviderBackendInterface):
 
 
 @contextmanager
-def registered_stopped_host_backend() -> Iterator[None]:
+def registered_stopped_host_backend() -> Generator[None, None, None]:
     """Make the stopped-host backend available to provider configuration while active."""
     _backend_registry[STOPPED_HOST_BACKEND_NAME] = StoppedHostProviderBackend
     register_provider_config(str(STOPPED_HOST_BACKEND_NAME), StoppedHostProviderConfig)

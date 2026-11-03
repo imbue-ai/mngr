@@ -3,12 +3,12 @@ from __future__ import annotations
 import shlex
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 
@@ -569,7 +569,7 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Iterator[None]:
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
         """Hold the host's exclusive, cross-actor lock for the duration of the block.
 
         Holds a real flock(2) (directly on local hosts, over SSH on remote hosts)
@@ -817,7 +817,7 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @contextmanager
-    def outer_host(self) -> Iterator[OuterHostInterface | None]:
+    def outer_host(self) -> Generator[OuterHostInterface | None, None, None]:
         """Open the outer host (the underlying machine that hosts this container/sandbox).
 
         Yields an ``OuterHostInterface`` for running commands and moving files

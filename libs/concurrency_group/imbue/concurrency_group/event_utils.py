@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Event
 from threading import Lock
@@ -56,7 +56,7 @@ class ShutdownEvent(MutableModel):
         return self._set_event.wait(timeout)
 
     @contextmanager
-    def call_on_set(self, callback: Callable[[], None]) -> Iterator[None]:
+    def call_on_set(self, callback: Callable[[], None]) -> Generator[None, None, None]:
         """Run a non-blocking callback when this event is set (at once if it already is) while the block is active.
 
         The callback runs on whichever thread sets the event, and may still run

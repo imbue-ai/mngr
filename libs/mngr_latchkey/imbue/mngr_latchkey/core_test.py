@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -113,7 +113,7 @@ _ASSIGNED_DEVICE_PORT = 41988
 
 
 @contextmanager
-def _captured_log_records() -> Iterator[list[tuple[str, str]]]:
+def _captured_log_records() -> Generator[list[tuple[str, str]], None, None]:
     """Collect every loguru record emitted inside the block as ``(level name, message)``."""
     captured: list[tuple[str, str]] = []
     sink_id = logger.add(lambda m: captured.append((m.record["level"].name, m.record["message"])), level=0)
@@ -1518,7 +1518,7 @@ class _StubProvider(MutableModel):
             self._on_reset()
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         del host_id
         self._outer_host_open_count += 1
         yield cast(OuterHostInterface, _StubOuterHost(ssh_connection_info=self.outer_ssh_info))
@@ -1539,7 +1539,7 @@ class _StaleListingProvider(_StubProvider):
         self._is_listing_fresh = True
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         if not self._is_listing_fresh:
             raise HostNotFoundError(ProviderInstanceName("stale"), host_id)
         with super().outer_host_for(host_id) as outer:
@@ -1759,7 +1759,7 @@ def _wait_for_provisioning_passes(handler: _ProvisionRecordingHandler, expected_
 @contextmanager
 def _relocatable_handler(
     tmp_path: Path, temp_mngr_ctx: MngrContext, tunnel_manager: SSHTunnelManager
-) -> Iterator[tuple[_StubProviderHandler, _StubProvider, int]]:
+) -> Generator[tuple[_StubProviderHandler, _StubProvider, int], None, None]:
     """A running gateway plus a handler whose host starts at ``_VPS_OUTER_SSH_INFO``; yields the host-side port too.
 
     Workers are awaited by the test inside the block, so the gateway is stopped

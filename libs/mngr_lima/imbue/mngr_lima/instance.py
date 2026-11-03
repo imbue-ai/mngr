@@ -1,6 +1,7 @@
 import fcntl
 import json
 import shutil
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -8,7 +9,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 
@@ -505,7 +505,7 @@ sudo poweroff
             host.write_text_file(script_path, script_content, mode="755")
 
     @contextmanager
-    def _name_reservation_lock(self) -> Iterator[None]:
+    def _name_reservation_lock(self) -> Generator[None, None, None]:
         """Hold an exclusive flock while checking-and-reserving a host name.
 
         Serializes the conflict check + reservation-record write across

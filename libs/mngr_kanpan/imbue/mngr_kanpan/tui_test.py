@@ -19,9 +19,11 @@ from typing import cast
 import pytest
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from urwid.display.common import AttrSpec
 from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
+from urwid.widget.columns import Columns
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
 from urwid.widget.listbox import ListBox
@@ -211,10 +213,6 @@ from imbue.mngr_kanpan.tui import _update_snapshot_mute
 from imbue.mngr_kanpan.tui import _write_terminal_title
 from imbue.mngr_kanpan.tui import resolve_board_layout
 
-# =============================================================================
-# Helpers
-# =============================================================================
-
 
 class _CallTracker:
     """Lightweight call tracker, recording how often it was called and with what."""
@@ -310,11 +308,6 @@ def _make_state(
     )
 
 
-# =============================================================================
-# State attr / name markup
-# =============================================================================
-
-
 def test_get_state_attr_running() -> None:
     entry = make_board_entry(state=AgentLifecycleState.RUNNING)
     assert _get_state_attr(entry) == "state_running"
@@ -343,11 +336,6 @@ def test_get_name_cell_markup_with_mark() -> None:
     assert ("mark_d", "d") in markup
 
 
-# =============================================================================
-# Section headings
-# =============================================================================
-
-
 def test_format_section_heading_with_suffix() -> None:
     heading = _format_section_heading(BoardSection.PR_MERGED, 3)
     assert len(heading) == 2
@@ -359,11 +347,6 @@ def test_format_section_heading_muted_no_suffix() -> None:
     heading = _format_section_heading(BoardSection.MUTED, 1)
     assert heading[0] == ("section_muted", "Muted")
     assert "(1)" in heading[1]
-
-
-# =============================================================================
-# Board widgets
-# =============================================================================
 
 
 def test_build_board_widgets_none_snapshot() -> None:
@@ -418,11 +401,6 @@ def test_build_board_widgets_groups_by_section() -> None:
     snapshot = make_board_snapshot(entries=(e1, e2))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 2
-
-
-# =============================================================================
-# Column assembly
-# =============================================================================
 
 
 def test_assemble_column_defs_no_order_no_custom() -> None:
@@ -489,11 +467,6 @@ def test_assemble_column_defs_default_order_includes_default_columns() -> None:
     assert pr_idx < ci_idx
 
 
-# =============================================================================
-# Mark palette
-# =============================================================================
-
-
 def test_build_mark_palette_no_markable() -> None:
     commands: dict[str, KanpanCommand] = {"r": CustomCommand(name="refresh")}
     entries, names = _build_mark_palette(commands)
@@ -515,11 +488,6 @@ def test_custom_command_is_markable_agrees_with_mark_color() -> None:
     for markable in (False, True, "", "light red"):
         cmd = CustomCommand(name="tag", command="true", markable=markable)
         assert cmd.is_markable is (_mark_color(cmd) is not None)
-
-
-# =============================================================================
-# State management
-# =============================================================================
 
 
 def test_show_transient_message() -> None:
@@ -617,11 +585,6 @@ def test_render_footer_is_single_writer_no_flicker() -> None:
     second = state.footer_left_text.text
     assert first.startswith("  Running deploy on agent-a")
     assert second.startswith("  Running deploy on agent-a")
-
-
-# =============================================================================
-# Header
-# =============================================================================
 
 
 def _render_header_lines(header: Pile, cols: int) -> list[str]:
@@ -747,11 +710,6 @@ def test_clear_focus() -> None:
     assert state.focused_instance_key is None
 
 
-# =============================================================================
-# Batch items
-# =============================================================================
-
-
 def test_batch_item_label_single() -> None:
     item = _BatchWorkItem(
         instance_key=_random_instance_key(),
@@ -779,11 +737,6 @@ def test_batch_item_label_batch() -> None:
     assert "2 agent(s)" in _batch_item_label(item)
 
 
-# =============================================================================
-# Input handler
-# =============================================================================
-
-
 def test_input_handler_quit() -> None:
     state = _make_state()
     handler = _KanpanInputHandler(state=state)
@@ -801,11 +754,6 @@ def test_input_handler_unknown_key_consumed() -> None:
     state = _make_state()
     handler = _KanpanInputHandler(state=state)
     assert handler("z") is True
-
-
-# =============================================================================
-# Field-based rendering
-# =============================================================================
 
 
 def test_field_cell_text_present() -> None:
@@ -834,11 +782,6 @@ def test_field_cell_markup_no_color() -> None:
 def test_field_cell_markup_absent() -> None:
     entry = make_board_entry()
     assert _field_cell_markup(entry, "pr") == ""
-
-
-# =============================================================================
-# Data source column defs
-# =============================================================================
 
 
 class _MockDataSource:
@@ -902,11 +845,6 @@ def test_resolve_board_layout_respects_configured_order() -> None:
     assert section_order == (BoardSection.MUTED, BoardSection.PR_MERGED)
 
 
-# =============================================================================
-# Field color palette
-# =============================================================================
-
-
 def test_build_field_color_palette_none_snapshot() -> None:
     entries, names = _build_field_color_palette(None)
     assert entries == []
@@ -928,11 +866,6 @@ def test_build_field_color_palette_no_colors() -> None:
     assert entries == []
 
 
-# =============================================================================
-# Flatten markup
-# =============================================================================
-
-
 def test_flatten_markup_to_attr_muted_string() -> None:
     result = _flatten_markup_to_attr("hello", "muted")
     assert result == ("muted", "hello")
@@ -946,11 +879,6 @@ def test_flatten_markup_to_attr_muted_tuple() -> None:
 def test_flatten_markup_to_attr_muted_list() -> None:
     result = _flatten_markup_to_attr([("attr", "a"), "b"], "muted")
     assert result == ("muted", "ab")
-
-
-# =============================================================================
-# Staleness flatten + freshness predicate
-# =============================================================================
 
 
 def test_flatten_markup_to_attr_stale_string() -> None:
@@ -982,11 +910,6 @@ def test_is_field_stale_at_threshold_boundary_is_not_stale() -> None:
     now = datetime(2027, 1, 1, 0, 0, 3, tzinfo=timezone.utc)
     field = CommitsAheadField(count=3, has_work_dir=True, created=now - timedelta(seconds=1800))
     assert _is_field_stale(field, now, staleness_threshold_seconds=1800.0) is False
-
-
-# =============================================================================
-# _build_agent_row staleness rendering
-# =============================================================================
 
 
 def _make_ci_def() -> _ColumnDef:
@@ -1052,11 +975,6 @@ def test_build_agent_row_muted_section_overrides_stale() -> None:
     widths = _compute_board_column_widths((entry,), column_defs)
     row = _build_agent_row(entry, widths, column_defs, now=now, staleness_threshold_seconds=1800.0)
     assert _ci_widget_attr(row) == "muted"
-
-
-# =============================================================================
-# Carry forward fields
-# =============================================================================
 
 
 def test_carry_forward_fields_merges() -> None:
@@ -1131,11 +1049,6 @@ def test_carry_forward_fields_new_agent() -> None:
     assert result.entries[0].name == AgentName("new-agent")
 
 
-# =============================================================================
-# _FieldCellTextFn, _FieldCellMarkupFn
-# =============================================================================
-
-
 def test_field_cell_text_fn_call() -> None:
     entry = make_board_entry(cells={"pr": CellDisplay(text="#1")})
     fn = _FieldCellTextFn(field_key="pr")
@@ -1146,11 +1059,6 @@ def test_field_cell_markup_fn_call() -> None:
     entry = make_board_entry(cells={"pr": CellDisplay(text="#1")})
     fn = _FieldCellMarkupFn(field_key="pr")
     assert fn(entry) == "#1"
-
-
-# =============================================================================
-# CI field markup - color is always provided by CiField.display()
-# =============================================================================
 
 
 def test_field_cell_markup_ci_failure_uses_color_attr() -> None:
@@ -1195,11 +1103,6 @@ def test_field_cell_markup_ci_success_uses_color_attr() -> None:
     assert markup[1] == cell.text
 
 
-# =============================================================================
-# _compute_board_column_widths
-# =============================================================================
-
-
 def test_compute_board_column_widths_empty_entries() -> None:
     widths = _compute_board_column_widths((), _BUILTIN_COLUMN_DEFS)
     # name col header is "  NAME" (6), state col header is "STATE" (5)
@@ -1212,11 +1115,6 @@ def test_compute_board_column_widths_with_entries() -> None:
     widths = _compute_board_column_widths((entry,), _BUILTIN_COLUMN_DEFS)
     # "  a-long-agent-name-here" is longer than "  NAME"
     assert widths["name"] > len("  NAME")
-
-
-# =============================================================================
-# _build_board_widgets with marks and muted entries
-# =============================================================================
 
 
 def test_build_board_widgets_renders_a_mark_only_on_its_own_agent_instance() -> None:
@@ -1253,11 +1151,6 @@ def test_build_board_widgets_multiple_sections() -> None:
     assert len(idx_map) == 3
 
 
-# =============================================================================
-# _update_row_mark
-# =============================================================================
-
-
 def test_update_row_mark_no_walker() -> None:
     state = _make_state()
     # Should not raise even with no walker
@@ -1274,11 +1167,6 @@ def test_update_row_mark_no_entry_at_index() -> None:
     state.index_to_entry = idx_map
     # Index 0 is the header row, not an agent entry; should not raise
     _update_row_mark(state, 0, "d")
-
-
-# =============================================================================
-# _toggle_mark
-# =============================================================================
 
 
 def _make_state_with_walker(entries: tuple[AgentBoardEntry, ...]) -> _KanpanState:
@@ -1338,11 +1226,6 @@ def test_toggle_mark_no_walker() -> None:
     _toggle_mark(state, "d")
 
 
-# =============================================================================
-# _unmark_focused
-# =============================================================================
-
-
 def test_unmark_focused_removes_mark() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
@@ -1361,11 +1244,6 @@ def test_unmark_focused_no_mark_is_noop() -> None:
     _unmark_focused(state)
 
 
-# =============================================================================
-# _unmark_all
-# =============================================================================
-
-
 def test_unmark_all_clears_marks() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
@@ -1377,11 +1255,6 @@ def test_unmark_all_clears_marks() -> None:
 def test_unmark_all_empty_marks_noop() -> None:
     state = _make_state()
     _unmark_all(state)
-
-
-# =============================================================================
-# _update_mark_count_footer
-# =============================================================================
 
 
 def test_update_mark_count_footer_with_marks() -> None:
@@ -1403,11 +1276,6 @@ def test_update_mark_count_footer_no_marks_restores_footer() -> None:
     assert state.footer_left_text.text == "  Steady"
 
 
-# =============================================================================
-# _execute_marks
-# =============================================================================
-
-
 def test_execute_marks_no_marks_does_nothing() -> None:
     state = _make_state()
     state.marks = {}
@@ -1421,11 +1289,6 @@ def test_execute_marks_already_executing_does_nothing() -> None:
     _execute_marks(state)
 
 
-# =============================================================================
-# _prune_orphaned_marks (full coverage including orphaned branch)
-# =============================================================================
-
-
 def test_prune_orphaned_marks_with_orphans() -> None:
     commands = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state(commands=commands)
@@ -1435,11 +1298,6 @@ def test_prune_orphaned_marks_with_orphans() -> None:
     state.snapshot = make_board_snapshot(entries=())
     _prune_orphaned_marks(state)
     assert gone_key not in state.marks
-
-
-# =============================================================================
-# _dispatch_command
-# =============================================================================
 
 
 def test_dispatch_command_markable_key_toggles_mark() -> None:
@@ -1506,11 +1364,6 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
     assert marker.exists()
 
 
-# =============================================================================
-# _refresh_display
-# =============================================================================
-
-
 def test_refresh_display_updates_walker() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
@@ -1557,11 +1410,6 @@ def test_refresh_display_writes_the_header_status() -> None:
     state.header_status = compile_header_status('{state == "RUNNING"} running / {total}')
     _refresh_display(state)
     assert state.header_status_text.text.strip() == "1 running / 2"
-
-
-# =============================================================================
-# _load_user_commands and _build_command_map
-# =============================================================================
 
 
 def test_load_user_commands_from_custom_command_instance() -> None:
@@ -1633,11 +1481,6 @@ def test_build_command_map_excludes_disabled() -> None:
     assert "z" not in result
 
 
-# =============================================================================
-# _update_snapshot_mute: None snapshot branch
-# =============================================================================
-
-
 def test_update_snapshot_mute_none_snapshot() -> None:
     # When snapshot is None, function should return without error
     state = _make_state()
@@ -1645,20 +1488,10 @@ def test_update_snapshot_mute_none_snapshot() -> None:
     _update_snapshot_mute(state, _random_instance_key(), True)
 
 
-# =============================================================================
-# _assemble_column_defs: empty result fallback
-# =============================================================================
-
-
 def test_assemble_column_defs_empty_order_falls_back_to_builtins() -> None:
     result = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, [], ["nonexistent"])
     # All names unknown => result is empty => falls back to builtins
     assert len(result) == len(_BUILTIN_COLUMN_DEFS)
-
-
-# =============================================================================
-# _KanpanInputHandler: "U" key, command dispatch, up/down keys
-# =============================================================================
 
 
 def test_input_handler_U_key_clears_marks() -> None:
@@ -1716,11 +1549,6 @@ def test_input_handler_page_up_passes_through() -> None:
     assert handler("page up") is None
 
 
-# =============================================================================
-# _is_focus_on_first_selectable
-# =============================================================================
-
-
 def test_is_focus_on_first_selectable_no_walker() -> None:
     state = _make_state()
     assert _is_focus_on_first_selectable(state) is False
@@ -1743,11 +1571,6 @@ def test_is_focus_on_first_selectable_at_non_first() -> None:
     assert _is_focus_on_first_selectable(state) is False
 
 
-# =============================================================================
-# _get_focused_entry
-# =============================================================================
-
-
 def test_get_focused_entry_no_walker() -> None:
     state = _make_state()
     assert _get_focused_entry(state) is None
@@ -1768,11 +1591,6 @@ def test_get_focused_entry_no_focus() -> None:
     assert _get_focused_entry(state) is None
 
 
-# =============================================================================
-# _update_row_mark: muted entry path
-# =============================================================================
-
-
 def test_update_row_mark_muted_entry() -> None:
     entry = make_board_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
     snapshot = make_board_snapshot(entries=(entry,))
@@ -1782,11 +1600,6 @@ def test_update_row_mark_muted_entry() -> None:
     state.index_to_entry = idx_map
     agent_idx = next(k for k, v in idx_map.items() if v.name == AgentName("muted-agent"))
     _update_row_mark(state, agent_idx, "d")
-
-
-# =============================================================================
-# _toggle_mark: push with no work_dir
-# =============================================================================
 
 
 def test_toggle_mark_push_no_work_dir_shows_message() -> None:
@@ -1804,11 +1617,6 @@ def test_toggle_mark_push_no_work_dir_shows_message() -> None:
     _toggle_mark(state, _BUILTIN_COMMAND_KEY_PUSH)
     assert entry.instance_key not in state.marks
     assert "Cannot push" in state.footer_left_text.text
-
-
-# =============================================================================
-# _finish_batch_execution
-# =============================================================================
 
 
 def test_finish_batch_execution_all_ok() -> None:
@@ -1845,11 +1653,6 @@ def test_finish_batch_execution_empty_results() -> None:
     _finish_batch_execution(state, [])
     assert state.executing is False
     assert state.execute_errors == ()
-
-
-# =============================================================================
-# Batch outcomes and the poll that collects them
-# =============================================================================
 
 
 def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -1961,11 +1764,6 @@ def test_on_batch_poll_finishes_once_the_last_one_lands() -> None:
     results: list[_BatchItemResult] = []
     _on_batch_poll(state.loop, (state, [(_batch_item(), _make_done_future(_completed(0)))], results, 1))
     assert state.executing is False
-
-
-# =============================================================================
-# _submit_batch_item
-# =============================================================================
 
 
 def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
@@ -2100,11 +1898,6 @@ def test_execute_marks_skips_a_mark_whose_agent_is_no_longer_on_the_board() -> N
     assert executor.calls == [(_run_shell_command_sync, ("true", str(on_board.name), "", on_board.instance_key))]
 
 
-# =============================================================================
-# _run_shell_command (loop=None, no alarm)
-# =============================================================================
-
-
 def test_run_shell_command_submits_future() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
@@ -2114,11 +1907,6 @@ def test_run_shell_command_submits_future() -> None:
     _run_shell_command(state, cmd)
     assert state.executor is not None
     state.executor.shutdown(wait=True)
-
-
-# =============================================================================
-# _execute_batch: skipped item (future is None)
-# =============================================================================
 
 
 def test_execute_batch_reports_an_item_it_cannot_run_as_skipped() -> None:
@@ -2135,11 +1923,6 @@ def test_execute_batch_reports_an_item_it_cannot_run_as_skipped() -> None:
     _execute_batch(state, [item])
     assert state.executing is False
     assert any("skipped" in error for error in state.execute_errors)
-
-
-# =============================================================================
-# Tests for _build_board_widgets section_order parameter
-# =============================================================================
 
 
 def _extract_section_headings(walker: Any) -> list[str]:
@@ -2205,11 +1988,6 @@ def test_build_board_widgets_section_order_omits_unlisted() -> None:
     assert len(index_to_entry) == 1
 
 
-# =============================================================================
-# Tests for _resolve_section_order
-# =============================================================================
-
-
 def test_resolve_section_order_none_returns_default() -> None:
     assert _resolve_section_order(None) == BOARD_SECTION_ORDER
 
@@ -2218,11 +1996,6 @@ def test_resolve_section_order_custom_list() -> None:
     custom = [BoardSection.STILL_COOKING, BoardSection.MUTED]
     result = _resolve_section_order(custom)
     assert result == (BoardSection.STILL_COOKING, BoardSection.MUTED)
-
-
-# =============================================================================
-# Peek panel
-# =============================================================================
 
 
 def test_last_nonempty_line_returns_last_meaningful_line() -> None:
@@ -2783,11 +2556,6 @@ def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
     assert state.peek_agent_name == AgentName("agent-a")
 
 
-# =============================================================================
-# Prompted commands
-# ======================================================================
-
-
 def _make_prompt_state(
     cmd: CustomCommand,
     key: str = "t",
@@ -3111,11 +2879,6 @@ def test_load_user_commands_accepts_prompt_with_markable() -> None:
     assert loaded["t"].is_markable is True
 
 
-# =============================================================================
-# The prompt as a reusable utility (no custom command involved)
-# =============================================================================
-
-
 class _RecordingPromptHandler:
     """Prompt handler standing in for a future built-in feature's action."""
 
@@ -3176,11 +2939,6 @@ def test_open_prompt_refuses_to_stack_over_an_open_prompt() -> None:
     assert state.open_prompt.edit.caption == "1> "
     _close_prompt(state)
     assert state.loop.widget is state.frame
-
-
-# =============================================================================
-# Mouse gate: the board must not take clicks while a prompt is open
-# =============================================================================
 
 
 def _make_prompt_state_with_rows() -> _KanpanState:
@@ -3288,10 +3046,6 @@ def test_prompt_overlay_renders_at_narrow_and_wide_terminals() -> None:
             assert not any(line.strip().startswith("\u256d") and len(line.strip()) >= cols for line in rendered)
 
 
-# =============================================================================
-# _build_agent_row terminal hyperlinks
-# =============================================================================
-
 _OSC8_SEQUENCE_PATTERN = re.compile(rb"\x1b\]8;;[^\x1b]*\x1b\\")
 _HYPERLINK_CREATED = datetime(2027, 1, 1, 0, 0, 20, tzinfo=timezone.utc)
 
@@ -3322,6 +3076,11 @@ def _render_row(row: Any, width: int) -> tuple[bytes, bytes]:
         text for row_content in row.render((width,)).content() for _attr, _charset, text in row_content
     )
     return rendered, _OSC8_SEQUENCE_PATTERN.sub(b"", rendered)
+
+
+def _rendered_segments(row: Columns, width: int) -> list[tuple[AttrSpec | str | None, str | None, bytes]]:
+    """Every (attr, charset, text) segment a row renders at ``width``, in order."""
+    return [segment for row_content in row.render((width,)).content() for segment in row_content]
 
 
 def _osc8_link(url: str, text: str) -> bytes:
@@ -3399,7 +3158,7 @@ def test_build_agent_row_colors_each_run_by_its_own_state() -> None:
     widths = _compute_board_column_widths((entry,), column_defs)
 
     row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
-    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+    rendered_content = _rendered_segments(row, 60)
     # A linked segment carries its OSC 8 escapes; the visible text is what identifies it.
     visible_by_attr = [
         (_OSC8_SEQUENCE_PATTERN.sub(b"", text).decode(), attr) for attr, _charset, text in rendered_content
@@ -3441,7 +3200,7 @@ def test_build_agent_row_stale_multi_link_cell_greys_every_run() -> None:
         now=_HYPERLINK_CREATED + timedelta(seconds=3600),
         staleness_threshold_seconds=1800.0,
     )
-    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+    rendered_content = _rendered_segments(row, 60)
 
     linked_attrs = {attr for attr, _charset, text in rendered_content if b"#2482" in text or b"#2392" in text}
     assert linked_attrs == {"stale"}
@@ -3457,7 +3216,7 @@ def test_build_agent_row_muted_multi_link_cell_greys_every_run() -> None:
     widths = _compute_board_column_widths((entry,), column_defs)
 
     row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
-    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+    rendered_content = _rendered_segments(row, 60)
 
     linked_attrs = {attr for attr, _charset, text in rendered_content if b"#2482" in text or b"#2392" in text}
     assert linked_attrs == {"muted"}
@@ -3512,7 +3271,6 @@ def test_update_row_mark_with_a_multi_link_cell_ahead_of_the_name_column() -> No
 
 
 # Search
-# =============================================================================
 
 _PR_COLUMN_DEF = _ColumnDef(
     name="pr",
@@ -4283,10 +4041,6 @@ def test_a_key_typed_before_a_click_in_its_batch_still_reaches_the_query(board_k
     assert state.search_input is None
 
 
-# =============================================================================
-# Legend fitting
-# =============================================================================
-
 _WIDE_LEGEND: tuple[tuple[str, str], ...] = (
     ("/", "search"),
     ("r", "refresh"),
@@ -4456,11 +4210,6 @@ def test_input_filter_refits_the_legend_on_a_window_resize() -> None:
     assert "search" in _belt_text(state)
 
 
-# =============================================================================
-# Batch prompting: mark N agents, answer once, apply to all
-# =============================================================================
-
-
 def _writes_input_per_agent(directory: Path) -> str:
     """A command that records its MNGR_INPUT under a per-agent filename."""
     return f'printf "%s" "$MNGR_INPUT" > {directory}/"$MNGR_AGENT_NAME".txt'
@@ -4606,11 +4355,6 @@ def test_execute_marks_will_not_stack_a_second_prompt_over_a_collection_round() 
     _execute_marks(state)
     assert state.open_prompt is first_prompt
     assert state.executing is False
-
-
-# =============================================================================
-# Refresh: the view stays put, and the outcome arrives with the rows it describes
-# =============================================================================
 
 
 def _tall_board_state(count: int = 40) -> _KanpanState:
@@ -5196,11 +4940,6 @@ def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
     assert state.pending_completion_message is None
 
 
-# =============================================================================
-# Batch execution overlaps independent agents
-# =============================================================================
-
-
 class _RecordingExecutor(ThreadPoolExecutor):
     """Executor that banks what it was handed and returns a future that never resolves."""
 
@@ -5356,11 +5095,6 @@ def test_quitting_drops_batch_work_that_has_not_started() -> None:
     assert queued.cancelled()
     may_finish.set()
     running.result(timeout=5)
-
-
-# =============================================================================
-# The board holds its place even when the focused row is the one that went away
-# =============================================================================
 
 
 def test_refresh_holds_the_view_when_the_focused_row_is_deleted() -> None:

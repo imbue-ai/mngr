@@ -9,7 +9,7 @@ Covers the behaviors that matter for a clean serve/shutdown cycle:
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextlib import nullcontext
 from pathlib import Path
@@ -200,7 +200,7 @@ def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path)
 @contextmanager
 def _serve_in_background(
     tmp_path: Path, api_socket_path: Path | None = None
-) -> Iterator[tuple[int, FileAuthStore, DesktopClientState]]:
+) -> Generator[tuple[int, FileAuthStore, DesktopClientState], None, None]:
     """Run the real cheroot WSGI server on an ephemeral port (and on ``api_socket_path``) for the block."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     resolver = MngrCliBackendResolver()

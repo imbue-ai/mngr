@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -1316,7 +1316,7 @@ class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _serve_always_unauthorized_git_remote() -> Iterator[GitUrl]:
+def _serve_always_unauthorized_git_remote() -> Generator[GitUrl, None, None]:
     """Serve an ``_AlwaysUnauthorizedHandler`` remote on a daemon thread and yield its git URL."""
     server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2797,7 +2797,7 @@ def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_m
 
 
 @contextmanager
-def _bootstrap_tail(command: tuple[str, ...]) -> Iterator[_BootstrapProgressTail]:
+def _bootstrap_tail(command: tuple[str, ...]) -> Generator[_BootstrapProgressTail, None, None]:
     """An unstarted tail of ``command`` under the ready step, with a fresh tracker, inside its own concurrency group."""
     tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
     with ConcurrencyGroup(name=f"bootstrap-tail-{uuid4().hex}") as cg:

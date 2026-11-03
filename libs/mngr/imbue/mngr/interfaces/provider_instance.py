@@ -2,7 +2,7 @@ import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from concurrent.futures import Future
 from concurrent.futures import wait
 from contextlib import contextmanager
@@ -349,7 +349,7 @@ def _build_offline_host_and_agent_details(
 def connected_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
-) -> Iterator[HostInterface]:
+) -> Generator[HostInterface, None, None]:
     """Connect to a host and disconnect when done, releasing the connection."""
     host = provider.get_host(host_id)
     try:
@@ -1602,7 +1602,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         return None
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         """Open the outer host for the inner host with the given id.
 
         Yields an ``OuterHostInterface`` for the underlying machine that hosts

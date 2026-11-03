@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -64,7 +65,7 @@ def _iter_cleanup_failures(group: BaseExceptionGroup[CleanupFailedError]) -> Ite
 
 
 @contextmanager
-def collecting_cleanup_failures() -> Iterator[list[CleanupFailure]]:
+def collecting_cleanup_failures() -> Generator[list[CleanupFailure], None, None]:
     """Aggregate the real failures of a best-effort cleanup operation, raising at the end.
 
     Yields a list that the operation appends :class:`CleanupFailure` records to (directly, or via

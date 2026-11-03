@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from contextlib import contextmanager
@@ -237,7 +238,7 @@ def _is_gcs_not_found(error: MngrError) -> bool:
 
 
 @contextmanager
-def _translate_gcs_errors(bucket_name: str) -> Iterator[None]:
+def _translate_gcs_errors(bucket_name: str) -> Generator[None, None, None]:
     """Translate ``google.api_core`` errors into ``GcsStateBucketError`` within the block."""
     try:
         yield

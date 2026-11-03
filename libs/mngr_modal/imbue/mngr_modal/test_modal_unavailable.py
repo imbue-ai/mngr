@@ -6,7 +6,7 @@ still gets answers about the providers it *can* reach, and an agent lookup that
 comes up empty blames Modal rather than the agent.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -50,7 +50,7 @@ _UNREACHABLE_MODAL_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstance
 
 
 @contextmanager
-def _registered_unreachable_modal_backend(modal_interface: ModalInterface) -> Iterator[None]:
+def _registered_unreachable_modal_backend(modal_interface: ModalInterface) -> Generator[None, None, None]:
     """Register the real Modal backend body, wired to a Modal that cannot be reached.
 
     Only the Modal SDK is stood in for. The construction body -- and therefore

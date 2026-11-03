@@ -5,7 +5,7 @@ import sys
 import time
 from abc import abstractmethod
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -669,7 +669,7 @@ class VpsProvider(BaseProviderInstance):
     # Outer host helper
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         """Open an outer host targeting root@vps_ip:22 via ``host_id``'s own VPS-root client key.
 
         The key is resolved, never created: a host with no key on this machine
@@ -1929,7 +1929,7 @@ class VpsProvider(BaseProviderInstance):
         return f"outer:{self.name}:{host_record.vps_ip}"
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         """Open the outer host (the VPS itself, root@vps_ip:22).
 
         Uses the host's own per-host VPS-root client key (the one the first-boot

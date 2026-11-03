@@ -2,7 +2,7 @@ import os
 import shlex
 import sys
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from contextlib import nullcontext
@@ -1191,7 +1191,7 @@ def _on_editor_exit() -> None:
 def _editor_cleanup_scope(
     editor_session: EditorSession | None,
     recovery_dir: Path | None = None,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Ensure editor session cleanup and logging suppressor restoration on exit.
 
     On failure, saves any editor content to a recovery file before cleanup so
@@ -1940,9 +1940,6 @@ def _find_existing_host(
             )
 
 
-# === Parsing Functions ===
-
-
 @pure
 def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, str | None, bool]:
     """Parse a --branch flag value in [BASE_BRANCH][:NEW_BRANCH] format.
@@ -1965,9 +1962,6 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 
     resolved_new = new.replace("*", str(agent_name))
     return (base or None, resolved_new, bool(base))
-
-
-# === Helper Functions (stubs) ===
 
 
 def _apply_host_labels(host: OnlineHostInterface, label_strings: tuple[str, ...]) -> None:

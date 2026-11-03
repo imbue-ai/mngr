@@ -54,7 +54,6 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 class _RecordingMessageSender(MngrMessageSender):
     """Test double for ``MngrMessageSender`` that records calls instead of running mngr."""
 
-    concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
     def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
@@ -112,7 +111,9 @@ class _Harness:
         latchkey: _StubLatchkey | None = None,
         carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
     ) -> None:
-        self.sender = _RecordingMessageSender(sent_messages=[])
+        self.sender = _RecordingMessageSender(
+            concurrency_group=ConcurrencyGroup(name="recording-message-sender-unused"), sent_messages=[]
+        )
         self.gateway: FakeLatchkeyGatewayClient = build_fake_gateway_client()
         self.latchkey = latchkey if latchkey is not None else _StubLatchkey(latchkey_directory=tmp_path / "latchkey")
         self.latchkey.latchkey_directory.mkdir(parents=True, exist_ok=True)

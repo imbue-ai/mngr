@@ -8,6 +8,7 @@ import math
 import os
 import shlex
 import tempfile
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -16,7 +17,6 @@ from typing import Any
 from typing import Callable
 from typing import ClassVar
 from typing import Final
-from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from typing import assert_never
@@ -727,7 +727,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         return result
 
     @contextmanager
-    def _notify_on_connection_error(self) -> Iterator[None]:
+    def _notify_on_connection_error(self) -> Generator[None, None, None]:
         """Context manager that calls on_connection_error when HostConnectionError is raised.
 
         Wraps operations that may raise HostConnectionError. When one is raised, this
@@ -957,7 +957,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # Outer Host Access
 
     @contextmanager
-    def outer_host(self) -> Iterator["OuterHostInterface | None"]:
+    def outer_host(self) -> Generator["OuterHostInterface | None", None, None]:
         """Open the outer host (the underlying machine that hosts this container/sandbox).
 
         Delegates to ``self.provider_instance.outer_host_for(self.id)``. The
@@ -1009,7 +1009,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # Cooperative Locking
 
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    def lock_cooperatively(
+        self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
+    ) -> Generator[None, None, None]:
         """Hold the host's exclusive, cross-actor lock for the duration of the block.
 
         Holds a real ``flock(2)`` on the ``host_lock`` file -- directly on local
@@ -1038,7 +1040,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 yield
 
     @contextmanager
-    def _hold_local_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
+    def _hold_local_host_lock(
+        self, lock_file_path: Path, timeout_seconds: float | None
+    ) -> Generator[None, None, None]:
         """Hold a real flock(2) on the local filesystem for the duration of the block."""
         lock_file_path.parent.mkdir(parents=True, exist_ok=True)
         lock_file = open(str(lock_file_path), "w")
@@ -1074,7 +1078,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("Released host lock")
 
     @contextmanager
-    def _hold_remote_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
+    def _hold_remote_host_lock(
+        self, lock_file_path: Path, timeout_seconds: float | None
+    ) -> Generator[None, None, None]:
         """Hold a real flock(2) on the host over SSH for the duration of the block.
 
         A long-lived exec channel opens the lock fd, waits for the lock, and then

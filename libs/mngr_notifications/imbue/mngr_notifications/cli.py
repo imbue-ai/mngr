@@ -1,6 +1,6 @@
 from collections.abc import Callable
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Iterator
 
 import click
 from loguru import logger
@@ -56,7 +56,7 @@ def _is_observe_running(mngr_ctx: MngrContext) -> bool:
 
 
 @contextmanager
-def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[RunningProcess | None]:
+def _ensure_observe(mngr_ctx: MngrContext) -> Generator[RunningProcess | None, None, None]:
     """Start mngr observe in the background if not already running.
 
     Yields the background process handle (or None if observe was already running).

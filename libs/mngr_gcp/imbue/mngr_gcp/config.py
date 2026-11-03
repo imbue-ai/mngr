@@ -142,7 +142,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             "GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project."
         ),
     )
-    default_region: str | None = Field(
+    default_region: str | None = Field(  # ty: ignore[invalid-attribute-override]
         default=None,
         description=(
             "GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, "

@@ -11,7 +11,7 @@ single thread started on a ``ConcurrencyGroup``.
 """
 
 import functools
-from collections.abc import Iterator
+from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import Any
@@ -128,7 +128,7 @@ def mngr_executor(
     parent_cg: ConcurrencyGroup,
     name: str,
     max_workers: int,
-) -> Iterator[_MngrExecutor]:
+) -> Generator[_MngrExecutor, None, None]:
     """Context manager yielding an executor that cleans up gevent Hubs.
 
     Use this instead of ConcurrencyGroupExecutor in mngr code that may run

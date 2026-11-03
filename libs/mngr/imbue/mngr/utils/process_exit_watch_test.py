@@ -1,6 +1,6 @@
 import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -10,7 +10,7 @@ from imbue.mngr.utils.process_exit_watch import ProcessExitWatch
 
 
 @contextmanager
-def _process_exit_watch() -> Iterator[ProcessExitWatch]:
+def _process_exit_watch() -> Generator[ProcessExitWatch, None, None]:
     with ConcurrencyGroup(name=f"process-exit-watch-test-{uuid4().hex}") as concurrency_group:
         watch = ProcessExitWatch(concurrency_group=concurrency_group, thread_name=f"exit-watch-{uuid4().hex}")
         try:
@@ -25,7 +25,7 @@ def _end(process: subprocess.Popen[bytes]) -> None:
 
 
 @contextmanager
-def _sleepers(count: int) -> Iterator[list[subprocess.Popen[bytes]]]:
+def _sleepers(count: int) -> Generator[list[subprocess.Popen[bytes]], None, None]:
     processes = [subprocess.Popen(["sleep", "48213"]) for _ in range(count)]
     try:
         yield processes

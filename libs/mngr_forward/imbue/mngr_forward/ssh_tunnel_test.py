@@ -21,7 +21,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -33,12 +33,12 @@ from paramiko.common import AUTH_FAILED
 from paramiko.common import AUTH_SUCCESSFUL
 from paramiko.common import OPEN_FAILED_CONNECT_FAILED
 from pydantic import PrivateAttr
-from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.suspension import ClockReading
 from imbue.imbue_common.suspension import read_clocks
+from imbue.imbue_common.testing import assert_model_is_frozen
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
@@ -399,9 +399,7 @@ def test_remote_ssh_info_round_trip() -> None:
 
 
 def test_remote_ssh_info_is_frozen() -> None:
-    info = RemoteSSHInfo(user="root", host="1.2.3.4", port=22, key_path=Path("/tmp/k"))
-    with pytest.raises((ValidationError, TypeError)):
-        info.user = "other"
+    assert_model_is_frozen(RemoteSSHInfo)
 
 
 def test_reverse_tunnel_info_defaults_and_optional_agent_id() -> None:
@@ -426,7 +424,7 @@ def test_reverse_tunnel_spec_remote_zero_means_dynamic() -> None:
 
 def test_reverse_tunnel_spec_local_must_be_positive() -> None:
     with pytest.raises(ValueError):
-        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]
+        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)
 
 
 def test_ssh_tunnel_manager_cleanup_is_idempotent() -> None:
@@ -1246,7 +1244,7 @@ class _OpenChannelRecorder:
 
 
 @contextmanager
-def _accepted_connection() -> Iterator[tuple[socket.socket, socket.socket]]:
+def _accepted_connection() -> Generator[tuple[socket.socket, socket.socket], None, None]:
     """A connected AF_UNIX pair, standing in for an accepted tunnel connection and its peer.
 
     Yields ``(client_sock, peer)``: ``client_sock`` is what an accept loop would
@@ -1263,7 +1261,7 @@ def _accepted_connection() -> Iterator[tuple[socket.socket, socket.socket]]:
 
 
 @contextmanager
-def _short_path_tmpdir() -> Iterator[Path]:
+def _short_path_tmpdir() -> Generator[Path, None, None]:
     """A temp dir for test sockets, built by the same rule the manager uses for its own.
 
     pytest's ``tmp_path`` will not do: on macOS it is under /var/folders/... and
@@ -1274,7 +1272,9 @@ def _short_path_tmpdir() -> Iterator[Path]:
 
 
 @contextmanager
-def _running_accept_loop(transport: _OpenChannelRecorder) -> Iterator[tuple[Path, threading.Event, threading.Thread]]:
+def _running_accept_loop(
+    transport: _OpenChannelRecorder,
+) -> Generator[tuple[Path, threading.Event, threading.Thread], None, None]:
     """Run a tunnel accept loop on a listening socket, and tear it down afterwards."""
     shutdown_event = threading.Event()
     stop_event = threading.Event()
@@ -1870,7 +1870,7 @@ class _KeyRejectingServer(paramiko.ServerInterface):
 @contextmanager
 def _loopback_sshd(
     tmp_path: Path, server: paramiko.ServerInterface
-) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
+) -> Generator[tuple[RemoteSSHInfo, list[paramiko.Transport]], None, None]:
     """Run an sshd on loopback that authenticates and serves channels as ``server`` decides.
 
     Yields the ``RemoteSSHInfo`` that addresses it -- real key material, and a
@@ -2045,7 +2045,9 @@ def test_authentication_failure_log_survives_a_key_file_it_cannot_parse(tmp_path
 
 
 @contextmanager
-def _loopback_server(serve_connection: Callable[[socket.socket], None], thread_name: str) -> Iterator[int]:
+def _loopback_server(
+    serve_connection: Callable[[socket.socket], None], thread_name: str
+) -> Generator[int, None, None]:
     """Accept connections on a loopback port, handing each to ``serve_connection`` on one background thread.
 
     Yields the port. The listener and its thread are torn down on exit.
@@ -2077,7 +2079,7 @@ def _loopback_server(serve_connection: Callable[[socket.socket], None], thread_n
 
 
 @contextmanager
-def _refusing_sshd(tmp_path: Path) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
+def _refusing_sshd(tmp_path: Path) -> Generator[tuple[RemoteSSHInfo, list[paramiko.Transport]], None, None]:
     """Run an sshd on loopback that refuses every ``direct-tcpip`` open.
 
     Yields the ``RemoteSSHInfo`` that addresses it -- real key material, and a
@@ -2115,7 +2117,7 @@ _HANGUP_DRAIN_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 @contextmanager
-def _sshd_that_hangs_up_after_the_banner(tmp_path: Path) -> Iterator[RemoteSSHInfo]:
+def _sshd_that_hangs_up_after_the_banner(tmp_path: Path) -> Generator[RemoteSSHInfo, None, None]:
     """Run a loopback "sshd" that announces itself and then closes every connection.
 
     Yields the ``RemoteSSHInfo`` that addresses it, with a key file and a

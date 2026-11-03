@@ -22,6 +22,7 @@ import re
 import shlex
 import stat
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -723,12 +724,14 @@ class OuterHost(OuterHostInterface):
         return name
 
     @contextmanager
-    def _notify_on_connection_error(self) -> Iterator[None]:
+    def _notify_on_connection_error(self) -> Generator[None, None, None]:
         """Default: no provider to notify. Overridden by Host subclass."""
         yield
 
     @contextmanager
-    def _translate_ssh_errors(self, *, failed: str, closed: str, timed_out: str | None = None) -> Iterator[None]:
+    def _translate_ssh_errors(
+        self, *, failed: str, closed: str, timed_out: str | None = None
+    ) -> Generator[None, None, None]:
         """Map post-retry pyinfra/paramiko SSH failures to a structured HostConnectionError.
 
         Centralizes the except-chain that was otherwise duplicated across every
@@ -832,7 +835,7 @@ class OuterHost(OuterHostInterface):
         self.connector.host.disconnect()
 
     @contextmanager
-    def _disconnect_on_transient_ssh_error(self, operation: str) -> Iterator[None]:
+    def _disconnect_on_transient_ssh_error(self, operation: str) -> Generator[None, None, None]:
         """Decide, when one attempt of a retried SSH ``operation`` fails, whether its retry needs a fresh connection.
 
         A refused channel open or a channel the server closed leaves the transport
@@ -1156,7 +1159,7 @@ class OuterHost(OuterHostInterface):
                 raise
 
     @contextmanager
-    def _open_sftp_channel(self, timeout_seconds: float | None) -> Iterator[SFTPClient]:
+    def _open_sftp_channel(self, timeout_seconds: float | None) -> Generator[SFTPClient, None, None]:
         """Open a dedicated SFTP channel on the shared transport, closing it on exit.
 
         When ``timeout_seconds`` is set, it replaces the channel's default silence

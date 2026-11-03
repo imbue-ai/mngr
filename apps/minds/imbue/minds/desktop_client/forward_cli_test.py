@@ -13,7 +13,7 @@ import json
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -1552,7 +1552,7 @@ def test_unintentional_subprocess_exit_reports_to_callback() -> None:
 
 
 @contextmanager
-def _captured_error_records() -> Iterator[list[Any]]:
+def _captured_error_records() -> Generator[list[Any], None, None]:
     """Collect the loguru ERROR records logged inside the block."""
     records: list[Any] = []
     with capture_loguru(level="ERROR"):

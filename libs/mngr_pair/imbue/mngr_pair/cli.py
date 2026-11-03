@@ -1,10 +1,10 @@
 import signal
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 from typing import Final
-from typing import Iterator
 from typing import assert_never
 
 import click
@@ -223,7 +223,7 @@ class SyncStopSignal(MutableModel):
 
 
 @contextmanager
-def _sigterm_requests_stop(stop_signal: SyncStopSignal) -> Iterator[None]:
+def _sigterm_requests_stop(stop_signal: SyncStopSignal) -> Generator[None, None, None]:
     """Make SIGTERM ask the sync to stop, the way Ctrl+C does.
 
     Without this, SIGTERM kills the command outright: the teardown never runs

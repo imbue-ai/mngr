@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -10,7 +11,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from urllib.parse import urlparse
@@ -2814,7 +2814,7 @@ kill -TERM 1
         return f"outer:{self.name}:{machine}"
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         """Open the outer host (the docker daemon's host machine).
 
         - Local socket / unix:// → outer = the local machine.

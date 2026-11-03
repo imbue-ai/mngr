@@ -27,7 +27,7 @@ its caller can leave the local edit as the whole change.
 """
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Final
 
@@ -168,7 +168,7 @@ class MachineAccess(MutableModel):
             raise MachineUnreachableError(f"Could not open the machine store of host {host_id}: {e}") from e
 
     @contextmanager
-    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Iterator[MachineCredentials]:
+    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
         """Open ``host_id``'s machine for the duration of one exchange.
 
         Raises:
@@ -195,7 +195,7 @@ class MachineAccess(MutableModel):
     @contextmanager
     def _opened_outer_host(
         self, provider: ProviderInstanceInterface, provider_name: str, host_id: HostId
-    ) -> Iterator[OuterHostInterface | None]:
+    ) -> Generator[OuterHostInterface | None, None, None]:
         """Open a host's outer machine, looking again on fresh data if the provider has not heard of it.
 
         A provider instance is kept across calls, and some providers cache their

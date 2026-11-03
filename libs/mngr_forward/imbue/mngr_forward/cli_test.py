@@ -16,7 +16,7 @@ import signal
 import socket
 import ssl
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -529,7 +529,7 @@ def _run_tls_server_until_stopped(config: Config, stop_serving: threading.Event)
 
 
 @contextmanager
-def _bound_tls_test_listener() -> Iterator[tuple[int, Config]]:
+def _bound_tls_test_listener() -> Generator[tuple[int, Config], None, None]:
     """Bind a loopback listen socket and build the forward's TLS config for it, yielding the port and the config.
 
     The config is yielded before anything serves on it, so a test can still
@@ -544,7 +544,7 @@ def _bound_tls_test_listener() -> Iterator[tuple[int, Config]]:
 
 
 @contextmanager
-def _serving_in_background(config: Config, thread_name: str) -> Iterator[None]:
+def _serving_in_background(config: Config, thread_name: str) -> Generator[None, None, None]:
     """Run the minimal app on ``config`` through the production serve loop on a daemon thread for the block's duration."""
     stop_serving = threading.Event()
     server_thread = threading.Thread(

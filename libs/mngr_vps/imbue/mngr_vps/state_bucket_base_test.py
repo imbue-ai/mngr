@@ -6,6 +6,7 @@ clouds (``S3Volume`` / ``BlobVolume``) are covered separately by their own
 provider tests; this pins down the shared logic once.
 """
 
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from contextlib import contextmanager
@@ -28,7 +29,7 @@ class _MissingObjectError(_FakeObjectStoreError):
 
 
 @contextmanager
-def _passthrough_translate() -> Iterator[None]:
+def _passthrough_translate() -> Generator[None, None, None]:
     yield
 
 

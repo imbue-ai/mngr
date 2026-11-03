@@ -44,7 +44,6 @@ PERM_WORKSPACES_READ: Final = "minds-workspaces-read"
 class _RecordingMessageSender(MngrMessageSender):
     """Test double for ``MngrMessageSender`` that records calls instead of running mngr."""
 
-    concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
     def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
@@ -77,7 +76,9 @@ def _make_handler(
     gateway_handler: _HttpxHandler,
     push_permissions_to_machine: Callable[[str], None] = leave_permissions_on_this_computer,
 ) -> tuple[WorkspacePermissionGrantHandler, _RecordingMessageSender]:
-    sender = _RecordingMessageSender(sent_messages=[])
+    sender = _RecordingMessageSender(
+        concurrency_group=ConcurrencyGroup(name="recording-message-sender-unused"), sent_messages=[]
+    )
     return (
         WorkspacePermissionGrantHandler(
             data_dir=tmp_path,

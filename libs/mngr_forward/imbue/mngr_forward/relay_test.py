@@ -12,7 +12,7 @@ import contextlib
 import os
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Final
 
 import paramiko
@@ -43,7 +43,7 @@ class _AcceptingSSHServer(paramiko.ServerInterface):
 
 
 @contextlib.contextmanager
-def _real_ssh_channel_pair() -> Iterator[tuple[paramiko.Channel, paramiko.Channel]]:
+def _real_ssh_channel_pair() -> Generator[tuple[paramiko.Channel, paramiko.Channel], None, None]:
     """Yield ``(client_channel, server_channel)`` from a real in-process SSH session.
 
     The client channel is the one to hand to ``relay_data``; the server channel
@@ -73,7 +73,7 @@ def _real_ssh_channel_pair() -> Iterator[tuple[paramiko.Channel, paramiko.Channe
 
 
 @contextlib.contextmanager
-def _descriptors_below_occupied(min_fd: int) -> Iterator[None]:
+def _descriptors_below_occupied(min_fd: int) -> Generator[None, None, None]:
     """Hold every free descriptor number below ``min_fd``, so descriptors opened inside land at or above it."""
     placeholder_fds: list[int] = []
     probe_fd = os.open(os.devnull, os.O_RDONLY)

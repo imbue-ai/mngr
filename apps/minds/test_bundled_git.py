@@ -47,7 +47,7 @@ import subprocess
 import sys
 import tarfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -245,7 +245,7 @@ def _serve_directory_over_https(
     serve_root: Path,
     certificate_path: Path,
     private_key_path: Path,
-) -> Iterator[str]:
+) -> Generator[str, None, None]:
     """Serve ``serve_root`` over HTTPS on 127.0.0.1 with an OS-assigned port; yields the base URL."""
     _StaticFileRequestHandler.directory_root = str(serve_root)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StaticFileRequestHandler)

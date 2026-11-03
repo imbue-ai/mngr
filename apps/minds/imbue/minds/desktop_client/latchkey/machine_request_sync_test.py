@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -175,7 +175,7 @@ class _RecordedAccess(MachineAccess):
     opened: list[tuple[str, HostId]] = Field(default_factory=list, description="Every open, in order.")
 
     @contextmanager
-    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Iterator[MachineCredentials]:
+    def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
         self.opened.append((workspace_agent_id, host_id))
         yield self.machine
 

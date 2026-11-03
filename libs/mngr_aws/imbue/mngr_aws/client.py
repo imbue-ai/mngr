@@ -1,5 +1,5 @@
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -232,7 +232,7 @@ class AwsVpsClient(VpsClientInterface):
         return architecture
 
     @contextmanager
-    def _translate_aws_errors(self) -> Iterator[None]:
+    def _translate_aws_errors(self) -> Generator[None, None, None]:
         """Translate ``botocore.exceptions.ClientError`` into ``VpsApiError`` while inside the block."""
         try:
             yield

@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -1452,7 +1452,7 @@ def _spawn_sleeper() -> subprocess.Popen[bytes]:
 
 
 @contextmanager
-def _running_process_exit_watch(observer: AgentObserver) -> Iterator[None]:
+def _running_process_exit_watch(observer: AgentObserver) -> Generator[None, None, None]:
     """Run the observer's concurrency group, closing its process exit watch before the group exits."""
     with observer._concurrency_group:
         try:
@@ -1634,7 +1634,7 @@ class _ConsumerFoldError(MngrError):
 
 
 @contextmanager
-def _observer_holding_the_lock(events_base_dir: Path) -> Iterator[None]:
+def _observer_holding_the_lock(events_base_dir: Path) -> Generator[None, None, None]:
     """Hold the observe lock for the body, standing in for a live ``mngr observe``.
 
     A follower refuses to run without this, so most follower tests need it as a

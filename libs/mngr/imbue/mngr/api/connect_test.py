@@ -3,7 +3,7 @@
 import os
 import shlex
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -555,7 +555,7 @@ def _make_restored_host(
 
 
 @contextmanager
-def _open_terminal() -> Iterator[tuple[int, int]]:
+def _open_terminal() -> Generator[tuple[int, int], None, None]:
     """A pseudo-terminal as ``(master_fd, terminal_fd)``, both closed on exit."""
     master_fd, terminal_fd = os.openpty()
     try:

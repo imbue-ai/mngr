@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
@@ -308,7 +308,7 @@ class _UnauthorizedAtConstructionBackend(ProviderBackendInterface):
 
 
 @contextmanager
-def _registered_backend(backend: type[ProviderBackendInterface]) -> Iterator[ProviderInstanceName]:
+def _registered_backend(backend: type[ProviderBackendInterface]) -> Generator[ProviderInstanceName, None, None]:
     """Register a test backend and yield the provider-instance name that resolves to it.
 
     The name matches the backend name so it resolves as an implicit-default instance,

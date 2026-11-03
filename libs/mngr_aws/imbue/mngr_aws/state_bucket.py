@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -278,7 +279,7 @@ def _is_s3_not_found(error: MngrError) -> bool:
 
 
 @contextmanager
-def _translate_s3_errors(bucket_name: str) -> Iterator[None]:
+def _translate_s3_errors(bucket_name: str) -> Generator[None, None, None]:
     """Translate ``botocore.ClientError`` into ``S3StateBucketError`` within the block."""
     try:
         yield

@@ -238,7 +238,7 @@ def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
 
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
-    """Ensure the whole workspace has zero type errors (ty).
+    """Ensure ty reports nothing on the whole workspace, warnings included.
 
     ty resolves the uv workspace root (root pyproject.toml declares
     [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so

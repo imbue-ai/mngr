@@ -94,21 +94,21 @@ class DiscoveryEventType(UpperCaseStrEnum):
 class AgentDiscoveryEvent(EventEnvelope):
     """A discovery event recording a single agent state change."""
 
-    type: Literal[DiscoveryEventType.AGENT_DISCOVERED] = DiscoveryEventType.AGENT_DISCOVERED
+    type: Literal[DiscoveryEventType.AGENT_DISCOVERED] = DiscoveryEventType.AGENT_DISCOVERED  # ty: ignore[invalid-attribute-override]
     agent: DiscoveredAgent = Field(description="The discovered agent data")
 
 
 class HostDiscoveryEvent(EventEnvelope):
     """A discovery event recording a single host state change."""
 
-    type: Literal[DiscoveryEventType.HOST_DISCOVERED] = DiscoveryEventType.HOST_DISCOVERED
+    type: Literal[DiscoveryEventType.HOST_DISCOVERED] = DiscoveryEventType.HOST_DISCOVERED  # ty: ignore[invalid-attribute-override]
     host: DiscoveredHost = Field(description="The discovered host data")
 
 
 class AgentDestroyedEvent(EventEnvelope):
     """A discovery event recording that an agent was destroyed."""
 
-    type: Literal[DiscoveryEventType.AGENT_DESTROYED] = DiscoveryEventType.AGENT_DESTROYED
+    type: Literal[DiscoveryEventType.AGENT_DESTROYED] = DiscoveryEventType.AGENT_DESTROYED  # ty: ignore[invalid-attribute-override]
     agent_id: AgentId = Field(description="ID of the destroyed agent")
     host_id: HostId = Field(description="ID of the host the agent was on")
 
@@ -116,7 +116,7 @@ class AgentDestroyedEvent(EventEnvelope):
 class HostDestroyedEvent(EventEnvelope):
     """A discovery event recording that a host was destroyed."""
 
-    type: Literal[DiscoveryEventType.HOST_DESTROYED] = DiscoveryEventType.HOST_DESTROYED
+    type: Literal[DiscoveryEventType.HOST_DESTROYED] = DiscoveryEventType.HOST_DESTROYED  # ty: ignore[invalid-attribute-override]
     host_id: HostId = Field(description="ID of the destroyed host")
     agent_ids: tuple[AgentId, ...] = Field(description="IDs of agents that were on the host")
 
@@ -210,7 +210,7 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
     :func:`_replay_discovery_events_into_maps` tolerates it as a back-compat reset.
     """
 
-    type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL
+    type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL  # ty: ignore[invalid-attribute-override]
     agents: tuple[DiscoveredAgent, ...] = Field(description="All discovered agents")
     hosts: tuple[DiscoveredHost, ...] = Field(description="All discovered hosts")
     providers: tuple[DiscoveredProvider, ...] = Field(
@@ -252,7 +252,7 @@ class ProviderDiscoverySnapshotEvent(EventEnvelope):
     this in-flight snapshot. See :class:`DiscoveryStateAggregator`.
     """
 
-    type: Literal[DiscoveryEventType.DISCOVERY_PROVIDER] = DiscoveryEventType.DISCOVERY_PROVIDER
+    type: Literal[DiscoveryEventType.DISCOVERY_PROVIDER] = DiscoveryEventType.DISCOVERY_PROVIDER  # ty: ignore[invalid-attribute-override]
     provider_name: ProviderInstanceName = Field(description="The provider this snapshot is authoritative for")
     agents: tuple[DiscoveredAgent, ...] = Field(description="All agents discovered on this provider this poll")
     hosts: tuple[DiscoveredHost, ...] = Field(description="All hosts discovered on this provider this poll")
@@ -279,7 +279,7 @@ class ProviderDiscoverySnapshotEvent(EventEnvelope):
 class HostSSHInfoEvent(EventEnvelope):
     """Records SSH connection info for a host."""
 
-    type: Literal[DiscoveryEventType.HOST_SSH_INFO] = DiscoveryEventType.HOST_SSH_INFO
+    type: Literal[DiscoveryEventType.HOST_SSH_INFO] = DiscoveryEventType.HOST_SSH_INFO  # ty: ignore[invalid-attribute-override]
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
     published_endpoints: list[PublishedEndpoint] = Field(
@@ -291,7 +291,7 @@ class HostSSHInfoEvent(EventEnvelope):
 class DiscoveryErrorEvent(EventEnvelope):
     """Records an error encountered during discovery."""
 
-    type: Literal[DiscoveryEventType.DISCOVERY_ERROR] = DiscoveryEventType.DISCOVERY_ERROR
+    type: Literal[DiscoveryEventType.DISCOVERY_ERROR] = DiscoveryEventType.DISCOVERY_ERROR  # ty: ignore[invalid-attribute-override]
     error_type: str = Field(description="The type name of the exception (e.g. 'RuntimeError')")
     error_message: str = Field(description="The error message")
     source_name: str = Field(description="Provider, host, or agent that caused the error")

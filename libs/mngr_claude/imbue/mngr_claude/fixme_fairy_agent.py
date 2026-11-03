@@ -84,7 +84,7 @@ class FixmeFairyAgentConfig(SkillProvisionedAgentConfig):
 class FixmeFairyAgent(SkillProvisionedAgent):
     """Agent implementation for fixme-fairy with skill provisioning."""
 
-    agent_config: FixmeFairyAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
+    agent_config: FixmeFairyAgentConfig = Field(frozen=True, repr=False, description="Agent type config")  # ty: ignore[invalid-mutable-override]
 
     _skill_name = _SKILL_NAME
     _skill_content = _FIXME_FAIRY_SKILL_CONTENT

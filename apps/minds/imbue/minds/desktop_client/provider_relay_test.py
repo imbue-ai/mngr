@@ -1,7 +1,7 @@
 import json
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -216,7 +216,7 @@ def _armed_relay(
     handled: threading.Event,
     no_callback_timeout_seconds: float = 30.0,
     after_callback_seconds: float = 30.0,
-) -> Iterator[ProviderSignInRelay]:
+) -> Generator[ProviderSignInRelay, None, None]:
     relay = _relay(
         forwarder,
         handled,

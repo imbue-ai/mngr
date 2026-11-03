@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from pydantic import ValidationError
 
 from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
@@ -14,6 +13,7 @@ from imbue.imbue_common.event_envelope import LogEvent
 from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.testing import assert_model_is_frozen
 
 _TS = IsoTimestamp("2026-02-28T00:00:00.000000000Z")
 _EID = EventId("evt-1234")
@@ -74,14 +74,7 @@ def test_event_envelope_config_keeps_extra_ignore() -> None:
 
 
 def test_event_envelope_is_frozen() -> None:
-    envelope = EventEnvelope(
-        timestamp=_TS,
-        type=EventType("test_event"),
-        event_id=_EID,
-        source=_SRC,
-    )
-    with pytest.raises(ValidationError):
-        envelope.type = EventType("changed")
+    assert_model_is_frozen(EventEnvelope)
 
 
 def test_iso_timestamp_rejects_empty() -> None:
@@ -188,17 +181,7 @@ def test_log_event_to_jsonl_dict_includes_command_when_set() -> None:
 
 
 def test_log_event_is_frozen() -> None:
-    event = LogEvent(
-        timestamp=_TS,
-        type=EventType("mngr"),
-        event_id=_EID,
-        source=_SRC,
-        level=NonEmptyStr("DEBUG"),
-        message="test",
-        pid=PositiveInt(1),
-    )
-    with pytest.raises(ValidationError):
-        event.level = "INFO"  # ty: ignore[invalid-assignment]
+    assert_model_is_frozen(LogEvent)
 
 
 def test_a_nanosecond_precision_envelope_timestamp_parses() -> None:

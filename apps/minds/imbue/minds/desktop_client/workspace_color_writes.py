@@ -8,7 +8,7 @@ still waiting for its turn when a newer one arrives is dropped unwritten.
 """
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from pydantic import PrivateAttr
@@ -37,7 +37,7 @@ class WorkspaceColorWrites(MutableModel):
             return self._latest_pick_by_agent_id.get(str(agent_id)) == pick
 
     @contextmanager
-    def turn_to_write(self, agent_id: AgentId) -> Iterator[None]:
+    def turn_to_write(self, agent_id: AgentId) -> Generator[None, None, None]:
         """Hold ``agent_id``'s write slot for the duration of one label write."""
         with self._lock:
             write_lock = self._write_lock_by_agent_id.setdefault(str(agent_id), threading.Lock())

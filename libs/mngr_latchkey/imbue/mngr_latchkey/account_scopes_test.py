@@ -114,9 +114,6 @@ def test_build_account_grant_returns_the_key_permissions_and_backing_schema() ->
     assert schemas == {rule_key: build_account_scope_schema("slack-api", "a@b")}
 
 
-# -- Reading grants back (structurally, never by parsing the key) ---------------
-
-
 @pytest.mark.parametrize(
     ("scope", "account"),
     [
@@ -203,7 +200,7 @@ def test_resolved_schema_names_of_an_undefined_key_is_just_the_key() -> None:
 
 
 def test_resolved_schema_names_terminates_on_a_reference_cycle() -> None:
-    schemas = {
+    schemas: dict[str, JsonValue] = {
         "a": {"allOf": [{"$ref": "#/$defs/b"}]},
         "b": {"allOf": [{"$ref": "#/$defs/a"}]},
     }
@@ -214,12 +211,11 @@ def test_resolved_schema_names_terminates_on_a_reference_cycle() -> None:
 def test_resolved_schema_names_ignores_pointers_into_a_definition() -> None:
     # Detent lets a pointer reach into a definition; the enclosing definition is
     # what identifies the schema.
-    schemas = {"custom": {"properties": {"domain": {"$ref": "#/$defs/slack-api/properties/domain"}}}}
+    schemas: dict[str, JsonValue] = {
+        "custom": {"properties": {"domain": {"$ref": "#/$defs/slack-api/properties/domain"}}}
+    }
 
     assert resolved_schema_names("custom", schemas) == frozenset({"custom", "slack-api"})
-
-
-# -- Cross-language drift guards ------------------------------------------------
 
 
 def _run_node(script: str) -> str:

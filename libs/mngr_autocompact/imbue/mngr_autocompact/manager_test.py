@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -1397,7 +1397,7 @@ def _make_send_keys_compaction_agent(
 
 
 @contextmanager
-def _captured_log_lines() -> Iterator[list[str]]:
+def _captured_log_lines() -> Generator[list[str], None, None]:
     """Capture every log line at DEBUG and above as '<LEVEL> <message>'."""
     lines: list[str] = []
     sink_id = logger.add(

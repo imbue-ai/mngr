@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -139,7 +139,7 @@ class ScriptRunner:
         instead: the converter invoked with the paths but without the flag that
         says the input is complete.
         """
-        env = {
+        env: dict[str, str] = {
             **os.environ,
             "_INPUT_FILE": str(self.input_file),
             "_OUTPUT_FILE": str(self.output_file),
@@ -154,7 +154,7 @@ class ScriptRunner:
         )
 
     @contextmanager
-    def running_watcher(self) -> Iterator[None]:
+    def running_watcher(self) -> Generator[None, None, None]:
         """Run the real watcher (no --single-pass) for the block; its poll loop never exits on its own.
 
         The watcher runs the converter as a child, and the converter is the one using the

@@ -15,6 +15,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import MutableMapping
 from contextlib import asynccontextmanager
@@ -549,7 +550,7 @@ class _EpochTimestampSigner(TimestampSigner):
 
 
 @contextmanager
-def _make_forward_app_on(data_directory: Path) -> Iterator[tuple[TestClient, FileAuthStore]]:
+def _make_forward_app_on(data_directory: Path) -> Generator[tuple[TestClient, FileAuthStore], None, None]:
     """Build a proxy app whose signing key lives in ``data_directory``.
 
     Two calls with the same directory model a stop-and-restart from the same
@@ -2823,7 +2824,7 @@ def _arm_reset_on_close(conn: socket_module.socket) -> None:
 
 
 @contextmanager
-def _failing_backend(mode: _BackendFailureMode) -> Iterator[int]:
+def _failing_backend(mode: _BackendFailureMode) -> Generator[int, None, None]:
     """Serve one loopback connection that fails in ``mode``, yielding the port to point a backend URL at."""
     server = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
     server.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
@@ -2994,7 +2995,7 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
 
 
 @contextmanager
-def _sse_backend_dropping_midstream(chunk_count: int) -> Iterator[int]:
+def _sse_backend_dropping_midstream(chunk_count: int) -> Generator[int, None, None]:
     """Serve one SSE connection that streams ``chunk_count`` chunks, then drops.
 
     The 200 response head and headers are delivered, then a few chunked SSE
@@ -3617,7 +3618,7 @@ def test_http2_subdomain_auth_bridge_cookie_is_none_and_partitioned(tmp_path: Pa
 @contextmanager
 def _make_browser_bridge_app(
     tmp_path: Path, browser_bridge_token: str | None
-) -> Iterator[tuple[TestClient, FileAuthStore]]:
+) -> Generator[tuple[TestClient, FileAuthStore], None, None]:
     app, auth_store, _resolver = _make_forward_app(tmp_path, use_http2=True, browser_bridge_token=browser_bridge_token)
     with TestClient(app, follow_redirects=False) as client:
         yield client, auth_store

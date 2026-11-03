@@ -29,8 +29,8 @@ import json
 import shlex
 import time
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterable
-from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -559,7 +559,7 @@ class _OuterListingSession(MutableModel):
         return self.vps_address == lease.vps_address and self.ssh_port == lease.ssh_port
 
     @contextmanager
-    def listing(self) -> Iterator[OuterHostInterface]:
+    def listing(self) -> Generator[OuterHostInterface, None, None]:
         """The outer, for one listing at a time: a full poll's read and a re-read of the same host serialize here."""
         with self._listing_lock:
             yield self.outer
@@ -2479,7 +2479,9 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         return rebuilt_container_public_key
 
     @contextmanager
-    def _outer_for_leased_vps(self, host_id: HostId, lease_result: LeaseResult) -> Iterator[OuterHostInterface]:
+    def _outer_for_leased_vps(
+        self, host_id: HostId, lease_result: LeaseResult
+    ) -> Generator[OuterHostInterface, None, None]:
         """Open an outer host (root@vps:ssh_port) for the leased VPS via the per-host key.
 
         Pins the VPS root host key the connector recorded (the deterministic
@@ -2533,7 +2535,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         host_db_id: str,
         host_id: HostId,
         phase: str,
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Release the lease back to the pool if the wrapped setup fails.
 
         The client owns the machine the moment the connector marks it leased,
@@ -3133,7 +3135,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         return self.config.container_ssh_port
 
     @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
         """Open the outer host (the leased VPS itself, root@vps_address:ssh_port), closing it on exit."""
         leased = self._find_leased(host_id)
         if leased is None:
@@ -3183,7 +3185,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
     # Kept outer-SSH sessions for discovery listings
 
     @contextmanager
-    def _outer_listing_session_for(self, lease: LeasedHostInfo) -> Iterator[OuterHostInterface]:
+    def _outer_listing_session_for(self, lease: LeasedHostInfo) -> Generator[OuterHostInterface, None, None]:
         """The lease's kept outer session, for one listing; a session whose listing fails is dropped.
 
         A session is built on the lease's first listing and reused by every later

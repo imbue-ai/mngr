@@ -5,8 +5,8 @@ import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterable
-from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -1158,7 +1158,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         }
 
     @contextmanager
-    def _changing_state(self) -> Iterator[None]:
+    def _changing_state(self) -> Generator[None, None, None]:
         """Hold ``self._lock`` for a mutation, then fire change callbacks if observable state differs."""
         with self._lock:
             state_before = self._observable_state_locked()

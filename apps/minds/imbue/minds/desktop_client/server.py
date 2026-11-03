@@ -35,7 +35,7 @@ server inside it.
 import signal
 import ssl
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -117,7 +117,9 @@ def _wake_sse_handlers(state: DesktopClientState) -> None:
 
 
 @contextmanager
-def desktop_client_runtime(state: DesktopClientState, is_externally_managed_client: bool) -> Iterator[None]:
+def desktop_client_runtime(
+    state: DesktopClientState, is_externally_managed_client: bool
+) -> Generator[None, None, None]:
     """Own the desktop client's startup and ordered teardown.
 
     On enter: create the shared sync HTTP client (unless one was injected) and

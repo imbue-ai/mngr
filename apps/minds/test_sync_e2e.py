@@ -37,7 +37,7 @@ import time
 import tomllib
 import zipfile
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -1221,7 +1221,7 @@ def _initialize_mngr_profile_and_sign_in(
 
 
 @contextmanager
-def _initialized_mngr_caller() -> Iterator[MngrCaller]:
+def _initialized_mngr_caller() -> Generator[MngrCaller, None, None]:
     """An initialized ``MngrCaller`` that is stopped on exit.
 
     Every call leaves a replacement warm ``mngr`` process idle on its socket,

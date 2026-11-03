@@ -1,5 +1,6 @@
 import base64
 import json
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -517,7 +518,7 @@ class BlobVolume(BaseObjectStoreVolume):
 
 
 @contextmanager
-def _translate_blob_errors(account_name: str) -> Iterator[None]:
+def _translate_blob_errors(account_name: str) -> Generator[None, None, None]:
     """Translate ``azure.core.exceptions.AzureError`` into ``BlobStateBucketError`` within the block.
 
     ``ResourceNotFoundError`` / ``ResourceExistsError`` subclass ``AzureError``,

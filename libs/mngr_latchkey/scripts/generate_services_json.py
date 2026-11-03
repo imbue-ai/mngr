@@ -428,6 +428,18 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
     return {**catalog, **_additional_services_catalog(catalog)}
 
 
+def _catalog_scopes(catalog: Mapping[str, list[dict[str, object]]]) -> set[str]:
+    """Return every ``scope`` in a catalog, as the strings the schema declares them to be."""
+    scopes: set[str] = set()
+    for entries in catalog.values():
+        for entry in entries:
+            scope = entry["scope"]
+            if not isinstance(scope, str):
+                raise GenerateServicesError(f"Catalog entry has a non-string scope: {scope!r}")
+            scopes.add(scope)
+    return scopes
+
+
 def _additional_services_catalog(
     detent_catalog: Mapping[str, list[dict[str, object]]],
 ) -> dict[str, list[dict[str, object]]]:
@@ -441,9 +453,7 @@ def _additional_services_catalog(
     name_collisions = sorted(set(detent_catalog) & set(additional))
     if name_collisions:
         raise GenerateServicesError(f"Additional services collide with detent service name(s): {name_collisions}")
-    detent_scopes = {entry["scope"] for entries in detent_catalog.values() for entry in entries}
-    additional_scopes = {entry["scope"] for entries in additional.values() for entry in entries}
-    scope_collisions = sorted(detent_scopes & additional_scopes)
+    scope_collisions = sorted(_catalog_scopes(detent_catalog) & _catalog_scopes(additional))
     if scope_collisions:
         raise GenerateServicesError(f"Additional services collide with detent scope(s): {scope_collisions}")
     return additional

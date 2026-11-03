@@ -39,9 +39,6 @@ _HttpxHandler: Final = Callable[[httpx2.Request], httpx2.Response]
 class _RecordingMessageSender(MngrMessageSender):
     """Test double for ``MngrMessageSender`` that records calls instead of running mngr."""
 
-    # This double overrides ``send`` entirely and never dispatches to a
-    # concurrency group, so relax the base class's required field.
-    concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
     def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
@@ -62,7 +59,9 @@ def _make_accounts_handler(
     gateway_handler: _HttpxHandler,
     push_permissions_to_machine: Callable[[str], None] = leave_permissions_on_this_computer,
 ) -> tuple[AccountsPermissionGrantHandler, _RecordingMessageSender]:
-    sender = _RecordingMessageSender(sent_messages=[])
+    sender = _RecordingMessageSender(
+        concurrency_group=ConcurrencyGroup(name="recording-message-sender-unused"), sent_messages=[]
+    )
     return (
         AccountsPermissionGrantHandler(
             data_dir=tmp_path,

@@ -72,7 +72,7 @@ class CodeGuardianAgentConfig(SkillProvisionedAgentConfig):
 class CodeGuardianAgent(SkillProvisionedAgent):
     """Agent implementation for code-guardian with skill provisioning."""
 
-    agent_config: CodeGuardianAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
+    agent_config: CodeGuardianAgentConfig = Field(frozen=True, repr=False, description="Agent type config")  # ty: ignore[invalid-mutable-override]
 
     _skill_name = _SKILL_NAME
     _skill_content = _CODE_GUARDIAN_SKILL_CONTENT

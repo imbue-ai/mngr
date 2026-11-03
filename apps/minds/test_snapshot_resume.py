@@ -26,8 +26,8 @@ import shlex
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Generator
 from collections.abc import Iterable
-from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
@@ -1117,7 +1117,7 @@ class _LiveWorkspaceRepo(FrozenModel):
         )
 
     @contextmanager
-    def quiesced(self) -> Iterator[_QuiescedWorkspaceRepo]:
+    def quiesced(self) -> Generator[_QuiescedWorkspaceRepo, None, None]:
         """Stop ``host-backup`` for the scope so the repository has no other restic actor.
 
         The restore under test brings the service back itself (``supervisorctl

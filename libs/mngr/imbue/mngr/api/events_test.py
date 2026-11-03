@@ -1,7 +1,7 @@
 import json
 import queue as queue_mod
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -1119,7 +1119,7 @@ def _running_tail_source_thread(
     offset_dir: Path,
     online_event: threading.Event,
     events_file: Path | None = None,
-) -> Iterator[_RunningTailSourceThread]:
+) -> Generator[_RunningTailSourceThread, None, None]:
     """Run ``_tail_source_thread`` over source "src" of ``target_holder[0]`` for the block.
 
     Owns the queue, stop event, failure flag, and watch group the thread is
@@ -1165,7 +1165,9 @@ def _running_tail_source_thread(
 
 
 @contextmanager
-def _running_local_tail_source_thread(tmp_path: Path, local_provider) -> Iterator[_RunningTailSourceThread]:
+def _running_local_tail_source_thread(
+    tmp_path: Path, local_provider
+) -> Generator[_RunningTailSourceThread, None, None]:
     """Run ``_tail_source_thread`` over a fresh, empty local "src" source.
 
     Yields once the thread has completed its first read (the offset file

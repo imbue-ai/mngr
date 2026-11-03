@@ -13,7 +13,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -974,7 +974,7 @@ _PROBE_BUDGET_SECONDS: Final[float] = 0.5
 @contextmanager
 def _loopback_listener(
     chunks: tuple[bytes, ...], chunk_delay_seconds: float = 0.0, bind_host: str = "127.0.0.1"
-) -> Iterator[int]:
+) -> Generator[int, None, None]:
     """Serve ``chunks`` to every connection on a loopback port, yielding the port.
 
     Each connection is handled on its own thread and then held open until

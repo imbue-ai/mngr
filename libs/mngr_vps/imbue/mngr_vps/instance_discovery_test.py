@@ -25,7 +25,7 @@ the actual fan-out / aggregation / caching code under test runs unmodified.
 """
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -176,7 +176,7 @@ class _DiscoveryTestProvider(VpsProvider):
         return self.per_vps_records.get(vps_ip, _VpsDiscoveryData())
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Generator[OuterHostInterface, None, None]:
         # Used by tests that opt into the real _read_records_from_vps body:
         # live_outer_by_ip[ip] -> yield that real outer (live-listing test);
         # per_vps_outer_errors[ip] -> raise that exception (cache-fallback test);

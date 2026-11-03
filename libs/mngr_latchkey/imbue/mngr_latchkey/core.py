@@ -29,7 +29,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Collection
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -699,7 +699,7 @@ def _build_foreign_store_env(store_directory: Path, encryption_key: SecretStr) -
 
 
 @contextmanager
-def _foreign_store_directory(store: EncryptedCredentialStore) -> Iterator[Path]:
+def _foreign_store_directory(store: EncryptedCredentialStore) -> Generator[Path, None, None]:
     """Lay ``store`` out as a private scratch latchkey directory, removed on exit."""
     with tempfile.TemporaryDirectory(prefix="mngr-latchkey-foreign-") as scratch:
         store_directory = Path(scratch)
@@ -941,7 +941,7 @@ class CodedLatchkeyFailure(FrozenModel):
     @property
     def known_code(self) -> LatchkeyErrorCode | None:
         """The code as a member, or None for a code newer than this package."""
-        if self.code in LatchkeyErrorCode:
+        if self.code in {member.value for member in LatchkeyErrorCode}:
             return LatchkeyErrorCode(self.code)
         return None
 

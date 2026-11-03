@@ -811,10 +811,12 @@ def build_workspace_permissions_view(
                 )
             )
 
+    available.sort(key=lambda entry: entry.display_name.lower())
+
     return WorkspacePermissionsView(
         host_id=str(host_id),
         connections=tuple(panel for _, _, panel in sorted(connections, key=lambda row: (row[0], row[1]))),
-        available_connections=tuple(sorted(available, key=lambda entry: entry.display_name.lower())),
+        available_connections=tuple(available),
         file_sharing_toggles=build_file_sharing_toggles(config, device_id),
         workspace_toggles=build_workspace_toggles(backend_resolver, config),
         desktops=(

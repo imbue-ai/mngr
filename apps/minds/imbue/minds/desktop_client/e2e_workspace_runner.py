@@ -30,7 +30,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -424,7 +424,7 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 @contextmanager
-def _user_data_dir_for_launch(persistent_dir: Path | None) -> Iterator[str]:
+def _user_data_dir_for_launch(persistent_dir: Path | None) -> Generator[str, None, None]:
     """The profile directory a launch runs with: the persistent one when given, else a fresh temporary one."""
     if persistent_dir is not None:
         persistent_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +446,7 @@ def _launched_electron(
     launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
     # The environment to launch from, in place of this process's own (see ``_build_electron_env``).
     base_env: Mapping[str, str] | None = None,
-) -> Iterator[subprocess.Popen[bytes]]:
+) -> Generator[subprocess.Popen[bytes], None, None]:
     """Start the Electron app, yield the process, and always tear it down.
 
     ``host_config_dir`` becomes the Electron process's cwd, so the
@@ -892,7 +892,7 @@ def electron_app_session(
     user_data_dir: Path | None = None,
     launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
     base_env: Mapping[str, str] | None = None,
-) -> Iterator[tuple[Browser, Page]]:
+) -> Generator[tuple[Browser, Page], None, None]:
     """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
 
     The generic sibling of :func:`create_workspace_via_electron` for flows that

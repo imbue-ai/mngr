@@ -32,7 +32,7 @@ credentials and the permissions file this computer keeps -- so for those every
 method is a no-op and the local edit is the whole change.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from loguru import logger
@@ -259,7 +259,9 @@ class MachineOperator(MutableModel):
         return desktop_egress_rules_json
 
     @contextmanager
-    def _machine(self, workspace_agent_id: str, failure_description: str) -> Iterator[MachineCredentials | None]:
+    def _machine(
+        self, workspace_agent_id: str, failure_description: str
+    ) -> Generator[MachineCredentials | None, None, None]:
         """Open the workspace's machine for one exchange, or yield ``None`` when it has none.
 
         A workspace with no machine of its own is the whole of the no-op case:

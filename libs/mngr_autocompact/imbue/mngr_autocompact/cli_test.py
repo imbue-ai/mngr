@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -279,7 +279,9 @@ class _FakeDiscoveryProvider(LocalProviderInstance):
 
 
 @contextmanager
-def _fake_discovery_context(temp_mngr_ctx: MngrContext) -> Iterator[tuple[MngrContext, _FakeDiscoveryProvider]]:
+def _fake_discovery_context(
+    temp_mngr_ctx: MngrContext,
+) -> Generator[tuple[MngrContext, _FakeDiscoveryProvider], None, None]:
     config = MngrConfig(
         providers={
             ProviderInstanceName("local"): ProviderInstanceConfig(backend=ProviderBackendName("local")),

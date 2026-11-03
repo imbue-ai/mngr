@@ -2,7 +2,7 @@
 
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,7 +31,7 @@ def _live_agents(
     plugin_manager: pluggy.PluginManager,
     agent_count: int,
     command: str,
-) -> Iterator[list[AgentName]]:
+) -> Generator[list[AgentName], None, None]:
     stamp = int(time.time())
     names = [AgentName(f"load-{agent_idx}-{stamp}") for agent_idx in range(agent_count)]
     created_sessions: list[str] = []
@@ -89,7 +89,7 @@ def _states_listed_while_slow(
     plugin_manager: pluggy.PluginManager,
     shim_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[list[AgentName], dict[AgentName, AgentLifecycleState]]]:
+) -> Generator[tuple[list[AgentName], dict[AgentName, AgentLifecycleState]], None, None]:
     """List live agents, the last ``stopped_agent_count`` of them stopped first, while ``slow_program`` outlasts a 1s read budget.
 
     Yields the agents' names and their listed states while the live agents still run.

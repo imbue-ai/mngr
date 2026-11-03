@@ -19,7 +19,7 @@ import shlex
 import subprocess
 from abc import ABC
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from enum import auto
@@ -52,9 +52,6 @@ from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 _SshConnectionInfo = tuple[str, str, int, Path]
 
 
-# === Errors ===
-
-
 class UncommittedChangesError(MngrError):
     """Raised when there are uncommitted changes and mode is FAIL."""
 
@@ -76,9 +73,6 @@ class GitSyncError(MngrError):
 
     def __init__(self, message: str) -> None:
         super().__init__(f"Git sync failed: {message}")
-
-
-# === Gitignore status ===
 
 
 class GitignoreStatus(UpperCaseStrEnum):
@@ -209,9 +203,6 @@ def check_path_repo_gitignore_status(
     if not repo_only_result.success:
         return GitignoreStatus.ONLY_GLOBAL, checked_relative
     return GitignoreStatus.IGNORED, checked_relative
-
-
-# === Git context (run git here, or on a remote host) ===
 
 
 class GitContextInterface(MutableModel, ABC):
@@ -389,9 +380,6 @@ class RemoteGitContext(GitContextInterface):
         return result.success
 
 
-# === Uncommitted-changes handling ===
-
-
 def _handle_uncommitted_changes(
     git_ctx: GitContextInterface,
     path: Path,
@@ -424,7 +412,7 @@ def stash_guard(
     git_ctx: GitContextInterface,
     path: Path,
     uncommitted_changes: UncommittedChangesMode,
-) -> Iterator[bool]:
+) -> Generator[bool, None, None]:
     """Stash uncommitted changes at ``path`` for the body of the with-block.
 
     Yields True if changes were stashed. On normal exit, pops the stash when mode
@@ -450,9 +438,6 @@ def stash_guard(
                         "Run 'git stash pop' in {} to recover your changes.",
                         path,
                     )
-
-
-# === SSH transport helpers ===
 
 
 @pure
@@ -496,9 +481,6 @@ def _build_git_url_and_env(
     if is_push:
         env["GIT_LFS_SKIP_PUSH"] = "1"
     return url, env
-
-
-# === Push/pull command assembly ===
 
 
 def _split_options_and_positionals(args: Sequence[str]) -> tuple[list[str], list[str]]:

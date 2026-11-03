@@ -22,7 +22,7 @@ import contextlib
 import json
 import os
 import shutil
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -316,7 +316,7 @@ def _vault_subprocess_env() -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def _vault_concurrency_group(parent: ConcurrencyGroup | None, *, name: str) -> Iterator[ConcurrencyGroup]:
+def _vault_concurrency_group(parent: ConcurrencyGroup | None, *, name: str) -> Generator[ConcurrencyGroup, None, None]:
     """Yield a CG to run vault subprocesses in: a child of ``parent``, or a fresh one."""
     cg = parent.make_concurrency_group(name=name) if parent is not None else ConcurrencyGroup(name=name)
     with cg:

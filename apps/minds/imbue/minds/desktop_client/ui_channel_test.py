@@ -11,7 +11,7 @@ import json
 import queue
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -185,7 +185,7 @@ def test_any_window_reporting_the_lock_counts_as_the_screen_locked() -> None:
 
 
 @contextmanager
-def _serve_ws_capable_app(tmp_path: Path) -> Iterator[tuple[int, str, DesktopClientState]]:
+def _serve_ws_capable_app(tmp_path: Path) -> Generator[tuple[int, str, DesktopClientState], None, None]:
     """The real desktop-client app on the real WebSocket-aware cheroot server."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     resolver = MngrCliBackendResolver()

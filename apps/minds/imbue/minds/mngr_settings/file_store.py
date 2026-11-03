@@ -4,7 +4,7 @@ import stat
 import time
 import tomllib
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,7 @@ class FileMindsSettingsStore(MindsSettingsStoreInterface):
             return is_write_needed
 
     @contextmanager
-    def _holding_write_lock(self) -> Iterator[None]:
+    def _holding_write_lock(self) -> Generator[None, None, None]:
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.settings_path.with_suffix(".lock")
         wait_started_at = time.monotonic()

@@ -5,7 +5,7 @@ import selectors
 import signal
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
@@ -339,7 +339,7 @@ class _WakeupPipe(MutableModel):
 
 
 @contextmanager
-def _open_wakeup_pipe() -> Iterator[_WakeupPipe]:
+def _open_wakeup_pipe() -> Generator[_WakeupPipe, None, None]:
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
     os.set_blocking(write_fd, False)

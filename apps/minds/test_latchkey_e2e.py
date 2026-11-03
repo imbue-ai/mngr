@@ -76,7 +76,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -262,7 +262,7 @@ def _install_latchkey_cli(prefix_dir: Path) -> Path:
 
 
 @contextmanager
-def _root_sshd(scratch: Path, authorized_public_key: str) -> Iterator[tuple[int, Path]]:
+def _root_sshd(scratch: Path, authorized_public_key: str) -> Generator[tuple[int, Path], None, None]:
     """Run a throwaway root sshd on a random loopback port; yield ``(port, host_key_path)``.
 
     The daemon runs as root (via ``sudo``) so the SSH login lands as ``root``
@@ -590,7 +590,7 @@ def _grant_scope_in_host_permissions(latchkey_directory: Path, host_id: str) -> 
 @contextmanager
 def _machine_of(
     env: dict[str, str], latchkey_directory: Path, latchkey_binary: Path, host_id: str
-) -> Iterator[MachineCredentials]:
+) -> Generator[MachineCredentials, None, None]:
     """Open the workspace's machine exactly as the desktop app does, under this test's mngr config.
 
     The app loads mngr's settings in-process and opens the workspace's outer
@@ -617,7 +617,7 @@ def _machine_of(
 
 
 @contextmanager
-def _environment(env: dict[str, str]) -> Iterator[None]:
+def _environment(env: dict[str, str]) -> Generator[None, None, None]:
     """Run the block with ``env`` as this process's environment, then restore it."""
     saved = dict(os.environ)
     os.environ.clear()

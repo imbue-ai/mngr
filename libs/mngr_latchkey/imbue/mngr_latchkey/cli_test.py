@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import Generator
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
@@ -364,7 +365,7 @@ def test_admin_jwt_prints_jwt_and_creates_admin_file(
 
 
 @contextlib.contextmanager
-def _fake_running_supervisor() -> Iterator[int]:
+def _fake_running_supervisor() -> Generator[int, None, None]:
     """Yield the PID of a sleeping subprocess that passes the pre-lock forward check.
 
     That check reads two things, and the subprocess is built for both: its argv

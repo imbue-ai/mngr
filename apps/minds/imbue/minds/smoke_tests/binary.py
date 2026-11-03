@@ -24,7 +24,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -469,7 +469,7 @@ def app_environment(environ: Mapping[str, str], launch_env: Mapping[str, str]) -
 @contextmanager
 def launched_studio_app(
     binary: StudioBinary, backend: SmokeBackend, data_home: Path, debug_port: int, display: str | None
-) -> Iterator[StudioAppSession]:
+) -> Generator[StudioAppSession, None, None]:
     """Launch ``binary`` against ``backend`` on a throwaway data home, with Playwright attached over CDP.
 
     The app is started the way an installed one is: from an empty directory

@@ -498,7 +498,7 @@ def test_extract_agent_id_from_anyof_entry_raises_on_unrecognized_entry() -> Non
 # register_agent_for_host
 
 
-def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, str]]:
+def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[JsonValue]:
     """Return the parsed ``anyOf`` list from the host's permissions file."""
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())

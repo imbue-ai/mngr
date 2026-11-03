@@ -2,6 +2,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
 from imbue.imbue_common.ratchet_testing.ratchets import parse_type_check_output
 
@@ -117,24 +119,32 @@ def test_counts_only_error_severity_diagnostics() -> None:
 
 def test_failure_message_leads_with_the_diagnostics_that_caused_the_failure() -> None:
     message = parse_type_check_output(_CI_RUN_34881780066_STDOUT, "", 1).failure_message
+    lines = message.splitlines()
 
-    headline, _blank, first_diagnostic = message.splitlines()[:3]
-    assert headline == "Type checker found 3 error(s) (ty exit code 1):"
-    assert "error[unknown-argument]" in first_diagnostic
-    assert "possibly-missing-submodule" not in message.split("warning(s)")[0]
+    assert lines[0] == "Type checker found 3 error(s) and 7 warning(s) (ty exit code 1):"
+    assert "error[unknown-argument]" in lines[2]
+    error_rows = [i for i, line in enumerate(lines) if ": error[" in line]
+    warning_rows = [i for i, line in enumerate(lines) if ": warning[" in line]
+    assert len(error_rows) == 3 and len(warning_rows) == 7
+    assert max(error_rows) < min(warning_rows)
 
 
-def test_a_warning_only_run_is_not_a_failure() -> None:
-    stdout = (
+# ty exits 1 on a warning-only run; exit 0 pins that the gate blocks warnings on its own
+# account, so a ty that went back to exiting zero on them would not unblock them.
+@pytest.mark.parametrize("return_code", [1, 0])
+def test_a_warning_only_run_is_a_failure(return_code: int) -> None:
+    warning = (
         "apps/minds_admin/imbue/minds_admin/cli/server.py:1757:16: "
-        "warning[possibly-missing-submodule] Submodule `errors` might not have been imported\n"
-        "Found 1 diagnostic\n"
+        "warning[possibly-missing-submodule] Submodule `errors` might not have been imported"
     )
 
-    outcome = parse_type_check_output(stdout, "", 0)
+    outcome = parse_type_check_output(f"{warning}\nFound 1 diagnostic\n", "", return_code)
 
-    assert not outcome.is_failure
-    assert len(outcome.warning_diagnostics) == 1
+    assert outcome.is_failure
+    assert outcome.failure_message.splitlines()[0] == (
+        f"Type checker found 1 warning(s) (ty exit code {return_code}):"
+    )
+    assert warning in outcome.failure_message
 
 
 def test_a_clean_run_reports_nothing() -> None:
@@ -150,9 +160,7 @@ def test_a_nonzero_exit_without_diagnostics_still_fails_and_shows_the_output() -
     outcome = parse_type_check_output("", "error: Failed to parse ty.toml\n", 2)
 
     assert outcome.is_failure
-    assert outcome.failure_message.splitlines()[0] == (
-        "Type checker exited 2 without reporting an error-severity diagnostic."
-    )
+    assert outcome.failure_message.splitlines()[0] == "Type checker exited 2 without reporting a diagnostic."
     assert "Failed to parse ty.toml" in outcome.failure_message
 
 

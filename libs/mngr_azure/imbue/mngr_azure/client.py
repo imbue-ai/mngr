@@ -1,7 +1,7 @@
 import base64
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -364,7 +364,7 @@ class AzureVpsClient(VpsClientInterface):
         return self._cached_authorization_client
 
     @contextmanager
-    def _translate_azure_errors(self) -> Iterator[None]:
+    def _translate_azure_errors(self) -> Generator[None, None, None]:
         """Translate ``azure.core.exceptions.HttpResponseError`` into ``VpsApiError``.
 
         ``ResourceNotFoundError`` and ``ClientAuthenticationError`` both subclass
@@ -378,7 +378,7 @@ class AzureVpsClient(VpsClientInterface):
             raise VpsApiError(status_code, e.message or str(e)) from e
 
     @contextmanager
-    def _translate_vm_create_errors(self, vm_size: str) -> Iterator[None]:
+    def _translate_vm_create_errors(self, vm_size: str) -> Generator[None, None, None]:
         """Translate a VM-create ``HttpResponseError`` like ``_translate_azure_errors``, with a curated ``SkuNotAvailable``.
 
         Azure's own text for a size the subscription may not use reads like a

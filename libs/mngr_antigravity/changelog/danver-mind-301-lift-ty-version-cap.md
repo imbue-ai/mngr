@@ -1,0 +1,1 @@
+MIND-301: `AntigravityAgent.TUI_READY_INDICATOR` keeps its inherited declared type instead of redeclaring a narrower one, which ty 0.0.87 rejects for a mutable class variable. Type-checker-only; behavior is unchanged.

@@ -1,6 +1,6 @@
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -285,7 +285,7 @@ class GcpVpsClient(VpsClientInterface):
         return self._cached_machine_types_client
 
     @contextmanager
-    def _translate_gcp_errors(self) -> Iterator[None]:
+    def _translate_gcp_errors(self) -> Generator[None, None, None]:
         """Translate ``google.api_core.exceptions.GoogleAPICallError`` into ``VpsApiError``."""
         try:
             yield

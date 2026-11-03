@@ -1,6 +1,7 @@
 import shlex
 import sys
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -78,7 +79,7 @@ def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
 
 
 @contextmanager
-def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterator[None]:
+def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Generator[None, None, None]:
     """Stop and destroy an agent on exit, suppressing cleanup errors."""
     try:
         yield
@@ -94,7 +95,7 @@ def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> I
 
 
 @contextmanager
-def ephemeral_work_location(host: OnlineHostInterface) -> Iterator[HostLocation]:
+def ephemeral_work_location(host: OnlineHostInterface) -> Generator[HostLocation, None, None]:
     """Yield a fresh throwaway work directory on the host; remove it on exit.
 
     Use this when a headless caller wants a blank scratch dir rather than an
@@ -125,7 +126,7 @@ def headless_agent_output(
     name: AgentName | None = None,
     initial_message: str | None = None,
     pre_create_setup: Callable[[OnlineHostInterface, Path], None] | None = None,
-) -> Iterator[StreamingHeadlessAgentMixin]:
+) -> Generator[StreamingHeadlessAgentMixin, None, None]:
     """Create a headless agent, yield it for streaming, and destroy it on exit.
 
     The agent runs in-place at ``source_location.path`` on

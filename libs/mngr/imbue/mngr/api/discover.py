@@ -1,6 +1,6 @@
 import concurrent.futures
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
@@ -126,7 +126,7 @@ def warn_on_duplicate_host_names(
 
 
 @contextmanager
-def _attributing_failures_to_provider(provider_name: ProviderInstanceName) -> Iterator[None]:
+def _attributing_failures_to_provider(provider_name: ProviderInstanceName) -> Generator[None, None, None]:
     """Wrap any failure inside one provider's discovery in ``ProviderDiscoveryError``, naming that provider."""
     try:
         yield

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -99,7 +99,7 @@ _EXPORTS_IN_FLIGHT_LOCK = threading.Lock()
 
 
 @contextmanager
-def _export_in_flight(agent_id: AgentId) -> Iterator[None]:
+def _export_in_flight(agent_id: AgentId) -> Generator[None, None, None]:
     with _EXPORTS_IN_FLIGHT_LOCK:
         _EXPORTS_IN_FLIGHT.add(str(agent_id))
     try:

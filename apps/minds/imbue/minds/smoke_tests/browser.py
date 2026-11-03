@@ -9,7 +9,7 @@ installed to, which is why the browsers directory is resolved explicitly
 rather than left to the (test-redirected) ``HOME``.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -50,7 +50,7 @@ def default_playwright_browsers_dir(home: Path, platform_name: str) -> Path:
 
 
 @contextmanager
-def visitor_browser_context(browser_type: BrowserType) -> Iterator[BrowserContext]:
+def visitor_browser_context(browser_type: BrowserType) -> Generator[BrowserContext, None, None]:
     """A fresh headless Chromium context: the browser a user would sign in and open a share link with.
 
     Launched through the Playwright the app session already runs (its
