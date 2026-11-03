@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `compact_stale_agents_by_name` and `get_compaction_agents` take an optional `provider_names` that limits discovery to those providers, skipping the full discovery-event-log replay.
+
 ## [v0.1.1] - 2026-10-28
 
 ## [v0.1.0] - 2026-10-22

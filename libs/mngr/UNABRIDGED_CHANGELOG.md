@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Alongside that, a few annotations that ty 0.0.87 rejects are corrected (a forwarding test double's kwargs, a docker build test's count check), and the deliberate narrowings it flags are marked: the discovery events' discriminator `Literal`s, the streamed observation result's required call id, and the log stream wrapper's read-only `encoding`/`errors`. Type-checker-only; behavior is unchanged.
+
+A `mngr create` whose agent cannot take input while starting, such as one stopped on a dialog or one whose TUI never shows it is ready, now removes the agent, as a readiness timeout already did, and fails with `Failed to start agent <name>: ...`. It used to report a send failure and leave the agent running with its worktree and branch deleted. With `--reuse --update`, the existing agent is kept and only the error changes.
+
 ## 2026-10-31
 
 A strict send that no evidence confirmed within its window is now settled from the agent's own screen before it is reported, through a new `InteractiveTuiAgent._read_unconfirmed_submission` hook (the default reads nothing). A message the screen shows taken counts as delivered, recorded as a `submission_confirmed_by_screen` agent event. One still in the input box was never taken: the agent clears it and the send fails with the new `SendFailureKind.NOT_SUBMITTED` (`not_submitted`), so sending it again delivers it once. Only a screen that shows neither leaves the send `submission_unconfirmed`. A typed message that never showed in the input box (`PastedMessageNotShownError`, Enter never sent) is settled the same way: the part that reached the box late is cleared and the send fails as `not_submitted`. Evidence probes can also read the agent's screen during the window: the confirmation script exposes the pane it typed into as `$mngr_pane_target`. The `mngr message` help says so.

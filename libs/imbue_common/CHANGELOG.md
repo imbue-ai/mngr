@@ -6,9 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `testing.assert_model_is_frozen`, which asserts a pydantic model is declared frozen.
+
 ### Changed
 
 - Changed: The owner-exec client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
+- Changed: `check_no_type_errors` now fails on any ty diagnostic, warnings included, and lists warnings in its failure message.
 
 ### Fixed
 

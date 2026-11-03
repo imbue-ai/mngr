@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: `scripts/generate_services_json.py` checks that every catalog scope is a string, raising `GenerateServicesError` on one that is not. `CodedLatchkeyFailure.known_code` checks membership against the set of `LatchkeyErrorCode` values, which means the same on every Python version. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`.
+
+## 2026-11-01
+
+New `minds-workspaces-account-settings` verb in the shared workspace-permissions catalog (user-profile-state spec, phase 3C): a target-scoped PUT on `/account-settings/keybindings$`, letting the workspace's shell save keybinding changes to the workspace's owning account once the user approves the grant. The gateway extension and the desktop dialog both pick it up from the catalog; no code change beyond the docstring verb lists.
+
 ## 2026-10-18
 
 - A machine policy with no rules is treated like no policy at all (`is_policy_provisioned` in `remote/_transfer.py`): it is the deny-all default a provisioning pass hands a machine before this computer has a policy for it. A read of the machine (`MachineCredentials.refresh`) and a later provisioning pass now seed such a machine from this computer's copy of the host's policy (and, on a read, from its copy of the desktop egress rules when it has one) instead of adopting the empty policy over the copy here. `register_agent_for_host` rebuilds a host file that holds no rules from the agent baseline, so a copy that was emptied by an earlier read is repaired by the next registration.

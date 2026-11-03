@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: `AntigravityAgent.TUI_READY_INDICATOR` keeps its inherited declared type instead of redeclaring a narrower one, which ty 0.0.87 rejects for a mutable class variable. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

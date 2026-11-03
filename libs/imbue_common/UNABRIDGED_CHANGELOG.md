@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: The type-check gate, `check_no_type_errors`, fails on any ty diagnostic, warnings included, and its failure message counts and lists warnings as causes alongside errors.
+
+`testing.py` gains `assert_model_is_frozen`, which asserts a pydantic model is declared frozen. The immutability tests use it instead of mutating a field inside `pytest.raises`, which ty 0.0.87 reports as an invalid assignment. That pydantic enforces `FrozenModel`'s config at all is tested once, in `frozen_model_test.py`.
+
+Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`.
+
 ## 2026-10-29
 
 The owner-exec client's requests now use `httpx2`, Pydantic's maintained fork of the unmaintained `httpx` with the same API. The package depends on `httpx2>=2.13.1` instead of `httpx`. httpx2 verifies TLS against the operating system's trust store instead of certifi's bundle, unless `SSL_CERT_FILE` names a bundle.

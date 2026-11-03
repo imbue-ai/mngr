@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: The code-guardian, fixme-fairy and skill-provisioned agents mark their `agent_config` narrowing, which ty 0.0.87 reports because it does not model a per-field `Field(frozen=True)` as read-only. A transcript test annotates the environment it hands to `subprocess.run`. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
+Sending a message to a Claude agent stuck on the Bypass Permissions mode warning now fails with "Claude is waiting for you to accept Bypass Permissions mode. Answer it in the agent's terminal." and presses nothing. mngr used to treat that warning as a dismissible dialog and press Escape, which exits Claude. An agent that cannot start because of the warning now says to run `claude --dangerously-skip-permissions` once, choose "Yes, I accept", and try again. Other dialogs that stop an agent from starting are reported as "Claude stopped on a dialog (...) while starting." instead of a pointer to a terminal. The warning appears when Claude starts in bypass-permissions mode (for example with `--dangerously-skip-permissions`) and `skipDangerousModePermissionPrompt` is missing from the user's Claude settings.
+
 ## 2026-10-31
 
 A message sent to a claude agent that is still running its SessionStart hooks now confirms within a second or two instead of being reported as unconfirmed after the 90 s window. Claude takes the message off its input box at once but records it in its transcript only when the hooks finish; a new `screen-taken` evidence probe watches its screen for the message shown submitted above an input row that no longer holds it. If the window still ends unconfirmed, the input box settles it: the message shown submitted as a turn the screen did not show before the send, with an empty box, means claude holds it and the send succeeds; the message still in the box means claude never took it, so it is cleared from there and the send fails as `not_submitted`, and sending it again delivers it once.

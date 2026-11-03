@@ -21,6 +21,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: The slice bake's derived-image step runs the template's Screen env.d unit instead of a deleted script, so seeding a box image against a post-Screen-migration template works again.
+- Fixed: Slices on a rebooted box no longer stay down: the gen-2 slice helper's `setup` waits up to 90 s for the box's default route and runs under a box-wide lock, and slice units get a 600 s `TimeoutStartSec`.
 
 ## [v0.3.1] - 2026-10-28
 

@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: A message sent to a claude agent still running its SessionStart hooks now confirms within seconds instead of being reported unconfirmed after the 90s window.
+- Fixed: Messaging a Claude agent stuck on the Bypass Permissions mode warning now fails with instructions to answer it in the agent's terminal instead of pressing Escape (which exited Claude); a start blocked by the warning explains how to accept it once.
 
 ## [v0.3.1] - 2026-10-28
 

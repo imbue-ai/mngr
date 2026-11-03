@@ -1,1 +1,0 @@
-MIND-301: The `FileEntry` immutability test uses `assert_model_is_frozen` instead of mutating a field inside `pytest.raises`. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

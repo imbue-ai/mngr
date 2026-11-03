@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
+## 2026-11-01
+
+- The default Lima guest image moved to the Debian 13 genericcloud release `20261026-2643` (kernel `6.12.113-1`, carrying the fix for CVE-2026-98432), in step with the gen-2 slice guest image.
+
 ## 2026-10-17
 
 The lima provider forwards the ports declared with `mngr create --publish <port>[/<protocol>]` (`specs/published-ports/spec.md`): a free loopback host port is chosen at create (one number for a guest port declared with both protocols), one `portForwards` rule per declaration is written into the instance's lima config ahead of the rules that ignore every other guest port, and the endpoints (`127.0.0.1` plus the chosen port) are recorded on the host for `mngr list --format json`.

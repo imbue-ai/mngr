@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: `GcpProviderConfig.default_region` is marked as a deliberate widening: GCP derives the region from the zone when it is unset, where `VpsProviderConfig` requires one. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-31
 
 The GCP provider no longer probes the GCE metadata server (169.254.169.254) for credentials unless `use_gce_metadata_server = true`. On a machine with neither `GOOGLE_APPLICATION_CREDENTIALS` nor a `gcloud auth application-default login` file, provider discovery now fails fast with a credentials error instead of contacting that link-local address. On macOS that contact raised the "find devices on your local network" prompt for Imbue Studio on a fresh install. Set `use_gce_metadata_server = true` to authenticate through a GCE / Cloud Run / GKE instance's attached service account.

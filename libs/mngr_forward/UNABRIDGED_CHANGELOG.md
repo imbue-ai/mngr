@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: The `RemoteSSHInfo` immutability test uses `assert_model_is_frozen` instead of mutating a field inside `pytest.raises`, and two `# ty: ignore` comments ty no longer needs are removed. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-29
 
 The `httpx2` floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.

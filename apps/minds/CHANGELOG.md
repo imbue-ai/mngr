@@ -172,6 +172,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Agent-reachable `media-endpoints` and `ice-servers` routes (per-account Cloudflare TURN credentials) for the workspace Screen, via the latchkey `minds-api-proxy`.
 - Added: `minds:open-share-settings` accepts an optional `serviceName` to open the whole-workspace Share tab (embed contract v13).
 - Added: The browser sign-in permission dialog can accept a pasted token instead of opening a browser.
+- Added: Keybindings are an account-keyed setting delivered to workspaces in the profile snapshot, editable from a workspace via `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings` (gated by the `minds-workspaces-account-settings` latchkey verb).
 
 ### Changed
 
@@ -311,7 +312,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The app is renamed Imbue Studio: it installs as `Imbue Studio.app` (Linux: `/opt/Imbue Studio/imbue-studio`), the package is `imbue-studio`, in-app copy says Imbue Studio, and the deep-link scheme is `imbue-studio://`. Upgrading removes `ImbueStudio.app`, `Mind.app` and `Minds.app`; Linux `.deb` users on 0.7.x must `apt remove minds` before installing the new `.deb` (data is kept).
 - Changed: New branding: a "studio" wordmark (`studio-wordmark.svg`), a redrawn per-platform app icon (macOS uses an Icon Composer package, so building the macOS app needs Xcode 26+), a single-color menu-bar template icon, and a redesigned loading screen (an animated intro on an installation's first launch) whose status line opens the startup log.
 - Changed: Staging and production moved to Imbue Studio hosts: the web app to `studio.<apex>` (`minds.<apex>` redirects), the connector and LiteLLM proxy to `api.studio.<apex>` / `llm.studio.<apex>`, and shared workspaces to per-tier content domains (`personal-imbue.com`, ...). Opening the Share tab re-shares a workspace left on an old content domain, keeping its grants (old links stop working). The update feed stays at `updates.imbueminds.com`.
-- Changed: On macOS, app data moves from `~/.minds` to `~/Library/Application Support/Imbue Studio/<env>/` (plus `Caches` and `Logs`) on first launch, rewriting stored paths; a failed move refuses to start, writes `migration-failure.log` and retries. Other platforms keep `~/.minds`.
 - Changed: App copy calls a workspace a "workspace" throughout ("machine" means only the compute it runs on), and account association is "Link" / "Unlink".
 - Changed: Major refactor: the desktop UI is a client-rendered Mithril + TypeScript single-page app (`apps/minds/frontend/`, bundled into the wheel) talking to the backend over one `/ui/ws` WebSocket per window instead of server-rendered JinjaX pages and SSE. Workspace content renders in a sandboxed cross-origin iframe inside one chrome shared by the desktop app and browser mode, under a versioned embed contract (`docs/embed-contract.md`, now v8); Electron's separate content/modal views are gone.
 - Changed: A workspace is identified by its `system-services` agent id, with the host a swappable attribute: synced records, backups (new bucket names), reaping and content URLs are keyed by workspace id, each registered service gets its own `.localhost` origin instead of a `/service/<name>/` prefix, and the sharing API moves to `/api/v1/workspace-sharing/<workspace_id>` (old `/machines/<host_id>/sharing` routes remain as shims).
@@ -365,6 +365,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Completed the Imbue Studio 0.9.4 stable rollout to 100% of mac (macOS 13+) and Linux installs; macOS 12 stays on 0.8.5.
 - Changed: Streamlined the workspace creation/onboarding page, dropping the build-goal and examples questions and moving returning-user log-in to the title bar.
 - Changed: On a fresh install, Imbue Studio creates its mngr profile at startup, disabling the default cloud providers from the first mngr process.
+- Changed: Imbue Studio 0.10.0: app version 0.10.0 with the pinned template at `minds-v0.10.0` (the Screen, multiplayer chat rooms, per-account keybindings, kernel security badge); the alpha channel is promoted to it.
+- Changed: App data moves off `~/.minds` on first launch -- on macOS to `~/Library/Application Support/Imbue Studio/<env>/` (plus `Caches` and `Logs`), on Linux to the XDG base directories (`imbue-studio/<tier>` under `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_STATE_HOME`) -- rewriting stored paths; a failed move refuses to start, writes `migration-failure.log` and retries, and the `minds` CLI refuses to run before the move.
+- Changed: `MINDS_DATA_HOME` is renamed `STUDIO_ROOTS_OVERRIDE`; setting only the old name raises.
+- Changed: Account-keyed settings (update window, auto-update toggle and offer answer, notifications master toggle) move from `config.toml` to per-account records synced through the connector, edited via `GET`/`PUT /ui/api/settings/<account_id>`, which replaces the `update-window`, `auto-update` and `auto-update-prompt` POST routes.
+- Changed: Per-workspace update facts (skipped target, row dismissals) and the backup-verification flag live in the workspace itself, so every computer managing it agrees; the desktop writes a workspace profile snapshot (`data/.state/profile/account.json`, contract `workspace_profile_contract.json`).
 
 ### Deprecated
 
@@ -533,6 +538,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
 - Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
 - Fixed: A new remote workspace's latchkey gateway now receives the desktop's policy instead of a deny-all default that had rejected the Screen's in-workspace API calls.
+- Fixed: A bug report filed while an earlier report from the same workspace is still collecting now waits and collects afresh, instead of running a concurrent collection that let both time out.
+- Fixed: Electron's log path now points at the tier's log root (on macOS the default omitted the tier).
 
 ### Security
 
@@ -545,6 +552,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Security: Desktop probes of the local `mngr forward` proxy verify its TLS certificate against the proxy's local CA, and the Electron shell trusts a loopback forward-proxy origin only when its leaf was signed by that CA, instead of disabling certificate verification.
 - Security: The share-URL readiness probe verifies certificate chains against the system roots instead of disabling verification altogether.
 - Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
+- Security: Local Lima VMs and cloud-connection VPSes booting a kernel below the CVE-2026-98432 floor (Debian `6.12.113-1`) are badged "Security update", with a "Restart machine" action that moves them onto the fixed kernel.
 
 ## [v0.2.8] - 2026-05-13
 

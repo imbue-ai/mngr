@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
+## 2026-11-01
+
+- The gen-2 slice helper's `setup` step now waits up to 90 seconds for the box's default route before enabling forwarding on the uplink interface, and refuses with a clear message when none appears. A slice unit started at boot before the box's DHCP client had installed the route fed an empty interface name to the sysctl and failed, which left every slice on a rebooted box down until an operator started the units again. Its `teardown` step reads the route once and, on a box without one, skips the uplink `tc` deletes and still removes the slice's tap, so it converges after a setup that gave up waiting. Boxes pick the fix up at their next `minds-admin server prep`.
+
+- The helper's `setup` step also runs under one box-wide lock: on a rebooted box every slice unit starts at once, and two setups interleaving on the uplink's shared HTB qdisc (a check-then-add) made the second fail with "Exclusivity flag on, cannot modify", leaving that slice down. The slice unit now carries a `TimeoutStartSec` (600 s) sized for the route wait plus the setups queued behind the lock.
+
 ## 2026-10-28
 
 The slice bake's derived-image step now runs the template's Screen env.d unit (`system/scripts/env.d/2000-screen.sh`) instead of the deleted `1000-playwright-fortress.sh`, so seeding a box image against a template at or past the Screen migration works again. The baked layer now covers the whole Screen stack (the Xorg/XFCE/PulseAudio/GStreamer apt packages, the neko binary and its input driver, and the Fortress browser -- upgraded to v156.0.8078.47 in the paired default-workspace-template change), so a loaded slice's env-converge hits the unit's fast satisfied-check and a leased workspace's Screen is usable immediately. The derive's per-attempt timeout is raised from 900 to 1800 seconds to cover the larger layer.

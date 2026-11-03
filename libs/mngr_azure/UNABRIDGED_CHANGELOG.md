@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-31
 
 The Azure provider's `DefaultAzureCredential` no longer tries a managed identity unless `use_managed_identity = true`, so it never probes the Azure instance metadata service (169.254.169.254). On macOS that probe raised the "find devices on your local network" prompt for the app running mngr, such as Imbue Studio, whenever an Azure subscription was resolvable. Set `use_managed_identity = true` when running mngr on an Azure VM or Container App that should authenticate with its managed identity; the Azure credentials error now names this option.

@@ -10,6 +10,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: The lima provider forwards ports declared with `mngr create --publish`, recording their loopback endpoints and keeping the rules across stop/start/resize (published-ports contract).
 
+### Security
+
+- Security: The default Lima guest image is now Debian 13 genericcloud `20261026-2643` (kernel `6.12.113-1`, fixing CVE-2026-98432).
+
 ## [v0.2.1] - 2026-10-28
 
 ### Security

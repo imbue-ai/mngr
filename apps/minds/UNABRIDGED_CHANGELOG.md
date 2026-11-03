@@ -4,6 +4,151 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. The latchkey handler test doubles pass an unused `ConcurrencyGroup` instead of widening the field to accept `None`, and the permissions view sorts its available connections before building the view rather than inside the constructor call. Type-checker-only; behavior is unchanged.
+
+Records the minds-v0.10.0 staging and production deploys of 2026-11-02 in the release's history entry and discharges the matching next-deploy checklist items: each tier's TURN key and `turn` Vault entry, its Bugsink redeploy, its connector deploy with migrations 059 through 062 (staging `20261102T165934Z` then `20261102T180616Z`, production `20261102T195815Z`, the latter two from PR #2731's branch), its four relay redeploys, the slices baked and verified at `minds-v0.10.0` (four on staging, nineteen on production across four boxes, with the box whose seed failed noted for a later look), and the smoke runs.
+
+The first staging smoke journey found that LiteLLM 1.105.0 (PR #2616) refuses every AI-key mint whose `metadata` carries `workspace_id`; both tiers now run PR #2731's connector fix, proven by the suite on staging and by a local journey on production. The checklist leads with landing that PR, notes that the deploy-dispatched smoke run cannot pass against a 0.9.x alpha build because the journey waits for the 0.10.0 start flow, and records the alpha promotion as PR #2735.
+
+The box re-prep item now says to check a box's installed slice helper for the published-port forwarding first, since every box on both tiers re-prepped in the kernel rollout already carried it.
+
+On Linux the app's files sit on the XDG base directories, one per role, as macOS
+already does with `~/Library`, instead of in a single `~/.minds` dotfolder:
+
+- state (credentials, agent records, the virtualenv, the managed CPython,
+  Electron's `userData`) at `$XDG_DATA_HOME/imbue-studio/<tier>`, by default
+  `~/.local/share/imbue-studio/<tier>`
+
+- cache (`.uv-cache`, `template-cache`) at `$XDG_CACHE_HOME/imbue-studio/<tier>`,
+  by default `~/.cache/imbue-studio/<tier>`
+
+- logs at `$XDG_STATE_HOME/imbue-studio/<tier>/log`, by default
+  `~/.local/state/imbue-studio/<tier>/log`
+
+The regenerable bytes now live under the cache base directory, which backup
+tools skip and which nothing on the old layout excluded. The directory is
+`imbue-studio` -- `package.json`'s `name`, which is also the Linux executable
+and the `.deb` id -- rather than the `Imbue Studio` the Apple roots take from
+`productName`. The packaged install directory stays `/opt/Imbue Studio`.
+
+Electron's own log path points at the log root. It is the one role that does not
+follow `userData` the way `crashDumps` and `sessionData` do, so it otherwise
+lands on a directory no layout documents; this corrects macOS too, where the
+default omitted the tier.
+
+The first launch after updating moves an existing `~/.minds` onto those roots
+and leaves the emptied directory behind, the same one-shot migration macOS runs:
+each entry keeps its name, `logs/` is unwrapped into the log root, the SSH-key
+paths recorded in mngr's per-host state are rewritten, and generated shell
+completions are dropped for mngr to rebuild. A pre-migration workspace's
+latchkey token still resolves, through the link left at `~/.minds/latchkey`. A
+stale `api.sock` is skipped rather than moved, since the backend rebinds its own.
+The move is fail-hard: a tier half on the old root and half on the new is worse
+than an app that does not start, so a failure shows a dialog naming what to move
+aside, writes `migration-failure.log` to the log root, and retries next launch.
+
+A `minds` command run before that first launch now stops with an error instead
+of writing to the new state root, which would have seeded a destination the move
+then halts on.
+
+The three roots honor `$XDG_DATA_HOME`, `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`,
+reading an unset, empty or relative value as absent -- a padded value such as
+`"  /data  "` counts as relative -- and the AppImage's menu entry and icon read
+`$XDG_DATA_HOME` by that same rule. `MINDS_DATA_HOME` is now
+`STUDIO_ROOTS_OVERRIDE`: it points all three roots at one directory, is set by
+test fixtures and `minds-admin demo` rather than by users, and still outranks the
+XDG variables. Setting only the retired name raises rather than silently
+resolving the real roots.
+
+`minds-admin env list` reads the tiers off the shared state parent on Linux as it
+already did on macOS, so a tier whose files have not migrated is not listed until
+they have. The `imbue-studio` skill names the Linux state root, and its shell
+snippet resolves the root on either platform.
+
+`style_guide.md`'s naming rule now states the line it actually draws: names minds
+chooses for itself keep `minds`, and names the OS or the packager derives from app
+identity follow `productName`.
+
+`docs/linux-on-mac.md` records how to run the real Linux app from a Mac in a Lima
+VM over VNC, the only way to exercise these roots and the migration without a
+packaged arm64 build.
+
+The macOS lifecycle e2e case "#481 closing the window during startup" now waits for the first window to show `shell.html` before closing it. Reading the URL once could catch the window before its first page load and fail `macos_launch` in launch-to-msg.
+
+Added an operations record for retiring a production pool box and moving its workspaces to other boxes, and corrected the box-cancellation steps in the box-ordering guide.
+
+Promotes the alpha channel to Imbue Studio 0.10.0: the desktop entry moves to ToDesktop build `261102fqt86rp3c` (mac and Linux, 100%, macOS 13 or newer), and the alpha web channel pins browser creates to `minds-v0.10.0`, which production's pool was baked at on 2026-11-02 after the connector deploy that the release's Screen, TURN and published-port work needs. Beta and stable stay on 0.9.4.
+
+- `docs/deploy/setup/vault.md` documents the monorepo CI credentials under `secrets/mngr/ci` (who reads them, how to rotate them with `scripts/rotate_mngr_ci_credentials.py`, and what to redeploy afterwards). The next-deploy checklist drops its item about minting a dedicated CI Anthropic key, which is done.
+
+Record the production run of the CVE-2026-98432 kernel rollout in the rollout runbook (`docs/deploy/history/rollouts/cve-2026-98432-guest-kernel.md`): every production edge host, box and leased slice VM is on 6.12.113, the 194 never-leased available rows were destroyed and 40 rebaked from the fixed guest image, and the lessons from the run (reading a lane's box list on its own descriptor, confirming a scheduled reboot timer, retrying dropped dials) are written down for the next fleet sweep.
+
+`next_deploy.md`: the available-row counts line now reflects the rebaked pool, the US-EAST-VA capacity item is discharged (the region's never-leased old rows are gone), and the `6bccf020` item is discharged (the box was drained and repaved the same day).
+
+The operator drivers the run ended with (lane and box reboot, edge-host reboot, bakes from tag worktrees, slice verification, pool row export) are kept beside the runbook under `docs/deploy/history/rollouts/cve-2026-98432-guest-kernel-drivers-temporary/`, marked `CLEANUP` for deletion once the second pass over the stopped workspaces is done.
+
+Record the second pass of the CVE-2026-98432 kernel rollout in its runbook: the 13 gen-2 workspaces that were stopped during the production sweep were started, moved onto a fixed kernel (a reboot where the VM has autostart units, an install for the next boot where it has not) and stopped again as `idle`, each with a fresh artifact. The per-workspace driver, its list runner and the row-state helper join the temporary drivers directory beside the runbook.
+
+## 2026-11-01
+
+- Cut the Imbue Studio 0.10.0 release: the app version is 0.10.0 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.10.0`, carrying everything that landed on `main` since `minds-v0.9.5`. A minor release, so every workspace on 0.9.x and older is prompted to take the new template; the template security floor stays `minds-v0.9.0`, and the kernel security floor (CVE-2026-98432) ships as its own badge. Highlights: the Screen, a streamed Linux desktop with its own browser that agents and people share, with published ports and TURN relay credentials for its media; the multiplayer chat rooms and per-account keybindings; Lima and cloud VMs on a vulnerable kernel are badged with a one-click restart onto the fixed one; new Lima VMs boot the `20261026-2643` Debian image; and the workspace-update, pre-deploy QA and TCP forwarding fixes since 0.9.5.
+
+- The warm-mngr-process stop-timeout test waits for the reader thread to reach its read loop before stopping it, so it no longer fails when the stop lands while the thread is still setting that loop up.
+
+- The release-tier tests follow the product again: the raw pool-lease deployment tests (lease isolation, machine resize, stop and start) declare the ports the bake template publishes, which a lease has required since the Screen's ICE ports, and the workspace-sync Electron tests drive the signed-in account's own home page, mark onboarding complete on a fresh install, and expect a workspace link to move the window to its hub, as every window shows one account now.
+
+- Recorded the 0.10.0 cut in `docs/deploy/history/minds-v0.10.0.md`, reset `docs/deploy/next_deploy.md` to what the release's rehearsal, deploy, bake and promotion still owe, and added two failure modes to the app-release runbook: a revoked CI Anthropic key (the first reply never arrives while every real-Claude release test fails with 401) and release-tier tests that only run on a release dispatch going stale.
+
+A bug report filed from a workspace while an earlier report from it is still collecting now waits for that collection to end and then collects afresh, instead of starting a second collection beside it, so its archive still covers what happened after the first report. Reports that wait together, asking for the same logs and chats, share that next collection. Two reports a minute apart used to run two collections at once on a workspace already too slow to finish one, and both lost their archive to the 300 s timeout.
+
+- Added the rollout runbook `docs/deploy/history/rollouts/cve-2026-98432-guest-kernel.md`: which of the fleet's hosts carry a kernel (slice VMs, bare-metal boxes, the relay and observability VPSes, desktop Lima VMs), how each one reaches the Debian trixie `6.12.113-1` kernel that fixes CVE-2026-98432 (a TCP use-after-free), the read-only survey that precedes any reboot, and the order of the sweep (edge hosts, destroying the never-leased available rows, box re-prep then in-place reboot with every leased VM riding it, `minds-admin reboot-guest-kernel` for the VMs a probe still finds below the floor, a rebake, a later pass for stopped workspaces), with the two box-reboot faults the dev tier surfaced and why a parked slice must not ride a box reboot.
+
+- The release checklist (`docs/deploy/ops/app-release.md`) now lists `DEBIAN_CLOUD_IMAGE_KERNEL_PACKAGE_VERSION` among the guest-image pins that move together, since it is the floor `minds-admin reboot-guest-kernel` holds VMs to.
+
+- Imbue Studio now reads the kernel a local Lima VM or a cloud-connection VPS (AWS, GCP, Azure, Vultr) boots, in the same background sweep that reads each workspace's template version, and badges a machine still running a kernel below the CVE-2026-98432 floor (Debian 13 `linux` 6.12.113-1) as a "Security update" on its row and in the titlebar pill. The Updates tab explains the advisory and offers "Restart machine", which starts a machine found stopped, installs the kernel package, stops the host, brings the machine back on the new kernel (a Lima VM through its own stop and start, as is an AWS, GCP or Azure instance, which the stop pauses and the start boots; a Vultr VPS, which runs on through its container's stop, through an in-place reboot), starts the host again, and clears the badge only once the machine answers with a new boot id on a kernel at or above the floor. The restart is refused while a template update is running, and asks before going ahead past a chat that is still working or chats that could not be listed. Only workspaces at `minds-v0.9.0` or later are offered it, since older templates' pinned apt snapshot cannot resolve the fixed package; those already show the template security update, which comes first. Imbue Cloud workspaces (the fleet reboots those), Modal sandboxes, and Docker workspaces on the user's own machine are never probed or badged.
+
+The mac runner's app download for the launch-to-msg run (`apps/minds/scripts/mac-runner-reset.sh`) now retries up to five times, ten seconds apart, on any curl failure. A ToDesktop CDN `curl: (92) ... INTERNAL_ERROR` reset used to fail the whole run on the first attempt, which discharges the next-deploy checklist item that asked for that flake to be filed.
+
+Phase 2 of the user profile state spec (`specs/user-profile-state/spec.md`): the settings model. Every value stays where it is; what changes is that every declared setting now has one scope, one override rule, and one resolution path, which is what lets phase 3 move the account-keyed values into a synced per-account record without touching behavior.
+
+- A new settings registry (`desktop_client/settings/`) declares each setting's scope (install-keyed or account-keyed) and override kind, with the `InstallSettings` / `AccountSettings` carrier records fixing the field names the synced settings document will use (`settings_format` 1, unknown keys kept, a too-new record readable but not writable). One resolution function answers every read in the spec's order: the workspace's override (per user when declared), then the scope's value, then the default. Every account-keyed reader (the update window, the auto-update toggle and offer answer, the master notifications toggle) goes through it. A workspace's own auto-update setting (its custom window, or manual) is read as that workspace's own fact and layered over the resolved app-wide switch and window, so no reader composes the two from `config.toml` itself.
+
+- The account-keyed settings are edited through one route pair, `GET`/`PUT /ui/api/settings/<account_id>`. The PUT is partial (any subset of the record's fields) and replaces the `update-window`, `auto-update`, and `auto-update-prompt` POST routes; in this phase every account id reads and writes the one install-wide copy `config.toml` holds, so the settings page keeps presenting these as install-level values.
+
+- The notifications write splits along its scopes: `POST /ui/api/settings/notifications` now writes only the install-keyed delivery style (keeping its If-Match guard), and the account-keyed master toggle goes through the settings PUT. Saving either still counts as having chosen notification preferences.
+
+Phase 3A of `specs/user-profile-state/spec.md`: account-keyed settings follow the account. The update window, the auto-update toggle and its one-time offer's answer, and the master notifications toggle move out of `config.toml` into one record per account id (the device's `local` included); the signed-in accounts' records sync through the connector's account documents store as the `settings` document, pulled and pushed on every sync pass -- so a preference set on one computer reaches every computer the account is signed in on.
+
+- A generic `AccountDocumentStore` (replica files, dirty-wins pulls, CAS pushes with one local-wins rebase, tombstones, the too-new gate) is factored out of the connection store; the connection store and the new settings store are its two clients.
+
+- The settings routes write the per-account replica and kick the scheduler; the settings overview takes the window's account as a query parameter; the update machinery and the notification dispatch gate resolve each workspace's or notification's owning account; the updates frame carries each account's own window and toggle, and a workspace's own auto-update setting layers over its owning account's switch and window, in the arm decision and in the frame's rows alike.
+
+- A one-time migration seeds the records from `config.toml`'s values (an account's existing server document wins on first pull) and deletes the moved keys.
+
+User-profile-state phase 3B, the workspace boundary (spec sections 7.4, 7.5, and 8):
+
+- The per-workspace update facts move into each workspace: the skipped update target and the update-row dismissals now live beside `data/.state/update-apply/schedule.json` (written through the update program's `read`, which doubles as the write-through for queued changes), and the backup-verification flag lives as `verification_disabled` in the workspace's `data/system/backup.toml` (written through the new `backup_verification_flag` program). Every computer managing a workspace now agrees on them.
+
+- Each install keeps a per-workspace facts cache that answers while a workspace is stopped and queues changes until a write-through lands; a one-shot CLEANUP-marked migration seeds it from the old per-install stores (`[updates.skipped_targets]` in config.toml, `update_dismissals/`, `backup_verification_disabled/`) and removes them.
+
+- Backup checks now read the verification flag from the workspace itself: the check program answers the flag first and skips the expensive work when verification is off, so a flag flipped on another computer is honored on the next check.
+
+- The desktop materializes the workspace profile snapshot (`data/.state/profile/account.json`: the workspace's account and owner; no setting keys yet) on create right after the welcome chat is seeded, on sync passes whose resolved content moved, and on association change. The creating client also writes `data/.state/user_timezone` once, when absent; the `/api/v1/timezone` route stays, CLEANUP-marked, for older templates.
+
+- The snapshot's format and keys are published as `workspace_profile_contract.json`, which the template vendors and pins its reader against.
+
+Phase 3C of the user-profile-state spec: keybindings become the first account-keyed setting a workspace consumes and the only one it may change.
+
+- `keybindings` is a declared account-keyed setting (`desktop_client/settings/schema.py`) with the workspace-per-user override kind, carried on `AccountSettings` as app name -> action id -> chord list and resolved through the new `resolve_keybindings` wrapper.
+
+- A new chord grammar module (`desktop_client/settings/keybindings.py`) validates the canonical chord spelling (lowercase tokens joined with `+`, modifiers in the fixed ctrl/alt/shift/meta order, named keys from the lowercased `KeyboardEvent.key` vocabulary); the vocabulary is pinned cross-repo through `workspace_profile_contract.json`.
+
+- The workspace profile snapshot now carries the owning account's keybindings: `WorkspaceProfileWriter` resolves them from the account settings store, and the contract fixture's `setting_keys` gains `"keybindings"` (the template's reader pins against it).
+
+- New cross-workspace verb route `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings`, gated by the new `minds-workspaces-account-settings` latchkey verb: it validates the chord grammar, resolves the workspace's owning account from its association (409 for an unassociated workspace), applies the body to that account's settings replica, marks the workspace's snapshot stale, kicks the sync scheduler, and answers the applied value.
+
 ## 2026-10-31
 
 - The app-release runbook (`docs/deploy/ops/app-release.md`) records that a

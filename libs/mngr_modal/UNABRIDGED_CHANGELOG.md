@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-31
 
 When the Modal workspace ran out of deployed-app slots, every Modal test that deploys failed at once, and none of them said so. The failure arrived as an undifferentiated `MngrError`, and the acceptance fixture -- which retries the ephemeral-app cap, worded almost identically -- polled for four minutes per test on a condition that cannot clear, logging the wrong cause the whole time.

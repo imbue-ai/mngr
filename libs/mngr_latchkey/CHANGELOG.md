@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `minds-workspaces-account-settings` verb in the workspace-permissions catalog, a target-scoped PUT on `/account-settings/keybindings` that lets a workspace save keybindings to its owning account once approved.
+
 ### Changed
 
 - Changed: Bumped Latchkey version to 3.21.0; the bundled service catalog now includes Asana.

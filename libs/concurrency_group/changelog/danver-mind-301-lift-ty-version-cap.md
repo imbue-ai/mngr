@@ -1,1 +1,0 @@
-MIND-301: `ObservableThread` reads its target's `__name__` without first testing the always-truthy target callable. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

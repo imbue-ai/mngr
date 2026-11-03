@@ -1,1 +1,0 @@
-- The default Lima guest image moved to the Debian 13 genericcloud release `20261026-2643` (kernel `6.12.113-1`, carrying the fix for CVE-2026-98432), in step with the gen-2 slice guest image.

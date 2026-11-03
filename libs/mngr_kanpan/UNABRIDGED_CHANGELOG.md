@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: `_build_focus_map` declares urwid's own `Hashable` attribute-map types, which urwid's `AttrMap` signature requires. Tests that render an agent row share a `_rendered_segments` helper typed against `Columns`, and the `PrField` immutability test uses `assert_model_is_frozen`. Type-checker-only; the board renders exactly as before.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

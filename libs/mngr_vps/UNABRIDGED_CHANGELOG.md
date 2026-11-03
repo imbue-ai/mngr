@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-17
 
 The VPS providers publish the ports declared with `mngr create --publish <port>[/<protocol>]` (`specs/published-ports/spec.md`): the container realizer adds `-p 0.0.0.0:<port>:<port>/<protocol>` beside the sshd mapping, and the endpoints (the VM's public address at the guest port number) are recorded on the host for `mngr list --format json`.

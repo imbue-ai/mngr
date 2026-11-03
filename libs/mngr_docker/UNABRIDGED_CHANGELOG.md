@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-02
+
+MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
+
 ## 2026-10-17
 
 The docker provider publishes the ports declared with `mngr create --publish <port>[/<protocol>]` (`specs/published-ports/spec.md`): each declaration becomes a `docker run -p` spec beside the one for sshd, bound where sshd is bound (`127.0.0.1` for a local daemon, every interface of the daemon host for a remote one, or `ssh_bind_address` when set).

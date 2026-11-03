@@ -1,1 +1,0 @@
-MIND-301: `GcpProviderConfig.default_region` is marked as a deliberate widening: GCP derives the region from the zone when it is unset, where `VpsProviderConfig` requires one. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

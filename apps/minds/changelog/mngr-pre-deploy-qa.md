@@ -1,1 +1,0 @@
-The mac runner's app download for the launch-to-msg run (`apps/minds/scripts/mac-runner-reset.sh`) now retries up to five times, ten seconds apart, on any curl failure. A ToDesktop CDN `curl: (92) ... INTERNAL_ERROR` reset used to fail the whole run on the first attempt, which discharges the next-deploy checklist item that asked for that flake to be filed.
