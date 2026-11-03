@@ -31,7 +31,7 @@ jobs:
       - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           version: "0.13.4"
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
       # The restic minds bundles, staged where the minds tests look for it.
       - run: |
           node -e "const b = require('./apps/minds/scripts/download-binaries.js'); b.BINARIES.restic.download('apps/minds/resources', b.getPlatformArch()).catch((e) => { console.error(e); process.exit(1); })"
