@@ -770,7 +770,7 @@ class InteractiveAgentMixin(ABC):
     command checks ``isinstance(agent, InteractiveAgentMixin)`` to decide whether an
     agent type can be messaged at all (rather than every agent carrying a rejecting
     stub). The send mechanism differs by agent: keystroke injection into a tmux pane
-    (``SendKeysAgent`` / ``InteractiveTuiAgent``, used by claude/codex/antigravity and the
+    (``SendKeysAgent`` / ``InteractiveTuiAgent``, used by the interactive TUI agents and the
     bare ``command`` runner) or an agent-native API (opencode's server, pi's extension).
     """
 
@@ -891,9 +891,8 @@ def require_key_chord_agent(agent: AgentInterface[Any]) -> SupportsKeyChordMixin
 
 
 class CliBackedAgentMixin:
-    """Marker for agents that wrap a specific external coding-model CLI (claude, codex,
-    antigravity, opencode, pi), as opposed to the bare ``command`` / ``headless_command``
-    runners that execute an arbitrary shell command.
+    """Marker for agents that wrap a specific external coding-model CLI, as opposed to the
+    bare ``command`` / ``headless_command`` runners that execute an arbitrary shell command.
 
     A bare marker with no contract of its own. The CLI-oriented capabilities (a native
     transcript, auto-install, version management, per-tool permission policy, usage tracking,

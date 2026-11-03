@@ -1,0 +1,199 @@
+# Expected readings of every capture in this directory, checked by grok_screen_test.py.
+# ready: is_ready_for_paste. idle: is_idle_and_empty. gate: detect_gate_screen ("" for none).
+# text: composer_holds_text. cancel: has_cancel_hint. again: has_press_again_hint.
+captures = [
+  { file = "claudeiso_pane_permission_dialog_run_terminal_command.txt", ready = false, idle = false, gate = "PERMISSION_CARD", text = false, cancel = true, again = false },
+  { file = "drop_after_clearing_ctrlc.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "drop_restored_five_lines.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "drop_restored_one_line.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "drop_restored_pasted_six_lines.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "focus_after_escape.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "focus_after_typing.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "g100_notrust_launch_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "g100_trust_dialog_t05.txt", ready = false, idle = false, gate = "TRUST_DIALOG", text = false, cancel = false, again = false },
+  { file = "g170_trust_after_yes_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "g170_trust_after_yes_t4.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "g170_trust_dialog_t05.txt", ready = false, idle = false, gate = "TRUST_DIALOG", text = false, cancel = false, again = false },
+  { file = "g170_welcome_after_turn.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "g170_welcome_t05.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "g170_welcome_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "gates_consent_accepted_welcome_empty_composer.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "gates_consent_notice_after_typed_text_and_enter.txt", ready = false, idle = false, gate = "CONSENT", text = false, cancel = false, again = false },
+  { file = "gates_consent_notice_default_title_and_label.txt", ready = false, idle = false, gate = "CONSENT", text = false, cancel = false, again = false },
+  { file = "gates_login_screen_after_paywall_l_logout.txt", ready = false, idle = false, gate = "LOGIN", text = false, cancel = false, again = false },
+  { file = "gates_paywall_free_tier_custom_label.txt", ready = false, idle = false, gate = "PAYWALL", text = false, cancel = false, again = false },
+  { file = "gates_paywall_free_tier_default_cta.txt", ready = false, idle = false, gate = "PAYWALL", text = false, cancel = false, again = false },
+  { file = "gates_paywall_lifted_after_server_upgrade.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "gates_recipe_b_idle_after_first_turn.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "gates_recipe_b_welcome_fresh_session_ready.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "gates_recipe_b_welcome_text_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "int_5a_after_ctrlc_01.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "int_5a_busy_typed_before_ctrlc.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "int_5a_turn_finished.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "int_5b_gap0.3_after_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = true },
+  { file = "int_5b_gap0.3_after_02.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "int_5b_tool_busy.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "int_5c_after_fast_double_press.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "int_5c_idle_ctrlc_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = true },
+  { file = "int_5c_idle_ctrlc_02.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "int_5d_after_ctrlc_01.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "int_5d_busy_queued.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "int_5d_settled.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "p100_busy_paste_six_chip.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "p100_paste_six_line_over_1024_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p100_queued_long_single.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "p100_queued_paste_six.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "p170_busy_paste_six_chip.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "p170_keys_five_line_under_1024_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p170_paste_four_line_paste_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p170_paste_one_line_1500_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p170_paste_six_line_over_1024_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p170_paste_three_line_paste_composer.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "p170_queue_drained.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "p170_queued_long_single.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "p170_queued_multi.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "p170_queued_paste_six.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "perm2_sb_after_enter.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "perm2_sb_after_paste.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "perm_after_ctrlc.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "perm_after_escape.txt", ready = false, idle = false, gate = "PERMISSION_CARD", text = false, cancel = true, again = false },
+  { file = "perm_card.txt", ready = false, idle = false, gate = "PERMISSION_CARD", text = false, cancel = true, again = false },
+  { file = "perm_card_after_typing.txt", ready = false, idle = false, gate = "PERMISSION_CARD", text = false, cancel = true, again = false },
+  { file = "sessions_q4_long_unicode_ready.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "sessions_q4_plain_ready.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "sessions_q5_quit_resume_before_prompt.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "sessions_q8_N1_typed_new.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "term2_notmux_plain_idle.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "trust_plain_none_startup.txt", ready = false, idle = false, gate = "TRUST_DIALOG", text = false, cancel = false, again = false },
+  { file = "w100_a_fresh_t05.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w100_b_fresh_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "w100_e_busy_empty.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w100_f_busy_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "w100_g_busy_queued1_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "w100_g_busy_queued2.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w100_i_resume_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w100_i_resume_04.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w100_k_launch_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_a_fresh_t05.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_b_fresh_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "w170_c_idle_after_turn.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_d_idle_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "w170_d_idle_typed_ctrlc_01.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_e_busy_empty.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w170_f_busy_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "w170_g_after_queue_drained.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_g_busy_queued1.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w170_g_busy_queued1_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "w170_g_busy_queued2.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w170_h_after_quit_shell.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_h_ctrlq_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = true },
+  { file = "w170_h_ctrlq_02.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_i_resume_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_i_resume_04.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_i_resume_t10.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_k_launch_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_k_launch_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w170_k_launch_04.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_a_fresh_t05.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_b_fresh_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = false, again = false },
+  { file = "w80_d_idle_after_ctrlc_t3.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_e_busy_empty.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w80_f_busy_typed.txt", ready = true, idle = false, gate = "", text = true, cancel = true, again = false },
+  { file = "w80_g_busy_queued1.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w80_g_busy_queued2.txt", ready = true, idle = false, gate = "", text = false, cancel = true, again = false },
+  { file = "w80_h_ctrlq_01.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = true },
+  { file = "w80_i_resume_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_i_resume_04.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_k_launch_03.txt", ready = false, idle = false, gate = "", text = false, cancel = false, again = false },
+  { file = "w80_k_launch_05.txt", ready = true, idle = true, gate = "", text = false, cancel = false, again = false },
+]
+
+# Queued rows (parse_queued_rows) and the messages a queued row matches (count_queued_rows_matching_message) or not.
+# A capture without a table here shows no queued rows. *_files entries name message files under messages/.
+
+[queued."w170_g_busy_queued1.txt"]
+rows = ["typed while busy one"]
+queued = ["typed while busy one"]
+not_queued = ["typed while busy", "second queued message two", "SLOWTEST e"]
+
+[queued."w170_g_busy_queued1_typed.txt"]
+rows = ["typed while busy one"]
+queued = ["typed while busy one"]
+not_queued = ["second queued message two"]
+
+[queued."w170_g_busy_queued2.txt"]
+rows = ["typed while busy one", "second queued message two"]
+queued = ["typed while busy one", "second queued message two"]
+not_queued = ["SLOWTEST e"]
+
+[queued."w170_g_after_queue_drained.txt"]
+rows = []
+not_queued = ["typed while busy one", "second queued message two"]
+
+[queued."w170_i_resume_04.txt"]
+rows = []
+not_queued = ["typed while busy one", "second queued message two"]
+
+[queued."w100_g_busy_queued1_typed.txt"]
+rows = ["typed while busy one"]
+queued = ["typed while busy one"]
+not_queued = ["second queued message two"]
+
+[queued."w100_g_busy_queued2.txt"]
+rows = ["typed while busy one", "second queued message two"]
+queued = ["typed while busy one", "second queued message two"]
+
+[queued."w80_g_busy_queued1.txt"]
+rows = ["typed while busy one"]
+queued = ["typed while busy one"]
+not_queued = ["second queued message two"]
+
+[queued."w80_g_busy_queued2.txt"]
+rows = ["typed while busy one", "second queued message two"]
+queued = ["typed while busy one", "second queued message two"]
+
+[queued."int_5d_busy_queued.txt"]
+rows = ["queued during 5d"]
+queued = ["queued during 5d"]
+
+[queued."int_5d_after_ctrlc_01.txt"]
+rows = []
+not_queued = ["queued during 5d"]
+
+[queued."p170_queued_long_single.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word2"]
+queued_files = ["messages/long_queued_single.txt"]
+not_queued = ["LONGQUEUED start", "LONGQUEUED start word1 word2 xyz"]
+not_queued_files = ["messages/multi_queued_three.txt"]
+
+[queued."p170_queued_multi.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word2", "MULTIQ first line"]
+queued = ["\n\nMULTIQ first line\nanother second line"]
+queued_files = ["messages/long_queued_single.txt", "messages/multi_queued_three.txt"]
+not_queued = ["MULTIQ second line"]
+not_queued_files = ["messages/six_line_over_1024.txt"]
+
+[queued."p170_queued_paste_six.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word2", "MULTIQ first line", "PASTE6 line 1 marker111 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence the quick brown fox jumps over the lazy"]
+queued_files = ["messages/long_queued_single.txt", "messages/multi_queued_three.txt", "messages/six_line_over_1024.txt"]
+not_queued_files = ["messages/four_line_paste.txt"]
+
+[queued."p170_busy_paste_six_chip.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word2", "MULTIQ first line"]
+queued_files = ["messages/long_queued_single.txt", "messages/multi_queued_three.txt"]
+not_queued_files = ["messages/six_line_over_1024.txt"]
+
+[queued."p100_queued_long_single.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word1"]
+queued_files = ["messages/long_queued_single.txt"]
+not_queued = ["LONGQUEUED start word1 word2 xyz"]
+
+[queued."p100_queued_paste_six.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word1", "MULTIQ first line", "PASTE6 line 1 marker111 the quick brown fox jumps over the lazy dog while the a"]
+queued_files = ["messages/long_queued_single.txt", "messages/multi_queued_three.txt", "messages/six_line_over_1024.txt"]
+not_queued_files = ["messages/four_line_paste.txt"]
+
+[queued."p100_busy_paste_six_chip.txt"]
+rows = ["LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word1", "MULTIQ first line"]
+queued_files = ["messages/long_queued_single.txt", "messages/multi_queued_three.txt"]
+not_queued_files = ["messages/six_line_over_1024.txt"]

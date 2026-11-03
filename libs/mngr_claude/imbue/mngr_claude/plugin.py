@@ -52,6 +52,7 @@ from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
+from imbue.mngr.agents.tui_utils import is_shell_command_message
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_key_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
@@ -166,7 +167,6 @@ from imbue.mngr_claude.dialogs import has_input_prompt_line
 from imbue.mngr_claude.dialogs import is_input_text_of_message
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
 from imbue.mngr_claude.dialogs import is_restored_compact_command
-from imbue.mngr_claude.dialogs import is_shell_command_message
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 

@@ -1,0 +1,50 @@
+
+  ~/project                                                                                                                                                                     6 / 131K │ [Dashboard]
+
+
+     ❯ hello before the held reply 86a5065a                                                                                                                                                  0:00 PM
+
+
+     STUB_REPLY k=2: OK                                                                                                                                                                      0:00 PM
+
+     Worked for 0.4s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ HOLDTEST line 1 of the held prompt 86a5065a                                                                                                                                                    │
+  │   HOLDTEST line 2 of the held prompt 86a5065a                                                                                                                                                    │
+  │   HOLDTEST line 3 of the held prompt 86a5065a                                                                                                                                                    │
+  │   HOLDTEST line 4 of the held prompt 86a5065a                                                                                                                                                    │
+  │   HOLDTEST line 5 of the held prompt 86a5065a                                                                                                                                                    │
+  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub · always-approve ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

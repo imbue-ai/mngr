@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import pytest
+
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import RequiredPackagesGate
 from imbue.mngr.plugin_catalog import SignalCheck
@@ -8,6 +12,7 @@ from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
 from imbue.mngr.plugin_catalog import get_catalog_entry
 from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import PluginTier
+from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 
 # PLUGIN_CATALOG structure
 
@@ -69,6 +74,25 @@ def test_docker_plugin_detects_its_daemon() -> None:
     assert entry.is_recommended is True
     assert isinstance(entry.gate, SignalGate)
     assert entry.gate.signal.command == ("docker", "version", "--format", "{{.Server.Version}}")
+
+
+@pytest.mark.parametrize(
+    ("version_output", "is_detected"),
+    [
+        ("grok 1.0.62 (1474f9cbdd91)", True),
+        ("grok-cli 0.0.34", False),
+        ("1.0.62", False),
+    ],
+)
+def test_grok_signal_accepts_only_the_grok_build_version_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version_output: str, is_detected: bool
+) -> None:
+    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "grok", version_output)
+    entry = get_catalog_entry("grok")
+    assert entry is not None
+    assert entry.is_recommended is False
+    assert isinstance(entry.gate, SignalGate)
+    assert check_signal(entry.gate.signal) is is_detected
 
 
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:

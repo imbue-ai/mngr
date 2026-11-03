@@ -44,6 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Final
 
 import pytest
 from pydantic import BaseModel
@@ -61,6 +62,12 @@ _MESSAGE_TIMEOUT_SECONDS = 180.0
 _RESPONSE_TIMEOUT_SECONDS = 300.0
 _RUNNING_TIMEOUT_SECONDS = 90.0
 _LIFECYCLE_TIMEOUT_SECONDS = 150.0
+
+# The command a tool-forcing profile's seed prompt asks the agent to run.
+SEED_TOOL_COMMAND: Final[str] = "echo SEEDED"
+RECALL_PROMPT: Final[str] = "What was the exact secret I asked you to remember earlier? Reply with just the secret."
+# The message journey's busy step: the next send must meet this prompt's turn still running.
+MESSAGE_JOURNEY_BUSY_PROMPT: Final[str] = "Write a four-line poem about terminals, then reply with just DONE."
 
 
 class AgentReleaseContext(BaseModel):
@@ -157,12 +164,12 @@ class AgentReleaseProfile(abc.ABC):
         if self.forces_tool_call:
             return (
                 f"Remember this exact value for later: the secret answer is {secret}. "
-                "Then use the bash tool to run exactly: echo SEEDED -- and finally reply with just ACK."
+                f"Then use the bash tool to run exactly: {SEED_TOOL_COMMAND} -- and finally reply with just ACK."
             )
         return f"Remember this exact secret for later: {secret}. Reply with just OK."
 
     def recall_prompt(self) -> str:
-        return "What was the exact secret I asked you to remember earlier? Reply with just the secret."
+        return RECALL_PROMPT
 
     @abc.abstractmethod
     def adopt_session_arg(self, preserved_dir: Path) -> str:
@@ -523,16 +530,14 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
                 ctx.teardown()
 
 
-# =============================================================================
-# Message-delivery journey (evidence-confirmed sends under racey conditions)
-# =============================================================================
+# Message-delivery journey: evidence-confirmed sends under racy conditions.
 
 # Sending to a busy agent may not confirm until the running turn dequeues the
 # prompt, so the per-send budget must comfortably exceed one model turn.
 _DELIVERY_SEND_TIMEOUT_SECONDS = 180.0
 
 
-def _agent_state_dir_by_name(host_dir: Path, agent_name: str) -> Path:
+def agent_state_dir_by_name(host_dir: Path, agent_name: str) -> Path:
     """Resolve an agent's state dir by its recorded name (for multi-agent hosts)."""
     agents_root = host_dir / "agents"
     matches: list[Path] = []
@@ -548,7 +553,7 @@ def _agent_state_dir_by_name(host_dir: Path, agent_name: str) -> Path:
 
 
 def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str) -> list[dict[str, Any]]:
-    return _read_common_records_in_state_dir(_agent_state_dir_by_name(host_dir, agent_name), subdir)
+    return _read_common_records_in_state_dir(agent_state_dir_by_name(host_dir, agent_name), subdir)
 
 
 def _user_steps_containing(records: list[dict[str, Any]], token: str) -> list[dict[str, Any]]:
@@ -676,12 +681,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         #    with acceptance evidence, the instant it is queued) and the message
         #    must eventually be processed.
         busy_token = f"BUSY-{run_id}"
-        _send_expecting_success(
-            profile,
-            ctx,
-            agent_name,
-            "Write a four-line poem about terminals, then reply with just DONE.",
-        )
+        _send_expecting_success(profile, ctx, agent_name, MESSAGE_JOURNEY_BUSY_PROMPT)
         _send_expecting_success(
             profile, ctx, agent_name, f"Also remember this exact value: {busy_token}. Reply with just OK."
         )

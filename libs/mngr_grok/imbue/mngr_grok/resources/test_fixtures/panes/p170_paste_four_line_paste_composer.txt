@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/p170                                                                                                                     25 / 131K │ [Dashboard]
+
+
+     ❯ PASTE6 line 1 marker111 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence the quick brown fox jumps over the lazy    0:00 PM
+       dog while the agent waits for paste evidence
+       PASTE6 line 2 marker222 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence the quick brown fox jumps over the …
+
+
+     STUB_REPLY: hello from the stub model nuser=3 last=[e the agent waits for paste evidence /user_query]                                                     0:00 PM
+
+     Worked for 1.1s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                       ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+                       │PASTE4 line 1 m1 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                     │
+                       │PASTE4 line 2 m2 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                     │
+                       │PASTE4 line 3 m3 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                     │
+                       │PASTE4 line 4 m4 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                     │
+                       ╰─ paste again or double-click to expand ──────────────────────────────────────────────────────────────────────────────────╯
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ [Pasted: 4 lines]                                                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

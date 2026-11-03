@@ -106,7 +106,6 @@ from imbue.mngr_claude.dialogs import PendingShellCommand
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.dialogs import has_input_prompt_line
 from imbue.mngr_claude.dialogs import is_pending_shell_command
-from imbue.mngr_claude.dialogs import is_shell_command_message
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.plugin import CLAUDE_INSTALL_PATH
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -1969,16 +1968,6 @@ def test_has_input_prompt_line_matches_only_column_zero_glyph() -> None:
     assert has_input_prompt_line("output\n❯ ") is True
     assert has_input_prompt_line("────\n  ❯ 1. Yes\n    2. No") is False
     assert has_input_prompt_line("just some text") is False
-
-
-def test_is_shell_command_message_detects_leading_bang() -> None:
-    """A leading `!` (after any leading whitespace) selects shell mode; nothing else does."""
-    assert is_shell_command_message("!") is True
-    assert is_shell_command_message("!echo mngr-behaviors-probe") is True
-    assert is_shell_command_message("   !ls") is True
-    assert is_shell_command_message("/clear") is False
-    assert is_shell_command_message("hello") is False
-    assert is_shell_command_message("echo !bang-in-the-middle") is False
 
 
 # The empty shell-mode input row Claude renders after a bare `!` (column-0 `!` plus the

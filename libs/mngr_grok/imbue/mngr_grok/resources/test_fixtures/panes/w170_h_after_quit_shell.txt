@@ -1,0 +1,48 @@
+bash-5.3$ /tmp/scratch/prereq/common/run_grok.sh /tmp/scratch/prereq/input /tmp/scratch/prereq/input/gh_w170 /tmp/scratch/prereq/input/work/w170 -s f689aa25-9019-4c5c-8c0
+2-f078d445deb7
+
+
+
+
+STUB_REPLY: hello from the stub model nuser=5 last=[— respon...
+> second queued message two
+  STUB_REPLY: hello from the stub model nuser=6 last=[user_query second queued message two /user_query]
+
+Resume this session with:
+  grok --resume f689aa25-9019-4c5c-8c02-f078d445deb7
+bash-5.3$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

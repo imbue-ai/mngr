@@ -1,0 +1,30 @@
+
+  /p/t/c/-/9/s/p/i/work/p100                                               37 / 131K │ [Dashboard]
+
+
+     ❯ SLOW40 queue formats                                                              0:00 PM
+
+
+     STUB_REPLY: long w1 w2 w3 w4 w5 w6                                                  0:00 PM
+
+
+
+
+                                                                                                   █
+                                                                                                   █
+                                                                                                   █
+
+    #1 LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word1…
+    #2 MULTIQ first line (+2 lines)
+    #3 PASTE6 line 1 marker111 the quick brown fox jumps over the lazy dog while the a… (+5 lines)
+
+    ⠼ Responding… 7.3s                                                             7.4s ⇣37 [stop]
+
+   Queued · Enter to send now
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                            │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send now  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+;:queue  │  Ctrl+x:shortcuts
+

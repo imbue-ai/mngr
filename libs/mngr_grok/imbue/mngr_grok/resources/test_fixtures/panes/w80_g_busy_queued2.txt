@@ -1,0 +1,24 @@
+
+  /p/t/c/-/9/s/p/i/work/w80                            31 / 131K │ [Dashboard]
+
+
+     ❯ SLOWTEST e                                                    0:00 PM
+
+
+     STUB_REPLY: slow one two three four                             0:00 PM   █
+                                                                               █
+                                                                               █
+
+    #1 typed while busy one
+    #2 second queued message two
+
+    ⠦ Responding… 5.6s                                         5.6s ⇣31 [stop]
+
+   Queued · Enter to send now
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰─────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send now  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+;:queue  │
+

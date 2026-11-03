@@ -233,16 +233,6 @@ def count_message_turns_above_input_row(
     )
 
 
-@pure
-def is_shell_command_message(message: str) -> bool:
-    """Whether a message drives Claude Code's shell (bash) mode -- a leading ``!``.
-
-    Such a message runs a bash command in the pane (or, for a bare ``!``, does nothing)
-    rather than sending a model turn.
-    """
-    return message.lstrip().startswith("!")
-
-
 # The command Claude Code puts back into the input box when a compaction is cancelled.
 COMPACT_COMMAND: Final[str] = "/compact"
 

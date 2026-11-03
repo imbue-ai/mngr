@@ -1,0 +1,20 @@
+[features]
+telemetry = false
+
+[cli]
+auto_update = false
+use_leader = false
+
+[ui]
+prompt_suggestions = false
+max_thoughts_width = 120
+yolo = false
+compact_mode = false
+
+[marketplace]
+default_skills_installs_purged = true
+
+[consent.answers.stub-consent]
+version = 1
+account = "stub-user@test.invalid"
+acked = true

@@ -1,0 +1,50 @@
+
+  ~/project                                                                                                                                                                     6 / 131K │ [Dashboard]
+
+
+     ❯ hello before the held reply 660062f9                                                                                                                                                  0:00 PM
+
+
+     STUB_REPLY k=2: OK                                                                                                                                                                      0:00 PM
+
+     Worked for 0.4s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                          ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+                          │HOLDTEST pasted line 1 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          │HOLDTEST pasted line 2 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          │HOLDTEST pasted line 3 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          │HOLDTEST pasted line 4 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          │HOLDTEST pasted line 5 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          │HOLDTEST pasted line 6 660062f9 the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jump…│
+                          ╰─ paste again or double-click to expand ─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ [Pasted: 6 lines]                                                                                                                                                                              │
+  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub · always-approve ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

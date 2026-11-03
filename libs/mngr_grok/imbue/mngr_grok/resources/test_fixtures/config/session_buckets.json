@@ -1,0 +1,92 @@
+{
+  "grok_version": "1.0.62",
+  "cases": [
+    {
+      "label": "plain",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/plain",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fplain"
+    },
+    {
+      "label": "dotted",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/.mngr/worktrees/x",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2F.mngr%2Fworktrees%2Fx"
+    },
+    {
+      "label": "space",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/with space",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fwith%20space"
+    },
+    {
+      "label": "unicode_nfc",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/uni-\u00e9\u540d",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Funi-%C3%A9%E5%90%8D"
+    },
+    {
+      "label": "unicode_nfd",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/nfd-e\u0301",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fnfd-e%CC%81"
+    },
+    {
+      "label": "symlink",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/linktarget",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Flinktarget"
+    },
+    {
+      "label": "tmp_alias",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/viatmp",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fviatmp"
+    },
+    {
+      "label": "specials",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/a~b_c-d.e+f%g#h@i=j,k!l'm(n)o*p&q[r]s{t}u;v:w$x",
+      "is_long_form": true
+    },
+    {
+      "label": "ascii_255",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "label": "ascii_256",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "is_long_form": true
+    },
+    {
+      "label": "long_unicode",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/LongProject-\u540d\u524d-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "is_long_form": true
+    },
+    {
+      "label": "specials_safe",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/s1~_-.+%#@=",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fs1~_-.%2B%25%23%40%3D"
+    },
+    {
+      "label": "specials_reserved",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/s2!'()*&[]{};:$,",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fs2%21%27%28%29%2A%26%5B%5D%7B%7D%3B%3A%24%2C"
+    },
+    {
+      "label": "q1_gh_plain",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/plain",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fplain"
+    },
+    {
+      "label": "q3_gh2_second",
+      "canonical_path": "/private/tmp/fixture-00/fixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000/fixture-0000000000000000000000000000/scratchpad/prereq/sessions/w/second",
+      "is_long_form": false,
+      "observed_bucket": "%2Fprivate%2Ftmp%2Ffixture-00%2Ffixture-000000000000000000000000000000000000000000000000000000000000000000000000000000000%2Ffixture-0000000000000000000000000000%2Fscratchpad%2Fprereq%2Fsessions%2Fw%2Fsecond"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/p170                                                                                                                     37 / 131K │ [Dashboard]
+
+
+     ❯ SLOW40 queue formats                                                                                                                                    0:00 PM
+
+
+     STUB_REPLY: long w1 w2 w3 w4                                                                                                                              0:00 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+
+    #1 LONGQUEUED start word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word2…
+    #2 MULTIQ first line (+2 lines)
+
+    ⠙ Responding… 5.6s                                                                                                                                   5.7s ⇣37 [stop]
+
+   Queued · Enter to send now
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                                                                  │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send now  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+;:queue  │  Ctrl+x:shortcuts
+

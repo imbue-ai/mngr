@@ -130,6 +130,12 @@ def is_slash_command_message(message: str) -> bool:
     return message.lstrip().startswith("/")
 
 
+@pure
+def is_shell_command_message(message: str) -> bool:
+    """Whether a message is a TUI shell-mode command, a leading ``!``, which runs in the pane rather than as a turn."""
+    return message.lstrip().startswith("!")
+
+
 # The confirmation script's variable holding the tmux target of the pane the message was typed into,
 # for a probe that reads the agent's screen: the pane's ID, or an exact-match ``=session:window``,
 # with the rendered target's shell quoting already removed, so a probe passes it to ``-t`` as it is.

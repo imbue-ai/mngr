@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/p170                                                                                                                     20 / 131K │ [Dashboard]
+
+
+     ❯ ONELINE1500 start xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx         0:00 PM
+       xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx
+       xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx …
+
+
+     STUB_REPLY: hello from the stub model nuser=6 last=[xxxxxxxxxxxxxxxx ONELINE_TAIL_MARKER /user_query]                                                     0:00 PM
+
+     Worked for 0.8s
+
+
+
+
+
+
+
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ KEYS5 line 1 m11 short text for send-keys                                                                                                                        │
+  │   KEYS5 line 2 m22 short text for send-keys                                                                                                                        │
+  │   KEYS5 line 3 m33 short text for send-keys                                                                                                                        │
+  │   KEYS5 line 4 m44 short text for send-keys                                                                                                                        │
+  │   KEYS5 line 5 m55 short text for send-keys                                                                                                                        │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

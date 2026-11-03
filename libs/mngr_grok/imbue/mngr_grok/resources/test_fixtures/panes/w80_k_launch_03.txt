@@ -1,0 +1,24 @@
+
+  /p/t/c/-/9/s/p/i/work/w80
+
+
+
+
+               New worktree                                 ctrl+w
+               Resume session                               ctrl+r
+               Changelog
+               Quit                                         ctrl+q
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰─────────────────────────────────────────────────────────────────── Stub ─╯
+
+                                 Logged in with API key  │  Grok Build  1.0.62
+

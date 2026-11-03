@@ -9,22 +9,22 @@ absent; `n/a` means the capability does not apply to that agent kind (an interac
 capability on a headless agent, or a CLI-specific capability on a bare command runner). See
 `libs/mngr/future_specs/capability-mixins.md` for the design.
 
-| Capability | claude | headless_claude | antigravity | codex | opencode | pi-coding | command | headless_command |
-|---|---|---|---|---|---|---|---|---|
-| raw_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
-| common_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
-| waiting_reason_field | Y | n/a | - | Y | Y | Y | n/a | n/a |
-| live_output | Y | Y | - | - | - | - | - | Y |
-| session_preservation | Y | Y | Y | Y | Y | Y | n/a | n/a |
-| session_resume | Y | n/a | Y | Y | Y | Y | n/a | n/a |
-| auto_install | Y | Y | Y | Y | Y | Y | n/a | n/a |
-| unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y |
-| permission_policy | - | - | Y | Y | Y | - | n/a | n/a |
-| version_management | Y | Y | - | Y | - | - | n/a | n/a |
-| deploy_contributions | Y | - | - | - | - | - | - | - |
-| usage_tracking | Y | - | - | Y | Y | Y | n/a | n/a |
-| compaction | Y | n/a | - | Y | - | Y | n/a | n/a |
-| headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | Y |
+| Capability | claude | headless_claude | antigravity | codex | grok | opencode | pi-coding | command | headless_command |
+|---|---|---|---|---|---|---|---|---|---|
+| raw_transcript | Y | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| common_transcript | Y | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| waiting_reason_field | Y | n/a | - | Y | Y | Y | Y | n/a | n/a |
+| live_output | Y | Y | - | - | - | - | - | - | Y |
+| session_preservation | Y | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| session_resume | Y | n/a | Y | Y | Y | Y | Y | n/a | n/a |
+| auto_install | Y | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| permission_policy | - | - | Y | Y | Y | Y | - | n/a | n/a |
+| version_management | Y | Y | - | Y | Y | - | - | n/a | n/a |
+| deploy_contributions | Y | - | - | - | - | - | - | - | - |
+| usage_tracking | Y | - | - | Y | - | Y | Y | n/a | n/a |
+| compaction | Y | n/a | - | Y | - | - | Y | n/a | n/a |
+| headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | n/a | Y |
 
 ## Capabilities
 

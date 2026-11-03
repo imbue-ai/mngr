@@ -1,10 +1,10 @@
 """Canonical schema for the agent-agnostic common-transcript stream.
 
-Every agent plugin emits a common, agent-type-independent JSONL stream (claude,
-codex, antigravity, opencode, pi-coding). Each line is one record whose ``type``
-is ``header``, ``step``, or ``observation``: a streaming form of ATIF (Harbor's
-Agent Trajectory Interchange Format; see ``specs/atif-transcript-alignment/spec.md``
-and the vendored models under :mod:`imbue.mngr.agents.data_types.atif`). Streams
+Every agent plugin emits a common, agent-type-independent JSONL stream. Each line
+is one record whose ``type`` is ``header``, ``step``, or ``observation``: a
+streaming form of ATIF (Harbor's Agent Trajectory Interchange Format; see
+``specs/atif-transcript-alignment/spec.md`` and the vendored models under
+:mod:`imbue.mngr.agents.data_types.atif`). Streams
 written before the ATIF cutover (see :data:`LEGACY_RECORD_TYPE_NAMES`) are reported
 as unsupported rather than rendered or rebuilt.
 
@@ -17,11 +17,11 @@ doc-builder strips the framing fields when assembling a full ATIF document.
 
 This module is the single source of truth for that contract. The contract is
 enforced at *emit* time, not read time: each plugin's conformance test asserts its
-emitter's real output validates against this schema, so the five independently
-written emitters (opencode and pi-coding in TypeScript; claude, antigravity, and
-codex in shell+Python) cannot silently drift on the shared fields. The reader
-(:mod:`imbue.mngr.cli.transcript`) deliberately stays tolerant -- it renders
-whatever an agent emitted rather than validating against this schema.
+emitter's real output validates against this schema, so the independently written
+emitters (in TypeScript and in shell+Python) cannot silently drift on the shared
+fields. The reader (:mod:`imbue.mngr.cli.transcript`) deliberately stays
+tolerant -- it renders whatever an agent emitted rather than validating against
+this schema.
 
 The records are strict (``extra="forbid"``): per-agent annotations belong under
 the ATIF ``extra`` objects, so the doc-builder can treat every other field as an

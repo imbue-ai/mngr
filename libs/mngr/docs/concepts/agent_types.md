@@ -105,3 +105,4 @@ mngr plugin list    # Shows installed plugins (listing agent types per plugin [f
 ```
 
 Built-in plugins provide `claude`, `codex`, and `command` by default.
+Other agent types, such as `opencode`, `antigravity`, and `grok`, come from separately installed plugins; [Supported Agent Types](../all_supported_agents.md) lists them with their packages.

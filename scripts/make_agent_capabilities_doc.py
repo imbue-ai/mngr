@@ -80,6 +80,7 @@ _MATRIX_AGENT_TYPE_ORDER: Final[tuple[str, ...]] = (
     "headless_claude",
     "antigravity",
     "codex",
+    "grok",
     "opencode",
     "pi-coding",
     "command",

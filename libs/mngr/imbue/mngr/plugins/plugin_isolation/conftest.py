@@ -20,6 +20,8 @@ def all_agent_type_plugins() -> frozenset[str]:
             "claude",
             "opencode",
             "antigravity",
+            "codex",
+            "grok",
             "pi_coding",
             "llm",
             "code_guardian",

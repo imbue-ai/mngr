@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/int                                                                                                                    1.4K / 131K │ [Dashboard]
+
+
+     ❯ SLOWTEST 5a turn                                                                                                                                        0:00 PM
+
+
+     STUB_REPLY: slow one two                                                                                                                                  0:00 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ⠙ Responding… 3.4s                                                                                                                                3.5s ⇣1.38k [stop]
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ draft text during turn                                                                                                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub · always-approve ─╯
+
+  Enter:queue  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+Enter:send now  │  Ctrl+x:shortcuts
+

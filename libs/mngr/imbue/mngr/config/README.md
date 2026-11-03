@@ -90,14 +90,15 @@ pydantic field metadata, so core never hard-codes the field name. Because such a
 field can only grow (a higher layer adding keys is a superset), it is also **exempt
 from the assign-narrowing detector**. The fields carrying it today are
 `CommandDefaults.defaults` (so each layer's `[commands.<name>]` table adds the parameters it
-names to the ones lower layers set) and `ClaudeAgentConfig.settings_overrides`.
+names to the ones lower layers set), `ClaudeAgentConfig.settings_overrides` and
+`GrokAgentConfig.settings_overrides`.
 `AntigravityAgentConfig.settings_overrides` mirrors claude's field by name but is *not* marked,
 so it still assigns by default.
 
 ### The `__mngr_merge` surface for `settings_overrides`
 
 `settings_overrides` is folded into a file an external AI CLI reads (Claude Code's /
-antigravity's `settings.json`). That CLI does not understand the `__extend` / `__assign`
+antigravity's `settings.json`, grok's `config.toml`). That CLI does not understand the `__extend` / `__assign`
 leaf suffixes and would treat `permissions__extend` as a junk literal key, so the
 suffixes are **rejected** on this path. Instead, merge intent is declared in a single
 top-level `__mngr_merge` map (dotted key path -> `"extend"` | `"assign"`), which the
@@ -120,7 +121,7 @@ intentionally drops the within-layer reset-then-add idiom (inexpressible in the 
 an external CLI reads). `mngr config extend|assign <path> <value>` writes these directives
 for you (bare value + a `__mngr_merge` entry) on a `settings_overrides` path.
 
-The provision-time fold (`apply_settings_patch`, shared by both plugins) strips a stray
+The provision-time fold (`apply_settings_patch`, shared by these plugins) strips a stray
 `__mngr_merge` from the base (a no-op on the floor) and, on a narrowing, reports the exact
 `__mngr_merge` patch to add. The remediation reports the full nested patch even where
 `narrowing_paths` stops at the dict level: a dict that drops a sibling key is suggested as
@@ -160,8 +161,8 @@ registry of paths, each with a wired consumer (`key_resolver.py`):
 
 - `create_templates.<name>` -> `apply_create_template` (at `mngr create` time).
 - `agent_types.<name>.settings_overrides` -> `external_settings.apply_settings_patch`
-  (via `mngr_claude` / `mngr_antigravity`), folded against the provisioned base
-  `settings.json`. Markers here arrive desugared from the `__mngr_merge` surface (above).
+  (via `mngr_claude` / `mngr_antigravity` / `mngr_grok`), folded against the provisioned base
+  `settings.json` (grok's `config.toml`). Markers here arrive desugared from the `__mngr_merge` surface (above).
 
 `__assign` preservation is scoped to `settings_overrides` only, because its consumer
 re-lifts the stored patch and honours the no-warn `Assign`; `create_templates` reads

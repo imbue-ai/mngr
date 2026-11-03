@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/w170                                                                                                                     31 / 131K │ [Dashboard]
+
+
+     ❯ SLOWTEST e                                                                                                                                              0:00 PM
+
+
+     STUB_REPLY: slow one two three                                                                                                                            0:00 PM
+
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+
+    #1 typed while busy one
+
+    ⠸ Responding… 4.8s                                                                                                                                   4.9s ⇣31 [stop]
+
+   Queued · Enter to send now
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ second queued message two                                                                                                                                        │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:queue  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+Enter:send now  │  Ctrl+x:shortcuts
+

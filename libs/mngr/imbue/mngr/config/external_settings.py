@@ -1,18 +1,17 @@
-"""Merge logic for settings files owned by an *external* AI CLI (Claude Code, antigravity).
+"""Merge logic for settings files owned by an *external* AI CLI.
 
-mngr bakes a per-agent ``settings.json`` that the external CLI reads directly, folding the
-agent type's ``settings_overrides`` onto a base (the user's synced home settings + mngr's
-own additions). Merge intent on this path cannot use mngr's internal ``__extend`` /
-``__assign`` leaf suffixes: the external CLI does not understand them and would treat
-``permissions__extend`` as a junk literal key. So intent is declared in a single top-level
-``__mngr_merge`` map (dotted key path -> ``"extend"`` | ``"assign"``) that the external CLI
-silently ignores.
+mngr bakes a per-agent settings file that the external CLI reads directly, folding the
+agent type's ``settings_overrides`` onto the base settings mngr builds for the agent. Merge
+intent on this path cannot use mngr's internal ``__extend`` / ``__assign`` leaf suffixes:
+the external CLI does not understand them and would treat ``permissions__extend`` as a junk
+literal key. So intent is declared in a single top-level ``__mngr_merge`` map (dotted key
+path -> ``"extend"`` | ``"assign"``) that the external CLI silently ignores.
 
 This module is the one place that knows that surface. It is self-contained -- it builds on
 the generic overlay algebra and the shared narrowing-message skeleton, but never on mngr's
-config-tree wiring. Callers drive it: ``key_resolver`` desugars at config-load, the
-claude/antigravity plugins fold at provision via ``apply_settings_patch``, and ``mngr
-config extend|assign`` writes ``__mngr_merge`` directives.
+config-tree wiring. It desugars the map into the internal suffix form at config-load
+(``desugar_settings_overrides``) and folds a desugared patch onto a base settings dict at
+provision (``apply_settings_patch``).
 
 ``__mngr_merge`` keys are dotted paths, so a settings key that contains a *literal* dot
 (e.g. an MCP server name like ``my.server``) cannot be targeted; such a directive fails the
@@ -50,9 +49,7 @@ OP_SUFFIXES: Final[dict[str, str]] = {"extend": EXTEND_SUFFIX, "assign": ASSIGN_
 _MISSING: Final = object()
 
 
-# =============================================================================
-# __mngr_merge surface -> internal suffix form (desugar), run at config-load
-# =============================================================================
+# __mngr_merge surface -> internal suffix form (desugar), run at config-load.
 
 
 def _suffix_op_word(suffix: str) -> str:
@@ -181,9 +178,7 @@ def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) 
     return _apply_marks(clean, marks, ())
 
 
-# =============================================================================
-# Provision-time fold + the __mngr_merge narrowing remediation
-# =============================================================================
+# Provision-time fold and the __mngr_merge narrowing remediation.
 
 
 def _remediation_directives(base: Any, override: Any, prefix: str) -> dict[str, str]:
@@ -255,10 +250,6 @@ def apply_settings_patch(
     base_description: str,
 ) -> dict[str, Any]:
     """Fold a desugared ``settings_overrides`` patch onto a concrete base settings dict.
-
-    Shared by the external-tool plugins (``mngr_claude``, ``mngr_antigravity``): both fold the
-    agent type's ``settings_overrides`` onto a base (the user's synced home settings + the
-    plugin's own additions) with identical semantics.
 
     Drops a top-level ``__mngr_merge`` key from the base (a no-op on the floor -- it merges
     onto nothing -- and the external tool ignores it, so it must not leak into the written

@@ -4,6 +4,7 @@ This module defines the full plugin catalog, signal checks for binary
 detection, and helpers used by the install wizard and test fixtures.
 """
 
+import shlex
 from typing import Final
 from typing import assert_never
 
@@ -88,6 +89,20 @@ class AntigravitySignalCheck(SignalCheck):
     command: tuple[str, ...] = ("agy", "--version")
 
 
+# A line of Grok Build's `grok --version` output, e.g. `grok 1.0.62 (1474f9cbdd91)`; both grep -E and re read it.
+GROK_BUILD_VERSION_LINE_PATTERN: Final[str] = r"^grok [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+\)"
+
+
+class GrokSignalCheck(SignalCheck):
+    """Detects whether xAI's Grok Build CLI is installed, rejecting other binaries named ``grok``."""
+
+    command: tuple[str, ...] = (
+        "sh",
+        "-c",
+        f"grok --version 2>/dev/null | grep -Eq {shlex.quote(GROK_BUILD_VERSION_LINE_PATTERN)}",
+    )
+
+
 class PiSignalCheck(SignalCheck):
     """Detects whether the Pi coding agent CLI is installed."""
 
@@ -135,6 +150,7 @@ _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
 _CODEX_SIGNAL: Final[CodexSignalCheck] = CodexSignalCheck()
 _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
+_GROK_SIGNAL: Final[GrokSignalCheck] = GrokSignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _DOCKER_SIGNAL: Final[DockerSignalCheck] = DockerSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
@@ -234,6 +250,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.INDEPENDENT,
         gate=SignalGate(signal=_ANTIGRAVITY_SIGNAL),
         is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="grok",
+        package_name="imbue-mngr-grok",
+        description="Grok Build agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_GROK_SIGNAL),
+        is_recommended=False,
     ),
     CatalogEntry(
         entry_point_name="pi_coding",

@@ -1,0 +1,48 @@
+bash-5.3$ /tmp/scratch/prereq/common/run_grok.sh /tmp/scratch/prereq/input /tmp/scratch/prereq/input/gh_int /tmp/scratch/prereq/input/work/int -s 9279b754-e76b-48a0-b74a-
+1b0ff2110c92
+
+
+
+
+SLOWTEST 5a turn
+> SLOWTEST 5a turn
+  STUB_REPLY: slow one two three four five six seven eight nine ten eleven twelve
+
+Resume this session with:
+  grok --resume 9279b754-e76b-48a0-b74a-1b0ff2110c92
+bash-5.3$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -340,48 +340,51 @@ def _present_keys(infos: tuple[AgentClassInfo, ...], agent_type_name: str) -> se
 def test_builder_detects_known_capabilities(loaded_plugin_manager: pluggy.PluginManager) -> None:
     infos = build_agent_class_infos(loaded_plugin_manager)
     agent_type_names = {i.agent_type_name for i in infos}
-    assert {"claude", "codex", "opencode", "pi-coding", "antigravity"} <= agent_type_names
+    assert {"claude", "codex", "opencode", "pi-coding", "antigravity", "grok"} <= agent_type_names
 
     # Every real agent emits both transcript layers; the bare config shells do not.
-    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity", "grok"):
         keys = _present_keys(infos, agent_type_name)
         assert "common_transcript" in keys
         assert "raw_transcript" in keys
     assert "common_transcript" not in _present_keys(infos, "command")
 
-    # waiting_reason field generator: claude/codex/opencode/pi yes (pi degenerately,
-    # a single-value END_OF_TURN); antigravity no (blocked on an upstream signal).
+    # pi's waiting_reason generator is degenerate (a single-value END_OF_TURN); antigravity has
+    # none because it is blocked on an upstream signal.
     assert "waiting_reason_field" in _present_keys(infos, "claude")
+    assert "waiting_reason_field" in _present_keys(infos, "grok")
     assert "waiting_reason_field" in _present_keys(infos, "codex")
     assert "waiting_reason_field" in _present_keys(infos, "opencode")
     assert "waiting_reason_field" in _present_keys(infos, "pi-coding")
     assert "waiting_reason_field" not in _present_keys(infos, "antigravity")
 
-    # live_output: claude publishes a streaming snapshot; codex does not.
     assert "live_output" in _present_keys(infos, "claude")
     assert "live_output" not in _present_keys(infos, "codex")
+    assert "live_output" not in _present_keys(infos, "grok")
     # session_resume (--adopt-session / --from carry-forward): every interactive agent.
-    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity", "grok"):
         assert "session_resume" in _present_keys(infos, agent_type_name)
-    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity", "grok"):
         assert "session_preservation" in _present_keys(infos, agent_type_name)
         assert "unattended_operation" in _present_keys(infos, agent_type_name)
-    # Per-resource permission policy: agy/opencode/codex yes; claude/pi no.
-    for agent_type_name in ("antigravity", "opencode", "codex"):
+    for agent_type_name in ("antigravity", "opencode", "codex", "grok"):
         assert "permission_policy" in _present_keys(infos, agent_type_name)
     assert "permission_policy" not in _present_keys(infos, "claude")
     assert "permission_policy" not in _present_keys(infos, "pi-coding")
-    # Version management: claude/codex yes; the rest no.
     assert "version_management" in _present_keys(infos, "claude")
     assert "version_management" in _present_keys(infos, "codex")
+    assert "version_management" in _present_keys(infos, "grok")
     assert "version_management" not in _present_keys(infos, "opencode")
 
     # Module-level capabilities (detected by package, not class).
     assert "deploy_contributions" in _present_keys(infos, "claude")
     assert "deploy_contributions" not in _present_keys(infos, "codex")
+    assert "deploy_contributions" not in _present_keys(infos, "grok")
     for agent_type_name in ("claude", "codex", "opencode", "pi-coding"):
         assert "usage_tracking" in _present_keys(infos, agent_type_name)
     assert "usage_tracking" not in _present_keys(infos, "antigravity")
+    assert "usage_tracking" not in _present_keys(infos, "grok")
+    assert "compaction" not in _present_keys(infos, "grok")
 
 
 def test_capability_matrix_doc_is_current(loaded_plugin_manager: pluggy.PluginManager) -> None:

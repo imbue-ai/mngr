@@ -1,0 +1,30 @@
+
+  /p/t/c/-/9/s/p/i/work/p100                                             1.4K / 131K │ [Dashboard]
+
+
+
+
+
+
+
+
+
+
+
+
+
+              ╭──────────────────────────────────────────────────────────────────────╮
+              │PASTE6 line 1 marker111 the quick brown fox jumps over the lazy dog w…│
+              │PASTE6 line 2 marker222 the quick brown fox jumps over the lazy dog w…│
+              │PASTE6 line 3 marker333 the quick brown fox jumps over the lazy dog w…│
+              │PASTE6 line 4 marker444 the quick brown fox jumps over the lazy dog w…│
+              │PASTE6 line 5 marker555 the quick brown fox jumps over the lazy dog w…│
+              │PASTE6 line 6 marker666 the quick brown fox jumps over the lazy dog w…│
+              ╰─ paste again or double-click to expand ──────────────────────────────╯
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ [Pasted: 6 lines]                                                                          │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

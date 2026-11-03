@@ -32,6 +32,7 @@ from imbue.mngr.agents.tui_utils import build_confirmation_command
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
+from imbue.mngr.agents.tui_utils import is_shell_command_message
 from imbue.mngr.agents.tui_utils import is_slash_command_message
 from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
@@ -176,6 +177,16 @@ def test_is_slash_command_message() -> None:
     assert is_slash_command_message("  /compact keep the summary short") is True
     assert is_slash_command_message("please run /clear for me") is False
     assert is_slash_command_message("hello") is False
+
+
+def test_is_shell_command_message_detects_leading_bang() -> None:
+    """A leading `!` (after any leading whitespace) selects shell mode; nothing else does."""
+    assert is_shell_command_message("!") is True
+    assert is_shell_command_message("!echo mngr-behaviors-probe") is True
+    assert is_shell_command_message("   !ls") is True
+    assert is_shell_command_message("/clear") is False
+    assert is_shell_command_message("hello") is False
+    assert is_shell_command_message("echo !bang-in-the-middle") is False
 
 
 # Probe constructors

@@ -22,6 +22,7 @@ The following agent types require installing an external plugin:
 |------|---------|-------------|--------|
 | `opencode` | `opencode` | [OpenCode](https://github.com/sst/opencode) - An open-source AI coding assistant. | `imbue-mngr-opencode` |
 | `antigravity` | `agy` | [Antigravity CLI](https://antigravity.google/docs/cli-overview) - Google's coding agent (successor to Gemini CLI). | `imbue-mngr-antigravity` |
+| `grok` | `grok` | [Grok Build](https://github.com/xai-org/grok-build) - xAI's coding agent. | `imbue-mngr-grok` |
 
 ## Using Agent Types
 

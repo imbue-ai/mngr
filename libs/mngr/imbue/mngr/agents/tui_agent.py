@@ -291,7 +291,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                 else:
                     logger.warning(
                         "Sent {!r} to agent {} but observed no submission evidence within {:.0f}s; "
-                        "slash commands are best-effort, so the send is reported as successful",
+                        "slash commands and shell commands are best-effort, so the send is reported as successful",
                         message,
                         self.name,
                         timeout_seconds,

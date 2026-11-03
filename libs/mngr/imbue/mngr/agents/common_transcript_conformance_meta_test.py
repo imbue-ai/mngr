@@ -28,7 +28,7 @@ _CONFORMANCE_TEST_NAME = "test_emitted_common_records_conform_to_canonical_schem
 # Safety net: these emitter plugins must be discovered, so a misconfigured registry that
 # loaded nothing can't make this meta-test vacuously pass. (Subtypes like ``code-guardian``
 # share their package's emitter/test, so only the distinct emitter packages are listed.)
-_EXPECTED_EMITTER_TYPES = frozenset({"claude", "antigravity", "opencode", "pi-coding", "codex"})
+_EXPECTED_EMITTER_TYPES = frozenset({"claude", "antigravity", "opencode", "pi-coding", "codex", "grok"})
 
 
 def _emits_common_transcript(agent_type: str) -> bool:

@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/p170                                                                                                                     25 / 131K │ [Dashboard]
+
+
+     ❯ PASTE4 line 1 m1 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                                                   0:00 PM
+       PASTE4 line 2 m2 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence
+       PASTE4 line 3 m3 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence …
+
+
+     STUB_REPLY: hello from the stub model nuser=4 last=[e the agent waits for paste evidence /user_query]                                                     0:00 PM
+                                                                                                                                                                         █
+     Worked for 1.1s                                                                                                                                                     █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+                                                                                                                                                                         █
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ PASTE3 line 1 m1 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                                                            │
+  │   PASTE3 line 2 m2 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                                                            │
+  │   PASTE3 line 3 m3 the quick brown fox jumps over the lazy dog while the agent waits for paste evidence                                                            │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Stub ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

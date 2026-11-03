@@ -1,0 +1,48 @@
+
+  /p/t/c/-/9/s/p/i/work/perm                                                                                                                     30 / 131K │ [Dashboard]
+
+
+     ❯ TOOLTEST perm                                                                                                                                           0:00 PM
+
+
+     ◆ Running write marker file
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ◆ write marker file… 1.8s                                                                                                                         2.0s ⇣30 [↓][stop]
+
+  ┃
+  ┃  ›  write marker file
+  ┃  │ echo stub-tool-ran > tool_ran.txt && echo done
+  ┃  ← → narrow scope
+  ┃
+  ┃  1 (○) Yes, and don't ask again for anything (always-approve mode)
+  ┃  2 (●) Yes, proceed
+  ┃  3 (○) No, reject (type to add feedback)
+  ┃  4 (○) Never allow: echo
+  ┃
+
+  1/4:select  │  Tab:next option  │  ←/→:scope  │  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback
+

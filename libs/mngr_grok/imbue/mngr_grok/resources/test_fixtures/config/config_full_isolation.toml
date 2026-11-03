@@ -1,0 +1,64 @@
+[cli]
+auto_update = false
+use_leader = false
+show_tips = false
+
+[features]
+telemetry = false
+feedback = false
+campaigns = false
+remote_fetch = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+
+[harness]
+disable_workspace_teleport = true
+disable_codebase_upload = true
+
+[ui]
+permission_mode = "ask"
+prompt_suggestions = false
+cancel_subagents_on_turn_cancel = "always_continue"
+
+[ui.status_line]
+type = "command"
+command = "/fixture/statusline_silent.sh"
+
+[models]
+default = "stub"
+default_reasoning_effort = "high"
+
+[model.stub]
+model = "stub-model"
+base_url = "http://127.0.0.1:18746/v1"
+api_key = "stub-key"
+name = "Stub"
+context_window = 131072
+reasoning_efforts = [{ value = "low" }, { value = "high" }]
+
+[privacy]
+privacy_banner_acked = "2026-10-19T18:00:00Z"
+
+[claude_compat]
+imported = true
+
+[compat.claude]
+skills = false
+rules = false
+agents = false
+mcps = false
+hooks = false
+sessions = false
+
+[compat.cursor]
+skills = false
+rules = false
+agents = false
+mcps = false
+hooks = false
+sessions = false
+
+[compat.codex]
+sessions = false

@@ -366,6 +366,8 @@ If your plugin depends on another plugin, declare it as a standard Python packag
 - **claude**: Claude Code with default configuration
 - **codex**: OpenAI Codex integration
 
+Other agent types are separately installed plugins, for example `imbue-mngr-opencode` (**opencode**), `imbue-mngr-antigravity` (**antigravity**), and `imbue-mngr-grok` (**grok**); `mngr plugin add imbue-mngr-grok` adds one.
+
 And for the basic provider backends:
 
 - **local**: Local host backend

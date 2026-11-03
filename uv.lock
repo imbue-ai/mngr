@@ -31,6 +31,7 @@ members = [
     "imbue-mngr-file",
     "imbue-mngr-forward",
     "imbue-mngr-gcp",
+    "imbue-mngr-grok",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-kanpan",
     "imbue-mngr-latchkey",
@@ -2304,6 +2305,17 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-vps", editable = "libs/mngr_vps" },
 ]
+
+[[package]]
+name = "imbue-mngr-grok"
+version = "0.1.0"
+source = { editable = "libs/mngr_grok" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-imbue-cloud"
