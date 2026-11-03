@@ -48,7 +48,7 @@ It installs, skipping anything already present: apt basics + Electron's
 GTK/NSS libraries, Docker CE, systemd lingering (keeps the app's background
 daemons alive between sessions), uv, nvm + the pinned node, pnpm, the mngr
 checkout, `uv sync`, and `pnpm install`. The launcher it writes
-(`~/.local/bin/minds-desktop`) runs the app from source against production.
+(`~/.local/bin/studio-desktop`) runs the app from source against production.
 
 It refuses clearly on: WSL1, missing systemd (it writes `/etc/wsl.conf` and
 asks you to `wsl --shutdown` and re-run), non-apt distros, <20GB free disk (5GB with `--skip-docker`), an

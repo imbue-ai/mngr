@@ -78,7 +78,7 @@ jobs:
           test "$(node --version)" = "$node_pin"
           test "$(cd apps/minds && pnpm --version)" = "$pnpm_pin"
           test -x apps/minds/node_modules/.bin/electron
-          test -x "$HOME/.local/bin/minds-desktop"
+          test -x "$HOME/.local/bin/studio-desktop"
           apps/minds/resources/git/bin/git --version | tee /dev/stderr | grep -F "git version $git_pin"
           test -f apps/minds/imbue/minds/desktop_client/static/ui/.vite/manifest.json
           uv run minds run --help

@@ -50,7 +50,7 @@ sudo chown root:root "$S" && sudo chmod 4755 "$S"
 ## Launching
 
 ```bash
-DISPLAY=:99 ~/.local/bin/minds-desktop
+DISPLAY=:99 ~/.local/bin/studio-desktop
 ```
 
 Use that launcher rather than `pnpm start`: it selects the pinned Node and pnpm,
@@ -78,7 +78,7 @@ A running app cannot pick up a new group, and neither can an existing SSH
 session, so start it with the group rather than re-logging in:
 
 ```bash
-setsid sg docker -c "env DISPLAY=:99 $HOME/.local/bin/minds-desktop"
+setsid sg docker -c "env DISPLAY=:99 $HOME/.local/bin/studio-desktop"
 ```
 
 On arm64 the workspace image is built locally from `default-workspace-template`

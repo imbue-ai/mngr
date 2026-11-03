@@ -122,7 +122,7 @@ is the only thing that runs them.
   `apps/minds/scripts/install-linux.sh --yes --no-launch --skip-docker` from
   the checkout on a stock `ubuntu-latest` runner, then asserts the pinned
   Node and pnpm, the Electron dependencies, the bundled git at its pinned
-  version, the built UI bundle, the `~/.local/bin/minds-desktop` launcher,
+  version, the built UI bundle, the `~/.local/bin/studio-desktop` launcher,
   and `uv run minds run --help`. Everything it touches is public, so the
   same job runs in the public-mirror overlay workflow.
 - **`build-minds-snapshot` + `test-minds-snapshot`** ("Minds Snapshot Resume

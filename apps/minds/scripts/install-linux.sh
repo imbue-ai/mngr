@@ -54,7 +54,7 @@ MIN_DOCKER_MAJOR=25
 # and the bundled binaries fit in a few GB, so --skip-docker needs far less.
 MIN_FREE_DISK_GB=20
 MIN_FREE_DISK_GB_WITHOUT_DOCKER=5
-LAUNCHER="$HOME/.local/bin/minds-desktop"
+LAUNCHER="$HOME/.local/bin/studio-desktop"
 # The launcher path as one shell word, for the places that hand it to a shell
 # as part of a command string rather than as an argument.
 LAUNCHER_WORD="$(printf '%q' "$LAUNCHER")"

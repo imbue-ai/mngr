@@ -75,7 +75,7 @@ them all unprompted. The script is idempotent. It:
 6. Builds the checkout: `uv sync --all-packages`, `pnpm install` in
    `apps/minds` (Playwright browser download skipped), the arm64 bundled
    binaries via `ensure-binaries.js`, and the SPA bundle.
-7. Installs `~/.local/bin/minds-desktop`, a menu entry, and an autostart entry,
+7. Installs `~/.local/bin/studio-desktop`, a menu entry, and an autostart entry,
    so the client comes up with the desktop after every boot.
 
 ## Using it

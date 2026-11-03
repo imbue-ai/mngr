@@ -28,7 +28,7 @@ sudo (apt packages, Docker CE, docker group membership) shows its exact
 command and asks first. `--yes` runs every step unprompted;
 `--non-interactive` never prompts and instead prints the command for any
 privileged step still needed. `--skip-docker` and `--no-launch` do what
-they say. It writes `~/.local/bin/minds-desktop`, which starts the app from
+they say. It writes `~/.local/bin/studio-desktop`, which starts the app from
 the checkout.
 
 The same script covers WSL2 ([wsl.md](./wsl.md), detected automatically)
