@@ -9,6 +9,8 @@ import shutil
 import uuid
 from collections.abc import Generator
 from contextlib import AbstractContextManager
+from datetime import datetime
+from datetime import timezone
 from io import StringIO
 from pathlib import Path
 from typing import Final
@@ -173,9 +175,13 @@ class FakeVolume(VolumeInterface):
 
     root_dir: Path = Field(description="Local directory backing this volume")
     volume_name: str | None = Field(default=None, description="Volume name if known")
+    created_at: datetime | None = Field(default=None, description="When the volume was created, if known")
 
     def get_name(self) -> str | None:
         return self.volume_name
+
+    def get_created_at(self) -> datetime | None:
+        return self.created_at
 
     def get_object_id(self) -> str:
         # The backing directory is this volume's identity: deleting it is how the
@@ -514,7 +520,7 @@ class FakeModalInterface(ModalInterface):
             raise ModalProxyNotFoundError(f"Volume not found: {name}")
         vol_dir = self.root_dir / "volumes" / environment_name / name
         vol_dir.mkdir(parents=True, exist_ok=True)
-        volume = FakeVolume(root_dir=vol_dir, volume_name=name)
+        volume = FakeVolume(root_dir=vol_dir, volume_name=name, created_at=datetime.now(timezone.utc))
         self._volumes[key] = volume
         return volume
 

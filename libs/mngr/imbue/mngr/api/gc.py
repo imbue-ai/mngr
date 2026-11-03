@@ -4,6 +4,7 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from threading import Lock
@@ -76,6 +77,7 @@ def gc(
     # Discover hosts once per provider and reuse across all GC functions.
     # This avoids repeated discover_hosts() calls that each retry failing
     # backends and emit duplicate warnings (e.g. when Docker is offline).
+    hosts_discovered_at = datetime.now(timezone.utc)
     all_hosts_by_provider = _discover_hosts_for_gc(providers, mngr_ctx)
 
     if resource_types.is_work_dirs:
@@ -119,6 +121,7 @@ def gc(
         with log_span("Garbage collecting orphaned volumes"):
             gc_volumes(
                 hosts_by_provider=all_hosts_by_provider,
+                hosts_discovered_at=hosts_discovered_at,
                 dry_run=dry_run,
                 error_behavior=error_behavior,
                 result=result,
@@ -581,11 +584,20 @@ def gc_snapshots(
 
 def gc_volumes(
     hosts_by_provider: ProviderHosts,
+    # When the host listing in hosts_by_provider was taken.
+    hosts_discovered_at: datetime,
     dry_run: bool,
     error_behavior: ErrorBehavior,
     result: GcResult,
 ) -> None:
-    """Garbage collect orphaned volumes."""
+    """Garbage collect orphaned volumes.
+
+    A volume whose host is missing from the host listing is orphaned only if it
+    was already older than the provider's minimum host age when the listing was
+    taken. A younger one may belong to a host that was still being created then,
+    and deleting it would take a live host's data. A volume of unknown age is
+    judged by the listing alone.
+    """
     for provider, host_refs in hosts_by_provider:
         if not provider.supports_volumes:
             logger.trace("Skipped provider {} (does not support volumes)", provider.name)
@@ -606,7 +618,15 @@ def gc_volumes(
                         active_volume_ids.add(volume.volume_id)
 
             # Identify orphaned volumes
-            orphaned_volumes = [v for v in all_volumes if v.volume_id not in active_volume_ids]
+            newest_trusted_creation = hosts_discovered_at - timedelta(
+                seconds=provider.get_min_online_host_age_seconds()
+            )
+            orphaned_volumes = [
+                v
+                for v in all_volumes
+                if v.volume_id not in active_volume_ids
+                and (v.created_at is None or v.created_at <= newest_trusted_creation)
+            ]
 
             for volume in orphaned_volumes:
                 try:

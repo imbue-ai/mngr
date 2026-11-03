@@ -4,6 +4,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from types import FunctionType
 from typing import Any
@@ -147,6 +148,9 @@ class _FakeVolume(VolumeInterface):
 
     def get_name(self) -> str | None:
         return None
+
+    def get_created_at(self) -> datetime | None:
+        raise NotImplementedError
 
     def get_object_id(self) -> str:
         raise NotImplementedError
@@ -964,6 +968,7 @@ _IS_RETRIED_BY_BOUNDARY_CALL: Final[Mapping[FunctionType, bool]] = {
     DirectModalInterface.enable_output_capture: False,
     DirectSandbox.get_object_id: False,
     DirectVolume.get_name: False,
+    DirectVolume.get_created_at: False,
     DirectVolume.reload: False,
     DirectVolume.commit: False,
     DirectImage.get_object_id: False,

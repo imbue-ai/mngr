@@ -141,6 +141,9 @@ class _TransientlyFailingVolumeStub(VolumeInterface):
     def get_name(self) -> str | None:
         return None
 
+    def get_created_at(self) -> datetime | None:
+        return None
+
     def get_object_id(self) -> str:
         raise self.error_class("Modal failed this request")
 
@@ -2829,6 +2832,23 @@ def test_list_volumes(
 
     volumes = testing_provider.list_volumes()
     assert len(volumes) >= 2
+
+
+def test_list_volumes_reports_when_each_volume_was_created(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """gc spares a volume too young to trust its host listing, which it can
+    only judge from the volume's creation time."""
+    before_creation = datetime.now(timezone.utc)
+    host_id = HostId.generate()
+    testing_provider._build_host_volume(host_id)
+    after_creation = datetime.now(timezone.utc)
+
+    volume_name = testing_provider._get_host_volume_name(host_id)
+    [listed] = [volume for volume in testing_provider.list_volumes() if volume.name == volume_name]
+
+    assert listed.created_at is not None
+    assert before_creation <= listed.created_at <= after_creation
 
 
 def test_delete_volume(

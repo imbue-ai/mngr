@@ -15,6 +15,8 @@ import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import AbstractContextManager
+from datetime import datetime
+from datetime import timezone
 from functools import wraps
 from io import StringIO
 from pathlib import Path
@@ -462,9 +464,13 @@ class DirectVolume(VolumeInterface):
 
     volume: modal.Volume = Field(description="The underlying modal.Volume", repr=False)
     volume_name: str | None = Field(default=None, description="Volume name if known")
+    created_at: datetime | None = Field(default=None, description="When the volume was created, if known")
 
     def get_name(self) -> str | None:
         return self.volume_name
+
+    def get_created_at(self) -> datetime | None:
+        return self.created_at
 
     @_retry_transient
     @_translate_exceptions
@@ -801,7 +807,10 @@ class DirectModalInterface(ModalInterface):
     @_translate_exceptions
     def volume_list(self, *, environment_name: str) -> list[VolumeInterface]:
         return [
-            DirectVolume.model_construct(volume=vol, volume_name=vol.name)
+            # A listed volume carries its metadata, so info() makes no request.
+            DirectVolume.model_construct(
+                volume=vol, volume_name=vol.name, created_at=vol.info().created_at.astimezone(timezone.utc)
+            )
             for vol in modal.Volume.objects.list(environment_name=environment_name, client=self._resolve_client())
         ]
 

@@ -256,7 +256,8 @@ class ProviderInstanceConfig(FrozenModel):
     )
     min_online_host_age_seconds: float | None = Field(
         default=None,
-        description="Minimum age (in seconds) before GC will destroy an online host with no agents. "
+        description="Minimum age (in seconds) before GC will destroy an online host with no agents, "
+        "or delete a volume whose host it did not find. "
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
     host_log_dir: Path | None = Field(
@@ -591,7 +592,8 @@ class MngrConfig(FrozenModel):
     )
     default_min_online_host_age_seconds: float = Field(
         default=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS,
-        description="Default minimum age (in seconds) before GC will destroy an online host with no agents. "
+        description="Default minimum age (in seconds) before GC will destroy an online host with no agents, "
+        "or delete a volume whose host it did not find. "
         "Can be overridden per provider via min_online_host_age_seconds in the provider config.",
     )
     agent_ready_timeout: float = Field(

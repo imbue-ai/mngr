@@ -3565,6 +3565,7 @@ log "=== Shutdown script completed ==="
                         volume_id=self._volume_id_for_name(vol_name),
                         name=vol_name,
                         size_bytes=0,
+                        created_at=vol_iface.get_created_at(),
                         host_id=host_id,
                     )
                 )

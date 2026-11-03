@@ -14,6 +14,7 @@ from abc import ABC
 from abc import abstractmethod
 from collections.abc import Generator
 from contextlib import AbstractContextManager
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Mapping
@@ -117,6 +118,10 @@ class VolumeInterface(MutableModel, ABC):
     @abstractmethod
     def get_name(self) -> str | None:
         """Get the volume name (if it has one)."""
+
+    @abstractmethod
+    def get_created_at(self) -> datetime | None:
+        """When the volume was created, if known; a volume from volume_list knows."""
         ...
 
     @abstractmethod

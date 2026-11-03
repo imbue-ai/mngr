@@ -964,6 +964,7 @@ def test_gc_volumes_skips_provider_without_volume_support(
     result = GcResult()
     gc_volumes(
         hosts_by_provider=_hosts_for(local_provider),
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -1003,6 +1004,7 @@ def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -1018,6 +1020,7 @@ def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
     result2 = GcResult()
     gc_volumes(
         hosts_by_provider=[],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result2,
@@ -1908,6 +1911,7 @@ def test_gc_volumes_skips_destroyed_host_volumes(temp_host_dir: Path, temp_mngr_
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [active_host_ref, destroyed_host_ref])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -1948,6 +1952,7 @@ def test_gc_volumes_preserves_active_host_volumes(temp_host_dir: Path, temp_mngr
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [active_host_ref])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -1955,6 +1960,53 @@ def test_gc_volumes_preserves_active_host_volumes(temp_host_dir: Path, temp_mngr
 
     assert len(result.volumes_destroyed) == 0
     assert provider.deleted_volumes == []
+
+
+@pytest.mark.parametrize(
+    ("created_relative_to_host_listing", "is_deleted"),
+    [
+        (timedelta(minutes=1), False),
+        (timedelta(minutes=-1), False),
+        (timedelta(minutes=-11), True),
+    ],
+    ids=["created-after-listing", "created-within-grace-before-listing", "older-than-grace"],
+)
+def test_gc_volumes_spares_volumes_too_young_to_trust_the_host_listing(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    created_relative_to_host_listing: timedelta,
+    is_deleted: bool,
+) -> None:
+    """A host still being created when the host listing was taken is missing
+    from it, so its volume looks orphaned. Only a volume already older than the
+    provider's minimum host age (10 minutes by default) at listing time is
+    trusted to have no host."""
+    hosts_discovered_at = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
+    volume = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000021"),
+        name="unlisted-host-vol",
+        size_bytes=0,
+        host_id=HostId("host-00000000000000000000000000000021"),
+        created_at=hosts_discovered_at + created_relative_to_host_listing,
+    )
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("vol-provider-young"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[volume],
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        hosts_discovered_at=hosts_discovered_at,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert provider.deleted_volumes == ([volume.volume_id] if is_deleted else [])
 
 
 class _DeleteVolumeErrorProvider(MockProviderInstance):
@@ -1985,6 +2037,7 @@ def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.CONTINUE,
         result=result,
@@ -2015,6 +2068,7 @@ def test_gc_volumes_handles_delete_error_with_abort(temp_host_dir: Path, temp_mn
     with pytest.raises(MngrError):
         gc_volumes(
             hosts_by_provider=[(provider, [])],
+            hosts_discovered_at=datetime.now(timezone.utc),
             dry_run=False,
             error_behavior=ErrorBehavior.ABORT,
             result=result,
@@ -2047,6 +2101,7 @@ def test_gc_volumes_skips_provider_when_unavailable(temp_host_dir: Path, temp_mn
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -2073,6 +2128,7 @@ def test_gc_volumes_handles_list_volumes_mngr_error_with_continue(
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [])],
+        hosts_discovered_at=datetime.now(timezone.utc),
         dry_run=False,
         error_behavior=ErrorBehavior.CONTINUE,
         result=result,
@@ -2097,6 +2153,7 @@ def test_gc_volumes_handles_list_volumes_mngr_error_with_abort(
     with pytest.raises(MngrError, match="simulated list_volumes failure from test"):
         gc_volumes(
             hosts_by_provider=[(provider, [])],
+            hosts_discovered_at=datetime.now(timezone.utc),
             dry_run=False,
             error_behavior=ErrorBehavior.ABORT,
             result=result,
