@@ -47,7 +47,7 @@ NVM_VERSION="v0.40.3"
 UV_VERSION="0.13.4"
 # Same gVisor release the mngr_vps host setup pins (PINNED_GVISOR_RELEASE);
 # apps/minds/scripts/build_test.py checks the two agree.
-GVISOR_RELEASE="20260601"
+GVISOR_RELEASE="20261102"
 # Debian's docker.io is 20.10; mngr's isolated host volumes need Engine >= 25.
 MIN_DOCKER_MAJOR=25
 # Workspace images are what fill a disk; the checkout, its venv, node_modules
@@ -357,22 +357,37 @@ fi
 IS_REBOOT_NEEDED=0
 if [ "$IS_RASPBERRY_PI" = 1 ]; then
     step "Raspberry Pi: gVisor runsc, registered the way the mngr_vps host setup registers it"
-    if command -v runsc >/dev/null 2>&1; then
-        skip "runsc is installed"
+    installed_runsc="$(command -v runsc || true)"
+    if [ -n "$installed_runsc" ] && [ "$installed_runsc" != /usr/local/bin/runsc ]; then
+        skip "runsc is installed at $installed_runsc"
+    elif /usr/local/bin/runsc --version 2>/dev/null | grep -q "^runsc version release-${GVISOR_RELEASE}\."; then
+        skip "runsc ${GVISOR_RELEASE} is installed"
     else
+        # The release tarball carries runsc, its containerd shim and the
+        # gvisor-bin/ sidecars runsc runs, which must sit next to it.
         gvisor_script="
             set -e
+            command -v zstd >/dev/null 2>&1 || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y zstd; }
             url=https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/\$(uname -m)
-            tmp=\$(mktemp -d)
-            cd \"\$tmp\"
-            curl -fsSL -o runsc \"\$url/runsc\"
-            curl -fsSL -o runsc.sha512 \"\$url/runsc.sha512\"
-            curl -fsSL -o containerd-shim-runsc-v1 \"\$url/containerd-shim-runsc-v1\"
-            curl -fsSL -o containerd-shim-runsc-v1.sha512 \"\$url/containerd-shim-runsc-v1.sha512\"
-            sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
-            chmod a+rx runsc containerd-shim-runsc-v1
-            mv runsc containerd-shim-runsc-v1 /usr/local/bin/
-            cd / && rm -rf \"\$tmp\"
+            tmp=\$(mktemp -d /usr/local/.gvisor.XXXXXX)
+            set +e
+            (
+                set -e
+                cd \"\$tmp\"
+                curl -fsSL -o gvisor.tar.zstd \"\$url/gvisor.tar.zstd\"
+                curl -fsSL -o gvisor.tar.zstd.sha512 \"\$url/gvisor.tar.zstd.sha512\"
+                sha512sum -c gvisor.tar.zstd.sha512
+                zstd -dq -o gvisor.tar gvisor.tar.zstd
+                mkdir release
+                tar -xf gvisor.tar -C release
+                chmod -R a+rX release
+                if [ -d /usr/local/bin/gvisor-bin ]; then mv /usr/local/bin/gvisor-bin previous-gvisor-bin; fi
+                mv release/gvisor-bin /usr/local/bin/gvisor-bin
+                mv -f release/containerd-shim-runsc-v1 release/runsc /usr/local/bin/
+            )
+            status=\$?
+            rm -rf \"\$tmp\"
+            exit \"\$status\"
         "
         run_privileged_shell "Installing gVisor runsc ${GVISOR_RELEASE}" "$gvisor_script"
     fi

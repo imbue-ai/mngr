@@ -1,4 +1,7 @@
 import base64
+import os
+import subprocess
+from pathlib import Path
 from typing import Any
 from typing import cast
 
@@ -17,7 +20,6 @@ from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_UNIT_NAME
 from imbue.mngr_vps.host_setup import ContainerMemoryCapProbe
 from imbue.mngr_vps.host_setup import MNGR_SSHD_DROP_IN_PATH
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
-from imbue.mngr_vps.host_setup import PINNED_GVISOR_BINARY_INSTALL_SCRIPT
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps.host_setup import build_apply_container_memory_cap_command
@@ -30,6 +32,11 @@ from imbue.mngr_vps.host_setup import render_container_memory_reconcile_script
 from imbue.mngr_vps.host_setup import render_gvisor_binary_install_script
 from imbue.mngr_vps.host_setup import render_sshd_drop_in_stage_script
 from imbue.mngr_vps.host_setup import render_vm_tmp_mount_unit
+from imbue.mngr_vps.testing import corrupt_fake_gvisor_release
+from imbue.mngr_vps.testing import make_fake_gvisor_release
+from imbue.mngr_vps.testing import read_runsc_version
+from imbue.mngr_vps.testing import write_fake_runsc
+from imbue.mngr_vps.testing import write_gvisor_install_tool_shims
 
 
 class _StubOuter(MutableModel):
@@ -240,9 +247,7 @@ def test_build_host_setup_steps_includes_gvisor_when_requested() -> None:
     # runsc is registered with --overlay2=none so the container's writable layer
     # persists across a docker restart (the default per-sandbox overlay loses it).
     assert "runsc install -- --overlay2=none" in gvisor_step.script
-    # The binary download is skipped when runsc is already present, and the
-    # daemon (re)registration is skipped when the flag is already configured.
-    assert "command -v runsc" in gvisor_step.script
+    # The daemon (re)registration is skipped when the flag is already configured.
     assert "--overlay2=none' /etc/docker/daemon.json" in gvisor_step.script
 
 
@@ -302,14 +307,73 @@ def test_apply_host_setup_on_outer_raises_on_step_failure() -> None:
     assert len(_stub(outer).recorded_commands) == 4
 
 
-def test_render_gvisor_binary_install_script_downloads_from_the_given_release_directory() -> None:
-    # The default rendering fetches gVisor's own release bucket; a caller with a
-    # mirrored copy of the same per-arch layout swaps only the base URL.
-    assert f"storage.googleapis.com/gvisor/releases/release/{PINNED_GVISOR_RELEASE}/" in (
-        PINNED_GVISOR_BINARY_INSTALL_SCRIPT
+def _run_gvisor_install(release_url: str, install_dir: Path, shim_dir: Path) -> subprocess.CompletedProcess[str]:
+    script = render_gvisor_binary_install_script(release_url, "20261102", str(install_dir))
+    return subprocess.run(
+        ["sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}"},
+        timeout=60,
     )
-    mirrored = render_gvisor_binary_install_script("https://mirror.example.test/artifacts/gvisor/20260601")
-    assert 'URL="https://mirror.example.test/artifacts/gvisor/20260601/${ARCH}"' in mirrored
-    assert "storage.googleapis.com" not in mirrored
-    assert "sha512sum -c runsc.sha512" in mirrored
-    assert "sha512sum -c containerd-shim-runsc-v1.sha512" in mirrored
+
+
+def _install_root(tmp_path: Path) -> tuple[Path, Path]:
+    install_dir = tmp_path / "usr" / "local" / "bin"
+    install_dir.mkdir(parents=True)
+    shim_dir = tmp_path / "shims"
+    write_gvisor_install_tool_shims(shim_dir)
+    return install_dir, shim_dir
+
+
+def test_gvisor_install_puts_runsc_its_shim_and_sidecars_side_by_side(tmp_path: Path) -> None:
+    install_dir, shim_dir = _install_root(tmp_path)
+    release_url = make_fake_gvisor_release(tmp_path / "release", "20261102")
+
+    result = _run_gvisor_install(release_url, install_dir, shim_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert read_runsc_version(install_dir) == "runsc version release-20261102.0"
+    assert (install_dir / "containerd-shim-runsc-v1").exists()
+    # runsc finds its sidecars next to its own binary.
+    assert (install_dir / "gvisor-bin" / "gvisor_sentry").exists()
+    assert not list((tmp_path / "usr" / "local").glob(".mngr-gvisor.*"))
+
+
+def test_gvisor_install_upgrades_an_older_runsc_in_place(tmp_path: Path) -> None:
+    install_dir, shim_dir = _install_root(tmp_path)
+    write_fake_runsc(install_dir / "runsc", "20260601")
+    (install_dir / "containerd-shim-runsc-v1").write_text("old shim\n")
+    release_url = make_fake_gvisor_release(tmp_path / "release", "20261102")
+
+    result = _run_gvisor_install(release_url, install_dir, shim_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert read_runsc_version(install_dir) == "runsc version release-20261102.0"
+    assert (install_dir / "containerd-shim-runsc-v1").read_text() != "old shim\n"
+    assert (install_dir / "gvisor-bin" / "gvisor_sentry").exists()
+
+
+def test_gvisor_install_downloads_nothing_when_the_pinned_release_is_installed(tmp_path: Path) -> None:
+    install_dir, shim_dir = _install_root(tmp_path)
+    write_fake_runsc(install_dir / "runsc", "20261102")
+
+    # No release exists at the URL, so any download would fail the script.
+    result = _run_gvisor_install((tmp_path / "no-such-release").as_uri(), install_dir, shim_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in install_dir.iterdir()) == ["runsc"]
+
+
+def test_gvisor_install_leaves_the_installed_runsc_alone_when_the_tarball_fails_its_checksum(tmp_path: Path) -> None:
+    install_dir, shim_dir = _install_root(tmp_path)
+    write_fake_runsc(install_dir / "runsc", "20260601")
+    release_url = make_fake_gvisor_release(tmp_path / "release", "20261102")
+    corrupt_fake_gvisor_release(tmp_path / "release")
+
+    result = _run_gvisor_install(release_url, install_dir, shim_dir)
+
+    assert result.returncode != 0
+    assert read_runsc_version(install_dir) == "runsc version release-20260601.0"
+    assert not list((tmp_path / "usr" / "local").glob(".mngr-gvisor.*"))
+    assert not (install_dir / "gvisor-bin").exists()

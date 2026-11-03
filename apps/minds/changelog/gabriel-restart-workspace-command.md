@@ -1,0 +1,3 @@
+Added the `gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows for as long as a workspace container runs on a runsc older than release `20261102`, the 2026-10-27 production survey of affected workspaces, and the runbook for moving the fleet onto `20261102`: `minds-admin install-runsc` and `minds-admin restart-workspace-container` on every leased workspace, one at a time, and a rebake of the available hosts.
+
+`install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball (runsc, its shim and the `gvisor-bin/` sidecars runsc needs beside it) and upgrades an older runsc it installed, instead of skipping whenever any runsc is present.

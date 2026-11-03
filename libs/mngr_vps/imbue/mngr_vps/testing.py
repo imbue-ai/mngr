@@ -1,8 +1,14 @@
+import hashlib
+import os
+import shutil
+import subprocess
+import tarfile
 from abc import abstractmethod
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -154,3 +160,64 @@ def seed_stopped_host_record(provider: VpsProvider, host_id: HostId, *, host_nam
         stop_reason=HostState.STOPPED.value,
     )
     provider._host_record_cache[host_id] = VpsHostRecord(certified_host_data=certified)
+
+
+def write_fake_runsc(path: Path, release: str) -> None:
+    """A runsc stand-in whose ``--version`` reports gVisor ``release`` (a ``yyyymmdd`` date)."""
+    path.write_text(f"#!/bin/sh\necho 'runsc version release-{release}.0'\necho 'spec: 1.2.0'\n")
+    path.chmod(0o755)
+
+
+def make_fake_gvisor_release(root: Path, release: str) -> str:
+    """Lay out a gVisor release the install script can fetch, and return its ``file://`` release URL.
+
+    Mirrors the upstream per-arch layout (``<arch>/gvisor.tar.zstd`` plus its
+    ``.sha512``) for this machine's arch. The "tarball" is an uncompressed tar,
+    which the ``zstd`` from ``write_gvisor_install_tool_shims`` copies through.
+    """
+    arch_dir = root / os.uname().machine
+    arch_dir.mkdir(parents=True)
+    contents = root / "contents"
+    (contents / "gvisor-bin").mkdir(parents=True)
+    write_fake_runsc(contents / "runsc", release)
+    for name in ("containerd-shim-runsc-v1", "gvisor-bin/gvisor_sentry"):
+        (contents / name).write_text(f"#!/bin/sh\necho '{name} {release}'\n")
+        (contents / name).chmod(0o755)
+    tarball = arch_dir / "gvisor.tar.zstd"
+    with tarfile.open(tarball, "w") as archive:
+        for name in ("runsc", "containerd-shim-runsc-v1", "gvisor-bin"):
+            archive.add(contents / name, arcname=name)
+    digest = hashlib.sha512(tarball.read_bytes()).hexdigest()
+    (arch_dir / "gvisor.tar.zstd.sha512").write_text(f"{digest}  gvisor.tar.zstd\n")
+    return root.as_uri()
+
+
+def corrupt_fake_gvisor_release(root: Path) -> None:
+    """Make the tarball of the release ``make_fake_gvisor_release`` laid out under ``root`` fail its sha512."""
+    with (root / os.uname().machine / "gvisor.tar.zstd").open("ab") as tarball:
+        tarball.write(b"corrupted")
+
+
+def read_runsc_version(install_dir: Path) -> str:
+    """The first line of ``install_dir``'s runsc ``--version``."""
+    return subprocess.run(
+        [str(install_dir / "runsc"), "--version"], capture_output=True, text=True, check=True
+    ).stdout.splitlines()[0]
+
+
+def write_gvisor_install_tool_shims(bin_dir: Path) -> None:
+    """Put the tools the install script runs that the test machine may lack into ``bin_dir``.
+
+    ``zstd`` copies its input through (the fake release's tarball is not
+    compressed), and ``sha512sum`` falls back to macOS's ``shasum``.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "zstd").write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; -*) shift ;; *) in=$1; shift ;; esac; done\n'
+        'cp "$in" "$out"\n'
+    )
+    (bin_dir / "zstd").chmod(0o755)
+    if shutil.which("sha512sum") is None:
+        (bin_dir / "sha512sum").write_text('#!/bin/sh\nexec shasum -a 512 "$@"\n')
+        (bin_dir / "sha512sum").chmod(0o755)

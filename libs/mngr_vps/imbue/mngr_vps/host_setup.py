@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import posixpath
 import shlex
 from typing import Final
 
@@ -46,11 +47,13 @@ PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.6.2-1"
 PINNED_CONTAINERD_APT_VERSION_CORE: Final[str] = "2.2.6-1"
 
 # gVisor publishes date-stamped releases under
-# ``https://storage.googleapis.com/gvisor/releases/release/<yyyymmdd>/<arch>/``.
-# Pin one so runsc is reproducible; confirm the date exists in that bucket before
-# deploying (the apt repo only ever serves "latest", so we download + checksum
-# the dated binaries directly instead).
-PINNED_GVISOR_RELEASE: Final[str] = "20260601"
+# ``https://storage.googleapis.com/gvisor/releases/release/<yyyymmdd>/<arch>/``,
+# each as one ``gvisor.tar.zstd`` (runsc, its containerd shim and the
+# ``gvisor-bin/`` sidecars runsc runs) plus its ``.sha512``. Pin one so runsc is
+# reproducible; confirm the date exists in that bucket before deploying (the apt
+# repo only ever serves "latest", so we download + checksum the dated tarball
+# directly instead).
+PINNED_GVISOR_RELEASE: Final[str] = "20261102"
 GVISOR_UPSTREAM_RELEASES_URL: Final[str] = "https://storage.googleapis.com/gvisor/releases/release"
 # The directory holding the pinned release's per-arch subdirectories upstream.
 # Callers that mirror the release elsewhere (the imbue slice fleet's artifact
@@ -67,8 +70,8 @@ PINNED_GVISOR_UPSTREAM_RELEASE_URL: Final[str] = f"{GVISOR_UPSTREAM_RELEASES_URL
 # ``/mngr`` host_dir symlink, mngr's provisioning markers, etc. -- is silently
 # lost on restart, leaving the container unreachable until mngr re-provisions it.
 GVISOR_RUNSC_RUNTIME_ARGS: Final[tuple[str, ...]] = ("--overlay2=none",)
-_GVISOR_INSTALL_DIR: Final[str] = "/usr/local/bin"
-GVISOR_RUNSC_BINARY_PATH: Final[str] = f"{_GVISOR_INSTALL_DIR}/runsc"
+GVISOR_INSTALL_DIR: Final[str] = "/usr/local/bin"
+GVISOR_RUNSC_BINARY_PATH: Final[str] = f"{GVISOR_INSTALL_DIR}/runsc"
 
 # Each host-setup step is a self-contained shell script run with a generous hard
 # timeout. apt mirror round-trips plus package extraction routinely take a couple
@@ -200,38 +203,62 @@ systemctl start docker"""
 
 
 @pure
-def render_gvisor_binary_install_script(release_url: str) -> str:
-    """The script that downloads the pinned gVisor binaries from ``release_url``'s per-arch subdirectories.
+def render_gvisor_binary_install_script(release_url: str, release: str, install_dir: str) -> str:
+    """The POSIX sh script that installs gVisor ``release`` from ``release_url``'s per-arch subdirectories.
 
-    Verifies the release's published sha512 checksums (served beside the
-    binaries) and installs runsc + its containerd shim under /usr/local/bin;
-    skipped when runsc is already present. Registration with the Docker daemon
-    is the caller's (a live host runs ``runsc install`` + a docker restart, an
-    offline image write is the daemon.json directly).
+    Verifies the release tarball against its published sha512 (served beside
+    it) and installs runsc, its containerd shim and the ``gvisor-bin/``
+    sidecars into ``install_dir``; skipped when ``install_dir``'s runsc already
+    reports ``release``, so an older runsc is upgraded in place. A running
+    sandbox keeps the runsc it started with until its container restarts.
+    Registration with the Docker daemon is the caller's (a live host runs
+    ``runsc install`` + a docker restart, an offline image write is the
+    daemon.json directly).
     """
+    staging_parent = posixpath.dirname(install_dir)
     return f"""set -e
-if ! command -v runsc >/dev/null 2>&1; then
+if ! "{install_dir}/runsc" --version 2>/dev/null | grep -q '^runsc version release-{release}\\.'; then
+    if ! command -v zstd >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y zstd
+    fi
     ARCH="$(uname -m)"
     URL="{release_url}/${{ARCH}}"
-    GVISOR_TMP="$(mktemp -d /var/tmp/mngr-gvisor.XXXXXX)"
-    cd "${{GVISOR_TMP}}"
-    curl -fsSL -o runsc "${{URL}}/runsc"
-    curl -fsSL -o runsc.sha512 "${{URL}}/runsc.sha512"
-    curl -fsSL -o containerd-shim-runsc-v1 "${{URL}}/containerd-shim-runsc-v1"
-    curl -fsSL -o containerd-shim-runsc-v1.sha512 "${{URL}}/containerd-shim-runsc-v1.sha512"
-    sha512sum -c runsc.sha512
-    sha512sum -c containerd-shim-runsc-v1.sha512
-    chmod a+rx runsc containerd-shim-runsc-v1
-    mv runsc containerd-shim-runsc-v1 {_GVISOR_INSTALL_DIR}/
-    cd /
+    # Beside the install directory, so every mv below is a rename within one filesystem.
+    GVISOR_TMP="$(mktemp -d "{staging_parent}/.mngr-gvisor.XXXXXX")"
+    # A subshell, so a failed step still removes the staging directory, which no
+    # tmp cleaner ages out there. Not under `||`: that would disable set -e inside.
+    set +e
+    (
+        set -e
+        cd "${{GVISOR_TMP}}"
+        curl -fsSL -o gvisor.tar.zstd "${{URL}}/gvisor.tar.zstd"
+        curl -fsSL -o gvisor.tar.zstd.sha512 "${{URL}}/gvisor.tar.zstd.sha512"
+        sha512sum -c gvisor.tar.zstd.sha512
+        zstd -dq -o gvisor.tar gvisor.tar.zstd
+        mkdir release
+        tar -xf gvisor.tar -C release
+        chmod -R a+rX release
+        # runsc refuses sidecars from any other release. They go in first because a
+        # runsc from before the sidecars never reads them; from a later runsc, the
+        # two renames leave only a moment in which runsc and its sidecars disagree.
+        if [ -d "{install_dir}/gvisor-bin" ]; then
+            mv "{install_dir}/gvisor-bin" previous-gvisor-bin
+        fi
+        mv release/gvisor-bin "{install_dir}/gvisor-bin"
+        mv -f release/containerd-shim-runsc-v1 release/runsc "{install_dir}/"
+    )
+    GVISOR_STATUS=$?
+    set -e
     rm -rf "${{GVISOR_TMP}}"
+    [ "${{GVISOR_STATUS}}" = 0 ] || exit "${{GVISOR_STATUS}}"
 fi"""
 
 
 # Rendered against upstream: the variant every VPS provider's host setup runs
 # (the gen-2 bare-metal prep renders its own copy against the artifact mirror).
 PINNED_GVISOR_BINARY_INSTALL_SCRIPT: Final[str] = render_gvisor_binary_install_script(
-    PINNED_GVISOR_UPSTREAM_RELEASE_URL
+    PINNED_GVISOR_UPSTREAM_RELEASE_URL, PINNED_GVISOR_RELEASE, GVISOR_INSTALL_DIR
 )
 
 # Install and register the pinned gVisor runsc runtime on a live host (see
