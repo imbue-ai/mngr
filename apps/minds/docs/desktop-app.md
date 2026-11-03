@@ -270,12 +270,12 @@ Linux x86_64 ships as two artifacts of every build, both packaged by ToDesktop f
 
 **Installing.** `sudo apt install ./imbue-studio-<version>-build-<build id>-amd64.deb` installs under `/opt/Imbue Studio` with a menu entry and the `imbue-studio://` and `minds://` scheme handlers registered by the package. The AppImage needs `chmod +x` and, on the distributions that no longer ship it, `libfuse2`; on its first launch (and every launch after, so the entry follows the file) it writes `~/.local/share/applications/minds.desktop` and its icon and registers itself as the handler for both schemes with `xdg-mime`, best-effort. `electron/linux-desktop-entry.js` renders the entry.
 
-**Upgrading a 0.7.x `.deb` install.** 0.8.0 renamed the package from `minds` to `imbue-studio`, and the `.deb` declares no `Replaces`/`Conflicts: minds` (ToDesktop exposes no way to set them; see [app-release.md](./deploy/ops/app-release.md), step 9). The in-app updater on a 0.7.x `.deb` install therefore installs 0.8.x *beside* the old package under `/opt/Imbue Studio`, relaunches the old binary from `/opt/Mind`, and offers the update again. Do not accept that prompt; upgrade by hand instead. Both packages keep their data in `~/.minds`, which uninstalling does not touch, and they install to different directories, so nothing overlaps:
+**Upgrading a 0.7.x `.deb` install.** 0.8.0 renamed the package from `minds` to `imbue-studio`, and the `.deb` declares no `Replaces`/`Conflicts: minds` (ToDesktop exposes no way to set them; see [app-release.md](./deploy/ops/app-release.md), step 9). The in-app updater on a 0.7.x `.deb` install therefore installs 0.8.x *beside* the old package under `/opt/Imbue Studio`, relaunches the old binary from `/opt/Mind`, and offers the update again. Do not accept that prompt; upgrade by hand instead. The two install to different directories and neither uninstall touches user data, so nothing overlaps -- but they no longer read the same data: 0.7.x keeps everything in `~/.minds`, and the current build's first launch moves that tree onto the per-role roots under [Data directory](#data-directory) and leaves the dotfolder emptied behind it. The hand upgrade is therefore one-way: once the move has run, a relaunched 0.7.x binary finds nothing where it looks.
 
 1. Quit the app completely.
 2. `sudo apt remove minds` (or `sudo dpkg -r minds`), which removes `/opt/Mind` and the old menu entry only.
 3. Download the current `.deb` from `https://studio.imbue.com/download?platform=linux` and `sudo apt install ./imbue-studio-<version>-build-<build id>-amd64.deb`.
-4. Launch Imbue Studio; it picks up `~/.minds` and does not ask for a new sign-in.
+4. Launch Imbue Studio; it moves `~/.minds` onto the per-role roots and does not ask for a new sign-in.
 
 If the in-app update was already accepted, step 2 still fixes it. Afterwards `dpkg -l | grep -E '^ii +(minds|imbue-studio) '` lists `imbue-studio` only. AppImage installs need nothing: the in-app update replaces the file in place (the file keeps whatever name it had).
 
@@ -306,21 +306,27 @@ git tracks upstream security releases, so the pinned dugite-native payload needs
 ## Data directory
 
 Every Imbue Studio env owns three roots, one per role, each with the env's tier
-name as its first subdirectory. macOS treats the three differently, which
+name as its first subdirectory. The platforms treat the three differently, which
 is the reason for the split: Time Machine excludes `~/Library/Caches` and
-`~/Library/Logs` but backs up `~/Library/Application Support`, and the OS
-may reclaim anything under Caches.
+`~/Library/Logs` but backs up `~/Library/Application Support`, and the OS may
+reclaim anything under Caches; on Linux, Deja Dup (preinstalled on Ubuntu)
+excludes the resolved cache directory, and Timeshift (Mint, Manjaro) excludes a
+literal `/home/*/.cache`.
 
-| Role | Path | Backed up? |
-|---|---|---|
-| State | `~/Library/Application Support/Imbue Studio/<tier>/` | yes |
-| Cache | `~/Library/Caches/Imbue Studio/<tier>/` | no -- and the OS may delete it |
-| Logs | `~/Library/Logs/Imbue Studio/<tier>/` | no |
+| Role | macOS | Backed up? | Linux | Backed up? |
+|---|---|---|---|---|
+| State | `~/Library/Application Support/Imbue Studio/<tier>/` | yes | `$XDG_DATA_HOME/imbue-studio/<tier>/` (`~/.local/share/...`) | yes |
+| Cache | `~/Library/Caches/Imbue Studio/<tier>/` | no -- and the OS may delete it | `$XDG_CACHE_HOME/imbue-studio/<tier>/` (`~/.cache/...`) | no |
+| Logs | `~/Library/Logs/Imbue Studio/<tier>/` | no | `$XDG_STATE_HOME/imbue-studio/<tier>/log/` (`~/.local/state/...`) | yes |
 
 `<tier>` is `production`, `staging`, or the dev env name (`dev-<your-user>`).
-Setting `MINDS_DATA_HOME` overrides all three, collecting them under
-`$MINDS_DATA_HOME/<tier>/{state,cache,logs}/`; tests and CI use it to keep a
+On Linux the three XDG variables are honored when set, and an unset, empty or
+relative value reads as absent, per the spec. Setting `STUDIO_ROOTS_OVERRIDE`
+overrides all three on either platform, collecting them under
+`$STUDIO_ROOTS_OVERRIDE/<tier>/{state,cache,logs}/`; tests and CI use it to keep a
 run self-contained.
+
+The tree below shows the macOS paths; the Linux roots hold the same contents.
 
 ```
 ~/Library/Application Support/Imbue Studio/<tier>/
@@ -357,7 +363,19 @@ The desktop app moves it on first launch, in one pass, and leaves the old
 directory behind rather than deleting it. The move is recorded by a
 `.migrated-from-dotfolder` marker in the state root; if it fails partway it
 re-runs on the next launch rather than booting with files split across both
-layouts.
+layouts. An entry that is already at its destination stops the launch instead,
+because the two copies cannot be merged here: the dialog names the path to move
+aside, and every launch stops at it until you do. A stale `api.sock` is skipped
+rather than moved, since the backend rebinds its own.
+
+So nothing may write into the new state root before that first launch. The
+`minds` CLI enforces it: run from a source checkout against an install whose
+data has not moved yet, it stops with an error naming both paths instead of
+creating the mngr profile, the latchkey store and the device id there. Launch
+the app once, or name an env with no dotfolder of its own via
+`MINDS_ROOT_NAME`. Standalone `mngr` commands are not covered, which is why
+`minds-admin env activate` warns before exporting `MNGR_HOST_DIR` into a state
+root that is still waiting.
 
 After a move, the old directory holds `latchkey`, a symlink to the moved
 `latchkey/` in the state root. Workspaces created before the move reach
@@ -378,7 +396,7 @@ invocations ignore `MINDS_ROOT_NAME`.
 
 Production is the default. A source checkout with nothing exported
 (`apps/minds/scripts/start-desktop.sh`, or a bare `uv run minds run`) reads the
-in-repo production `client.toml` and owns `~/.minds/`. Another env is
+in-repo production `client.toml` and owns the production tier's roots. Another env is
 selected by exporting `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` / `MNGR_PREFIX` /
 `MINDS_CLIENT_CONFIG_PATH` for it (Imbue's internal operator tooling does
 this); `minds run --config-file <path>` overrides the config path either way.
@@ -393,7 +411,7 @@ deploy-time secrets flow through HCP Vault.
 
 ### Configuration file
 
-`~/.<root>/config.toml` is optional and holds user-personal
+`config.toml` in the tier's state root is optional and holds user-personal
 preferences only (the error-reporting settings, the sign-in browser, the
 update settings). Its `[recent]` table records, per install, the order in
 which accounts were last shown in a window (`accounts`) and, per account,

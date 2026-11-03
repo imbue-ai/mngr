@@ -4,12 +4,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const { XDG_CACHE_HOME_SEGMENTS, xdgBaseDir } = require('./platform-roots');
+
 // CLEANUP: delete this module, its call in main.js, and legacy-name-cleanup.test.js
 // once the Imbue Studio build has been on stable long enough for installs to
 // have launched once (specs/imbue-studio-rename/05_cleanup.md).
 //
 // Kept free of any `electron` import (like session-persistence.js and
 // update-channel.js) so it can be unit-tested under plain node.
+
+const XDG_CONFIG_HOME_SEGMENTS = ['.config'];
 
 // Every name the app has shipped under before this one, each of which owned
 // its own set of per-user directories.
@@ -39,8 +43,8 @@ function legacyNameDirs({ platform, homeDir, env } = defaultEnvironment()) {
       path.join(homeDir, 'Library', 'Caches', name),
     ]);
   }
-  const config = env.XDG_CONFIG_HOME || path.join(homeDir, '.config');
-  const cache = env.XDG_CACHE_HOME || path.join(homeDir, '.cache');
+  const config = xdgBaseDir({ value: env.XDG_CONFIG_HOME, homeDir, defaultSegments: XDG_CONFIG_HOME_SEGMENTS });
+  const cache = xdgBaseDir({ value: env.XDG_CACHE_HOME, homeDir, defaultSegments: XDG_CACHE_HOME_SEGMENTS });
   return LEGACY_APP_NAMES.flatMap((name) => [path.join(config, name), path.join(cache, name)]);
 }
 

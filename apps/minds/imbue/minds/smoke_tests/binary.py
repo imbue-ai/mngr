@@ -10,7 +10,7 @@ needs no root.
 
 The launch reuses the e2e runner's Electron machinery (the CDP attach with its
 relaunch on a wedged handshake), pointed at the build and at a throwaway
-``MINDS_DATA_HOME``, so a smoke run never touches the operator's own install.
+``STUDIO_ROOTS_OVERRIDE``, so a smoke run never touches the operator's own install.
 The environment it hands the app is built here rather than inherited: a
 published build is the product, not a harness, so it must not see that a test
 started it.
@@ -39,8 +39,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import MINDS_APP_NAME
-from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.desktop_client.e2e_workspace_runner import DEV_CHECKOUT_LAUNCH_TARGET
@@ -492,13 +492,15 @@ def launched_studio_app(
     if no_op_command is None:
         raise SmokeConfigError(f"`{_NO_OP_COMMAND}` is not on PATH; it stands in for the app's browser.")
     launch_env = {
-        MINDS_DATA_HOME_ENV_VAR: str(data_home),
+        STUDIO_ROOTS_OVERRIDE_ENV_VAR: str(data_home),
         MINDS_ROOT_NAME_ENV_VAR: str(binary.root_name),
         ACTIVATED_CLIENT_CONFIG_PATH_ENV_VAR: str(resolve_smoke_client_config_path(backend.env_name)),
         _BROWSER_ENV_VAR: no_op_command,
         **({_DISPLAY_ENV_VAR: display} if display is not None else {}),
     }
-    logger.info("Launching {} as {} with {}={}", binary.label, binary.root_name, MINDS_DATA_HOME_ENV_VAR, data_home)
+    logger.info(
+        "Launching {} as {} with {}={}", binary.label, binary.root_name, STUDIO_ROOTS_OVERRIDE_ENV_VAR, data_home
+    )
     with electron_app_session(
         None,
         debug_port,

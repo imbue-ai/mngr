@@ -80,8 +80,10 @@ explains why: gVisor's default overlay discards root-filesystem writes.)
 
 `wsl --shutdown` (and anything else that stops the distro) kills the Docker
 daemon and every workspace container with it. When bringing workspaces back,
-use `mngr start` (e.g. `MNGR_HOST_DIR=~/.minds/mngr MNGR_PREFIX=minds- uv run mngr start --host <host>`,
-the same host dir and prefix the app runs with), never a raw `docker start`: docker only resurrects the container and
+use `mngr start` (e.g. `MNGR_HOST_DIR="$HOME/.local/share/imbue-studio/production/mngr" MNGR_PREFIX=minds- uv run mngr start --host <host>`,
+the same host dir and prefix the app runs with -- see the data directory table in
+[desktop-app.md](./desktop-app.md) for the other tiers and for what `$XDG_DATA_HOME` moves),
+never a raw `docker start`: docker only resurrects the container and
 its sshd, while the agent processes (tmux, supervisord, the system
 interface) exist only in tmux sessions that mngr recreates. A raw
 `docker start` leaves the workspace half-up -- reachable at the container

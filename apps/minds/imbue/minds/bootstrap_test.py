@@ -9,14 +9,16 @@ from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_APP_NAME
 from imbue.minds.bootstrap import MINDS_CACHE_DIR_ENV_VAR
-from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_LOG_DIR_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import MINDS_STATE_DIR_ENV_VAR
 from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
+from imbue.minds.bootstrap import XDG_APP_DIR_NAME
 from imbue.minds.bootstrap import apply_bootstrap
+from imbue.minds.bootstrap import check_legacy_dotfolder_has_migrated
 from imbue.minds.bootstrap import default_root_name_to_production
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_env_activated
@@ -30,7 +32,7 @@ from imbue.minds.bootstrap import root_name_for_env_name
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave MINDS_ROOT_NAME, the MNGR_* overrides and the minds path overrides unset, restoring at teardown.
+    """Leave MINDS_ROOT_NAME, the MNGR_* overrides, the minds path overrides (including the retired MINDS_DATA_HOME) and the XDG base directories unset, restoring at teardown.
 
     monkeypatch only records vars it changed itself, so a plain delenv of an absent var would leave
     anything the code under test writes directly into os.environ (apply_bootstrap does) in place after
@@ -40,10 +42,14 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         MINDS_ROOT_NAME_ENV_VAR,
         "MNGR_HOST_DIR",
         "MNGR_PREFIX",
-        MINDS_DATA_HOME_ENV_VAR,
+        STUDIO_ROOTS_OVERRIDE_ENV_VAR,
+        "MINDS_DATA_HOME",
         MINDS_STATE_DIR_ENV_VAR,
         MINDS_CACHE_DIR_ENV_VAR,
         MINDS_LOG_DIR_ENV_VAR,
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
     ):
         monkeypatch.setenv(name, "placeholder")
         monkeypatch.delenv(name)
@@ -179,13 +185,13 @@ def test_minds_data_dir_for() -> None:
 def test_mngr_host_dir_for(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """mngr's host dir hangs off the tier's state root, not the legacy dotfolder.
 
-    Resolved through ``MINDS_DATA_HOME`` so the assertion holds on every platform: this helper
+    Resolved through ``STUDIO_ROOTS_OVERRIDE`` so the assertion holds on every platform: this helper
     takes no ``platform`` argument, and the roots have no answer off darwin. What the Apple
     layout spells the state root is asserted by
     :func:`test_darwin_roots_are_the_apple_canonical_three`, which can name a platform.
     """
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
     assert (
         mngr_host_dir_for("minds-dev-josh-3") == minds_dir_for_role(MindsPathRole.STATE, "minds-dev-josh-3") / "mngr"
     )
@@ -199,7 +205,7 @@ def test_mngr_prefix_for() -> None:
 
 def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-testname")
     apply_bootstrap()
 
@@ -216,7 +222,7 @@ def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.Monke
     Imbue Studio bootstrap writes to.
     """
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-josh-3")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
     monkeypatch.setenv("MNGR_PREFIX", "custom-")
@@ -293,12 +299,22 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
 
 
 def test_minds_app_name_matches_the_electron_product_name() -> None:
-    """The segment every canonical root is keyed on exists three times over, and a drift splits the app in half.
+    """The segment the Apple roots are keyed on exists three times over, and a drift splits the app in half.
 
     ``electron/platform-roots.js`` pins its own copy against the same ``productName``, so anchoring both halves here is what stops the shell writing a tier's state to one directory while the backend reads another.
     """
     package_json = Path(__file__).resolve().parents[2] / "package.json"
     assert MINDS_APP_NAME == json.loads(package_json.read_text())["productName"]
+
+
+def test_xdg_app_dir_name_matches_the_package_name_and_carries_no_space() -> None:
+    """The XDG roots are keyed on the package name, not the display name, and ``electron/platform-roots.js`` pins its own copy against the same field.
+
+    The space in ``productName`` is what makes it wrong here: every path below these roots is interpolated into shell and command lines.
+    """
+    package_json = Path(__file__).resolve().parents[2] / "package.json"
+    assert XDG_APP_DIR_NAME == json.loads(package_json.read_text())["name"]
+    assert not any(character.isspace() for character in XDG_APP_DIR_NAME)
 
 
 def _darwin_roots(root_name: str) -> dict[MindsPathRole, Path]:
@@ -341,61 +357,100 @@ def test_xdg_variables_do_not_move_the_darwin_roots(monkeypatch: pytest.MonkeyPa
     assert _darwin_roots(DEFAULT_MINDS_ROOT_NAME) == _expected_apple_roots("production")
 
 
-def test_off_darwin_every_role_resolves_into_the_one_dotfolder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only macOS gained canonical roots, so everywhere else keeps the layout it already had."""
-    _clear_env(monkeypatch)
-    dotfolder = minds_data_dir_for(DEFAULT_MINDS_ROOT_NAME)
-    resolved = {role: minds_dir_for_role(role, DEFAULT_MINDS_ROOT_NAME, platform="linux") for role in MindsPathRole}
-    assert resolved == {
-        MindsPathRole.STATE: dotfolder,
-        MindsPathRole.CACHE: dotfolder,
-        MindsPathRole.LOGS: dotfolder / "logs",
+def _expected_xdg_roots(tier: str) -> dict[MindsPathRole, Path]:
+    home = Path.home()
+    return {
+        MindsPathRole.STATE: home / ".local" / "share" / XDG_APP_DIR_NAME / tier,
+        MindsPathRole.CACHE: home / ".cache" / XDG_APP_DIR_NAME / tier,
+        MindsPathRole.LOGS: home / ".local" / "state" / XDG_APP_DIR_NAME / tier / "log",
     }
 
 
-def test_off_darwin_the_tier_stays_in_the_dotfolder_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The Apple layout puts the tier one level below the root; the dotfolder carries it, so two tiers are two dotfolders."""
+def _linux_roots(root_name: str) -> dict[MindsPathRole, Path]:
+    return {role: minds_dir_for_role(role, root_name, platform="linux") for role in MindsPathRole}
+
+
+def test_off_darwin_each_role_resolves_to_its_own_xdg_base_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing the cache to its own base directory is what gets the regenerable bytes excluded: backup tools skip the cache directory and nothing excluded the dotfolder."""
+    _clear_env(monkeypatch)
+    assert _linux_roots(DEFAULT_MINDS_ROOT_NAME) == _expected_xdg_roots("production")
+
+
+def test_off_darwin_the_tier_is_a_segment_below_each_role_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dotfolder carried the tier in its own name; here two tiers are two subdirectories, so one tier's roots can never nest inside another's."""
     _clear_env(monkeypatch)
     staging = minds_dir_for_role(MindsPathRole.STATE, "minds-staging", platform="linux")
-    assert staging == minds_data_dir_for("minds-staging")
-    assert staging != minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
+    production = minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
+    assert staging == Path.home() / ".local" / "share" / XDG_APP_DIR_NAME / "staging"
+    assert staging != production
+    assert production not in staging.parents
 
 
-def test_off_darwin_the_shell_and_the_backend_name_the_same_dotfolder_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_off_darwin_the_xdg_variables_are_honored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A host that exports these expects every writer to follow them, and the Electron shell reads the same three."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "s"))
+    assert _linux_roots(DEFAULT_MINDS_ROOT_NAME) == {
+        MindsPathRole.STATE: tmp_path / "d" / XDG_APP_DIR_NAME / "production",
+        MindsPathRole.CACHE: tmp_path / "c" / XDG_APP_DIR_NAME / "production",
+        MindsPathRole.LOGS: tmp_path / "s" / XDG_APP_DIR_NAME / "production" / "log",
+    }
+
+
+@pytest.mark.parametrize("value", ["", "   ", "rel/ative"])
+def test_an_empty_or_relative_xdg_variable_falls_back_to_its_default(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The spec reads empty as absent and requires a relative path to be ignored; honoring one would put a tier's credentials somewhere relative to the cwd."""
+    _clear_env(monkeypatch)
+    for name in ("XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        monkeypatch.setenv(name, value)
+    assert _linux_roots(DEFAULT_MINDS_ROOT_NAME) == _expected_xdg_roots("production")
+
+
+def test_off_darwin_the_shell_and_the_backend_name_the_same_roots(monkeypatch: pytest.MonkeyPatch) -> None:
     """electron/platform-roots.js resolves these same three off darwin; a disagreement would split a tier's files between the two runtimes."""
     _clear_env(monkeypatch)
     state = minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
     cache = minds_dir_for_role(MindsPathRole.CACHE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
     logs = minds_dir_for_role(MindsPathRole.LOGS, DEFAULT_MINDS_ROOT_NAME, platform="linux")
-    assert (state / "mngr") == Path.home() / ".minds" / "mngr"
-    assert (state / ".venv") == Path.home() / ".minds" / ".venv"
-    assert (cache / ".uv-cache") == Path.home() / ".minds" / ".uv-cache"
-    assert logs == Path.home() / ".minds" / "logs"
+    state_root = Path.home() / ".local" / "share" / XDG_APP_DIR_NAME / "production"
+    assert (state / "mngr") == state_root / "mngr"
+    assert (state / ".venv") == state_root / ".venv"
+    assert (cache / ".uv-cache") == Path.home() / ".cache" / XDG_APP_DIR_NAME / "production" / ".uv-cache"
+    assert logs == Path.home() / ".local" / "state" / XDG_APP_DIR_NAME / "production" / "log"
 
 
-def test_tiers_are_enumerated_from_the_dotfolder_names_off_darwin(
+def test_the_legacy_dotfolder_is_not_a_live_root_off_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``minds_data_dir_for`` is only the migration's source, which is what gives a Linux launch a real source and destination rather than one directory."""
+    _clear_env(monkeypatch)
+    legacy = minds_data_dir_for(DEFAULT_MINDS_ROOT_NAME)
+    assert legacy == Path.home() / ".minds"
+    assert legacy not in _linux_roots(DEFAULT_MINDS_ROOT_NAME).values()
+
+
+def test_tiers_are_enumerated_from_the_shared_parent_off_darwin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``minds-admin env list`` works off darwin, where the tier is in the dotfolder's own name rather than a directory below a shared parent."""
+    """``minds-admin env list`` works off darwin, where the tier is now a directory below the state parent as it is on darwin."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".minds").mkdir()
-    (tmp_path / ".minds-staging").mkdir()
-    (tmp_path / ".minds-dev-josh-3").mkdir()
+    state_parent = tmp_path / ".local" / "share" / XDG_APP_DIR_NAME
+    for tier in ("production", "staging", "dev-josh-3"):
+        (state_parent / tier).mkdir(parents=True)
     assert sorted(list_state_tier_names(platform="linux")) == ["dev-josh-3", "production", "staging"]
 
 
-def test_tier_enumeration_off_darwin_ignores_directories_that_are_not_roots(
+def test_tier_enumeration_off_darwin_ignores_an_unmigrated_dotfolder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A hand-made backup copy beside the real roots must not read as a tier."""
+    """A tier whose files have not moved off ``~/.minds`` has nothing under the state parent, and the emptied husk left behind must not read as one either."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".minds").mkdir()
-    (tmp_path / ".mindsomething").mkdir()
-    # Already present from the isolation fixture on some runs, and a real sibling either way.
-    (tmp_path / ".mngr").mkdir(exist_ok=True)
-    (tmp_path / "Documents").mkdir()
+    (tmp_path / ".minds-staging").mkdir()
+    (tmp_path / ".local" / "share" / XDG_APP_DIR_NAME / "production").mkdir(parents=True)
     assert list_state_tier_names(platform="linux") == ("production",)
 
 
@@ -452,21 +507,23 @@ def test_staging_and_dev_staging_do_not_collide(monkeypatch: pytest.MonkeyPatch)
         assert staging[role] != dev_staging[role]
 
 
-def test_data_home_override_collects_all_roots_under_one_directory(
+def test_roots_override_collects_all_roots_under_one_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``MINDS_DATA_HOME`` is what keeps CI runs self-contained and ``mac-runner-reset.sh`` a single ``rm -rf``."""
+    """``STUDIO_ROOTS_OVERRIDE`` is what keeps a CI run self-contained, writing to a throwaway directory instead of the roots the runner's own install owns."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
     assert minds_dir_for_role(MindsPathRole.STATE, "minds-staging") == tmp_path / "staging" / "state"
     assert minds_dir_for_role(MindsPathRole.CACHE, "minds-staging") == tmp_path / "staging" / "cache"
     assert minds_dir_for_role(MindsPathRole.LOGS, "minds-staging") == tmp_path / "staging" / "logs"
 
 
-def test_data_home_override_outranks_the_dotfolder_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The override is consulted before the platform dispatch, so a caller that wants an isolated root gets one on every platform."""
+def test_roots_override_outranks_the_xdg_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The override is consulted before the platform dispatch, so a caller that wants an isolated root gets one on every platform -- including a host that exports the XDG variables."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
+    for name in ("XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        monkeypatch.setenv(name, str(tmp_path / "ignored" / name.lower()))
     resolved = minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
     assert resolved == tmp_path / "production" / "state"
 
@@ -498,10 +555,10 @@ def test_injected_roots_are_honored_on_an_unsupported_platform(
     assert minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux") == tmp_path / "s"
 
 
-def test_injected_roots_beat_the_data_home_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The shell already applied ``MINDS_DATA_HOME`` when it resolved the roots, so re-applying it here would point the backend somewhere the shell is not looking."""
+def test_injected_roots_beat_the_roots_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The shell already applied ``STUDIO_ROOTS_OVERRIDE`` when it resolved the roots, so re-applying it here would point the backend somewhere the shell is not looking."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path / "ignored"))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path / "ignored"))
     _set_injected_roots(monkeypatch, tmp_path)
     assert minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME) == tmp_path / "s"
 
@@ -562,8 +619,79 @@ def test_legacy_data_dir_still_points_at_the_dotfolder(monkeypatch: pytest.Monke
 def test_minds_root_exposes_each_role(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The accessor callers actually use, so it must route through the same resolution the free function does."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
     root = MindsRoot("minds-staging")
     assert root.state_dir == tmp_path / "staging" / "state"
     assert root.cache_dir == tmp_path / "staging" / "cache"
     assert root.log_dir == tmp_path / "staging" / "logs"
+
+
+def test_the_retired_override_name_raises_rather_than_resolving_the_real_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A caller that still exports it believes it is isolated, so resolving the real roots behind it is the one outcome worse than stopping."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    with pytest.raises(BootstrapError, match=STUDIO_ROOTS_OVERRIDE_ENV_VAR):
+        minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
+    with pytest.raises(BootstrapError, match=STUDIO_ROOTS_OVERRIDE_ENV_VAR):
+        list_state_tier_names(platform="linux")
+
+
+def test_the_retired_name_is_ignored_once_the_current_one_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both set is what a shell looks like mid-rename, and the current name answers."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", "/stale")
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
+    assert minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux") == (
+        tmp_path / "production" / "state"
+    )
+
+
+def _unmigrated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point HOME at a tier that still has its dotfolder, and the roots at a throwaway. Returns the state root."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, DEFAULT_MINDS_ROOT_NAME)
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path / "roots"))
+    (tmp_path / f".{DEFAULT_MINDS_ROOT_NAME}").mkdir()
+    return tmp_path / "roots" / "production" / "state"
+
+
+def test_an_unmigrated_dotfolder_refuses_the_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The entries this process would create are the ones the shell's migration stops on."""
+    state_dir = _unmigrated_home(monkeypatch, tmp_path)
+    with pytest.raises(BootstrapError, match=re.escape(str(state_dir))):
+        check_legacy_dotfolder_has_migrated()
+
+
+def test_a_migrated_dotfolder_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    state_dir = _unmigrated_home(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / ".migrated-from-dotfolder").write_text("migrated 7 entries\n")
+    check_legacy_dotfolder_has_migrated()
+
+
+def test_no_dotfolder_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A fresh install has nothing to move, so there is no destination to protect."""
+    _unmigrated_home(monkeypatch, tmp_path)
+    (tmp_path / f".{DEFAULT_MINDS_ROOT_NAME}").rmdir()
+    check_legacy_dotfolder_has_migrated()
+
+
+def test_injected_roots_run_against_an_unmigrated_dotfolder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The shell migrates before it spawns the backend, so its own child must not second-guess it."""
+    state_dir = _unmigrated_home(monkeypatch, tmp_path)
+    monkeypatch.setenv(MINDS_STATE_DIR_ENV_VAR, str(state_dir))
+    monkeypatch.setenv(MINDS_CACHE_DIR_ENV_VAR, str(tmp_path / "c"))
+    monkeypatch.setenv(MINDS_LOG_DIR_ENV_VAR, str(tmp_path / "l"))
+    check_legacy_dotfolder_has_migrated()
+
+
+def test_an_unactivated_shell_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``minds-admin`` leaves the root name unset, and then no tier is named to check."""
+    _unmigrated_home(monkeypatch, tmp_path)
+    monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR)
+    check_legacy_dotfolder_has_migrated()

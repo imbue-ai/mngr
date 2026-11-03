@@ -3,7 +3,7 @@
 // Note on isolation: the signed bundle's baked-in
 // `resources/pyproject/imbue/minds/config/envs/_bundled/root_name` takes
 // precedence over MINDS_ROOT_NAME from the environment (getMindsRootName in
-// electron/paths.js), so the environment cannot pick the tier. MINDS_DATA_HOME
+// electron/paths.js), so the environment cannot pick the tier. STUDIO_ROOTS_OVERRIDE
 // can still relocate the tier's roots; without it, tests run against the
 // user's live state roots for the build's tier. Specs are responsible for
 // cleaning up any workspaces they create (`mngr destroy` or the destroy
@@ -31,8 +31,12 @@ function appLogsDir(execPath, env) {
   const rootName = fs.existsSync(rootNameFile)
     ? fs.readFileSync(rootNameFile, 'utf-8').trim()
     : env.MINDS_ROOT_NAME || 'minds';
-  return platformRootsFor({ rootName, platform: process.platform, homeDir: os.homedir(), dataHome: env.MINDS_DATA_HOME })
-    .logs;
+  return platformRootsFor({
+    rootName,
+    platform: process.platform,
+    homeDir: os.homedir(),
+    env,
+  }).logs;
 }
 
 // Each app window is a single web context now (the chrome page, which hosts

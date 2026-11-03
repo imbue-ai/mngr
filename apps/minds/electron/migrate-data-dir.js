@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { MIGRATION_MARKER_NAME, migrationPlanFor } = require('./platform-roots');
+const { LOGS_ENTRY_NAME, MIGRATION_MARKER_NAME, migrationPlanFor } = require('./platform-roots');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // The state root's subtrees whose files point at the legacy root rather than
@@ -82,8 +82,8 @@ function isDirectory(candidatePath) {
  * Move one path, falling back to copy+delete across filesystems.
  *
  * `fs.renameSync` fails with EXDEV when the legacy root and the destination are
- * on different volumes, which happens on a home directory mounted separately
- * from `~/Library`.
+ * on different volumes: a home directory mounted separately from `~/Library`,
+ * or `$XDG_CACHE_HOME` and `$XDG_DATA_HOME` on separate mounts.
  */
 function movePath(from, to) {
   fs.mkdirSync(path.dirname(to), { recursive: true });
@@ -93,7 +93,12 @@ function movePath(from, to) {
     if (err.code !== 'EXDEV') {
       throw err;
     }
-    fs.cpSync(from, to, { recursive: true });
+    // `verbatimSymlinks` keeps every link exactly as written, the way the
+    // rename above leaves them. Without it cpSync rewrites a relative link to
+    // an absolute path inside `from`, which the removal below then orphans --
+    // and `.venv/bin/python3 -> python` and most of `.uv-python/` are relative
+    // links, so the moved interpreter would not run.
+    fs.cpSync(from, to, { recursive: true, verbatimSymlinks: true });
     fs.rmSync(from, { recursive: true, force: true });
   }
 }
@@ -146,8 +151,8 @@ function rewriteRecordedPaths({ stateDir, legacyDir, log }) {
  */
 function migrateLegacyDataDir({ legacyDir, roots, log = console.log }) {
   if (path.resolve(legacyDir) === path.resolve(roots.state)) {
-    // The layouts coincide off macOS, so there is nowhere to move to and no
-    // marker to leave in a directory the user still keeps.
+    // No layout resolves the two to one directory, so this guards a
+    // configuration that would otherwise move a tree into itself.
     return { migrated: false, reason: 'state-root-is-legacy-root' };
   }
   const markerPath = path.join(roots.state, MIGRATION_MARKER_NAME);
@@ -164,7 +169,7 @@ function migrateLegacyDataDir({ legacyDir, roots, log = console.log }) {
   }
 
   const entryNames = fs.readdirSync(legacyDir);
-  const logsDir = path.join(legacyDir, 'logs');
+  const logsDir = path.join(legacyDir, LOGS_ENTRY_NAME);
   const logsEntryChildNames = isDirectory(logsDir) ? fs.readdirSync(logsDir) : [];
   const moves = migrationPlanFor({ legacyDir, roots, entryNames, logsEntryChildNames });
 
@@ -174,12 +179,20 @@ function migrateLegacyDataDir({ legacyDir, roots, log = console.log }) {
     if (!fs.existsSync(from)) {
       continue;
     }
-    if (fs.existsSync(to)) {
-      // The destination already holds this entry -- Sentry and Crashpad write
-      // into the state root before this migration can run on a first launch.
-      // Keeping the destination is right: it is the newer of the two.
-      log(`[migrate] skipping ${from}: ${to} already exists`);
+    if (fs.lstatSync(from).isSocket()) {
+      // `cpSync` refuses a socket outright (ERR_FS_CP_SOCKET), so a cross-volume
+      // move would fail on one and never finish. The backend binds its own at
+      // the canonical path on the next start, and clears a stale one there.
+      log(`[migrate] skipping ${from}: a socket is rebound rather than moved`);
       continue;
+    }
+    if (fs.existsSync(to)) {
+      // Nothing here can merge the two copies, so skipping the move would
+      // strand the legacy one behind a marker recorded as complete.
+      throw new Error(
+        `${to} already exists, so ${from} cannot be moved onto it. Nothing clears it on its own: ` +
+          `move ${to} aside and launch again.`
+      );
     }
     movePath(from, to);
     movedCount += 1;

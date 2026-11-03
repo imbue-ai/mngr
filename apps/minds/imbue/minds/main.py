@@ -10,6 +10,7 @@ import sys
 
 from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import apply_bootstrap
+from imbue.minds.bootstrap import check_legacy_dotfolder_has_migrated
 from imbue.minds.bootstrap import default_root_name_to_production
 
 # The ``minds`` CLI is production unless the shell names another env; the
@@ -18,6 +19,8 @@ from imbue.minds.bootstrap import default_root_name_to_production
 default_root_name_to_production()
 try:
     apply_bootstrap()
+    # Before the reconcile below, which is the first thing here to create a state-root entry.
+    check_legacy_dotfolder_has_migrated()
 except BootstrapError as e:
     # Print the actionable one-liner instead of a traceback: this is operator
     # misconfiguration (e.g. a stale env var), not a program bug.

@@ -89,14 +89,14 @@ def list_env_names() -> tuple[str, ...]:
     """Every env whose state root exists on disk, production first.
 
     Asks :func:`list_state_tier_names` for the tiers the active layout has on
-    disk, which on macOS are the subdirectories of the shared state parent
-    rather than the ``~/.minds*`` dotfolders: after the first-launch migration
-    those are emptied husks, so reading them would list envs whose files have
-    all moved. Names rather than paths, because a tier directory is the state
-    root only under the Apple layout -- ``MINDS_DATA_HOME`` puts the role below
-    the tier -- so :func:`env_root_dir` is what turns one into the other. Used
-    by ``minds-admin env list``; callers that need to filter by "has a real
-    ``client.toml``" do so themselves.
+    disk, which are the subdirectories of the shared state parent rather than
+    the ``~/.minds*`` dotfolders: after the first-launch migration those are
+    emptied husks, so reading them would list envs whose files have all moved.
+    Names rather than paths, because a tier directory is the state root itself
+    under both platform layouts but not under ``STUDIO_ROOTS_OVERRIDE``, which puts
+    the role below the tier -- so :func:`env_root_dir` is what turns one into
+    the other. Used by ``minds-admin env list``; callers that need to filter by
+    "has a real ``client.toml``" do so themselves.
     """
     matches = [
         tier_name

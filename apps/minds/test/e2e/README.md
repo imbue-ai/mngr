@@ -57,7 +57,7 @@ MINDS_APP_PATH="/tmp/Imbue Studio-260530xxxxx.app/Contents/MacOS/Imbue Studio \
 
 ## Isolation
 
-A packaged build's bundled `root_name` wins over `MINDS_ROOT_NAME`, so the environment cannot change the tier a Playwright run uses. `MINDS_DATA_HOME=<dir>` moves all three of that tier's roots under `<dir>/<tier>/{state,cache,logs}/`. Without it, a run uses the build's live roots under `~/Library/{Application Support,Caches,Logs}/Imbue Studio/<tier>/`, the same ones a user's launch does. Specs destroy any workspace they create before exiting.
+A packaged build's bundled `root_name` wins over `MINDS_ROOT_NAME`, so the environment cannot change the tier a Playwright run uses. `STUDIO_ROOTS_OVERRIDE=<dir>` moves all three of that tier's roots under `<dir>/<tier>/{state,cache,logs}/`. Without it, a run uses the build's live roots under `~/Library/{Application Support,Caches,Logs}/Imbue Studio/<tier>/`, the same ones a user's launch does. Specs destroy any workspace they create before exiting.
 
 ## Authoring notes
 

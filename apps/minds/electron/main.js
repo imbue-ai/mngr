@@ -121,6 +121,13 @@ const { createExternalLinkPermissions } = require('./external-link-permissions')
 // event queue outside the tier directory, shared across every tier.
 app.setPath('userData', paths.getStateDir());
 
+// Point Electron's own log path at this tier's log root too: it is the one role
+// that does not follow userData the way crashDumps and sessionData do, so
+// without this it lands on a directory no layout documents. Unlike the
+// assignment above, this one creates the directory -- only the log root, whose
+// children the migration below moves one by one.
+app.setAppLogsPath(paths.getLogDir());
+
 // Move this tier's files off the legacy ~/.<MINDS_ROOT_NAME> root, once. Runs
 // before logging and Sentry because both open files under the roots it moves.
 // Deliberately allowed to throw: a half-migrated tier has some files at the new

@@ -364,10 +364,11 @@ function bakeBuildInfo() {
  *     file, just copies it verbatim into _bundled/client.toml.
  *
  *   - MINDS_ROOT_NAME_BUNDLE: the MINDS_ROOT_NAME the runtime should
- *     export before launching `minds run`. Production builds use
- *     "minds" (so on-disk state lands in ~/.minds/); a staging build
- *     uses "minds-staging" (so state lands in ~/.minds-staging/ and
- *     never collides with an installed prod build). Must match the
+ *     export before launching `minds run`, which picks the tier whose
+ *     data roots the build writes to (the table in
+ *     docs/desktop-app.md names them per platform). Production builds
+ *     use "minds"; a staging build uses "minds-staging", so its roots
+ *     never collide with an installed prod build's. Must match the
  *     minds(-<env-name>)? shape enforced by the runtime bootstrap.
  *
  * When both are unset, leaves _bundled/ empty -- the `uv run minds run` /

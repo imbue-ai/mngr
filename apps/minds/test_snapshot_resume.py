@@ -250,10 +250,10 @@ def _baked_mngr_host_dir(root_name: str, real_home: Path) -> Path:
 
     Resolved the way the shell that baked it resolved it, rather than as
     ``~/.<root_name>/mngr``: ``_build_electron_env`` gives the Linux harness a
-    ``MINDS_DATA_HOME`` for a throwaway root per run, so the baked tree hangs
+    ``STUDIO_ROOTS_OVERRIDE`` for a throwaway root per run, so the baked tree hangs
     off that override rather than off the dotfolder the shell would use.
 
-    Deliberately ignores the ambient ``MINDS_DATA_HOME``. This is a fact about
+    Deliberately ignores the ambient ``STUDIO_ROOTS_OVERRIDE``. This is a fact about
     the image, fixed when it was baked, while the running test has its own
     throwaway value from the autouse ``isolated_minds_data_home`` fixture --
     reading the variable here finds an empty tmp directory instead of the

@@ -2,8 +2,8 @@
 
 This is the one-time setup for hacking on the Imbue Studio desktop client and its
 stack from source. Run from source, the app targets production by default:
-it reads the in-repo production `client.toml`, owns `~/.minds/`, and needs
-nothing exported.
+it reads the in-repo production `client.toml`, owns the production tier's data
+roots, and needs nothing exported.
 
 ## Linux: one script
 
@@ -34,6 +34,12 @@ the checkout.
 The same script covers WSL2 ([wsl.md](./wsl.md), detected automatically)
 and, with `--raspberry-pi`, a Raspberry Pi 5 always-on host
 ([raspberry-pi.md](./raspberry-pi.md)).
+
+## Testing Linux behaviour from a Mac
+
+[linux-on-mac.md](./linux-on-mac.md) brings the real Linux app up in a Lima VM
+over VNC, which is what you need for anything the path resolver, the data
+migration or the Electron shell does differently there.
 
 ## macOS: prerequisites (install once)
 

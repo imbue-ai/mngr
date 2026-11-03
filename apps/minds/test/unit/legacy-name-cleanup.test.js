@@ -40,6 +40,10 @@ test('Linux legacy dirs follow XDG, honoring overrides, for each old name', () =
     '/cfg/Mind',
     '/cache/Mind',
   ]);
+  // A relative value is invalid per the spec, and every path here is handed to
+  // a recursive delete, so honoring one would sweep directories under the cwd.
+  const relative = { ...LINUX, env: { XDG_CONFIG_HOME: 'cfg', XDG_CACHE_HOME: '  ' } };
+  assert.deepEqual(legacyNameDirs(relative), legacyNameDirs(LINUX));
 });
 
 test('the current name owns no legacy directory', () => {

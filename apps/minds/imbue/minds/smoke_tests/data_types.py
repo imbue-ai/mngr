@@ -342,7 +342,7 @@ class StudioAppSession(FrozenModel):
     browser: Browser = Field(description="The CDP connection to the app; its contexts hold every window.")
     page: Page = Field(description="The window's chrome page, on the app's own backend origin.")
     backend_origin: NonEmptyStr = Field(description="``http://localhost:<port>``: the app's own web UI and API.")
-    data_home: Path = Field(description="The ``MINDS_DATA_HOME`` the app was launched with.")
+    data_home: Path = Field(description="The ``STUDIO_ROOTS_OVERRIDE`` the app was launched with.")
     log_dir: Path = Field(
         description="Where the app writes ``minds.log``, ``electron.log`` and ``minds-events.jsonl``."
     )

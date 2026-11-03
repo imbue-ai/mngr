@@ -51,7 +51,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
-from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
+from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
 from imbue.minds.desktop_client.default_workspace_template_worktree import current_worktree_branch
@@ -85,7 +85,7 @@ _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
 # ``ci-snapshot`` tier, so callers can boot the backend without an explicit
 # ``minds-admin env activate`` step and without pointing at any real environment.
 _DEFAULT_MINDS_ROOT_NAME: Final[str] = CI_SNAPSHOT_MINDS_ROOT_NAME
-# The throwaway root the Linux harnesses point MINDS_DATA_HOME at. Named here
+# The throwaway root the Linux harnesses point STUDIO_ROOTS_OVERRIDE at. Named here
 # so test_snapshot_resume.py can find what a baked image actually contains.
 _E2E_DATA_HOME_DIR_NAME: Final[str] = ".minds-e2e-data-home"
 _DEFAULT_MINDS_TIER: Final[str] = "ci-snapshot"
@@ -328,9 +328,9 @@ def _build_electron_env(
     env["MNGR_ROOT_NAME"] = "mngr"
     # This harness runs the real Electron shell on Linux (the snapshot job builds
     # its image in a Modal container), where the shell would otherwise write to
-    # the user's dotfolder. MINDS_DATA_HOME gives it one throwaway root per run,
+    # the user's dotfolder. STUDIO_ROOTS_OVERRIDE gives it one throwaway root per run,
     # which also keeps the container reproducible.
-    env.setdefault(MINDS_DATA_HOME_ENV_VAR, str(Path(env.get("HOME", "/root")) / _E2E_DATA_HOME_DIR_NAME))
+    env.setdefault(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(Path(env.get("HOME", "/root")) / _E2E_DATA_HOME_DIR_NAME))
     env[E2E_HARNESS_MARKER_ENV_VAR] = "1"
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_BASE_URL", None)

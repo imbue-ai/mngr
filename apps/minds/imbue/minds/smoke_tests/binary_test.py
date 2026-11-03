@@ -150,13 +150,13 @@ def test_the_app_runs_on_the_shell_s_environment_with_this_test_process_s_own_ta
         "MNGR_HOST_DIR": "/home/runner/.mngr-test-1234",
         "MNGR_ROOT_NAME": "mngr-test-1234",
         "MINDS_ROOT_NAME": "minds-ci-snapshot",
-        "MINDS_DATA_HOME": "/home/runner/.minds-e2e",
+        "STUDIO_ROOTS_OVERRIDE": "/home/runner/.minds-e2e",
         "UV_OFFLINE": "1",
         "UV_FROZEN": "1",
         "VIRTUAL_ENV": "/code/.venv",
         "_PYTEST_GUARD_WRAPPER_DIR": "/tmp/pytest_resource_guards_abc",
     }
-    launch_env = {"MINDS_DATA_HOME": "/tmp/run/studio-data-home", "MINDS_ROOT_NAME": "minds-staging"}
+    launch_env = {"STUDIO_ROOTS_OVERRIDE": "/tmp/run/studio-data-home", "MINDS_ROOT_NAME": "minds-staging"}
 
     app_env = app_environment(environ, launch_env)
 
@@ -166,7 +166,7 @@ def test_the_app_runs_on_the_shell_s_environment_with_this_test_process_s_own_ta
         "TMPDIR": "/tmp",
         "LANG": "en_US.UTF-8",
         "DISPLAY": ":99",
-        "MINDS_DATA_HOME": "/tmp/run/studio-data-home",
+        "STUDIO_ROOTS_OVERRIDE": "/tmp/run/studio-data-home",
         "MINDS_ROOT_NAME": "minds-staging",
     }
 

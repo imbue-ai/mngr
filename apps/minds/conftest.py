@@ -34,7 +34,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.imbue_common.primitives import NonEmptyStr
-from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
+from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
 from imbue.minds.testing import RunningWorkspaceContainer
@@ -112,7 +112,7 @@ def isolated_minds_data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # The space mirrors the real state root (~/Library/Application Support/...).
     # Without it the suite runs entirely on space-free paths and cannot see the
     # shell-quoting and whitespace-splitting failures that layout provokes.
-    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path / "minds data home"))
+    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path / "minds data home"))
 
 
 @pytest.fixture

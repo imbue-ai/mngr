@@ -364,7 +364,7 @@ and the resource guards' per-test switches, which make a guarded binary exit
 switches the mngr test harness sets (`UV_OFFLINE` would forbid the app's
 first-launch `uv sync` the managed CPython it downloads), the test venv, and
 the resource guards' shim directory on `PATH` are dropped, and
-`MINDS_DATA_HOME`, `MINDS_ROOT_NAME`, the client config and `DISPLAY` are set
+`STUDIO_ROOTS_OVERRIDE`, `MINDS_ROOT_NAME`, the client config and `DISPLAY` are set
 explicitly. The `BROWSER` it is given is a no-op, so its web-login never
 reaches the operator's own browser (which would hand whatever account is
 signed in there to the app); the suite opens the hosted sign-in URL from the

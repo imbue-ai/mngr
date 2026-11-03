@@ -19,6 +19,12 @@ test('paths default to ~/.local/share and honor XDG_DATA_HOME', () => {
   // An empty XDG_DATA_HOME is unset, per the spec.
   const blank = desktopEntryPaths({ homeDir: '/home/alice', xdgDataHome: '  ' });
   assert.equal(blank.applicationsDir, '/home/alice/.local/share/applications');
+
+  // A relative value is invalid per the spec, and these paths are written to:
+  // honoring one would file the entry and icon under the working directory.
+  const relative = desktopEntryPaths({ homeDir: '/home/alice', xdgDataHome: 'xdg' });
+  assert.equal(relative.applicationsDir, '/home/alice/.local/share/applications');
+  assert.equal(relative.iconPath, '/home/alice/.local/share/icons/hicolor/512x512/apps/minds.png');
 });
 
 test('the entry launches the AppImage with the URL argument and claims both schemes', () => {

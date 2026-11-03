@@ -39,12 +39,32 @@ _ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{DYNAMIC_ENV_NAM
 # The full set of legal MINDS_ROOT_NAME values is ``minds`` (production), ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
-# The application name the platform-canonical roots are keyed on, e.g. ``~/Library/Application Support/Imbue Studio``.
-# Matches ``productName`` in ``apps/minds/package.json``, which is what Electron derives its own default ``userData`` path from.
+# The application name the Apple-canonical roots are keyed on, e.g. ``~/Library/Application Support/Imbue Studio``.
+# Matches ``productName`` in ``apps/minds/package.json``, which is what Electron derives its own default ``userData`` path from, and what the packagers name the macOS bundle and the Linux ``/opt`` directory.
 MINDS_APP_NAME: Final[str] = "Imbue Studio"
 
-# Points all three roots at one throwaway directory, for tests and the CI runner.
-MINDS_DATA_HOME_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+# The directory the XDG base directories are keyed on, e.g. ``~/.local/share/imbue-studio``.
+# Matches ``name`` in ``apps/minds/package.json``. The Apple roots take the display name instead, which no Linux data directory carries: a space there has to survive every shell word-splitting the path reaches.
+XDG_APP_DIR_NAME: Final[str] = "imbue-studio"
+
+# Points all three roots at one throwaway directory. Set by the test fixtures, the CI steps, and `minds-admin demo` for a demo box; not a setting an end user is meant to export.
+# It redirects only the destination -- `minds_data_dir_for` still resolves the migration's source against `$HOME` -- so a real build launched with it set moves an existing dotfolder into the throwaway.
+STUDIO_ROOTS_OVERRIDE_ENV_VAR: Final[str] = "STUDIO_ROOTS_OVERRIDE"
+
+# CLEANUP: delete this and `_check_no_retired_roots_override`'s call sites once no shell, CI step or operator script still exports the old name.
+# Ignoring it silently would hand a caller who still exports it the real roots while it believed it was isolated, which is the one failure this variable exists to prevent.
+_RETIRED_ROOTS_OVERRIDE_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+
+
+def _check_no_retired_roots_override() -> None:
+    """Raise when only the retired ``MINDS_DATA_HOME`` is set, rather than resolving the real roots behind its back."""
+    if os.environ.get(_RETIRED_ROOTS_OVERRIDE_ENV_VAR) and not os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR):
+        raise BootstrapError(
+            f"{_RETIRED_ROOTS_OVERRIDE_ENV_VAR} is set but {STUDIO_ROOTS_OVERRIDE_ENV_VAR} is not. The variable was "
+            f"renamed; export {STUDIO_ROOTS_OVERRIDE_ENV_VAR} instead. Continuing would resolve the real roots while "
+            "the caller expected a throwaway directory."
+        )
+
 
 # The per-role roots a parent process can hand this one, which win over anything resolved here.
 # The Electron shell is the intended setter: it creates the virtualenv before any Python exists to ask, so it owns resolution (see specs/minds-platform-canonical-dirs/spec.md, F7).
@@ -57,11 +77,21 @@ _INJECTED_ROOT_ENV_VARS: Final[tuple[str, ...]] = (
     MINDS_LOG_DIR_ENV_VAR,
 )
 
-# The one platform with its own canonical roots; everywhere else keeps the single dotfolder.
+# The two canonical layouts: Apple's ``~/Library`` roots, and the XDG base directories everywhere else.
 _APPLE_PLATFORM: Final[str] = "darwin"
 
-# The logs subdirectory of a dotfolder root. Matches LOGS_ENTRY_NAME in electron/platform-roots.js.
-_DOTFOLDER_LOGS_SUBDIR: Final[str] = "logs"
+# Each XDG base directory's variable, and its default relative to the home directory.
+# Mirrors XDG_*_SEGMENTS in electron/platform-roots.js.
+_XDG_DATA_HOME_ENV_VAR: Final[str] = "XDG_DATA_HOME"
+_XDG_CACHE_HOME_ENV_VAR: Final[str] = "XDG_CACHE_HOME"
+_XDG_STATE_HOME_ENV_VAR: Final[str] = "XDG_STATE_HOME"
+_XDG_DATA_HOME_DEFAULT: Final[tuple[str, ...]] = (".local", "share")
+_XDG_CACHE_HOME_DEFAULT: Final[tuple[str, ...]] = (".cache",)
+_XDG_STATE_HOME_DEFAULT: Final[tuple[str, ...]] = (".local", "state")
+
+# The logs directory below the XDG state root. ``log`` rather than ``logs`` is the component systemd spells for a user unit's ``LogsDirectory=``, which it places above the unit name rather than below it.
+# Matches XDG_LOG_ENTRY_NAME in electron/platform-roots.js.
+_XDG_LOG_SUBDIR: Final[str] = "log"
 
 
 class BootstrapError(ValueError):
@@ -143,7 +173,7 @@ def root_name_for_env_name(env_name: str) -> str:
 def minds_data_dir_for(root_name: str) -> Path:
     """Return the ``~/.<root_name>`` dotfolder root (e.g. ~/.minds).
 
-    On macOS this is the pre-migration root; everywhere else it is the live root.
+    The pre-migration root on every platform. No role resolves into it.
     """
     return Path.home() / ".{}".format(root_name)
 
@@ -161,7 +191,7 @@ def mngr_prefix_for(root_name: str) -> str:
 class MindsPathRole(UpperCaseStrEnum):
     """One of the platform-canonical roots a minds tier keeps its files under.
 
-    Three roles, not four: macOS files data, config, and state under one ``Application Support`` directory, so a config/state split is unobservable on the only platform minds ships.
+    Three roles, not four: macOS files data, config, and state under one ``Application Support`` directory, and minds keeps no configuration a user hand-edits, so the fourth XDG role has nothing to hold.
     """
 
     STATE = auto()
@@ -176,8 +206,8 @@ _INJECTED_ENV_VAR_BY_ROLE: Final[dict[MindsPathRole, str]] = {
     MindsPathRole.LOGS: MINDS_LOG_DIR_ENV_VAR,
 }
 
-# Each role's directory name under a ``MINDS_DATA_HOME`` tier root.
-_DATA_HOME_SUBDIR_BY_ROLE: Final[dict[MindsPathRole, str]] = {
+# Each role's directory name under a ``STUDIO_ROOTS_OVERRIDE`` tier root.
+_ROOTS_OVERRIDE_SUBDIR_BY_ROLE: Final[dict[MindsPathRole, str]] = {
     MindsPathRole.STATE: "state",
     MindsPathRole.CACHE: "cache",
     MindsPathRole.LOGS: "logs",
@@ -233,17 +263,31 @@ def _apple_root_for_role(role: MindsPathRole) -> Path:
             assert_never(unreachable)
 
 
-def _dotfolder_root_for_role(role: MindsPathRole, root_name: str) -> Path:
-    """Return the dotfolder root for a role, e.g. ``~/.minds`` for state and cache and ``~/.minds/logs`` for logs.
+def _xdg_base_dir(env_var: str, default: tuple[str, ...]) -> Path:
+    """Return one XDG base directory: the variable's path, else the default below the home directory.
 
-    The layout every platform but macOS keeps: one dotfolder per tier holding all three roles, with the tier in the dotfolder's own name rather than a segment below it.
+    The spec reads an unset or empty variable as absent, and requires a relative path to be ignored as invalid.
     """
-    dotfolder = minds_data_dir_for(root_name)
+    value = os.environ.get(env_var, "")
+    if value and Path(value).is_absolute():
+        return Path(value)
+    return Path.home().joinpath(*default)
+
+
+def _xdg_root_for_role(role: MindsPathRole) -> Path:
+    """Return the parent a role's tier directories sit below, e.g. ``~/.cache/imbue-studio``.
+
+    State holds credentials, agent records and the virtualenv, which is data the user would miss, so it goes under ``$XDG_DATA_HOME`` rather than under ``$XDG_CONFIG_HOME`` where Electron's own default ``userData`` would put it.
+    The logs role takes a further ``log`` segment below its tier, which :func:`minds_dir_for_role` appends.
+    Written out rather than read from ``platformdirs`` for the reason the Apple roots are: this layer is stdlib-only by contract (see the module docstring), and the Electron shell has to resolve the identical paths with no library at all.
+    """
     match role:
-        case MindsPathRole.STATE | MindsPathRole.CACHE:
-            return dotfolder
+        case MindsPathRole.STATE:
+            return _xdg_base_dir(_XDG_DATA_HOME_ENV_VAR, _XDG_DATA_HOME_DEFAULT) / XDG_APP_DIR_NAME
+        case MindsPathRole.CACHE:
+            return _xdg_base_dir(_XDG_CACHE_HOME_ENV_VAR, _XDG_CACHE_HOME_DEFAULT) / XDG_APP_DIR_NAME
         case MindsPathRole.LOGS:
-            return dotfolder / _DOTFOLDER_LOGS_SUBDIR
+            return _xdg_base_dir(_XDG_STATE_HOME_ENV_VAR, _XDG_STATE_HOME_DEFAULT) / XDG_APP_DIR_NAME
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -251,11 +295,11 @@ def _dotfolder_root_for_role(role: MindsPathRole, root_name: str) -> Path:
 def minds_dir_for_role(role: MindsPathRole, root_name: str, platform: str = sys.platform) -> Path:
     """Return one platform-canonical root for a tier, e.g. ``~/Library/Caches/Imbue Studio/production``.
 
-    Precedence: an injected ``MINDS_*_DIR`` root, then the ``MINDS_DATA_HOME`` throwaway-directory override, then the platform default.
-    The injected root wins because the shell already applied ``MINDS_DATA_HOME`` when it resolved it, so honoring the override again here could point the backend somewhere the shell is not looking.
+    Precedence: an injected ``MINDS_*_DIR`` root, then the ``STUDIO_ROOTS_OVERRIDE`` throwaway-directory override, then the platform default.
+    The injected root wins because the shell already applied ``STUDIO_ROOTS_OVERRIDE`` when it resolved it, so honoring the override again here could point the backend somewhere the shell is not looking.
     An injected root answers only for the tier this process was launched as; any other ``root_name`` raises while one is set.
 
-    ``platform`` is a parameter rather than a read of ``sys.platform`` so one platform's layout can be asserted from another: darwin's from the Linux CI host that runs these tests, and the non-darwin guard from a darwin developer machine.
+    ``platform`` is a parameter rather than a read of ``sys.platform`` so one platform's layout can be asserted from another: darwin's from the Linux CI host that runs these tests, and the XDG layout from a darwin developer machine.
     """
     _check_injected_roots_are_complete()
     injected = os.environ.get(_INJECTED_ENV_VAR_BY_ROLE[role])
@@ -263,44 +307,28 @@ def minds_dir_for_role(role: MindsPathRole, root_name: str, platform: str = sys.
         _check_injected_roots_are_for(root_name)
         return Path(injected)
     tier = env_name_from_root_name(root_name)
-    data_home = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
-    if data_home:
-        return Path(data_home) / tier / _DATA_HOME_SUBDIR_BY_ROLE[role]
+    _check_no_retired_roots_override()
+    roots_override = os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
+    if roots_override:
+        return Path(roots_override) / tier / _ROOTS_OVERRIDE_SUBDIR_BY_ROLE[role]
     if platform != _APPLE_PLATFORM:
-        return _dotfolder_root_for_role(role, root_name)
+        tier_root = _xdg_root_for_role(role) / tier
+        return tier_root / _XDG_LOG_SUBDIR if role is MindsPathRole.LOGS else tier_root
     return _apple_root_for_role(role) / tier
 
 
 def _tier_names_under(parent: Path) -> tuple[str, ...]:
-    """Return the names of ``parent``'s immediate subdirectories, which are the tier names under the Apple and ``MINDS_DATA_HOME`` layouts."""
+    """Return the names of ``parent``'s immediate subdirectories, which are the tier names under every layout."""
     if not parent.is_dir():
         return ()
     return tuple(child.name for child in parent.iterdir() if child.is_dir())
 
 
-def _dotfolder_tier_names() -> tuple[str, ...]:
-    """Return the tier of every ``~/.minds`` / ``~/.minds-<tier>`` directory in the home directory.
-
-    A dotfolder whose name is not a root name -- ``~/.mindsomething``, or a hand-made ``~/.minds-backup-copy`` -- contributes nothing, so a name that is not a tier never reaches the caller.
-    """
-    home = Path.home()
-    if not home.is_dir():
-        return ()
-    tier_names = []
-    for child in home.iterdir():
-        if not child.is_dir():
-            continue
-        root_name = child.name.removeprefix(".")
-        if root_name != DEFAULT_MINDS_ROOT_NAME and not root_name.startswith(f"{_MINDS_PREFIX}-"):
-            continue
-        tier_names.append(env_name_from_root_name(root_name))
-    return tuple(tier_names)
-
-
 def list_state_tier_names(platform: str = sys.platform) -> tuple[str, ...]:
     """Return the tier of every state directory on disk, unordered, e.g. ``("production", "staging")``.
 
-    Reads whichever directory the layout keeps its tiers in, because the two nest the tier and the role in opposite orders: the Apple layout and ``MINDS_DATA_HOME`` both give tiers a shared parent, while a dotfolder carries its tier in its own name.
+    Reads whichever directory the layout keeps its tiers in: both platform layouts give each role's parent a tier segment, while ``STUDIO_ROOTS_OVERRIDE`` gives the tier a segment of its own with the role below it.
+    A tier whose files have not migrated off ``~/.<root_name>`` yet has no directory there and so is not reported.
     Filtering these down to legal env names is the caller's job; this only reports what is on disk.
     Injected roots are resolved for one tier only, so they cannot answer for the set of tiers and raise instead.
     """
@@ -311,12 +339,13 @@ def list_state_tier_names(platform: str = sys.platform) -> tuple[str, ...]:
             f"{MINDS_STATE_DIR_ENV_VAR}={injected!r} is resolved for one tier, so it cannot name where every "
             "tier's state lives. Enumerate tiers from a process that was not handed injected roots."
         )
-    data_home = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
-    if data_home:
-        return _tier_names_under(Path(data_home))
+    _check_no_retired_roots_override()
+    roots_override = os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
+    if roots_override:
+        return _tier_names_under(Path(roots_override))
     if platform == _APPLE_PLATFORM:
         return _tier_names_under(_apple_root_for_role(MindsPathRole.STATE))
-    return _dotfolder_tier_names()
+    return _tier_names_under(_xdg_root_for_role(MindsPathRole.STATE))
 
 
 def resolve_effective_mngr_host_dir() -> Path:
@@ -385,6 +414,36 @@ class MindsRoot:
 
     def __repr__(self) -> str:
         return f"MindsRoot({self._root_name!r})"
+
+
+# CLEANUP: delete this and :func:`check_legacy_dotfolder_has_migrated`, with its call in main.py, alongside
+# electron/migrate-data-dir.js (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
+# Spelled here as well as in electron/platform-roots.js because the two resolvers are deliberately separate.
+_MIGRATION_MARKER_NAME: Final[str] = ".migrated-from-dotfolder"
+
+
+def check_legacy_dotfolder_has_migrated() -> None:
+    """Refuse to run where the Electron shell has not moved this tier out of its ``~/.<root_name>`` dotfolder yet.
+
+    Every entry this process creates under the state root -- the mngr profile, the latchkey store, the anonymous id, the device id -- is one the shell's migration must move there itself, and that move stops on any destination that already exists. Creating one first turns the next launch into a failure that repeats until the user moves the path aside by hand.
+
+    No-op where the shell injected the roots, since it migrates before it spawns anything; where no dotfolder exists; and where the move has already run.
+    """
+    if os.environ.get(MINDS_ROOT_NAME_ENV_VAR) is None:
+        return
+    if any(os.environ.get(name) for name in _INJECTED_ROOT_ENV_VARS):
+        return
+    root = MindsRoot.from_environment()
+    if not root.legacy_data_dir.is_dir():
+        return
+    state_dir = root.state_dir
+    if (state_dir / _MIGRATION_MARKER_NAME).exists():
+        return
+    raise BootstrapError(
+        f"{root.legacy_data_dir} has not moved to {state_dir} yet, and writing to {state_dir} first would stop "
+        f"the move. Launch Imbue Studio once to move it, then run this again. To work against a throwaway root "
+        f"instead, set {MINDS_ROOT_NAME_ENV_VAR} to an env name with no dotfolder of its own."
+    )
 
 
 def apply_bootstrap() -> None:

@@ -13,6 +13,7 @@
 const path = require('path');
 
 const { DEEPLINK_SCHEMES } = require('./deeplink');
+const { XDG_DATA_HOME_SEGMENTS, xdgBaseDir } = require('./platform-roots');
 
 const DESKTOP_ENTRY_FILENAME = 'minds.desktop';
 const ICON_NAME = 'minds';
@@ -23,11 +24,11 @@ const ICON_SIZE = `${ICON_PIXEL_SIZE}x${ICON_PIXEL_SIZE}`;
 const SCHEME_MIME_TYPES = Object.freeze(DEEPLINK_SCHEMES.map((scheme) => `x-scheme-handler/${scheme}`));
 
 /**
- * Where the entry and icon go, per the XDG base directory spec: `$XDG_DATA_HOME`
- * when set, else `~/.local/share`.
+ * Where the entry and icon go, per the XDG base directory spec:
+ * `$XDG_DATA_HOME` when it names an absolute path, else `~/.local/share`.
  */
 function desktopEntryPaths({ homeDir, xdgDataHome }) {
-  const dataHome = xdgDataHome && xdgDataHome.trim() !== '' ? xdgDataHome : path.join(homeDir, '.local', 'share');
+  const dataHome = xdgBaseDir({ value: xdgDataHome, homeDir, defaultSegments: XDG_DATA_HOME_SEGMENTS });
   const applicationsDir = path.join(dataHome, 'applications');
   return {
     applicationsDir,

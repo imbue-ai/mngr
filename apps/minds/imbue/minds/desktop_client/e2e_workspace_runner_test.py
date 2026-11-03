@@ -377,12 +377,12 @@ def test_the_electron_env_prefills_the_template_only_when_one_is_given(monkeypat
     monkeypatch.delenv("MINDS_WORKSPACE_GIT_URL", raising=False)
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
 
-    with_template = _build_electron_env(Path("/tmp/template"), {"MINDS_DATA_HOME": "/tmp/data-home"})
+    with_template = _build_electron_env(Path("/tmp/template"), {"STUDIO_ROOTS_OVERRIDE": "/tmp/data-home"})
     assert with_template["MINDS_WORKSPACE_GIT_URL"] == "/tmp/template"
     assert with_template["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] == "1"
-    assert with_template["MINDS_DATA_HOME"] == "/tmp/data-home"
+    assert with_template["STUDIO_ROOTS_OVERRIDE"] == "/tmp/data-home"
 
-    without_template = _build_electron_env(None, {"MINDS_DATA_HOME": "/tmp/data-home"})
+    without_template = _build_electron_env(None, {"STUDIO_ROOTS_OVERRIDE": "/tmp/data-home"})
     assert "MINDS_WORKSPACE_GIT_URL" not in without_template
     assert "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS" not in without_template
     assert without_template["MNGR_ROOT_NAME"] == "mngr"

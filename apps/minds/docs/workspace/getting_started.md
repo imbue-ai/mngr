@@ -10,7 +10,8 @@ terminal and the system browser opens directly on that URL.
 
 Run from source with nothing exported (`minds run`, or
 `apps/minds/scripts/start-desktop.sh`), the backend targets production:
-it loads the in-repo production `client.toml` and owns `~/.minds/`.
+it loads the in-repo production `client.toml` and owns the production
+tier's data roots.
 `just minds-start` always needs an env **activated in your shell** first,
 because it syncs your local mngr into the workspace template and refuses
 to guess whose data root that lands in -- activate `production` to get
@@ -23,8 +24,8 @@ just minds-start
 
 Activation exports the four env vars (`MINDS_ROOT_NAME`,
 `MNGR_HOST_DIR`, `MNGR_PREFIX`, `MINDS_CLIENT_CONFIG_PATH`) that
-point the backend at the env's `~/.minds-<env-name>/` data root and
-the env's `client.toml`. A shell that names another env via
+point the backend at the env's own data roots and the env's
+`client.toml`. A shell that names another env via
 `MINDS_ROOT_NAME` without `MINDS_CLIENT_CONFIG_PATH` (or
 `--config-file`) is refused rather than silently pointed at production.
 

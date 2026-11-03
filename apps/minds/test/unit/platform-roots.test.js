@@ -4,27 +4,41 @@
 //
 // platform-roots.js is plain node (no Electron), so it is testable directly.
 // Its Python counterpart is covered by imbue/minds/bootstrap_test.py; the two
-// halves must name the same directories, which is what the MINDS_APP_NAME and
-// tier assertions here pin down.
+// halves must name the same directories, which is what the app-name and tier
+// assertions here pin down.
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
-const { MINDS_APP_NAME, tierForRootName, platformRootsFor } = require('../../electron/platform-roots');
+const {
+  MINDS_APP_NAME,
+  XDG_APP_DIR_NAME,
+  STUDIO_ROOTS_OVERRIDE_ENV_VAR,
+  tierForRootName,
+  platformRootsFor,
+  legacyDataDirFor,
+} = require('../../electron/platform-roots');
 
 const HOME = '/Users/tester';
 
-function darwinRoots(rootName) {
-  return platformRootsFor({ rootName, platform: 'darwin', homeDir: HOME, dataHome: undefined });
+function darwinRoots(rootName, env = {}) {
+  return platformRootsFor({ rootName, platform: 'darwin', homeDir: HOME, env });
 }
 
-// -- MINDS_APP_NAME --
+// -- the two app directory names --
 
 test('MINDS_APP_NAME tracks the Electron productName', () => {
   // bootstrap.py pins its own copy against the same field, so anchoring both
   // halves here is what stops the shell writing a tier's state to one directory
   // while the backend reads another.
   assert.equal(MINDS_APP_NAME, require('../../package.json').productName);
+});
+
+test('XDG_APP_DIR_NAME tracks the package name and carries no space', () => {
+  // The space in productName is what makes it wrong for a Linux data directory:
+  // every path below these roots is interpolated into shell and command lines.
+  assert.equal(XDG_APP_DIR_NAME, require('../../package.json').name);
+  assert.ok(!/\s/.test(XDG_APP_DIR_NAME));
 });
 
 // -- tierForRootName --
@@ -62,6 +76,12 @@ test('darwin resolves the three Apple-canonical roots, tier-suffixed', () => {
   });
 });
 
+test('the XDG variables do not move the darwin roots', () => {
+  // A developer's exported variables must not move the shell off the roots it
+  // hardcodes, which is what the backend's own resolver is pinned against.
+  assert.deepEqual(darwinRoots('minds', { XDG_DATA_HOME: '/d', XDG_CACHE_HOME: '/c', XDG_STATE_HOME: '/s' }), darwinRoots('minds'));
+});
+
 test('the three darwin roots stay distinct from each other', () => {
   const { state, cache, logs } = darwinRoots('minds');
   assert.equal(new Set([state, cache, logs]).size, 3);
@@ -75,45 +95,111 @@ test('tiers do not share a directory', () => {
   assert.notEqual(staging.logs, devStaging.logs);
 });
 
-test('MINDS_DATA_HOME collects all three roots under one directory', () => {
-  // What keeps CI runs self-contained and mac-runner-reset.sh a single rm -rf.
+test('STUDIO_ROOTS_OVERRIDE collects all three roots under one directory', () => {
+  // What keeps a CI run self-contained, off the roots the runner's own install owns.
   assert.deepEqual(
-    platformRootsFor({ rootName: 'minds-staging', platform: 'darwin', homeDir: HOME, dataHome: '/tmp/throwaway' }),
+    platformRootsFor({
+      rootName: 'minds-staging',
+      platform: 'darwin',
+      homeDir: HOME,
+      env: { STUDIO_ROOTS_OVERRIDE: '/tmp/throwaway' },
+    }),
     { state: '/tmp/throwaway/staging/state', cache: '/tmp/throwaway/staging/cache', logs: '/tmp/throwaway/staging/logs' }
   );
 });
 
-test('MINDS_DATA_HOME outranks the dotfolder layout off darwin', () => {
+test('STUDIO_ROOTS_OVERRIDE outranks the XDG layout off darwin', () => {
   assert.deepEqual(
-    platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, dataHome: '/tmp/t' }),
+    platformRootsFor({
+      rootName: 'minds',
+      platform: 'linux',
+      homeDir: HOME,
+      env: {
+        STUDIO_ROOTS_OVERRIDE: '/tmp/t',
+        XDG_DATA_HOME: '/ignored/d',
+        XDG_CACHE_HOME: '/ignored/c',
+        XDG_STATE_HOME: '/ignored/s',
+      },
+    }),
     { state: '/tmp/t/production/state', cache: '/tmp/t/production/cache', logs: '/tmp/t/production/logs' }
   );
 });
 
-test('off darwin all three roles live in the one dotfolder', () => {
-  assert.deepEqual(platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, dataHome: undefined }), {
-    state: `${HOME}/.minds`,
-    cache: `${HOME}/.minds`,
-    logs: `${HOME}/.minds/logs`,
+test('the retired override name raises rather than resolving the real roots', () => {
+  assert.throws(
+    () =>
+      platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, env: { MINDS_DATA_HOME: '/tmp/t' } }),
+    new RegExp(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
+  );
+});
+
+test('the retired name is ignored once the current one is set', () => {
+  // Both set is what a shell looks like mid-rename, and the current name answers.
+  assert.deepEqual(
+    platformRootsFor({
+      rootName: 'minds',
+      platform: 'linux',
+      homeDir: HOME,
+      env: { MINDS_DATA_HOME: '/stale', STUDIO_ROOTS_OVERRIDE: '/tmp/t' },
+    }),
+    { state: '/tmp/t/production/state', cache: '/tmp/t/production/cache', logs: '/tmp/t/production/logs' }
+  );
+});
+
+function linuxRoots(rootName, env = {}) {
+  return platformRootsFor({ rootName, platform: 'linux', homeDir: HOME, env });
+}
+
+test('off darwin each role resolves to its own XDG base directory', () => {
+  // Routing the cache to $XDG_CACHE_HOME is what gets the regenerable bytes
+  // excluded: backup tools skip the cache directory, and nothing excluded the dotfolder.
+  assert.deepEqual(linuxRoots('minds'), {
+    state: `${HOME}/.local/share/${XDG_APP_DIR_NAME}/production`,
+    cache: `${HOME}/.cache/${XDG_APP_DIR_NAME}/production`,
+    logs: `${HOME}/.local/state/${XDG_APP_DIR_NAME}/production/log`,
   });
 });
 
-test('off darwin the tier stays in the dotfolder name', () => {
-  // Where the Apple layout puts the tier one level below the root, the
-  // dotfolder carries it, so two tiers are two dotfolders.
-  const staging = platformRootsFor({ rootName: 'minds-staging', platform: 'linux', homeDir: HOME, dataHome: undefined });
-  assert.equal(staging.state, `${HOME}/.minds-staging`);
-  assert.notEqual(staging.state, platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, dataHome: undefined }).state);
+test('off darwin the tier is a segment below each role parent', () => {
+  // The dotfolder carried the tier in its own name; here two tiers are two
+  // subdirectories, so one tier's roots can never nest inside another's.
+  const staging = linuxRoots('minds-staging');
+  assert.equal(staging.state, `${HOME}/.local/share/${XDG_APP_DIR_NAME}/staging`);
+  assert.notEqual(staging.state, linuxRoots('minds').state);
+  assert.ok(!staging.state.startsWith(`${linuxRoots('minds').state}/`));
 });
 
-test('the dotfolder layout matches what the app read before the move', () => {
-  // Every derived path in paths.js hangs off these three, so reproducing them
-  // exactly is what leaves a non-macOS install untouched by this change.
-  const { state, cache, logs } = platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, dataHome: undefined });
-  assert.equal(path.join(state, 'mngr'), `${HOME}/.minds/mngr`);
-  assert.equal(path.join(state, 'latchkey'), `${HOME}/.minds/latchkey`);
-  assert.equal(path.join(state, '.venv'), `${HOME}/.minds/.venv`);
-  assert.equal(path.join(state, '.uv-python'), `${HOME}/.minds/.uv-python`);
-  assert.equal(path.join(cache, '.uv-cache'), `${HOME}/.minds/.uv-cache`);
-  assert.equal(logs, `${HOME}/.minds/logs`);
+test('off darwin the XDG variables are honored', () => {
+  assert.deepEqual(linuxRoots('minds', { XDG_DATA_HOME: '/d', XDG_CACHE_HOME: '/c', XDG_STATE_HOME: '/s' }), {
+    state: `/d/${XDG_APP_DIR_NAME}/production`,
+    cache: `/c/${XDG_APP_DIR_NAME}/production`,
+    logs: `/s/${XDG_APP_DIR_NAME}/production/log`,
+  });
+});
+
+test('an unset, empty or relative XDG variable falls back to its default', () => {
+  // The spec reads empty as absent and requires a relative path to be ignored;
+  // honoring one would put a tier's credentials somewhere relative to the cwd.
+  assert.deepEqual(linuxRoots('minds', { XDG_DATA_HOME: '  ', XDG_CACHE_HOME: '', XDG_STATE_HOME: 'rel/ative' }), linuxRoots('minds'));
+});
+
+test('the XDG layout keeps every derived path under the role its parent names', () => {
+  // Every derived path in paths.js hangs off these three. The virtualenv and
+  // the managed CPython stay on state deliberately: regenerable, but the
+  // backend cannot boot without them, and a cache root is purgeable.
+  const { state, cache, logs } = linuxRoots('minds');
+  const stateRoot = `${HOME}/.local/share/${XDG_APP_DIR_NAME}/production`;
+  assert.equal(path.join(state, 'mngr'), `${stateRoot}/mngr`);
+  assert.equal(path.join(state, 'latchkey'), `${stateRoot}/latchkey`);
+  assert.equal(path.join(state, '.venv'), `${stateRoot}/.venv`);
+  assert.equal(path.join(state, '.uv-python'), `${stateRoot}/.uv-python`);
+  assert.equal(path.join(cache, '.uv-cache'), `${HOME}/.cache/${XDG_APP_DIR_NAME}/production/.uv-cache`);
+  assert.equal(logs, `${HOME}/.local/state/${XDG_APP_DIR_NAME}/production/log`);
+});
+
+test('the legacy dotfolder is only where the migration reads from', () => {
+  // Distinct from every live root, which is what gives a Linux launch a real
+  // source and destination instead of the state-root-is-legacy-root short circuit.
+  assert.equal(legacyDataDirFor({ rootName: 'minds', homeDir: HOME }), `${HOME}/.minds`);
+  assert.notEqual(legacyDataDirFor({ rootName: 'minds', homeDir: HOME }), linuxRoots('minds').state);
 });

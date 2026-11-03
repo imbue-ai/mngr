@@ -267,20 +267,18 @@ function getPlatformRoots() {
     rootName: getMindsRootName(),
     platform: process.platform,
     homeDir: os.homedir(),
-    dataHome: process.env.MINDS_DATA_HOME,
+    env: process.env,
   });
 }
 
 /**
  * The `~/.<MINDS_ROOT_NAME>` root this tier used before the move.
  *
- * On macOS only migrate-data-dir.js uses it: the migration reads it, and the
- * legacy latchkey link lives in it.
- * Off macOS it is still the live root, and every role below resolves back into
- * it.
+ * Only migrate-data-dir.js uses it: the migration reads it, and the legacy
+ * latchkey link lives in it.
  */
 // CLEANUP: delete alongside electron/migrate-data-dir.js, its only caller
-// (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration"). legacyDataDirFor stays: off macOS it resolves the live root.
+// (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
 function getLegacyDataDir() {
   return legacyDataDirFor({ rootName: getMindsRootName(), homeDir: os.homedir() });
 }

@@ -45,14 +45,20 @@ Any other root name has the form `minds-<tier>`.
 | Platform | State root |
 |---|---|
 | macOS | `~/Library/Application Support/Imbue Studio/<tier>/` (`production` for the default) |
-| Linux | `~/.minds/` for production, `~/.minds-<tier>/` otherwise |
+| Linux | `$XDG_DATA_HOME/imbue-studio/<tier>/`, by default `~/.local/share/imbue-studio/<tier>/` |
 
 While the app runs, the state root holds `app.json` and, normally, `api.sock`.
 Read `app.json` first when it exists: it names the real `socket_path` (which can live elsewhere when the state root's path is too long for a socket) and the `launch.argv` command that starts this install.
 Without `app.json`, assume `<state root>/api.sock`.
 
 ```bash
-ROOT="$HOME/Library/Application Support/Imbue Studio/production"   # macOS, production
+# The production tier; for another, replace `production` with its name.
+# A relative $XDG_DATA_HOME is invalid, so the app ignores one and so does this.
+case "${XDG_DATA_HOME-}" in /*) DATA_HOME="$XDG_DATA_HOME" ;; *) DATA_HOME="$HOME/.local/share" ;; esac
+case "$(uname -s)" in
+  Darwin) ROOT="$HOME/Library/Application Support/Imbue Studio/production" ;;
+  *)      ROOT="$DATA_HOME/imbue-studio/production" ;;
+esac
 SOCKET=$(jq -r .socket_path "$ROOT/app.json" 2>/dev/null || echo "$ROOT/api.sock")
 ```
 
@@ -64,6 +70,7 @@ Start it in the background; it shows no window and the user's shortcut still ope
 - With `app.json` present: run its `launch.argv` exactly as given.
   It returns immediately and leaves the app running detached from your shell.
 - Without `app.json`: on macOS `open -g -n -a "Imbue Studio" --args --background`; on Linux `imbue-studio --background` for a package install, or the AppImage file with `--background`; from a source checkout, `uv run minds run --no-browser` from the repo root.
+  The source-checkout form stops with an error when the install's data is still in `~/.minds`, because writing to the new state root first would block the move the app makes on its next launch. Launch the installed app instead, and start again from `app.json`.
 
 Then wait for readiness by polling the version route; a packaged launch syncs its environment first, so allow up to about two minutes:
 

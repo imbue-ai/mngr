@@ -3,8 +3,8 @@
 A 64-bit Raspberry Pi 5 can host the production-tier Imbue Studio desktop client, run
 from source, as an always-on box you reach over VNC. This is useful when your
 main machine is the one you *develop* Imbue Studio on: the Pi runs the real thing,
-against production, with its own `~/.minds/` data root, and never collides with
-a dev checkout.
+against production, with its own copy of the production tier's data roots, and
+never collides with a dev checkout.
 
 There is no packaged Linux arm64 build (the packaged Linux artifacts are x86_64
 only; see [desktop-app.md](./desktop-app.md)), so the Pi runs the same dev-mode
@@ -92,8 +92,11 @@ workspace image is built on the Pi from the public
 `default-workspace-template` at the pinned `minds-v*` tag, so the first
 create takes a while.
 
-The launcher runs against production, so data lives in `~/.minds/` and
-logs in `~/.minds/logs/`. It runs `pnpm start`, whose `prestart` hook
+The launcher runs against production, so data lives in
+`$XDG_DATA_HOME/imbue-studio/production/` and logs in
+`$XDG_STATE_HOME/imbue-studio/production/log/` (by default
+`~/.local/share/...` and `~/.local/state/...`; see the data directory table in
+[desktop-app.md](./desktop-app.md)). It runs `pnpm start`, whose `prestart` hook
 re-provisions binaries and rebuilds the SPA on every launch, and raises mngr's
 Docker build timeout to an hour (`MNGR__PROVIDERS__DOCKER__BUILD_TIMEOUT_SECONDS`),
 since the first workspace image build on a Pi runs past the 600s default.

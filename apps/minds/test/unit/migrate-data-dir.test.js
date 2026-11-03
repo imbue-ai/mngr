@@ -9,6 +9,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 
@@ -174,16 +175,123 @@ test('running twice moves nothing the second time', (t) => {
   assert.equal(fs.existsSync(path.join(roots.state, 'auth-late')), false);
 });
 
-test('an entry already at the destination is kept, not overwritten', (t) => {
-  // Sentry and Crashpad write into the state root before the migration can run
-  // on a first launch, so the destination copy is the newer one.
+test('an entry already at the destination stops the move instead of being skipped', (t) => {
+  // A half-copied destination beside a whole legacy copy: what an interrupted
+  // earlier attempt leaves behind.
   const { legacyDir, roots } = makeScratch(t);
-  writeFileAt(path.join(legacyDir, 'sentry', 'scope.json'), 'old');
-  writeFileAt(path.join(roots.state, 'sentry', 'scope.json'), 'new');
+  writeFileAt(path.join(legacyDir, 'latchkey', 'encryption_key'), 'real');
+  writeFileAt(path.join(roots.state, 'latchkey', 'mngr_latchkey', 'half-copied'), 'partial');
+
+  assert.throws(() => migrateLegacyDataDir({ legacyDir, roots, log: quiet }), /already exists/);
+  assert.equal(fs.existsSync(path.join(roots.state, MIGRATION_MARKER_NAME)), false);
+  assert.equal(fs.readFileSync(path.join(legacyDir, 'latchkey', 'encryption_key'), 'utf8'), 'real');
+});
+
+test('a socket is left behind rather than moved', (t) => {
+  // cpSync refuses a socket, so a cross-volume move would fail on one forever.
+  const { legacyDir, roots } = makeScratch(t);
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const server = net.createServer();
+  const socketPath = path.join(legacyDir, 'api.sock');
+  server.listen(socketPath);
+  t.after(() => server.close());
+  writeFileAt(path.join(legacyDir, 'anonymous_user_id'), 'abc');
+
+  const result = migrateLegacyDataDir({ legacyDir, roots, log: quiet });
+
+  assert.equal(result.movedCount, 1);
+  assert.equal(fs.existsSync(path.join(roots.state, MIGRATION_MARKER_NAME)), true);
+  assert.equal(fs.existsSync(path.join(roots.state, 'api.sock')), false);
+  assert.equal(fs.lstatSync(socketPath).isSocket(), true);
+});
+
+// A device boundary cannot be made inside a unit test, so renameSync raises
+// EXDEV for the one legacy path under test. Every other call reaches the real
+// one, so the rest of the plan moves as it always does.
+function failRenameAcrossVolumes(t, exdevSource) {
+  const realRenameSync = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (from !== exdevSource) {
+      return realRenameSync(from, to);
+    }
+    const error = new Error(`EXDEV: cross-device link, rename '${from}' -> '${to}'`);
+    error.code = 'EXDEV';
+    throw error;
+  });
+}
+
+// One workspace's latchkey store at the legacy root: the host's permissions
+// file, the handle its token names (a symlink to that file by absolute path),
+// and the encryption key every store mngr_latchkey initializes holds.
+function seedLegacyLatchkeyStore(legacyDir) {
+  const pluginRelativeDir = path.join('latchkey', 'mngr_latchkey');
+  const hostFileRelativePath = path.join(pluginRelativeDir, 'hosts', 'host-1', 'latchkey_permissions.json');
+  const handleRelativePath = path.join(pluginRelativeDir, 'permissions', 'abc.json');
+  writeFileAt(path.join(legacyDir, 'latchkey', 'encryption_key'), 'real');
+  writeFileAt(path.join(legacyDir, hostFileRelativePath), '{"rules":[]}');
+  const handle = path.join(legacyDir, handleRelativePath);
+  fs.mkdirSync(path.dirname(handle), { recursive: true });
+  fs.symlinkSync(path.join(legacyDir, hostFileRelativePath), handle);
+  return { hostFileRelativePath, handleRelativePath };
+}
+
+test('a cross-volume move lands the whole entry and leaves nothing beside it', (t) => {
+  const { legacyDir, roots } = makeScratch(t);
+  const { hostFileRelativePath, handleRelativePath } = seedLegacyLatchkeyStore(legacyDir);
+  const legacyStore = path.join(legacyDir, 'latchkey');
+  failRenameAcrossVolumes(t, legacyStore);
 
   migrateLegacyDataDir({ legacyDir, roots, log: quiet });
 
-  assert.equal(fs.readFileSync(path.join(roots.state, 'sentry', 'scope.json'), 'utf8'), 'new');
+  const movedStore = path.join(roots.state, 'latchkey');
+  assert.equal(fs.readFileSync(path.join(movedStore, 'encryption_key'), 'utf8'), 'real');
+  // The handle stays a symlink naming the same path, which is what a pre-move
+  // workspace's token resolves through once ensureLegacyLatchkeyLink runs;
+  // copying it as a file would leave that token naming a stale snapshot.
+  const movedHandle = path.join(roots.state, handleRelativePath);
+  assert.equal(fs.lstatSync(movedHandle).isSymbolicLink(), true);
+  assert.equal(fs.readlinkSync(movedHandle), path.join(legacyDir, hostFileRelativePath));
+  assert.equal(fs.existsSync(legacyStore), false);
+  // The entry and the marker, and nothing else: the copy left no scratch of its
+  // own beside what it was asked to move.
+  assert.deepEqual(fs.readdirSync(roots.state).sort(), [MIGRATION_MARKER_NAME, 'latchkey']);
+});
+
+test('a cross-volume move keeps a relative symlink resolving', (t) => {
+  // `.venv/bin/python3 -> python` and most of `.uv-python/` are relative links.
+  // A copy that rewrote them to absolute paths inside the legacy root would
+  // hand the state root an interpreter of dangling links -- after the legacy
+  // copy is deleted, and with the marker written.
+  const { legacyDir, roots } = makeScratch(t);
+  const legacyVenv = path.join(legacyDir, '.venv');
+  writeFileAt(path.join(legacyVenv, 'bin', 'python3.12'), '#!/bin/sh\n');
+  fs.symlinkSync('python3.12', path.join(legacyVenv, 'bin', 'python3'));
+  failRenameAcrossVolumes(t, legacyVenv);
+
+  migrateLegacyDataDir({ legacyDir, roots, log: quiet });
+
+  const movedLink = path.join(roots.state, '.venv', 'bin', 'python3');
+  assert.equal(fs.readlinkSync(movedLink), 'python3.12');
+  assert.equal(fs.existsSync(movedLink), true);
+});
+
+test('a cross-volume copy that fails writes no marker and keeps the legacy copy', (t) => {
+  const { legacyDir, roots } = makeScratch(t);
+  seedLegacyLatchkeyStore(legacyDir);
+  failRenameAcrossVolumes(t, path.join(legacyDir, 'latchkey'));
+  t.mock.method(fs, 'cpSync', () => {
+    throw new Error('ENOSPC: no space left on device');
+  });
+
+  assert.throws(() => migrateLegacyDataDir({ legacyDir, roots, log: quiet }), /ENOSPC/);
+
+  // The two things the retry depends on: no marker, so the next launch runs the
+  // move again rather than reading the failure as a finished one, and the whole
+  // entry still at the legacy root for it to move. Whatever the interrupted copy
+  // did write at the destination stays there, and stops that next launch at the
+  // destination-exists check.
+  assert.equal(fs.existsSync(path.join(roots.state, MIGRATION_MARKER_NAME)), false);
+  assert.equal(fs.readFileSync(path.join(legacyDir, 'latchkey', 'encryption_key'), 'utf8'), 'real');
 });
 
 test('a legacy root that cannot be read is not recorded as nothing to migrate', (t) => {
@@ -208,21 +316,18 @@ test('a fresh install is marked without inventing a legacy directory', (t) => {
   assert.equal(fs.existsSync(legacyDir), false);
 });
 
-// A migrated install holding one workspace's latchkey files: the host's
-// permissions file, and the handle its token names, a symlink to that file by
-// absolute path.
+// A migrated install holding one workspace's latchkey files.
 function migratedWithLatchkeyHandle(t) {
   const scratch = makeScratch(t);
   const { legacyDir, roots } = scratch;
-  const pluginRelativeDir = path.join('latchkey', 'mngr_latchkey');
-  const hostFileRelativePath = path.join(pluginRelativeDir, 'hosts', 'host-1', 'latchkey_permissions.json');
-  const hostFile = path.join(legacyDir, hostFileRelativePath);
-  writeFileAt(hostFile, '{"rules":[]}');
-  const handle = path.join(legacyDir, pluginRelativeDir, 'permissions', 'abc.json');
-  fs.mkdirSync(path.dirname(handle), { recursive: true });
-  fs.symlinkSync(hostFile, handle);
+  const { hostFileRelativePath, handleRelativePath } = seedLegacyLatchkeyStore(legacyDir);
   migrateLegacyDataDir({ legacyDir, roots, log: quiet });
-  return { ...scratch, handle, hostFile, movedHostFile: path.join(roots.state, hostFileRelativePath) };
+  return {
+    ...scratch,
+    handle: path.join(legacyDir, handleRelativePath),
+    hostFile: path.join(legacyDir, hostFileRelativePath),
+    movedHostFile: path.join(roots.state, hostFileRelativePath),
+  };
 }
 
 test('paths recorded before the move still name the moved permissions file', (t) => {
