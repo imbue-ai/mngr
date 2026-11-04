@@ -270,6 +270,8 @@ how to run them. The decisions behind the first shape are recorded in
 against the production backend: launch the published build and reach the landing
 page; sign in to Imbue Cloud through the app's web-login flow, completing the
 hosted login page in the test's own browser; create an Imbue Cloud workspace;
+run default-workspace-template's CI test suites inside it (see "The template's
+CI suites in the workspace" below);
 send the chat a prompt that builds a hello-world scaffolding app (a web server
 with a route that answers 200, registered as a workspace app; the prompt is
 optimized to be minimally expensive while still building that server); share the
@@ -335,7 +337,8 @@ The throwaway account exists for the signup test and is deleted by `teardown`.
 **Mutual exclusion and the single rerun.** Runs are rival and exclusive: no two
 smoke invocations run at the same time (a GitHub `concurrency` group per tier,
 queued rather than cancelled). The test step gets one rerun before the run counts
-as failed; `teardown` cleans up after both attempts.
+as failed, unless its only failures are default-workspace-template tests, which
+fail the same way again (see below); `teardown` cleans up after both attempts.
 
 **CI keys that talk to production.** This is the first CI workflow holding
 production credentials. These are CI's keys, which happen to give one specific CI
@@ -395,6 +398,57 @@ the main chat's id from the chat app's own `GET /api/chats` (`main_chat_id`)
 before pressing Enter, then waits for that chat's page to show the prompt and
 the reply.
 
+**The template's CI suites in the workspace.** default-workspace-template's CI
+runs its three pytest roots (the repo root, `system/apps/chat` and
+`system/apps/system_interface`) through offload, in Modal sandboxes built from
+the workspace image. A real workspace runs them in a gVisor container on a pool
+host, which differs in ways CI cannot see, and agents run the same suites there.
+So right after the journey creates its workspace, before anything else touches
+it, step 3b runs those suites inside it:
+
+- What runs is read from the workspace itself: each `offload-modal*.toml` at the
+  template's repo root, at the version the workspace was created from, gives a
+  suite's command, the arguments every run adds, its environment (including
+  `DWT_REQUIRE_WORKSPACE_ENV=1`, under which a skipped test fails), and its test
+  groups. Every group runs the way offload runs it: the group's failures rerun
+  with pytest's `--lf` up to its `retry_count`, and a test that passes on any
+  attempt passes.
+
+- The suite reaches the workspace through the app's own mngr (`mngr exec` on the
+  app's host dir under its data home, from its launch directory), so it needs no
+  credential beyond the app's sign-in. It starts a runner detached under
+  `/var/tmp/studio-smoke-dwt/<run id>/`, which first waits for the workspace's
+  first-boot `env-converge` (it installs the browser stack the browser tests
+  need), then polls it and fetches what it left into
+  `.test_output/smoke/<test name>/dwt/`: each attempt's junit report and log,
+  the configs it read, and `summary.md`.
+
+- The suites run one after another, where CI spreads them over twenty sandboxes,
+  so they get 75 minutes; past that the runner is stopped and every unfinished
+  group is reported as such. The journey's timeout, one session's
+  `PYTEST_MAX_DURATION_SECONDS` and the CI job's timeout all grow to fit.
+
+Every template test is reported as a subtest of the journey labelled
+`dwt:<suite>::<node id>`, so each one that fails in the workspace is its own
+`SUBFAILED` result carrying its failure text, and the journey carries on. A run
+that went wrong rather than its tests (a group that crashed, never ran, or wrote
+no report) is reported as `dwt:<suite>::[<group> group]`. The step's own
+failure, when the configs cannot be read, the runner cannot start, or its
+results cannot be fetched, fails the `Step 3b` subtest instead, which counts as
+a journey failure. Each session writes `.test_output/smoke/verdict.json`,
+counting failed template tests apart from every other failure: the workflow
+skips its rerun when those are the only failures, and adds each `summary.md` to
+the job's summary page.
+
+`MINDS_SMOKE_SKIP_DWT_TESTS=1` skips step 3b: the journey reports it as a
+`SUBSKIPPED` subtest and goes on. Unset or `0` runs it, and any other value
+errors the journey before the app launches. A dispatch of the workflow sets it
+through the `skip_dwt_tests` input, where `true` skips and the default is
+`false`. The dispatch `minds-admin env deploy` starts after a production deploy
+passes `skip_dwt_tests=true`: a services deploy changes neither the template
+nor the pool hosts, which is what these tests exercise. The hand dispatch after
+a channel publish leaves it at `false`, so that run includes them.
+
 **Running it locally.** The suite runs from a developer laptop against staging
 or production with nothing but this branch, so a developer can see whether the
 tier passes or fails before any CI exists. What a run needs:
@@ -442,7 +496,9 @@ just minds-smoke-teardown <tier> <run-id> --state /tmp/smoke-<run-id>.json
 A run leases one pool row at the build's template tag, in the region the
 create form already points at (and fails when the tier's pool has none to lease
 there, which is a true thing to report about the tier), mints one LiteLLM key
-for the persistent account, and has a real agent build the hello-world app; a
+for the persistent account, runs default-workspace-template's CI suites in the
+workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them), and
+has a real agent build the hello-world app; a
 passing journey destroys its workspace and turns its share off itself. After a
 failed run, `just minds-smoke-teardown` releases whatever the manifest and the
 two accounts still hold, turns off their shares, deletes the throwaway account

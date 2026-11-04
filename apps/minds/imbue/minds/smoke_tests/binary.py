@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 import httpx2
 from loguru import logger
@@ -42,6 +43,7 @@ from imbue.minds.bootstrap import MINDS_APP_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.desktop_client.e2e_workspace_runner import DEV_CHECKOUT_LAUNCH_TARGET
 from imbue.minds.desktop_client.e2e_workspace_runner import ElectronLaunchTarget
@@ -121,6 +123,12 @@ _BROWSER_ENV_VAR: Final[str] = "BROWSER"
 _NO_OP_COMMAND: Final[str] = "true"
 _DISPLAY_ENV_VAR: Final[str] = "DISPLAY"
 _LOGS_DIR_NAME: Final[str] = "logs"
+# The tier's state directory under the data home holds the app's mngr host dir and, for a packaged build,
+# the virtualenv its first launch syncs, whose mngr is the one the app runs.
+_STATE_DIR_NAME: Final[str] = "state"
+_MNGR_HOST_DIR_NAME: Final[str] = "mngr"
+_PACKAGED_MNGR_RELATIVE_PATH: Final[Path] = Path(".venv") / "bin" / "mngr"
+_MNGR_EXECUTABLE_NAME: Final[str] = "mngr"
 
 # Variable families this process carries that an installed app never would:
 # pytest's own marker and the resource guards' switches (``_PYTEST_GUARD_*``),
@@ -434,6 +442,29 @@ def app_log_dir(data_home: Path, root_name: str) -> Path:
 
 
 @pure
+def app_mngr_host_dir(data_home: Path, root_name: str) -> Path:
+    """The ``MNGR_HOST_DIR`` the app runs mngr with: ``<data home>/<tier>/state/mngr``."""
+    return data_home / env_name_from_root_name(root_name) / _STATE_DIR_NAME / _MNGR_HOST_DIR_NAME
+
+
+@pure
+def app_mngr_executable(binary: StudioBinary, data_home: Path, test_venv_bin_dir: Path) -> Path:
+    """The mngr the app runs: a packaged build's own venv's, or, for the dev checkout, this checkout's.
+
+    The dev checkout's backend runs from the checkout's workspace venv, which is
+    the venv this test process runs from too.
+    """
+    match binary.kind:
+        case StudioBinaryKind.PACKAGED:
+            state_dir = data_home / env_name_from_root_name(str(binary.root_name)) / _STATE_DIR_NAME
+            return state_dir / _PACKAGED_MNGR_RELATIVE_PATH
+        case StudioBinaryKind.DEV_CHECKOUT:
+            return test_venv_bin_dir / _MNGR_EXECUTABLE_NAME
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
 def app_environment(environ: Mapping[str, str], launch_env: Mapping[str, str]) -> dict[str, str]:
     """The environment the app under test runs in: the shell's, minus this test process's own, plus ``launch_env``.
 
@@ -515,4 +546,8 @@ def launched_studio_app(
             backend_origin=NonEmptyStr(backend_origin_from_page(page)),
             data_home=data_home,
             log_dir=app_log_dir(data_home, str(binary.root_name)),
+            launch_cwd=launch_cwd,
+            mngr_executable=app_mngr_executable(binary, data_home, Path(sys.executable).parent),
+            mngr_host_dir=app_mngr_host_dir(data_home, str(binary.root_name)),
+            mngr_prefix=NonEmptyStr(mngr_prefix_for(str(binary.root_name))),
         )

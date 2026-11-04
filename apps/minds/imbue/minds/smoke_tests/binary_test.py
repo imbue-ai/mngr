@@ -8,6 +8,8 @@ from imbue.minds.smoke_tests.backend import resolve_smoke_backend
 from imbue.minds.smoke_tests.backend import resolve_smoke_client_config_path
 from imbue.minds.smoke_tests.binary import app_environment
 from imbue.minds.smoke_tests.binary import app_log_dir
+from imbue.minds.smoke_tests.binary import app_mngr_executable
+from imbue.minds.smoke_tests.binary import app_mngr_host_dir
 from imbue.minds.smoke_tests.binary import bundled_root_name_or_none
 from imbue.minds.smoke_tests.binary import cached_build_dir
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
@@ -19,6 +21,7 @@ from imbue.minds.smoke_tests.binary import published_build_layout_or_none
 from imbue.minds.smoke_tests.binary import published_channel_studio_binary
 from imbue.minds.smoke_tests.binary import resolve_studio_binary
 from imbue.minds.smoke_tests.data_types import SmokeBackend
+from imbue.minds.smoke_tests.data_types import StudioBinary
 from imbue.minds.smoke_tests.data_types import StudioBinaryKind
 from imbue.minds.smoke_tests.primitives import ReleaseChannelName
 from imbue.minds.smoke_tests.primitives import SMOKE_BINARY_PATH_ENV_VAR
@@ -135,6 +138,29 @@ def test_the_launch_target_of_a_packaged_build_has_no_main_script(tmp_path: Path
 def test_the_app_logs_under_the_tier_directory_of_the_data_home(tmp_path: Path) -> None:
     assert app_log_dir(tmp_path, "minds") == tmp_path / "production" / "logs"
     assert app_log_dir(tmp_path, "minds-staging") == tmp_path / "staging" / "logs"
+
+
+def test_the_app_keeps_its_mngr_host_dir_under_the_tier_s_state_directory_of_the_data_home(tmp_path: Path) -> None:
+    assert app_mngr_host_dir(tmp_path, "minds") == tmp_path / "production" / "state" / "mngr"
+    assert app_mngr_host_dir(tmp_path, "minds-staging") == tmp_path / "staging" / "state" / "mngr"
+
+
+def test_a_packaged_build_runs_its_own_venv_s_mngr_and_the_dev_checkout_runs_this_checkout_s(tmp_path: Path) -> None:
+    executable = _write_linux_build(tmp_path / "build", bundled_root_name="minds-staging")
+    packaged = packaged_studio_binary(executable, _staging_backend(), label="packaged")
+    dev_checkout = StudioBinary(
+        kind=StudioBinaryKind.DEV_CHECKOUT,
+        executable=tmp_path / "electron",
+        main_js=tmp_path / "main.js",
+        label=NonEmptyStr("this checkout's Electron"),
+        root_name=NonEmptyStr("minds-staging"),
+    )
+    test_venv_bin_dir = tmp_path / "checkout" / ".venv" / "bin"
+
+    assert app_mngr_executable(packaged, tmp_path / "data", test_venv_bin_dir) == (
+        tmp_path / "data" / "staging" / "state" / ".venv" / "bin" / "mngr"
+    )
+    assert app_mngr_executable(dev_checkout, tmp_path / "data", test_venv_bin_dir) == test_venv_bin_dir / "mngr"
 
 
 def test_the_app_runs_on_the_shell_s_environment_with_this_test_process_s_own_taken_out() -> None:
