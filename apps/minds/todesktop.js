@@ -22,8 +22,9 @@ module.exports = {
   // excluded wholesale. The app-files glob also strips **/node_modules at any
   // depth, so it could not carry resources/latchkey's nested ones even if it
   // were the delivery channel. scripts/build.js estimates the upload and fails
-  // the build when it approaches uploadSizeLimit.
-  appFiles: ['**', '!resources/**'],
+  // the build when it approaches uploadSizeLimit. Dotenv files hold a
+  // developer's credentials and must never ride along in a local build.
+  appFiles: ['**', '!resources/**', '!.env', '!.env.*'],
   // One upload carries every target's tools (see scripts/build.js), which is
   // what the estimate in build.js is held against.
   uploadSizeLimit: 1100,

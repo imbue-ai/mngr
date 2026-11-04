@@ -80,3 +80,27 @@ Fluent assertion API:
 - `expect(string).to_be_empty()` -- assert empty string
 - `expect(string).not_to_contain(substring)` -- assert substring absent
 - `expect(string).not_to_match(pattern)` -- assert no regex match
+
+## Credential redaction and artifact scrubbing
+
+A session's commands inherit the test runner's environment, so a command that
+prints its environment writes every credential the runner holds into the
+transcript. Two modules keep those values out of anything that gets published:
+
+- `imbue.skitwright.redaction.redact_secret_values(text, env, secret_names)` --
+  replaces every occurrence of each named variable's value in `text` with
+  `<redacted NAME>`. The caller names the variables that hold credentials;
+  nothing is inferred from variable names.
+- `imbue.skitwright.artifact_scrub.scrub_paths(paths, env, secret_names)` --
+  rewrites every UTF-8 text file under `paths` in place (directories are walked
+  recursively; other files are reported as skipped): the named variables'
+  values become `<redacted NAME>`, and anything else credential-shaped
+  (Anthropic, LiteLLM and OpenAI keys, Modal tokens, GitHub tokens, AWS access
+  key ids, private-key blocks; documentation placeholders excepted) becomes
+  `<redacted PATTERN>`. The returned `ScrubReport` lists the scanned, redacted
+  and skipped files and the `pattern_redactions`, each located by file and
+  line; one of those means a credential the caller did not name got in.
+  `secret_names_from_env(env)` reads the names to redact from the
+  comma-separated `MNGR_SECRET_ENV_NAMES` and `VAULT_SECRET_ENV_NAMES`
+  variables, and `format_pattern_redactions(redactions)` renders them one per
+  line.

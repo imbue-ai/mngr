@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 from collections.abc import Generator
-from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -34,6 +33,7 @@ from imbue.mngr.utils.env_utils import TEST_USER_ID_RANDOM_SUFFIX_LENGTH
 from imbue.mngr.utils.env_utils import build_test_user_id
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
+from imbue.skitwright.artifact_scrub import secret_names_from_env
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
@@ -72,16 +72,6 @@ def require_binary(binary: str, install_hint: str) -> None:
     while these blocks exercised nothing.
     """
     assert shutil.which(binary) is not None, f"{binary} is not installed ({install_hint})"
-
-
-# Comma-separated names of the environment variables that hold credentials. The
-# workflow that injects the credentials sets it, so the list is whatever was
-# actually injected rather than a guess from variable names. Unset outside CI.
-SECRET_ENV_NAMES_VAR = "MNGR_SECRET_ENV_NAMES"
-
-
-def _secret_env_names(env: Mapping[str, str]) -> list[str]:
-    return [name for name in env.get(SECRET_ENV_NAMES_VAR, "").split(",") if name]
 
 
 def time_bounded(seconds: float, command: str) -> str:
@@ -569,7 +559,14 @@ def _setup_test_profile(host_dir: Path, max_user_id_length: int) -> str:
     # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
     # is_allowed_in_pytest = true (it defaults to False) the config loader would
     # refuse to run.
-    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+    # A tutorial block that forwards ANTHROPIC_API_KEY to a remote agent must
+    # forward the proxy URL the key belongs to as well, or a LiteLLM-minted key
+    # (what CI hands these tests) is presented to api.anthropic.com. The config
+    # list is the base the block's own --pass-env is appended to, and an unset
+    # variable is skipped, so local runs without a proxy see no difference.
+    (profile_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\npass_env = ["ANTHROPIC_BASE_URL"]\n'
+    )
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
@@ -928,7 +925,7 @@ def e2e(
         transcript_path = test_output_dir / "transcript.txt"
         # Local agents inherit this env, so a test that dumps an agent's env
         # prints the runner's credentials; they must not reach the saved artifact.
-        transcript_path.write_text(redact_secret_values(session.transcript, env, _secret_env_names(env)))
+        transcript_path.write_text(redact_secret_values(session.transcript, env, secret_names_from_env(env)))
         # Capture the test's docstring (the scope anchor: the verbatim tutorial
         # block plus crystallized scope) so the detail renderer can show it.
         docstring = inspect.cleandoc(request.node.function.__doc__ or "")
