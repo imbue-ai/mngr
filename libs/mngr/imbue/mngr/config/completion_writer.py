@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterator
 from enum import Enum
 from typing import Any
 from typing import Final
@@ -12,11 +13,14 @@ from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
+from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
@@ -325,9 +329,42 @@ def _is_excluded_config_key(key: str) -> bool:
     return any(key == prefix or key.startswith(f"{prefix}.") for prefix in _EXCLUDED_CONFIG_KEY_PREFIXES)
 
 
-def _is_agent_types_key(key: str) -> bool:
-    """Return True for the ``agent_types`` container key and any key under it."""
-    return key == "agent_types" or key.startswith("agent_types.")
+# Dict-container config namespaces whose completion keys are built from the
+# config *schema* (and enumerable key sources) rather than by flattening the
+# config instance. Their instance-dump keys use the internal
+# ``.defaults.``/``.options.`` shape and drop unset fields, so they are excluded
+# from the flattened base key set and re-emitted correctly per namespace.
+_CONTAINER_NAMESPACES: Final[frozenset[str]] = frozenset(
+    {"agent_types", "providers", "plugins", "commands", "create_templates", "pre_command_scripts"}
+)
+
+
+def _is_container_namespace_key(key: str) -> bool:
+    """Return True for any key under a schema-completed dict-container namespace."""
+    return key.split(".", 1)[0] in _CONTAINER_NAMESPACES
+
+
+def _collect_model_field_completions(
+    config_class: type[BaseModel],
+    prefix: tuple[str, ...],
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Walk one config model's schema into completion keys and constrained-value choices.
+
+    Returns ``(keys, choices)``: one key per settable leaf field (dotted, under
+    ``prefix``), plus a value-choices entry for each field whose annotation
+    constrains its value (bool, enum, or a dynamic-source type). Shared by the
+    ``agent_types`` / ``plugins`` / ``providers`` namespace builders, which differ
+    only in how they resolve each entry's config class.
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    for path, annotation, _description in walk_model_fields(config_class, prefix=prefix, recurse_optional=True):
+        keys.append(path)
+        value_choices = _value_choices_for_annotation(annotation, dynamic_values)
+        if value_choices is not None:
+            choices[path] = value_choices
+    return keys, choices
 
 
 def _agent_type_schema_completions(
@@ -352,24 +389,248 @@ def _agent_type_schema_completions(
     for name in agent_type_names:
         existing = config.agent_types.get(AgentTypeName(name))
         config_class = type(existing) if existing is not None else get_agent_config_class(name)
-        for path, annotation, _description in walk_model_fields(
-            config_class, prefix=("agent_types", name), recurse_optional=True
-        ):
-            keys.append(path)
-            value_choices = _value_choices_for_annotation(annotation, dynamic_values)
+        sub_keys, sub_choices = _collect_model_field_completions(config_class, ("agent_types", name), dynamic_values)
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
+    return keys, choices
+
+
+def _plugin_schema_completions(
+    plugin_names: list[str],
+    config: MngrConfig,
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Build ``plugins.<name>.*`` keys/choices from each plugin's config schema.
+
+    Plugin names are enumerable (installed plugins), so each plugin's config
+    fields are offered even before anything is set for it. A configured plugin
+    with a plugin-specific ``PluginConfig`` subclass uses that subclass's schema;
+    otherwise the base ``PluginConfig`` (``enabled``) is walked.
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    names = sorted(set(plugin_names) | {str(k) for k in config.plugins.keys()})
+    for name in names:
+        existing = config.plugins.get(PluginName(name))
+        config_class = type(existing) if existing is not None else PluginConfig
+        sub_keys, sub_choices = _collect_model_field_completions(config_class, ("plugins", name), dynamic_values)
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
+    return keys, choices
+
+
+def _provider_schema_completions(
+    config: MngrConfig,
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Build ``providers.<name>.*`` keys/choices from each configured provider's schema.
+
+    Provider instance names are user-chosen (not enumerable), so only configured
+    providers contribute -- but each is walked from its config *schema*, so all
+    settable fields (e.g. the discovery timeouts) are offered even when unset,
+    not just the fields the user already wrote (which is all the instance dump
+    would surface).
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    for name, instance in config.providers.items():
+        sub_keys, sub_choices = _collect_model_field_completions(
+            type(instance), ("providers", str(name)), dynamic_values
+        )
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
+    return keys, choices
+
+
+def _create_template_schema_completions(
+    config: MngrConfig,
+    dynamic_values: dict[str, list[str]],
+    create_param_choices: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Build ``create_templates.<name>.*`` keys/choices for configured templates.
+
+    Template names are user-chosen (not enumerable), so only configured templates
+    contribute. A template's options are validated against ``CreateCliOptions``
+    (see ``loader._parse_create_templates``), so every ``CreateCliOptions`` field
+    is offered as a settable ``create_templates.<name>.<param>`` -- the
+    transparently unwrapped, user-facing key -- rather than only the params
+    already present (and rather than the internal ``.options.<param>`` shape the
+    instance dump would produce, which does not round-trip through ``config set``).
+
+    Value choices come from ``create_param_choices`` -- the ``create`` command's own
+    option choices, static and dynamic -- so a template option completes to the same
+    values ``mngr create --<opt>`` does (e.g. ``type`` -> agent type names). Fields
+    with no create-option choice fall back to what the annotation alone constrains.
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    for name in config.create_templates.keys():
+        for field_name, field_info in CreateCliOptions.model_fields.items():
+            key = f"create_templates.{name}.{field_name}"
+            keys.append(key)
+            value_choices = create_param_choices.get(field_name)
+            if value_choices is None:
+                value_choices = _value_choices_for_annotation(field_info.annotation, dynamic_values)
             if value_choices is not None:
-                choices[path] = value_choices
+                choices[key] = value_choices
+    return keys, choices
+
+
+def _option_value_choices(option: click.Option) -> list[str] | None:
+    """Return the constrained value set for a click option, or None if freeform.
+
+    A ``click.Choice`` yields its choices; a boolean flag yields
+    ``["true", "false"]``. Everything else has no fixed value set.
+    """
+    if isinstance(option.type, click.Choice):
+        return [str(choice) for choice in option.type.choices]
+    if option.is_flag:
+        return ["true", "false"]
+    return None
+
+
+def _create_command_param_choices(
+    create_cmd: click.Command | None,
+    dynamic_choice_values: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Map each ``create`` option's param name to its value choices (static + dynamic).
+
+    A create template's options are exactly the ``create`` command's options (a
+    template is validated against ``CreateCliOptions``), so a template option should
+    complete to the same values ``mngr create --<opt>`` does. Static choices come
+    from the option itself (booleans, ``click.Choice``); dynamic choices come from
+    ``_DYNAMIC_CHOICE_OPTIONS`` (e.g. ``--type`` -> agent type names, ``--provider``
+    -> provider names), looked up in ``dynamic_choice_values``. Returns an empty map
+    when the ``create`` command is absent (e.g. disabled).
+    """
+    if create_cmd is None:
+        return {}
+    choices: dict[str, list[str]] = {}
+    for param in create_cmd.params:
+        if not isinstance(param, click.Option) or not param.name:
+            continue
+        static_choices = _option_value_choices(param)
+        if static_choices is not None:
+            choices[param.name] = static_choices
+            continue
+        for opt in param.opts:
+            data_key = _DYNAMIC_CHOICE_OPTIONS.get(f"create.{opt}")
+            if data_key is not None and data_key in dynamic_choice_values:
+                choices[param.name] = dynamic_choice_values[data_key]
+                break
+    return choices
+
+
+def _iter_leaf_commands(cli_group: click.Group) -> Iterator[tuple[str | None, str, click.Command]]:
+    """Yield ``(group_name, leaf_name, command)`` for every non-group command in the tree.
+
+    ``group_name`` is None for a top-level command and the group's canonical name
+    for a subcommand. Alias entries (registered under a name other than the
+    command's canonical name) are skipped so each command is yielded once, under
+    its canonical name.
+    """
+    top_aliases = detect_alias_to_canonical(cli_group)
+    for name, cmd in cli_group.commands.items():
+        if name in top_aliases:
+            continue
+        if isinstance(cmd, click.Group) and cmd.commands:
+            group_name = cmd.name or name
+            sub_aliases = detect_alias_to_canonical(cmd)
+            for sub_name, sub_cmd in cmd.commands.items():
+                if sub_name in sub_aliases:
+                    continue
+                yield group_name, (sub_cmd.name or sub_name), sub_cmd
+        else:
+            yield None, (cmd.name or name), cmd
+
+
+def _derive_command_name(group_name: str | None, leaf_name: str) -> str:
+    """Derive a command's ``command_name`` bucket from its position in the tree.
+
+    Top-level commands use their own name; group subcommands are namespaced
+    ``<group>_<subcommand>`` (matching the call-site literals -- see
+    ``cli/command_names.py``). Callers gate the result on the authoritative
+    registry, so a derived name that does not correspond to a real bucket (e.g.
+    ``config_set`` for the group-level ``config`` bucket) is discarded.
+    """
+    return leaf_name if group_name is None else f"{group_name}_{leaf_name}"
+
+
+def _command_defaults_completions(
+    cli_group: click.Group,
+    config: MngrConfig,
+    config_command_names: frozenset[str],
+    default_subcommand_choices: dict[str, list[str]],
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Build ``commands.*`` completion keys/choices in the user-facing key shape.
+
+    Users set ``commands.<name>.<param>`` (the ``defaults`` wrapper is transparent
+    -- see ``config/key_resolver.py``), so keys are emitted flat, never in the
+    internal ``commands.<name>.defaults.<param>`` shape (which does not round-trip
+    through ``config set``). Three sources:
+
+    - Per-command parameter defaults: for every tree command whose derived
+      ``command_name`` (``<group>_<sub>`` for subcommands) owns a defaults bucket
+      (is in ``config_command_names``), each click option is offered as
+      ``commands.<command_name>.<param>`` -- discoverable before anything is set.
+      Boolean/choice options also complete their value. Gating on the registry
+      excludes the group-level ``config`` / ``plugin`` buckets, whose derived
+      per-subcommand names are absent from it.
+    - ``default_subcommand``: for every configurable-default group,
+      ``commands.<config_key>.default_subcommand`` with the group's subcommand
+      names as value choices. The (config_key -> subcommand names) mapping is
+      computed in the cli layer and passed in as ``default_subcommand_choices``.
+    - Already-configured params: any ``commands.<name>.<param>`` present in the
+      user's config, covering plugin-added options and the group-level buckets
+      that have no per-command tree entry.
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+
+    for group_name, leaf_name, cmd in _iter_leaf_commands(cli_group):
+        command_name = _derive_command_name(group_name, leaf_name)
+        if command_name not in config_command_names:
+            continue
+        for param in cmd.params:
+            if isinstance(param, click.Option) and param.expose_value and param.name:
+                key = f"commands.{command_name}.{param.name}"
+                keys.append(key)
+                value_choices = _option_value_choices(param)
+                if value_choices is not None:
+                    choices[key] = value_choices
+
+    for config_key, subcommand_names in default_subcommand_choices.items():
+        key = f"commands.{config_key}.default_subcommand"
+        keys.append(key)
+        if subcommand_names:
+            choices[key] = subcommand_names
+
+    for name, command_defaults in config.commands.items():
+        for param_name in command_defaults.defaults.keys():
+            keys.append(f"commands.{name}.{param_name}")
+
     return keys, choices
 
 
 def _build_dynamic_completions(
     mngr_ctx: MngrContext,
     registered_agent_types: list[str],
+    cli_group: click.Group,
+    config_command_names: list[str],
+    default_subcommand_choices: dict[str, list[str]],
 ) -> _DynamicCompletions:
     """Build dynamic completion data from the runtime context.
 
     Extracts agent type names, template names, provider names, plugin names,
     and config keys from the live MngrContext for injection into the cache.
+
+    The dict-container config namespaces (``agent_types``, ``providers``,
+    ``plugins``, ``commands``, ``create_templates``, ``pre_command_scripts``) are
+    completed from the config *schema* and enumerable key sources (registered
+    agent/plugin names, the ``command_name`` registry, the command tree) rather
+    than from flattening the config instance, so every settable key -- not just
+    the already-configured ones -- is offered, in the correct user-facing shape.
     """
     config = mngr_ctx.config
 
@@ -387,21 +648,58 @@ def _build_dynamic_completions(
         "provider_backend_names": provider_backend_names,
     }
 
-    # The instance dump only covers agent types present in the user's config and
-    # drops unset container fields, so the ``agent_types.*`` keys/choices are
-    # instead derived from each known agent type's config *schema* (covering
-    # builtin types and fields like ``config_overrides`` even when unset).
+    command_name_set = frozenset(config_command_names)
+
+    # Each dict-container namespace's keys/choices come from the config schema
+    # (and its enumerable key source), not the instance dump -- so unset fields
+    # and, where the key source is authoritative (agent/plugin names, the command
+    # registry), unconfigured entries are still offered.
     schema_agent_keys, schema_agent_choices = _agent_type_schema_completions(agent_type_names, config, dynamic_values)
+    plugin_keys, plugin_choices = _plugin_schema_completions(plugin_names, config, dynamic_values)
+    provider_keys, provider_choices = _provider_schema_completions(config, dynamic_values)
+    command_keys, command_choices = _command_defaults_completions(
+        cli_group, config, command_name_set, default_subcommand_choices, dynamic_values
+    )
+    # A create template's option values complete like ``mngr create --<opt>``, so
+    # reuse the create command's own choices (incl. the dynamic ``--type`` etc.).
+    create_param_choices = _create_command_param_choices(
+        cli_group.commands.get("create"),
+        {"agent_type_names": agent_type_names, "template_names": template_names, "provider_names": provider_names},
+    )
+    template_keys, template_choices = _create_template_schema_completions(config, dynamic_values, create_param_choices)
+    pre_command_script_keys = [
+        f"pre_command_scripts.{name}"
+        for name in sorted(command_name_set | {str(k) for k in config.pre_command_scripts.keys()})
+    ]
 
-    instance_keys = [k for k in flatten_dict_keys(config.model_dump(mode="json")) if not _is_agent_types_key(k)]
-    config_keys = [k for k in (instance_keys + sorted(schema_agent_keys)) if not _is_excluded_config_key(k)]
+    # Non-container keys come from the instance dump unchanged; container keys are
+    # dropped here and replaced by the schema-derived keys above.
+    base_keys = [k for k in flatten_dict_keys(config.model_dump(mode="json")) if not _is_container_namespace_key(k)]
+    all_keys = (
+        base_keys
+        + schema_agent_keys
+        + plugin_keys
+        + provider_keys
+        + command_keys
+        + template_keys
+        + pre_command_script_keys
+    )
+    config_keys = sorted({k for k in all_keys if not _is_excluded_config_key(k)})
 
-    instance_choices = {
-        k: v for k, v in _extract_config_value_choices(config, dynamic_values).items() if not _is_agent_types_key(k)
+    base_choices = {
+        k: v
+        for k, v in _extract_config_value_choices(config, dynamic_values).items()
+        if not _is_container_namespace_key(k)
     }
-    config_value_choices = {
-        k: v for k, v in {**instance_choices, **schema_agent_choices}.items() if not _is_excluded_config_key(k)
+    merged_choices = {
+        **base_choices,
+        **schema_agent_choices,
+        **plugin_choices,
+        **provider_choices,
+        **command_choices,
+        **template_choices,
     }
+    config_value_choices = {k: v for k, v in merged_choices.items() if not _is_excluded_config_key(k)}
 
     return _DynamicCompletions(
         agent_type_names=agent_type_names,
@@ -420,6 +718,8 @@ def write_cli_completions_cache(
     registered_agent_types: list[str] | None = None,
     topic_names: list[str] | None = None,
     installed_plugin_packages: list[str] | None = None,
+    config_command_names: list[str] | None = None,
+    default_subcommand_choices: dict[str, list[str]] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -445,6 +745,20 @@ def write_cli_completions_cache(
     ``mngr plugin remove`` positional argument. The caller passes these for the
     same layering reason as topic_names: the uv-tool receipt helper transitively
     imports the cli layer, which this writer must not depend on.
+
+    config_command_names is the authoritative set of ``command_name`` values
+    (``cli.command_names.KNOWN_CONFIG_COMMAND_NAMES``): the keys under which a
+    command owns its ``[commands.<name>]`` parameter defaults and
+    ``[pre_command_scripts.<name>]`` hooks. The caller passes it for the same
+    layering reason as topic_names (the registry lives in the cli layer); the
+    completion of ``commands.*`` / ``pre_command_scripts.*`` keys relies on it to
+    recognise which tree commands own a defaults bucket.
+
+    default_subcommand_choices maps each configurable-default group's config key
+    (see ``cli.command_names.build_default_subcommand_choices``) to its subcommand
+    names, so ``commands.<config_key>.default_subcommand`` completes with the right
+    values. The caller computes it because it depends on the cli-layer
+    ``DefaultCommandGroup`` type, which this writer must not import.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -527,7 +841,17 @@ def write_cli_completions_cache(
             help_targets = sorted(canonical_names | set(topic_names or []))
 
         # Inject dynamic choice values from runtime context (config, registries)
-        dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
+        dynamic = (
+            _build_dynamic_completions(
+                mngr_ctx,
+                registered_agent_types or [],
+                cli_group,
+                config_command_names or [],
+                default_subcommand_choices or {},
+            )
+            if mngr_ctx is not None
+            else None
+        )
         if dynamic is not None:
             dynamic_as_dict = dynamic._asdict()
             for opt_key, data_key in _DYNAMIC_CHOICE_OPTIONS.items():
