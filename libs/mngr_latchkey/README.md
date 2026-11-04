@@ -879,7 +879,16 @@ consume the stream and approve/delete on resolution.
   already pending is a 409), which is how one request keeps a single identity
   across the user's desktops: a remote host's machine assigns it before
   forwarding (see [Permission requests across desktops](#permission-requests-across-desktops)).
-  Two `type` values are accepted:
+  These `type` values are accepted (`accounts` and `custom-service` are
+  described in the extension's own header):
+  * `"remote-execution"` -- lets every agent of the asking host run commands
+    on the desktop this gateway runs on, through the desktop's
+    `POST /api/v1/remote-execution/<device id>` route. The payload is `{}`;
+    the effect is one `remote-execution-<device id>` permission under
+    `latchkey-self`, pinned by a `const` path to this desktop's route (so it is
+    minted for `LATCHKEY_EXTENSION_LOCAL_DEVICE_ID` only, like file-sharing),
+    and it takes no approve override. `imbue.mngr_latchkey.remote_execution`
+    reads the names back.
   * `"predefined"` -- detent scope/permission grant for one signed-in
     account of the service, with payload
     `{"scope": "...", "permissions": ["...", ...], "account": "...",

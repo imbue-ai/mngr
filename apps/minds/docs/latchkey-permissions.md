@@ -763,6 +763,48 @@ on the same machine, and *only* those: the user's computer keeps one store for
 its local workspaces, and each remote workspace's VPS has one of its own (see
 [Per-machine credentials](#per-machine-credentials) below).
 
+## Running commands on the user's computer
+
+An agent in an approved workspace can run a command on one of the user's
+computers, as the user, through `POST /api/v1/remote-execution/<device_id>`
+(reached as `/minds-api-proxy/api/v1/remote-execution/<device_id>` through the
+gateway, with `X-Latchkey-Device` naming the same device). It is the most
+dangerous grant a workspace can hold, so three gates stand in front of it, and
+every one has to be open:
+
+1. **This device's switch.** Settings > This computer, "Allow agents to run
+   commands on this computer": an install-keyed setting in `config.toml`, off
+   by default, never synced to the account, so enabling it on one device never
+   enables it on another. Turning it on opens a warning the user has to
+   acknowledge before anything is written; turning it off writes at once and
+   leaves every grant in place, inert.
+2. **A per-workspace grant of its own kind.** The agent files a
+   `remote-execution` request (empty payload, addressed to one device) and the
+   user approves it in the request popup, whose dialog carries the same warning
+   and offers no Approve while the switch is off. The gateway mints one
+   permission, `remote-execution-<device id>`, under the `latchkey-self` rule,
+   pinned by a `const` path to that one device's route. The permission lives
+   nowhere else: not in the services catalog (so no `any` switch reaches it),
+   not in the cross-workspace verb file (so no "all workspaces" grant
+   reaches it), and not in the agent baseline.
+3. **The route re-reads the switch on every call**, refuses a request naming
+   any other device (404), and refuses the browser session cookie outright:
+   the gateway bearer and the same-machine socket are the only ways in.
+
+The body names an argv list (`{"command": ["bash", "-lc", "..."], "cwd"?,
+"timeout_seconds"?}`), and the answer is an `application/x-ndjson` stream in
+the owner-exec `/run` shape: `stdout` and `stderr` lines as they arrive, a
+`keepalive` while the command is silent, and one final `exit` line. Nothing
+is capped but time; a dropped connection, the timeout, or the desktop shutting
+down kills the command and everything it spawned. Every command leaves a
+`command_started` and a `command_finished` record under
+`<data_dir>/events/remote_execution/events.jsonl` (what ran and how it ended,
+never its output).
+
+The workspace options panel's Permissions tab lists the grants under **This
+computer**, one row per device, and can only turn them off: granting goes
+through the request flow alone. The design is `specs/remote-execution/spec.md`.
+
 ## Cross-workspace management API permissions
 
 Imbue Studio exposes a cross-workspace management API (`/api/v1/workspaces/...`)

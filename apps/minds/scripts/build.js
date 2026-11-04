@@ -75,7 +75,6 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-pi-coding':   'libs/mngr_pi_coding',
   'imbue-mngr-opencode':    'libs/mngr_opencode',
   'imbue-mngr-antigravity': 'libs/mngr_antigravity',
-  'imbue-mngr-grok':        'libs/mngr_grok',
   'imbue-mngr-vps':         'libs/mngr_vps',
   'imbue-common':           'libs/imbue_common',
   'concurrency-group':      'libs/concurrency_group',

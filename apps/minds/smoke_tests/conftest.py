@@ -44,8 +44,6 @@ from imbue.minds.smoke_tests.data_types import SmokeRunHandoff
 from imbue.minds.smoke_tests.data_types import StudioAppSession
 from imbue.minds.smoke_tests.data_types import StudioBinary
 from imbue.minds.smoke_tests.data_types import ThrowawayAccount
-from imbue.minds.smoke_tests.dwt_suites import is_dwt_tests_skip_requested
-from imbue.minds.smoke_tests.dwt_suites import smoke_run_verdict
 from imbue.minds.smoke_tests.handoff import read_handoff_state_file_or_none
 from imbue.minds.smoke_tests.handoff import resolve_test_job_handoff_or_none
 from imbue.minds.smoke_tests.manifest import default_manifest_path
@@ -71,13 +69,6 @@ _APP_LOGS_DIR_NAME: Final[str] = "app-logs"
 _MINTED_RUN_ID_FORMAT: Final[str] = "%Y%m%dt%H%M%Sz"
 _TEST_OUTPUTS_DIR_NAME: Final[str] = ".test_output"
 _STUDIO_APP_FIXTURE_NAME: Final[str] = "studio_app"
-# What failed in the session, by kind, for the workflow deciding whether a rerun could help.
-_VERDICT_FILE_NAME: Final[str] = "verdict.json"
-# The tests that failed on their own rather than through a failed subtest, as ``<node id> (<phase>)``.
-_OWN_FAILURES_KEY: Final[pytest.StashKey[list[str]]] = pytest.StashKey[list[str]]()
-# Set while a test's body runs. pytest makes each subtest's report while the body runs, through the same
-# hook as the test's own reports, so a report made meanwhile is a subtest's.
-_IS_BODY_RUNNING_KEY: Final[pytest.StashKey[bool]] = pytest.StashKey[bool]()
 
 
 @pytest.fixture(scope="session")
@@ -99,12 +90,6 @@ def studio_binary(backend: SmokeBackend) -> StudioBinary:
             "(MINDS_SMOKE_DEV_CHECKOUT=1 runs this checkout's Electron)."
         )
     return resolve_studio_binary(backend, os.environ)
-
-
-@pytest.fixture(scope="session")
-def is_dwt_tests_skipped() -> bool:
-    """Whether the journey skips default-workspace-template's CI tests, by ``MINDS_SMOKE_SKIP_DWT_TESTS``."""
-    return is_dwt_tests_skip_requested(os.environ)
 
 
 @pytest.fixture(scope="session")
@@ -250,15 +235,6 @@ def studio_app(
 
 
 @pytest.hookimpl(wrapper=True)
-def pytest_runtest_call(item: pytest.Item) -> Generator[None, None, None]:
-    item.stash[_IS_BODY_RUNNING_KEY] = True
-    try:
-        return (yield)
-    finally:
-        item.stash[_IS_BODY_RUNNING_KEY] = False
-
-
-@pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
 ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
@@ -267,45 +243,15 @@ def pytest_runtest_makereport(
     The app's data home is pytest's per-test temporary directory, which pytest
     prunes after a few runs, so its ``minds.log``, ``electron.log`` and
     ``minds-events.jsonl`` are copied beside the screenshots while they exist.
-
-    The failure is also counted for the session's verdict here, where the
-    report is still the test's own: a test whose only failures are failed
-    subtests passes at this point, and pytest fails it only later, when it
-    reports it. A subtest's report is neither: its failure is counted by
-    label at the end of the session.
     """
     report = yield
-    if item.stash.get(_IS_BODY_RUNNING_KEY, False) or not report.failed:
-        return report
-    item.config.stash.setdefault(_OWN_FAILURES_KEY, []).append(f"{report.nodeid} ({report.when})")
-    if report.when == "call" and isinstance(item, pytest.Function):
+    if report.when == "call" and report.failed and isinstance(item, pytest.Function):
         session = item.funcargs.get(_STUDIO_APP_FIXTURE_NAME)
         if isinstance(session, StudioAppSession):
             output_dir = _output_dir_for(item)
             screenshot_every_page(session.browser, output_dir, "failure")
             _copy_app_logs(session.log_dir, output_dir / _APP_LOGS_DIR_NAME)
     return report
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Write ``.test_output/smoke/verdict.json``: how many failures were default-workspace-template tests.
-
-    A failed template test fails the same way on a rerun, so the workflow
-    skips its rerun when those are the session's only failures.
-    """
-    terminal_reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-    if terminal_reporter is None:
-        return
-    failed_subtest_labels = tuple(
-        report.context.msg
-        for report in terminal_reporter.stats.get("failed", [])
-        if isinstance(report, pytest.SubtestReport)
-    )
-    verdict = smoke_run_verdict(len(session.config.stash.get(_OWN_FAILURES_KEY, [])), failed_subtest_labels)
-    verdict_path = _smoke_outputs_dir(session.config) / _VERDICT_FILE_NAME
-    verdict_path.parent.mkdir(parents=True, exist_ok=True)
-    verdict_path.write_text(verdict.model_dump_json())
 
 
 def _copy_app_logs(log_dir: Path, destination: Path) -> None:

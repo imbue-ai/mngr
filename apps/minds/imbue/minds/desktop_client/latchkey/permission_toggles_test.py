@@ -17,6 +17,8 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_servi
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressSetting
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
+from imbue.minds.desktop_client.latchkey.permission_toggles import REMOTE_EXECUTION_OTHER_DEVICE_DETAIL
+from imbue.minds.desktop_client.latchkey.permission_toggles import REMOTE_EXECUTION_THIS_COMPUTER_LABEL
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspaceDesktop
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_connector_toggle
@@ -24,6 +26,7 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import apply_desktop
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_self_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_desktop_egress_setting
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_file_sharing_toggles
+from imbue.minds.desktop_client.latchkey.permission_toggles import build_remote_execution_toggles
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_permissions_view
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_toggles
 from imbue.minds.desktop_client.latchkey.permission_toggles import classify_permission
@@ -1863,3 +1866,50 @@ def test_a_custom_services_own_header_is_what_the_pane_collects_and_stores(tmp_p
 
     assert stored_account == DEFAULT_ACCOUNT
     assert latchkey.auth_set_calls[0][1][-2:] == ("-H", "X-Api-Key: k-42")
+
+
+_THIS_DESKTOP_REMOTE_EXECUTION = f"remote-execution-{_DEVICE_ID}"
+_OTHER_DESKTOP_REMOTE_EXECUTION = f"remote-execution-{_OTHER_DEVICE_ID}"
+
+
+def test_build_remote_execution_toggles_lists_every_desktops_grant_this_computer_first() -> None:
+    config = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [_BASELINE_PERMISSION, _OTHER_DESKTOP_REMOTE_EXECUTION, _THIS_DESKTOP_REMOTE_EXECUTION]},),
+        schemas={
+            name: {"type": "object"} for name in (_THIS_DESKTOP_REMOTE_EXECUTION, _OTHER_DESKTOP_REMOTE_EXECUTION)
+        },
+    )
+
+    toggles = build_remote_execution_toggles(config, _DEVICE_ID)
+
+    assert [(toggle.permission, toggle.label, toggle.detail) for toggle in toggles] == [
+        (_THIS_DESKTOP_REMOTE_EXECUTION, REMOTE_EXECUTION_THIS_COMPUTER_LABEL, ""),
+        (_OTHER_DESKTOP_REMOTE_EXECUTION, _OTHER_DEVICE_ID, REMOTE_EXECUTION_OTHER_DEVICE_DETAIL),
+    ]
+    assert all(toggle.is_granted and not toggle.can_enable for toggle in toggles)
+
+
+def test_build_remote_execution_toggles_drops_a_revoked_grant_even_when_its_schema_remains() -> None:
+    """Nothing here can turn the grant back on, so a revoked one is not a row."""
+    config = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [_BASELINE_PERMISSION]},),
+        schemas={_THIS_DESKTOP_REMOTE_EXECUTION: {"type": "object"}},
+    )
+
+    assert build_remote_execution_toggles(config, _DEVICE_ID) == ()
+
+
+@pytest.mark.witnesses(
+    "remote-execution.grant-is-its-own-kind",
+    partial="only that the permissions screen cannot mint one; the catalog, verb-file and baseline checks are mngr_latchkey's permission_requests_test",
+)
+def test_compute_self_permissions_revokes_a_remote_execution_grant_but_never_grants_one() -> None:
+    config = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [_BASELINE_PERMISSION, _THIS_DESKTOP_REMOTE_EXECUTION]},),
+        schemas={_THIS_DESKTOP_REMOTE_EXECUTION: {"type": "object"}},
+    )
+
+    assert compute_self_permissions(config, _THIS_DESKTOP_REMOTE_EXECUTION, enabled=False) == (_BASELINE_PERMISSION,)
+    revoked = LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [_BASELINE_PERMISSION]},), schemas=config.schemas)
+    with pytest.raises(PermissionToggleError, match="asks for it from inside the workspace"):
+        compute_self_permissions(revoked, _THIS_DESKTOP_REMOTE_EXECUTION, enabled=True)

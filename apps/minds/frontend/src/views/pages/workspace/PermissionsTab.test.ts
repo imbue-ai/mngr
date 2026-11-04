@@ -274,7 +274,7 @@ describe("PermissionsTab waiting strip", () => {
 });
 
 describe("PermissionsTab left nav", () => {
-  it("lists the connections, Add connection, and the two self families", async () => {
+  it("lists the connections, Add connection, and the three self families", async () => {
     const { root } = await render(
       permissionsView({
         connections: [slackConnection(), slackConnection({ service_name: "notion", display_name: "Notion", account: "n@x.com" })],
@@ -287,6 +287,7 @@ describe("PermissionsTab left nav", () => {
       "add-connection",
       "local-files",
       "other-machines",
+      "this-computer",
     ]);
   });
 
@@ -1765,5 +1766,47 @@ describe("PermissionsTab shared paths", () => {
       body: { path: row.path, enabled: true, conflict: "NEWER" },
     });
     remove();
+  });
+});
+
+describe("the This computer panel", () => {
+  const thisComputerGrant = {
+    permission: "remote-execution-host-3f9c",
+    label: "This computer",
+    detail: "",
+    description: "Agents in this workspace may run any command there, as you.",
+    is_granted: true,
+    can_enable: false,
+  };
+
+  it("says so when no computer has been granted", async () => {
+    const { root } = await render(permissionsView(), { requestedSection: "this-computer" });
+    expect(allText(root)).toContain("Agents in this workspace can't run commands on your computers.");
+  });
+
+  it("lists each granted computer with a switch that can only be turned off", async () => {
+    const { root, requests } = await render(
+      permissionsView({ remote_execution_toggles: [thisComputerGrant], is_remote_execution_enabled: true }),
+      { requestedSection: "this-computer" },
+    );
+    expect(allText(root)).toContain("This computer");
+    expect(collectVnodes(root).some((vnode) => attrsOf(vnode).id === "remote-execution-disabled-notice")).toBe(false);
+    const control = switches(root)[0];
+    expect(attrsOf(control)["aria-checked"]).toBe("true");
+
+    (attrsOf(control).onclick as () => void)();
+    await settle();
+
+    const flip = requests.find((request) => request.url.endsWith("/permissions/self-toggle"));
+    expect(flip?.body).toEqual({ permission: "remote-execution-host-3f9c", enabled: false });
+  });
+
+  it("says the grants are inert while this device's switch is off", async () => {
+    const { root } = await render(
+      permissionsView({ remote_execution_toggles: [thisComputerGrant], is_remote_execution_enabled: false }),
+      { requestedSection: "this-computer" },
+    );
+    expect(collectVnodes(root).some((vnode) => attrsOf(vnode).id === "remote-execution-disabled-notice")).toBe(true);
+    expect(allText(root)).toContain("Settings > This computer");
   });
 });

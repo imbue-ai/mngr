@@ -55,6 +55,12 @@ export interface SettingsOverview {
    * "no browsers found" (the default browser is all there is to pick). */
   sign_in_browsers?: SignInBrowserOption[];
   sign_in_browser_id?: string | null;
+  /** Whether an approved workspace's agents may run commands on this device: the
+   * master switch of Settings > This computer. Optional only for version skew
+   * with a backend from before the switch; absent reads as off. */
+  allow_agent_command_execution?: boolean;
+  /** If-Match version for the switch's write. */
+  remote_execution_version?: string;
 }
 
 /** An installed browser provider sign-ins can open in. */
@@ -64,7 +70,14 @@ export interface SignInBrowserOption {
 }
 
 export type SettingsSection =
-  "notifications" | "display" | "browser-import" | "error-reporting" | "updates" | "sign-ins" | "backups";
+  | "notifications"
+  | "display"
+  | "browser-import"
+  | "error-reporting"
+  | "updates"
+  | "sign-ins"
+  | "backups"
+  | "this-computer";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -78,6 +91,8 @@ export const SETTINGS_SECTIONS: {
   { name: "updates", label: "Updates", group: "Other" },
   { name: "sign-ins", label: "Sign-ins", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
+  // Last: the section a user visits deliberately, never the first thing Settings shows.
+  { name: "this-computer", label: "This computer", group: "Other" },
 ];
 
 /** The zoom sizes the Display panel offers; mirrors ZOOM_PERCENTS in
@@ -137,6 +152,12 @@ export interface MasterPasswordResult {
 
 type FetchLike = typeof fetch;
 
+/** What an If-Match-guarded write of an install-keyed flag came back with. */
+type InstallFlagWriteOutcome =
+  | { kind: "ok"; version: string }
+  | { kind: "conflict" }
+  | { kind: "refused"; message: string };
+
 export class SettingsModel {
   overview: SettingsOverview | null = null;
   isLoadFailed = false;
@@ -169,6 +190,13 @@ export class SettingsModel {
   workspaceResetError = "";
   signInBrowserError = "";
   notificationPrefsError = "";
+  remoteExecutionError = "";
+  /** The big warning is up: the user asked to let agents run commands here and has not yet confirmed. */
+  isRemoteExecutionWarningOpen = false;
+  /** Whether the warning's acknowledgement box is ticked; the confirm button waits on it. */
+  isRemoteExecutionAcknowledged = false;
+  /** A write of the switch is in flight. */
+  isRemoteExecutionBusy = false;
   /** Set after a failed openNotificationOsSettings() call (e.g. no known
    * settings command found on this Linux desktop environment), so the panel
    * can tell the reader the automatic open didn't work rather than leaving
@@ -236,62 +264,142 @@ export class SettingsModel {
     this.activeSection = name;
   }
 
-  /** Flip the error-reporting flag through the If-Match-guarded endpoint.
+  /** POST one install-keyed flag through its If-Match-guarded endpoint.
+   * A 412 (another window changed it first) is a conflict for the caller to
+   * rebase on by reloading rather than clobbering. A refusal persisted
+   * nothing, so the control snaps back and the outcome carries the stated
+   * reason (the server's, else the status); so does a network failure. */
+  private async postInstallFlagWrite(
+    url: string,
+    version: string,
+    body: Record<string, boolean>,
+    subject: string,
+  ): Promise<InstallFlagWriteOutcome> {
+    try {
+      const response = await this.fetchImpl(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "If-Match": version,
+        },
+        body: JSON.stringify(body),
+      });
+      if (response.status === 412) return { kind: "conflict" };
+      if (response.ok) {
+        const result = (await response.json()) as { version: string };
+        return { kind: "ok", version: result.version };
+      }
+      let message = `Could not update ${subject} (HTTP ${response.status}).`;
+      try {
+        const data = (await response.json()) as { error?: string };
+        if (data.error) message = data.error;
+      } catch {
+        // Non-JSON error body: keep the status-based message.
+      }
+      return { kind: "refused", message };
+    } catch {
+      return {
+        kind: "refused",
+        message: `Could not update ${subject} (network error).`,
+      };
+    }
+  }
 
-  A 412 (another window changed it first) rebases by reloading the payload
-  rather than clobbering; the checkbox then reflects the newer state. */
+  /** Flip the error-reporting flag through the If-Match-guarded endpoint. */
   async setReportUnexpectedErrors(isEnabled: boolean): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
     this.errorReportingError = "";
-    try {
-      const response = await this.fetchImpl(
-        "/ui/api/settings/error-reporting",
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "Content-Type": "application/json",
-            "If-Match": overview.version,
-          },
-          body: JSON.stringify({ report_unexpected_errors: isEnabled }),
-        },
-      );
-      if (response.status === 412) {
-        // Another window changed the flag first: rebase on the newer state.
-        await this.load();
-        return;
-      }
-      if (response.ok) {
-        const result = (await response.json()) as { version: string };
-        // Merge onto the CURRENT overview, not the pre-await `overview`
-        // snapshot: a concurrent write (e.g. setNotificationPrefs) may have
-        // already landed its own field on `this.overview` while this request
-        // was in flight, and spreading the stale snapshot would clobber it.
-        const latest = this.overview;
-        if (latest === null) return;
+    const outcome = await this.postInstallFlagWrite(
+      "/ui/api/settings/error-reporting",
+      overview.version,
+      { report_unexpected_errors: isEnabled },
+      "error reporting",
+    );
+    if (outcome.kind === "conflict") {
+      await this.load();
+      return;
+    }
+    if (outcome.kind === "ok") {
+      // Merge onto the CURRENT overview, not the pre-await `overview`
+      // snapshot: a concurrent write (e.g. setNotificationPrefs) may have
+      // already landed its own field on `this.overview` while this request
+      // was in flight, and spreading the stale snapshot would clobber it.
+      const latest = this.overview;
+      if (latest === null) return;
+      this.overview = {
+        ...latest,
+        report_unexpected_errors: isEnabled,
+        version: outcome.version,
+      };
+    } else {
+      this.errorReportingError = outcome.message;
+    }
+    this.redraw();
+  }
+
+  /** Whether agents may run commands on this device, as the overview says (absent reads as off). */
+  isAgentCommandExecutionAllowed(): boolean {
+    return this.overview?.allow_agent_command_execution === true;
+  }
+
+  /** The switch was flipped. Off writes at once; on only opens the warning,
+   * which writes nothing until it is confirmed. */
+  requestAgentCommandExecution(isEnabled: boolean): void {
+    if (!isEnabled) {
+      void this.setAgentCommandExecution(false);
+      return;
+    }
+    this.isRemoteExecutionWarningOpen = true;
+    this.isRemoteExecutionAcknowledged = false;
+    this.remoteExecutionError = "";
+    this.redraw();
+  }
+
+  cancelRemoteExecutionWarning(): void {
+    this.isRemoteExecutionWarningOpen = false;
+    this.isRemoteExecutionAcknowledged = false;
+    this.redraw();
+  }
+
+  /** The warning's confirm: nothing happens unless the acknowledgement is ticked. */
+  async confirmRemoteExecutionWarning(): Promise<void> {
+    if (!this.isRemoteExecutionAcknowledged || this.isRemoteExecutionBusy) return;
+    this.isRemoteExecutionWarningOpen = false;
+    await this.setAgentCommandExecution(true);
+  }
+
+  /** Flip the master switch through the If-Match-guarded endpoint, like the
+   * error-reporting flag: a 412 rebases on the newer state. */
+  async setAgentCommandExecution(isEnabled: boolean): Promise<void> {
+    const overview = this.overview;
+    if (overview === null) return;
+    this.remoteExecutionError = "";
+    this.isRemoteExecutionBusy = true;
+    this.redraw();
+    const outcome = await this.postInstallFlagWrite(
+      "/ui/api/settings/remote-execution",
+      overview.remote_execution_version ?? "",
+      { allow_agent_command_execution: isEnabled },
+      "the setting",
+    );
+    this.isRemoteExecutionBusy = false;
+    if (outcome.kind === "conflict") {
+      await this.load();
+      return;
+    }
+    if (outcome.kind === "ok") {
+      const latest = this.overview;
+      if (latest !== null) {
         this.overview = {
           ...latest,
-          report_unexpected_errors: isEnabled,
-          version: result.version,
+          allow_agent_command_execution: isEnabled,
+          remote_execution_version: outcome.version,
         };
-      } else {
-        // Persisted nothing; the unchanged model state stands, and the
-        // snapped-back checkbox needs a stated reason.
-        let message = `Could not update error reporting (HTTP ${response.status}).`;
-        try {
-          const data = (await response.json()) as { error?: string };
-          if (data.error) message = data.error;
-        } catch {
-          // Non-JSON error body: keep the status-based message.
-        }
-        this.errorReportingError = message;
       }
-    } catch {
-      // Network failure: nothing was persisted; say so rather than
-      // snapping the checkbox back silently.
-      this.errorReportingError =
-        "Could not update error reporting (network error).";
+    } else {
+      this.remoteExecutionError = outcome.message;
     }
     this.redraw();
   }

@@ -1392,17 +1392,6 @@ requires-dist = [
 ]
 
 [[package]]
-name = "imbue-mngr-grok"
-version = "0.1.0"
-source = { editable = "../../../../libs/mngr_grok" }
-dependencies = [
-    { name = "imbue-mngr" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
-
-[[package]]
 name = "imbue-mngr-imbue-cloud"
 version = "0.3.1"
 source = { editable = "../../../../libs/mngr_imbue_cloud" }
@@ -1779,7 +1768,6 @@ dependencies = [
     { name = "imbue-mngr-docker" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-gcp" },
-    { name = "imbue-mngr-grok" },
     { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-lima" },
@@ -1830,7 +1818,6 @@ requires-dist = [
     { name = "imbue-mngr-docker", editable = "../../../../libs/mngr_docker" },
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
     { name = "imbue-mngr-gcp", editable = "../../../../libs/mngr_gcp" },
-    { name = "imbue-mngr-grok", editable = "../../../../libs/mngr_grok" },
     { name = "imbue-mngr-imbue-cloud", editable = "../../../../libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
     { name = "imbue-mngr-lima", editable = "../../../../libs/mngr_lima" },
@@ -1878,7 +1865,6 @@ dependencies = [
     { name = "imbue-mngr-docker" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-gcp" },
-    { name = "imbue-mngr-grok" },
     { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-lima" },
@@ -1908,7 +1894,6 @@ requires-dist = [
     { name = "imbue-mngr-docker", editable = "../../../../libs/mngr_docker" },
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
     { name = "imbue-mngr-gcp", editable = "../../../../libs/mngr_gcp" },
-    { name = "imbue-mngr-grok", editable = "../../../../libs/mngr_grok" },
     { name = "imbue-mngr-imbue-cloud", editable = "../../../../libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
     { name = "imbue-mngr-lima", editable = "../../../../libs/mngr_lima" },

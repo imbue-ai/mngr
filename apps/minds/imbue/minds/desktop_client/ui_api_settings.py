@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
+from imbue.minds.desktop_client.settings.resolve import resolve_allow_agent_command_execution
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
 from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
@@ -140,6 +141,13 @@ class UiSettingsOverview(FrozenModel):
     sign_in_browser_id: str | None = Field(
         default=None, description="The browser provider sign-ins open in; None for the default browser"
     )
+    allow_agent_command_execution: bool = Field(
+        default=False,
+        description="Whether an approved workspace's agents may run commands on this device (the master switch)",
+    )
+    remote_execution_version: str = Field(
+        default="", description="If-Match version for the remote-execution switch write"
+    )
 
 
 class UiBrowserImportStatus(FrozenModel):
@@ -182,6 +190,14 @@ class UiErrorReportingWrite(FrozenModel):
     """Body of the error-reporting opt-out write."""
 
     report_unexpected_errors: bool = Field(description="New value for the per-machine flag")
+
+
+class UiRemoteExecutionWrite(FrozenModel):
+    """Body of the remote-execution switch write."""
+
+    allow_agent_command_execution: bool = Field(
+        description="Whether an approved workspace's agents may run commands on this device"
+    )
 
 
 class UiSignInBrowserWrite(FrozenModel):
@@ -304,6 +320,12 @@ def _unauthenticated_response() -> Response:
     return _error_response("Not authenticated", 401)
 
 
+def _compute_flag_version(key: str, value: bool) -> str:
+    """The If-Match version of a one-flag record: a hash of its stored value under its key."""
+    canonical = json.dumps({key: value}, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     """The If-Match version of the error-reporting record: a hash of its stored value.
 
@@ -311,8 +333,16 @@ def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     equals A -- exactly the staleness contract optimistic concurrency needs
     for a record this small.
     """
-    canonical = json.dumps({"report_unexpected_errors": report_unexpected_errors}, sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return _compute_flag_version("report_unexpected_errors", report_unexpected_errors)
+
+
+def compute_remote_execution_version(allow_agent_command_execution: bool) -> str:
+    """The If-Match version of the remote-execution switch: a hash of its stored value.
+
+    Its own record, like the other two, so a write to it never 412s a page
+    that only touched error reporting or notifications.
+    """
+    return _compute_flag_version("allow_agent_command_execution", allow_agent_command_execution)
 
 
 def compute_notification_style_version(style: str, has_chosen: bool) -> str:
@@ -391,6 +421,7 @@ def _handle_settings_overview() -> Response:
     update_window = resolve_update_window(context)
     browsers = get_state().sign_in_browsers.list_browsers()
     stored_browser_id = resolve_sign_in_browser(context)
+    allow_agent_command_execution = resolve_allow_agent_command_execution(context)
     overview = UiSettingsOverview(
         is_master_password_set=_is_any_account_master_password_set(),
         report_unexpected_errors=report_unexpected_errors,
@@ -407,6 +438,8 @@ def _handle_settings_overview() -> Response:
         sign_in_browser_id=(
             stored_browser_id if any(browser.browser_id == stored_browser_id for browser in browsers) else None
         ),
+        allow_agent_command_execution=allow_agent_command_execution,
+        remote_execution_version=compute_remote_execution_version(allow_agent_command_execution),
     )
     return _json_response(overview)
 
@@ -471,6 +504,36 @@ def _handle_error_reporting_write() -> Response:
         minds_config=minds_config,
         write_model_type=UiErrorReportingWrite,
         apply_versioned_write=_apply_error_reporting_write,
+    )
+
+
+def _apply_remote_execution_write(
+    minds_config: MindsConfig, write: UiRemoteExecutionWrite, expected_version: str
+) -> str | None:
+    new_version = minds_config.set_allow_agent_command_execution_if_version_matches(
+        expected_version=expected_version,
+        compute_version=compute_remote_execution_version,
+        enabled=write.allow_agent_command_execution,
+    )
+    if new_version is not None:
+        logger.info(
+            "Agents may {} run commands on this device",
+            "now" if write.allow_agent_command_execution else "no longer",
+        )
+    return new_version
+
+
+def _handle_remote_execution_write() -> Response:
+    """POST /ui/api/settings/remote-execution: If-Match-guarded write of the master switch."""
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    return _handle_if_match_write(
+        minds_config=minds_config,
+        write_model_type=UiRemoteExecutionWrite,
+        apply_versioned_write=_apply_remote_execution_write,
     )
 
 
@@ -882,6 +945,9 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     # them (SuperTokens ids are UUIDs, and the device's is "local").
     blueprint.add_url_rule("/api/settings/<account_id>", view_func=_handle_account_settings, methods=["GET", "PUT"])
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/settings/remote-execution", view_func=_handle_remote_execution_write, methods=["POST"]
+    )
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_style_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/sign-in-browser", view_func=_handle_sign_in_browser_write, methods=["POST"])

@@ -2,17 +2,11 @@
 
 Launch the app and reach its landing page; sign in to Imbue Cloud through the
 app's own web-login flow, completing the hosted page in the suite's browser;
-create an Imbue Cloud workspace; run default-workspace-template's CI test
-suites inside it; have its agent build and register a hello-world web app;
-share the workspace from the Share tab and open the app's route through the
-share as the owner; turn sharing off; destroy the workspace. Every resource
-created on the way is recorded in the run manifest, so the teardown job
-releases it however this test ends.
-
-The template's CI runs its suites in Modal sandboxes built from the workspace
-image; a real workspace runs them in a gVisor container on a pool host, which
-differs in ways CI cannot see. Every template test is reported as a subtest of
-the journey, so each one that fails in the workspace is its own failed result.
+create an Imbue Cloud workspace; have its agent build and register a
+hello-world web app; share the workspace from the Share tab and open the app's
+route through the share as the owner; turn sharing off; destroy the workspace.
+Every resource created on the way is recorded in the run manifest, so the
+teardown job releases it however this test ends.
 """
 
 import re
@@ -21,7 +15,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import assert_never
 
 import pytest
 from loguru import logger
@@ -55,42 +48,20 @@ from imbue.minds.smoke_tests.app_flows import wait_for_share_url
 from imbue.minds.smoke_tests.browser import complete_hosted_login
 from imbue.minds.smoke_tests.browser import is_hosted_login_page
 from imbue.minds.smoke_tests.browser import visitor_browser_context
-from imbue.minds.smoke_tests.data_types import DwtTestOutcome
-from imbue.minds.smoke_tests.data_types import DwtTestResult
 from imbue.minds.smoke_tests.data_types import SmokeAccountCredentials
 from imbue.minds.smoke_tests.data_types import SmokeBackend
 from imbue.minds.smoke_tests.data_types import SmokeResourceKind
 from imbue.minds.smoke_tests.data_types import StudioAppSession
-from imbue.minds.smoke_tests.dwt_suites import DWT_WORKSPACE_REPO_ROOT
-from imbue.minds.smoke_tests.dwt_suites import DWT_WORKSPACE_RESULTS_ROOT
-from imbue.minds.smoke_tests.dwt_suites import dwt_attempts_phrase
-from imbue.minds.smoke_tests.dwt_suites import dwt_results_markdown
-from imbue.minds.smoke_tests.dwt_suites import dwt_subtest_label
-from imbue.minds.smoke_tests.dwt_suites import run_dwt_ci_suites_in_workspace
 from imbue.minds.smoke_tests.manifest import record_created_resource
 from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
-from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
-from imbue.minds.smoke_tests.workspace_exec import app_mngr_workspace_shell
-from imbue.minds.smoke_tests.workspace_exec import workspace_exec_address
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.smoke]
 
-# default-workspace-template's CI suites run one after another in the workspace, where CI spreads them over
-# many sandboxes; the deadline covers waiting for the workspace's first-boot installs too.
-_DWT_SUITES_DEADLINE_SECONDS: Final[float] = 75 * 60
-_DWT_ENV_CONVERGE_WAIT_SECONDS: Final[int] = 20 * 60
-_DWT_POLL_INTERVAL_SECONDS: Final[float] = 30.0
-# Reading the configs, starting and stopping the runner, and fetching its results, around the run itself.
-_DWT_STEP_OVERHEAD_SECONDS: Final[int] = 10 * 60
-_DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suites in the workspace"
-_DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
-# Beside the results; the smoke workflow adds it to its job's summary page.
-_DWT_SUMMARY_FILE_NAME: Final[str] = "summary.md"
-# The whole journey: a pool lease, the template's CI suites, an agent building a server, a share
+# The whole journey: a pool lease, an agent building a server, a share
 # certificate, and a destroy.
-_JOURNEY_TIMEOUT_SECONDS: Final[int] = 60 * 60 + int(_DWT_SUITES_DEADLINE_SECONDS) + _DWT_STEP_OVERHEAD_SECONDS
+_JOURNEY_TIMEOUT_SECONDS: Final[int] = 60 * 60
 _HOSTED_LOGIN_REDIRECT_TIMEOUT_MS: Final[float] = 90_000.0
 _ACCOUNT_LISTED_TIMEOUT_SECONDS: Final[float] = 120.0
 _AGENT_REPLY_TIMEOUT_SECONDS: Final[float] = 12 * 60
@@ -204,74 +175,14 @@ def _open_share_as_owner(visitor: BrowserContext, share_url: str, account: Smoke
     )
 
 
-def _assert_dwt_result_passed(result: DwtTestResult) -> None:
-    """Pass, skip, or fail the way the template test did in the workspace, with its own failure text."""
-    match result.outcome:
-        case DwtTestOutcome.PASSED:
-            pass
-        case DwtTestOutcome.SKIPPED:
-            pytest.skip(result.detail or "skipped in the workspace")
-        case DwtTestOutcome.FAILED:
-            attempts = dwt_attempts_phrase(result.attempt_count)
-            pytest.fail(f"Failed in the workspace on {attempts}:\n{result.detail}", pytrace=False)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def _run_dwt_ci_suites_reporting_each_test(
-    subtests: pytest.Subtests,
-    studio_app: StudioAppSession,
-    workspace_row: Mapping[str, Any],
-    run_id: SmokeRunId,
-    output_dir: Path,
-) -> None:
-    """Run the template's CI suites in the fresh workspace and report each of their tests as a subtest.
-
-    A failing template test fails its own subtest and the journey goes on: the
-    rest of the journey does not depend on it. The step's own failure -- the
-    suites could not be read, started or fetched -- is the step's subtest.
-    """
-    with subtests.test(msg=_DWT_STEP_LABEL):
-        workspace = app_mngr_workspace_shell(
-            studio_app,
-            workspace_exec_address(
-                agent_id=str(workspace_row["agent_id"]),
-                host_id=workspace_row.get("host_id"),
-                provider_name=workspace_row.get("provider_name"),
-            ),
-        )
-        results = run_dwt_ci_suites_in_workspace(
-            workspace=workspace,
-            repo_root=DWT_WORKSPACE_REPO_ROOT,
-            workspace_results_dir=DWT_WORKSPACE_RESULTS_ROOT / str(run_id),
-            local_results_dir=output_dir,
-            env_converge_wait_seconds=_DWT_ENV_CONVERGE_WAIT_SECONDS,
-            deadline_seconds=_DWT_SUITES_DEADLINE_SECONDS,
-            poll_interval_seconds=_DWT_POLL_INTERVAL_SECONDS,
-        )
-        (output_dir / _DWT_SUMMARY_FILE_NAME).write_text(dwt_results_markdown(results))
-        for result in results:
-            with subtests.test(msg=dwt_subtest_label(result)):
-                _assert_dwt_result_passed(result)
-        failed_count = sum(1 for result in results if result.outcome == DwtTestOutcome.FAILED)
-        logger.info(
-            "Step 3b: ran {} default-workspace-template test results in the workspace; {} failed (results in {})",
-            len(results),
-            failed_count,
-            output_dir,
-        )
-
-
 @pytest.mark.timeout(_JOURNEY_TIMEOUT_SECONDS)
 def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
-    is_dwt_tests_skipped: bool,
     backend: SmokeBackend,
     studio_app: StudioAppSession,
     persistent_account: SmokeAccountCredentials,
     run_manifest: Path,
     smoke_run_id: SmokeRunId,
     smoke_output_dir: Path,
-    subtests: pytest.Subtests,
 ) -> None:
     """The first-shape journey, end to end, through the app's own UI."""
     owner_email = str(persistent_account.email)
@@ -298,14 +209,6 @@ def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
         )
         logger.info("Step 3: created workspace {} ({}, pool row {})", workspace_name, agent_id, host_db_id)
         screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
-
-        if is_dwt_tests_skipped:
-            with subtests.test(msg=_DWT_STEP_LABEL):
-                pytest.skip(f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests")
-        else:
-            _run_dwt_ci_suites_reporting_each_test(
-                subtests, studio_app, row, smoke_run_id, smoke_output_dir / _DWT_RESULTS_DIR_NAME
-            )
 
         welcome_chat = open_welcome_chat(workspace_frame)
         adopt_imbue_credentials(welcome_chat, mint_workspace_llm_credentials(studio_app, agent_id))

@@ -13,6 +13,7 @@ import { AccountsPermissionDetailView } from "./AccountsPermissionDetail";
 import { CustomServicePermissionDetailView } from "./CustomServicePermissionDetail";
 import { FileSharingPermissionDetailView } from "./FileSharingPermissionDetail";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
+import { RemoteExecutionPermissionDetailView } from "./RemoteExecutionPermissionDetail";
 import { WorkspacePermissionDetailView } from "./WorkspacePermissionDetail";
 
 /** The grant dialog for one request, by kind. */
@@ -28,6 +29,8 @@ export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Chi
       return m(AccountsPermissionDetailView, { model, detail });
     case "custom_service":
       return m(CustomServicePermissionDetailView, { model, detail });
+    case "remote_execution":
+      return m(RemoteExecutionPermissionDetailView, { model, detail });
     case "unknown_scope":
       return m("div", { class: "flex flex-col gap-3" }, [
         m(

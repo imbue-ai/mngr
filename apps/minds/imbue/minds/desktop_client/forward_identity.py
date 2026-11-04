@@ -156,6 +156,11 @@ class ForwardIdentityPublisher(MutableModel):
                 agent_ids.discard(agent_id)
         self.rebuild()
 
+    def is_marked_shared(self, agent_id: str) -> bool:
+        """Whether this desktop currently holds the workspace as shared, under any signed-in account."""
+        with self._lock:
+            return any(agent_id in agent_ids for agent_ids in self._shared_agent_ids_by_user_id.values())
+
     def request_sync(self) -> None:
         if self.on_shared_workspaces_changed is not None:
             self.on_shared_workspaces_changed()

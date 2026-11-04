@@ -216,6 +216,17 @@ class AccountsRequestPayload(FrozenModel):
     """
 
 
+class RemoteExecutionRequestPayload(FrozenModel):
+    """Payload for ``type == "remote-execution"`` permission requests.
+
+    The grant (running commands on the desktop that approves it) is
+    all-or-nothing for one desktop, so the payload is empty; the desktop is
+    whichever one the request was addressed to, never a field of the payload.
+    Parameter-free like :class:`AccountsRequestPayload`, and told apart from it
+    by the ``request_type``-keyed dispatch on :class:`StreamedPermissionRequest`.
+    """
+
+
 class CustomServiceLogin(FrozenModel):
     """The browser sign-in a ``custom-service`` request asks for, as ``latchkey services register`` takes it.
 
@@ -324,17 +335,19 @@ REQUEST_TYPE_FILE_SHARING: Final[str] = "file-sharing"
 REQUEST_TYPE_WORKSPACE: Final[str] = "workspace"
 REQUEST_TYPE_ACCOUNTS: Final[str] = "accounts"
 REQUEST_TYPE_CUSTOM_SERVICE: Final[str] = "custom-service"
+REQUEST_TYPE_REMOTE_EXECUTION: Final[str] = "remote-execution"
 
 # Maps the wire ``request_type`` to its payload model, so
 # ``StreamedPermissionRequest`` selects the variant deterministically instead of
-# relying on pydantic shape resolution (the ``workspace`` and ``accounts``
-# payloads are both satisfiable by an empty object).
+# relying on pydantic shape resolution (the ``workspace``, ``accounts`` and
+# ``remote-execution`` payloads are all satisfiable by an empty object).
 _PAYLOAD_CLASS_BY_REQUEST_TYPE: Final[Mapping[str, type[FrozenModel]]] = {
     REQUEST_TYPE_PREDEFINED: PredefinedRequestPayload,
     REQUEST_TYPE_FILE_SHARING: FileSharingRequestPayload,
     REQUEST_TYPE_WORKSPACE: WorkspaceRequestPayload,
     REQUEST_TYPE_ACCOUNTS: AccountsRequestPayload,
     REQUEST_TYPE_CUSTOM_SERVICE: CustomServiceRequestPayload,
+    REQUEST_TYPE_REMOTE_EXECUTION: RemoteExecutionRequestPayload,
 }
 
 
@@ -342,10 +355,10 @@ class StreamedPermissionRequest(FrozenModel):
     """Single JSONL record produced by ``GET /permission-requests``.
 
     The on-disk schema is versioned (``permission_requests/v3``). The ``payload``
-    field is one of five type-specific variants. They are *not* all
-    shape-disjoint -- ``workspace`` and ``accounts`` payloads both validate
-    against an empty object (every field defaulted / no fields) -- so the variant
-    is selected up front from the sibling ``request_type`` by
+    field is the type-specific variant of its ``request_type``. The variants are
+    *not* all shape-disjoint -- ``workspace``, ``accounts`` and ``remote-execution``
+    payloads all validate against an empty object (every field defaulted / no
+    fields) -- so the variant is selected up front from the sibling ``request_type`` by
     :meth:`_select_payload_variant_by_request_type` rather than by pydantic's
     shape resolution. Consumers then dispatch with ``isinstance`` on ``payload``.
     """
@@ -356,8 +369,8 @@ class StreamedPermissionRequest(FrozenModel):
     request_type: str = Field(
         description=(
             "Wire kind of the request (``predefined`` / ``file-sharing`` / ``workspace`` / "
-            "``accounts`` / ``custom-service``). This is the authoritative discriminator: the matching ``payload`` "
-            "variant is selected from it before validation."
+            "``accounts`` / ``custom-service`` / ``remote-execution``). This is the authoritative discriminator: "
+            "the matching ``payload`` variant is selected from it before validation."
         ),
     )
     payload: (
@@ -366,6 +379,7 @@ class StreamedPermissionRequest(FrozenModel):
         | WorkspaceRequestPayload
         | AccountsRequestPayload
         | CustomServiceRequestPayload
+        | RemoteExecutionRequestPayload
     ) = Field(description="Type-specific payload; selected by ``request_type`` then dispatched with ``isinstance``.")
 
     @model_validator(mode="before")

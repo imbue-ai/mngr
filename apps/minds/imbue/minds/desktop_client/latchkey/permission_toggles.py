@@ -119,6 +119,7 @@ from imbue.mngr_latchkey.file_sharing import parse_file_sharing_permission
 from imbue.mngr_latchkey.file_sharing import parse_legacy_file_sharing_permission
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
+from imbue.mngr_latchkey.remote_execution import parse_remote_execution_permission
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -323,6 +324,10 @@ class WorkspacePermissionsView(FrozenModel):
     )
     file_sharing_toggles: tuple[SelfPermissionToggle, ...] = Field(description="Shared-path toggle rows.")
     workspace_toggles: tuple[SelfPermissionToggle, ...] = Field(description="Cross-workspace verb toggle rows.")
+    remote_execution_toggles: tuple[SelfPermissionToggle, ...] = Field(
+        default=(),
+        description="This computer rows: one per desktop whose commands the workspace's agents may run, revoke-only.",
+    )
     desktops: tuple[WorkspaceDesktop, ...] = Field(
         description=(
             "The desktops a desktop egress route can name: this computer first, then the others the "
@@ -819,6 +824,7 @@ def build_workspace_permissions_view(
         available_connections=tuple(available),
         file_sharing_toggles=build_file_sharing_toggles(config, device_id),
         workspace_toggles=build_workspace_toggles(backend_resolver, config),
+        remote_execution_toggles=build_remote_execution_toggles(config, device_id),
         desktops=(
             list_workspace_desktops(device_id, desktop_egress_route_by_service_name)
             if describe_why_desktop_egress_is_unsupported(device_id, is_machine_of_its_own) is None
@@ -903,6 +909,48 @@ def build_file_sharing_toggles(
 @pure
 def _file_sharing_access_label(access: FileSharingAccess) -> str:
     return FILE_SHARING_WRITE_LABEL if access == FileSharingAccess.WRITE else FILE_SHARING_READ_LABEL
+
+
+# What the This computer rows call the desktop they are shown on, and any other.
+REMOTE_EXECUTION_THIS_COMPUTER_LABEL: Final[str] = "This computer"
+REMOTE_EXECUTION_OTHER_DEVICE_DETAIL: Final[str] = "another device"
+
+
+@pure
+def build_remote_execution_toggles(
+    config: LatchkeyPermissionsConfig,
+    # This install's device id; empty when the app was built without one, which then names every row by its id.
+    device_id: str,
+) -> tuple[SelfPermissionToggle, ...]:
+    """Build the This computer rows: one per desktop whose commands the workspace's agents may run.
+
+    Only granted names are rows, and none can be turned back on from here:
+    granting goes through the one dialog that carries the warning, so a revoked
+    grant simply leaves the list. Every desktop's grant is listed, this one's
+    first, because any desktop may revoke what the shared policy carries.
+    """
+    granted = frozenset(_self_rule_permissions(config))
+    rows: list[tuple[int, str, SelfPermissionToggle]] = []
+    for name in granted:
+        grant = parse_remote_execution_permission(name)
+        if grant is None:
+            continue
+        is_this_device = bool(device_id) and grant.device_id == device_id
+        rows.append(
+            (
+                0 if is_this_device else 1,
+                grant.device_id,
+                SelfPermissionToggle(
+                    permission=name,
+                    label=REMOTE_EXECUTION_THIS_COMPUTER_LABEL if is_this_device else grant.device_id,
+                    detail="" if is_this_device else REMOTE_EXECUTION_OTHER_DEVICE_DETAIL,
+                    description="Agents in this workspace may run any command there, as you.",
+                    is_granted=True,
+                    can_enable=False,
+                ),
+            )
+        )
+    return tuple(toggle for _, _, toggle in sorted(rows, key=lambda row: (row[0], row[1])))
 
 
 def build_workspace_toggles(
@@ -1258,9 +1306,10 @@ def compute_self_permissions(
     """Recompute the full ``latchkey-self`` permission list after a toggle flip.
 
     Only the ``minds-file-server-*`` / ``minds-workspaces-*`` names this screen
-    owns may be flipped; everything else on the rule (baseline, accounts) is
-    preserved verbatim, which is why the full list is recomputed here rather
-    than trusted from the client. Returns ``None`` when the flip is a no-op.
+    owns may be flipped, and the ``remote-execution-*`` names turned off;
+    everything else on the rule (baseline, accounts) is preserved verbatim,
+    which is why the full list is recomputed here rather than trusted from the
+    client. Returns ``None`` when the flip is a no-op.
 
     Turning a shared path off also drops the grant for the same path and access
     from before grants named a desktop, which would otherwise keep the path
@@ -1273,12 +1322,20 @@ def compute_self_permissions(
     reference, taking every ``latchkey-self`` grant down with it).
     """
     file_sharing_grant = parse_file_sharing_permission(permission)
-    if file_sharing_grant is None and parse_workspace_permission(permission) is None:
+    is_remote_execution_grant = parse_remote_execution_permission(permission) is not None
+    if file_sharing_grant is None and parse_workspace_permission(permission) is None and not is_remote_execution_grant:
         raise PermissionToggleError(f"Permission '{permission}' is not toggleable from the permissions screen.")
     current = _self_rule_permissions(config)
     if enabled:
         if permission in current:
             return None
+        # Running commands on a desktop is granted only through the request
+        # dialog, which carries the warning; this screen may only take it away.
+        if is_remote_execution_grant:
+            raise PermissionToggleError(
+                "Running commands on a computer cannot be turned on here: an agent asks for it from inside the "
+                "workspace, and you approve it there."
+            )
         if permission not in config.schemas:
             raise PermissionToggleError(
                 f"Permission '{permission}' cannot be re-enabled because its definition is gone; "

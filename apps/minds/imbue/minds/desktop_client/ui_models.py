@@ -1172,6 +1172,20 @@ class UiWorkspacePermissions(FrozenModel):
     )
     shared_paths: tuple[UiSharedPath, ...] = Field(default=(), description="Local files rows, one per shared path")
     workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other workspaces (verb) rows")
+    remote_execution_toggles: tuple[UiSelfPermissionToggle, ...] = Field(
+        default=(),
+        description=(
+            "This computer rows: one per desktop whose commands the workspace's agents may run; revoke-only, "
+            "granting goes through the request dialog"
+        ),
+    )
+    is_remote_execution_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether this device's master switch (Settings > This computer) is on; off, every This computer "
+            "row is inert and the pane says so"
+        ),
+    )
     desktops: tuple[UiWorkspaceDesktop, ...] = Field(
         default=(),
         description="The desktops a desktop egress route can name, this computer first; empty when unsupported",

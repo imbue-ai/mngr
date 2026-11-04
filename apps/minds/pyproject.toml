@@ -40,7 +40,6 @@ dependencies = [
     "imbue-mngr-antigravity",
     "imbue-mngr-claude",
     "imbue-mngr-codex",
-    "imbue-mngr-grok",
     "imbue-mngr-opencode",
     "imbue-mngr-pi-coding",
     # The plugin whose [plugins.autocompact] section the default workspace
@@ -89,7 +88,6 @@ imbue-mngr-claude = { workspace = true }
 imbue-mngr-codex = { workspace = true }
 imbue-mngr-docker = { workspace = true }
 imbue-mngr-forward = { workspace = true }
-imbue-mngr-grok = { workspace = true }
 imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-lima = { workspace = true }

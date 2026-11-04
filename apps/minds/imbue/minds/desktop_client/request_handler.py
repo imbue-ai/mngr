@@ -195,6 +195,29 @@ class UiAccountsPermissionDetail(FrozenModel):
     rationale: str = Field(description="Agent's stated reason for the request")
 
 
+class UiRemoteExecutionPermissionDetail(FrozenModel):
+    """Inbox detail payload for a remote-execution request: letting the workspace's agents run commands here."""
+
+    kind: Literal["remote_execution"] = "remote_execution"
+    request_id: str = Field(description="Request event id")
+    agent_id: str = Field(description="Requesting agent id")
+    ws_name: str = Field(description="Workspace display name")
+    rationale: str = Field(description="Agent's stated reason for the request")
+    device_hostname: str = Field(description="This computer's hostname, so the dialog can name where commands run")
+    is_setting_enabled: bool = Field(
+        description=(
+            "Whether this device's master switch (Settings > This computer) is on; while it is off the dialog "
+            "offers no Approve and points at the switch"
+        )
+    )
+    is_workspace_shared: bool = Field(
+        description=(
+            "Whether the asking workspace is shared with other people, as far as this device can tell without "
+            "a round trip; the dialog warns, and nothing is refused"
+        )
+    )
+
+
 class UiCustomServicePermissionDetail(FrozenModel):
     """Inbox detail payload for a custom-service request (create a connection, then grant it).
 
@@ -265,6 +288,7 @@ RequestDetailPayload = (
     | UiWorkspacePermissionDetail
     | UiAccountsPermissionDetail
     | UiCustomServicePermissionDetail
+    | UiRemoteExecutionPermissionDetail
     | UiUnknownScopeDetail
     | UiUnsupportedDetail
 )

@@ -2018,3 +2018,56 @@ def test_connect_browser_rejects_an_unknown_service(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert latchkey.added_account_calls == []
+
+
+@pytest.mark.witnesses(
+    "remote-execution.revoke-from-permissions", partial="does not cover that nothing in the tab can turn it back on"
+)
+def test_self_toggle_revokes_a_remote_execution_grant_from_any_desktop(tmp_path: Path) -> None:
+    """A grant for another desktop may be revoked here too: every desktop adopts the shared policy."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    other_desktops_grant = "remote-execution-host-other-desktop-7c1e"
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [_BASELINE_PERMISSION, other_desktops_grant]},),
+            schemas={other_desktops_grant: {"type": "object"}},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+    listed = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+    assert [row["permission"] for row in listed["remote_execution_toggles"]] == [other_desktops_grant]
+    assert listed["is_remote_execution_enabled"] is False
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/self-toggle",
+        json={"permission": other_desktops_grant, "enabled": False},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["remote_execution_toggles"] == []
+    assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION]},)
+
+
+@pytest.mark.witnesses(
+    "remote-execution.revoke-from-permissions", partial="only that the tab cannot turn a grant back on"
+)
+def test_self_toggle_refuses_to_grant_remote_execution(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    grant = "remote-execution-host-this-desktop-3f9c"
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [_BASELINE_PERMISSION]},), schemas={grant: {"type": "object"}}),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/self-toggle", json={"permission": grant, "enabled": True}
+    )
+
+    assert response.status_code == 400
+    assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION]},)

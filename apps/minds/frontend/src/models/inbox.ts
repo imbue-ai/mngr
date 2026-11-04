@@ -150,6 +150,22 @@ export interface AccountsPermissionDetail {
   rationale: string;
 }
 
+export interface RemoteExecutionPermissionDetail {
+  kind: "remote_execution";
+  request_id: string;
+  agent_id: string;
+  ws_name: string;
+  rationale: string;
+  /** This computer's hostname: the dialog names where the commands would run. */
+  device_hostname: string;
+  /** Whether this device's master switch (Settings > This computer) is on;
+   * off, the dialog offers no Approve and points at the switch. */
+  is_setting_enabled: boolean;
+  /** Whether the asking workspace is shared, as far as this device can tell;
+   * a warning, never a refusal. */
+  is_workspace_shared: boolean;
+}
+
 export interface CustomServicePermissionDetail {
   kind: "custom_service";
   request_id: string;
@@ -194,6 +210,7 @@ export type InboxDetail =
   | WorkspacePermissionDetail
   | AccountsPermissionDetail
   | CustomServicePermissionDetail
+  | RemoteExecutionPermissionDetail
   | UnknownScopeDetail
   | UnsupportedDetail
   | UnavailableDetail;
@@ -522,6 +539,22 @@ export class InboxModel {
         return;
       }
     }
+    await this.fetchDetail(id);
+  }
+
+  /** Fetch the selected request's detail again, for a dialog whose answer
+   * depends on something the user may have just changed elsewhere. */
+  async reloadDetail(): Promise<void> {
+    const id = this.selectedId;
+    if (id === null) return;
+    this.isDetailLoading = true;
+    this.redraw();
+    await this.fetchDetail(id);
+  }
+
+  /** Fetch one request's detail and show it, or the unavailable placeholder
+   * when the backend refuses. */
+  private async fetchDetail(id: string): Promise<void> {
     const response = await this.fetcher()(requestDetailUrl(id));
     this.isDetailLoading = false;
     if (!response.ok) {
@@ -565,6 +598,8 @@ export class InboxModel {
       this.sharePathSyncConflict = detail.sync_conflict;
     } else if (detail.kind === "accounts") {
       this.checkedPermissions = new Set(["accounts"]);
+    } else if (detail.kind === "remote_execution") {
+      this.checkedPermissions = new Set(["remote-execution"]);
     } else {
       // Unavailable/unsupported/unknown-scope details have no editable state.
     }
@@ -683,6 +718,9 @@ export class InboxModel {
       );
     }
     if (detail.kind === "accounts") return true;
+    // Running commands here is granted only while this device's master switch
+    // is on: the dialog points at the switch instead of offering Approve.
+    if (detail.kind === "remote_execution") return detail.is_setting_enabled;
     // A custom service has nothing to choose: one fixed permission on a scope
     // pinned to one domain. The credential form, when the server has asked for
     // one, is already covered by the incompleteness check above.
@@ -758,7 +796,7 @@ export class InboxModel {
       // with no browser sign-in); the first Approve sends none.
       this.appendManualCredentialFields(form);
     } else {
-      // Accounts grants carry no parameters (all-or-nothing approve).
+      // Accounts and remote-execution grants carry no parameters (all-or-nothing approve).
     }
     return form;
   }

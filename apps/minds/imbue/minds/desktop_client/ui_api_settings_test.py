@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_style_version
+from imbue.minds.desktop_client.ui_api_settings import compute_remote_execution_version
 from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -864,3 +865,63 @@ def test_account_notification_preferences_require_authentication(tmp_path: Path)
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
 
     assert client.get("/ui/api/accounts/user-123/notification-preferences").status_code == 401
+
+
+def test_remote_execution_switch_is_served_off_with_its_own_version(tmp_path: Path) -> None:
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
+
+    overview = json.loads(client.get("/ui/api/settings").data)
+
+    assert overview["allow_agent_command_execution"] is False
+    assert overview["remote_execution_version"] == compute_remote_execution_version(False)
+
+
+def test_remote_execution_write_round_trips_with_the_served_version(tmp_path: Path) -> None:
+    client, minds_config, _settings_store = _build_settings_client(tmp_path)
+    served_version = json.loads(client.get("/ui/api/settings").data)["remote_execution_version"]
+
+    response = client.post(
+        "/ui/api/settings/remote-execution",
+        json={"allow_agent_command_execution": True},
+        headers={"If-Match": served_version},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["version"] == compute_remote_execution_version(True)
+    assert minds_config.get_allow_agent_command_execution() is True
+    assert json.loads(client.get("/ui/api/settings").data)["allow_agent_command_execution"] is True
+
+
+def test_remote_execution_write_without_if_match_is_rejected_with_428(tmp_path: Path) -> None:
+    client, minds_config, _settings_store = _build_settings_client(tmp_path)
+
+    response = client.post("/ui/api/settings/remote-execution", json={"allow_agent_command_execution": True})
+
+    assert response.status_code == 428
+    assert minds_config.get_allow_agent_command_execution() is False
+
+
+def test_remote_execution_write_with_a_stale_version_is_rejected_with_412(tmp_path: Path) -> None:
+    client, minds_config, _settings_store = _build_settings_client(tmp_path)
+    stale_version = compute_remote_execution_version(True)
+
+    response = client.post(
+        "/ui/api/settings/remote-execution",
+        json={"allow_agent_command_execution": True},
+        headers={"If-Match": stale_version},
+    )
+
+    assert response.status_code == 412
+    assert minds_config.get_allow_agent_command_execution() is False
+
+
+def test_remote_execution_write_requires_authentication(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
+
+    response = client.post(
+        "/ui/api/settings/remote-execution",
+        json={"allow_agent_command_execution": True},
+        headers={"If-Match": compute_remote_execution_version(False)},
+    )
+
+    assert response.status_code == 401

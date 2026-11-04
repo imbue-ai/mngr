@@ -58,12 +58,14 @@ export const WAITING_SECTION = "waiting";
 export const ADD_CONNECTION_SECTION = "add-connection";
 export const LOCAL_FILES_SECTION = "local-files";
 export const OTHER_MACHINES_SECTION = "other-machines";
+export const THIS_COMPUTER_SECTION = "this-computer";
 
 const FIXED_SECTIONS: readonly string[] = [
   WAITING_SECTION,
   ADD_CONNECTION_SECTION,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
+  THIS_COMPUTER_SECTION,
 ];
 
 /** Left-nav key for a connection. Keyed by (service, account) rather than by

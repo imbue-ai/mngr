@@ -28,6 +28,7 @@ from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
 from imbue.concurrency_group.subprocess_utils import _write_and_close_child_stdin
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
+from imbue.concurrency_group.test_utils import is_process_with_marker_running
 from imbue.concurrency_group.test_utils import make_idle_child_script
 
 
@@ -735,3 +736,19 @@ def test_run_local_command_does_not_wake_while_its_child_sits_idle(is_closing_it
         f"the read loop woke {shutdown_event.consultation_count} times (counted as shutdown-event "
         f"consultations) while waiting {_IDLE_CHILD_LIFETIME_SECONDS}s on a child that did nothing"
     )
+
+
+def test_timeout_of_an_own_process_group_leader_kills_what_it_forked() -> None:
+    """A grandchild shares the leader's group, so the timeout's signal reaches it too."""
+    marker = "sleep 36293"
+
+    result = run_local_command_modern_version(
+        ["sh", "-c", f"{marker} & wait"],
+        is_checked=False,
+        timeout=0.5,
+        shutdown_timeout_sec=1.0,
+        is_own_process_group=True,
+    )
+
+    assert result.is_timed_out
+    assert not is_process_with_marker_running(marker)

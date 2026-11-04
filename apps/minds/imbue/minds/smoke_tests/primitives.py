@@ -53,8 +53,6 @@ SMOKE_RUN_ID_ENV_VAR: Final[str] = "MINDS_SMOKE_RUN_ID"
 SMOKE_HANDOFF_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_HANDOFF_FILE"
 # Where the test job appends the resources it creates, for teardown to read.
 SMOKE_MANIFEST_PATH_ENV_VAR: Final[str] = "MINDS_SMOKE_MANIFEST_PATH"
-# ``1`` skips default-workspace-template's CI tests in the journey's workspace; unset or ``0`` runs them.
-SMOKE_SKIP_DWT_TESTS_ENV_VAR: Final[str] = "MINDS_SMOKE_SKIP_DWT_TESTS"
 
 # The mail.tm mailbox the throwaway account verifies its email through. The
 # address and JWT keep the names the deployment tests already thread through
@@ -142,18 +140,6 @@ class SmokeManifestError(MindError):
 
 class SmokeAppError(MindError):
     """Raised when the launched Imbue Studio app does not reach the state a journey step waits for."""
-
-    ...
-
-
-class SmokeWorkspaceExecError(MindError):
-    """Raised when a command could not be run inside the journey's workspace, or failed there."""
-
-    ...
-
-
-class SmokeDwtReportError(MindError):
-    """Raised when a junit report the default-workspace-template runner left cannot be read."""
 
     ...
 

@@ -25,8 +25,6 @@ from pydantic import SecretStr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
-from imbue.imbue_common.primitives import NonNegativeInt
-from imbue.imbue_common.primitives import PositiveInt
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MailtmAccountId
@@ -347,80 +345,4 @@ class StudioAppSession(FrozenModel):
     data_home: Path = Field(description="The ``STUDIO_ROOTS_OVERRIDE`` the app was launched with.")
     log_dir: Path = Field(
         description="Where the app writes ``minds.log``, ``electron.log`` and ``minds-events.jsonl``."
-    )
-    launch_cwd: Path = Field(description="The empty directory outside any checkout the app was started from.")
-    mngr_executable: Path = Field(
-        description="The app's own mngr: the packaged build's venv's, or this checkout's for the dev checkout."
-    )
-    mngr_host_dir: Path = Field(description="The ``MNGR_HOST_DIR`` the app runs mngr with, under its data home.")
-    mngr_prefix: NonEmptyStr = Field(description="The ``MNGR_PREFIX`` the app runs mngr with.")
-
-
-class DwtTestGroup(FrozenModel):
-    """One test group of a default-workspace-template offload config: a pytest selection and its CI retry budget."""
-
-    name: NonEmptyStr = Field(description="The group's key in the config (``all``, ``flaky``).")
-    filters: str = Field(description="The pytest arguments selecting the group's tests, in shell syntax.")
-    retry_count: NonNegativeInt = Field(
-        description="How many more attempts CI gives the group's failed tests before they count as failed."
-    )
-
-
-class DwtTestSuite(FrozenModel):
-    """One default-workspace-template pytest root, as the offload config its CI runs it with describes it."""
-
-    name: NonEmptyStr = Field(description="The last segment of the config's report directory (``root``, ``chat``).")
-    command: NonEmptyStr = Field(
-        description="The command running this root's pytest from the repo root, in shell syntax."
-    )
-    run_args: str = Field(description="The arguments CI adds to every pytest run of this root, in shell syntax.")
-    environment: dict[str, str] = Field(description="The variables CI sets for this root's pytest runs.")
-    groups: tuple[DwtTestGroup, ...] = Field(description="The root's test groups, in the config's order.")
-
-
-class DwtTestOutcome(UpperCaseStrEnum):
-    """How a default-workspace-template test ended in the workspace, across the attempts CI would give it."""
-
-    PASSED = auto()
-    FAILED = auto()
-    SKIPPED = auto()
-
-
-class DwtJunitCase(FrozenModel):
-    """One test case of a pytest junit report the runner left in the workspace."""
-
-    test_id: NonEmptyStr = Field(description="The pytest node id, relative to the suite's root.")
-    outcome: DwtTestOutcome = Field(description="How the case ended in that report.")
-    detail: str = Field(description="Its failure text or skip reason; empty for a pass.")
-
-
-class DwtGroupAttempt(FrozenModel):
-    """One pytest run of a test group, as the runner left it in the workspace."""
-
-    number: PositiveInt = Field(description="1 for the group's run, then one more per retry of its failures.")
-    exit_code: int | None = Field(description="pytest's exit code, or None when the attempt never finished.")
-    cases: tuple[DwtJunitCase, ...] | None = Field(description="Its junit report's cases, or None when it wrote none.")
-    log_tail: str = Field(description="The end of the attempt's output, which says why a run went wrong.")
-
-
-class DwtTestResult(FrozenModel):
-    """One default-workspace-template test's result in the workspace, or one group run that reported no tests."""
-
-    suite_name: NonEmptyStr = Field(description="The suite the test belongs to.")
-    test_id: NonEmptyStr = Field(
-        description="The pytest node id relative to the suite's root, or ``[<group> group]`` for a run's own failure."
-    )
-    outcome: DwtTestOutcome = Field(description="Its outcome on its last attempt; a pass on any attempt is a pass.")
-    attempt_count: PositiveInt = Field(description="How many attempts ran it.")
-    detail: str = Field(description="The failure or skip text of its last attempt; empty for a pass.")
-
-
-class SmokeRunVerdict(FrozenModel):
-    """What failed in one smoke session, for the workflow deciding whether a rerun could help."""
-
-    dwt_failure_count: NonNegativeInt = Field(
-        description="Failed default-workspace-template tests, which fail the same way on a rerun."
-    )
-    other_failure_count: NonNegativeInt = Field(
-        description="Every other failure: a journey step, a probe, a fixture, or the run of the DWT suites itself."
     )

@@ -40,6 +40,7 @@ import {
   FILE_SHARING_ACCESSES,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
+  THIS_COMPUTER_SECTION,
   WAITING_SECTION,
   connectActionFor,
   connectServiceRowKey,
@@ -404,6 +405,11 @@ function renderNav(
         m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
         m("span", { class: "truncate" }, "Other workspaces"),
       ),
+      navEntry(
+        THIS_COMPUTER_SECTION,
+        m(Icon16, { name: "triangle-alert", extra: "shrink-0" }),
+        m("span", { class: "truncate" }, "This computer"),
+      ),
     ]),
   ];
 }
@@ -421,6 +427,7 @@ function renderSelectedPanel(
   if (selected === WAITING_SECTION) return renderWaitingPanel(data.waiting_requests, onReviewRequest);
   if (selected === LOCAL_FILES_SECTION) return renderLocalFilesPanel(model);
   if (selected === OTHER_MACHINES_SECTION) return renderOtherMachinesPanel(model);
+  if (selected === THIS_COMPUTER_SECTION) return renderThisComputerPanel(model);
   if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, selectSection);
   const connection = connections.find((entry) => connectionSectionId(entry) === selected);
   if (connection === undefined) return null;
@@ -1233,6 +1240,60 @@ function renderOtherMachinesPanel(model: PermissionsModel): m.Children {
             ]),
           ),
         ),
+  ]);
+}
+
+/** The This computer panel: which of the user's computers this workspace's
+ * agents may run commands on. Revoke-only -- granting goes through the one
+ * dialog that carries the warning -- and inert while this device's master
+ * switch is off, which the panel says rather than hiding the rows. */
+function renderThisComputerPanel(model: PermissionsModel): m.Children {
+  const toggles = model.data?.remote_execution_toggles ?? [];
+  const isEnabled = model.data?.is_remote_execution_enabled === true;
+  return m("section", { "data-perm-panel": THIS_COMPUTER_SECTION }, [
+    m("h2", { class: "type-heading text-primary mb-1" }, "This computer"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-4" },
+      "Whether agents in this workspace may run commands on your computers, as you. " +
+        "An agent asks for this from inside the workspace, and you approve it there; here you can only take it away.",
+    ),
+    toggles.length === 0
+      ? m(
+          Notice,
+          { variant: "info" },
+          "Agents in this workspace can't run commands on your computers.",
+        )
+      : [
+          isEnabled
+            ? null
+            : m(
+                Notice,
+                { variant: "warn", id: "remote-execution-disabled-notice" },
+                "Disabled: agents are not allowed to run commands on this computer. " +
+                  "Change that under Settings > This computer.",
+              ),
+          m(
+            "div",
+            { class: "flex flex-col pr-4" },
+            toggles.map((toggle) =>
+              m("div", { class: TOGGLE_ROW_CLASS, "data-perm-remote-execution": toggle.permission }, [
+                m("div", { class: "min-w-0" }, [
+                  m("p", { class: "type-body text-primary flex items-center gap-2 min-w-0" }, [
+                    m("span", { class: "truncate" }, toggle.label),
+                    toggle.detail
+                      ? m("span", { class: "type-helper text-tertiary shrink-0" }, toggle.detail)
+                      : null,
+                  ]),
+                  toggle.description
+                    ? m("p", { class: "type-helper text-tertiary mt-0.5" }, toggle.description)
+                    : null,
+                ]),
+                renderSelfSwitch(model, toggle, `Run commands on ${toggle.label}`),
+              ]),
+            ),
+          ),
+        ],
   ]);
 }
 

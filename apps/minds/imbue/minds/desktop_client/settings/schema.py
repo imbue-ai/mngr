@@ -76,6 +76,13 @@ class InstallSettings(FrozenModel):
     notification_style: NotificationStyle = Field(
         default=DEFAULT_NOTIFICATION_STYLE, description="Delivery style for feed-backed notifications"
     )
+    allow_agent_command_execution: bool = Field(
+        default=False,
+        description=(
+            "Whether an approved workspace's agents may run commands on this device as the user; "
+            "install-keyed on purpose, so enabling it on one device never enables it on another"
+        ),
+    )
 
 
 class AccountSettings(FrozenModel):
@@ -148,6 +155,9 @@ REPORT_UNEXPECTED_ERRORS: Final[SettingDeclaration] = SettingDeclaration(
 NOTIFICATION_STYLE: Final[SettingDeclaration] = SettingDeclaration(
     key="notification_style", scope=SettingScope.INSTALL, override_kind=SettingOverrideKind.NONE
 )
+ALLOW_AGENT_COMMAND_EXECUTION: Final[SettingDeclaration] = SettingDeclaration(
+    key="allow_agent_command_execution", scope=SettingScope.INSTALL, override_kind=SettingOverrideKind.NONE
+)
 
 SETTING_DECLARATIONS: Final[tuple[SettingDeclaration, ...]] = (
     UPDATE_WINDOW_START_HOUR,
@@ -159,6 +169,7 @@ SETTING_DECLARATIONS: Final[tuple[SettingDeclaration, ...]] = (
     SIGN_IN_BROWSER,
     REPORT_UNEXPECTED_ERRORS,
     NOTIFICATION_STYLE,
+    ALLOW_AGENT_COMMAND_EXECUTION,
 )
 
 

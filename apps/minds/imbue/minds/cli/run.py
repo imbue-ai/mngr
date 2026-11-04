@@ -110,6 +110,7 @@ from imbue.minds.desktop_client.latchkey.handlers.custom_service import CustomSe
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import RemoteExecutionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
@@ -565,6 +566,12 @@ def run(
         mngr_message_sender=mngr_message_sender,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,
     )
+    remote_execution_handler = RemoteExecutionGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+        push_permissions_to_machine=push_permissions_to_machine,
+    )
     imbue_cloud_cli = ImbueCloudCli(
         mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
@@ -1009,6 +1016,7 @@ def run(
             workspace_permission_handler,
             accounts_permission_handler,
             custom_service_handler,
+            remote_execution_handler,
         ),
         server_port=port,
         mngr_forward_port=mngr_forward_port,

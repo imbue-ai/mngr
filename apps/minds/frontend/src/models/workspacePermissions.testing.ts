@@ -134,6 +134,8 @@ export function permissionsView(overrides: Partial<UiWorkspacePermissions> = {})
     available_connections: [{ service_name: "notion", display_name: "Notion", sign_in: BROWSER_SIGN_IN }],
     shared_paths: [],
     workspace_toggles: [],
+    remote_execution_toggles: [],
+    is_remote_execution_enabled: false,
     waiting_requests: [],
     permissions_unavailable: false,
     is_sync_supported: true,
