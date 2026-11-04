@@ -1,1 +1,0 @@
-`is_shell_command_message`, the check for a leading-`!` shell-mode message, moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`, where the grok plugin uses it too. Claude's handling of `!` messages is unchanged.

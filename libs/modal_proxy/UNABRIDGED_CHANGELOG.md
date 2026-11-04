@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+`VolumeInterface` gains `get_created_at()`, the volume's creation time when known. Volumes returned by `volume_list` know it: Modal's listing already carries it, so reading it makes no extra request. A handle from `volume_from_name` returns `None`.
+
 ## 2026-10-31
 
 Modal refuses a deploy once the workspace holds its maximum number of deployed apps, and it words that refusal almost exactly like the ephemeral-app cap. The two are not alike: an ephemeral app drains on its own as concurrent runs finish, while a deployed app leaves the count only when something stops it or deletes its environment. Treating them as one meant waiting out a condition that no wait can clear.

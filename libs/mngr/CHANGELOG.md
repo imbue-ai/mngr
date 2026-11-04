@@ -9,6 +9,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr create --publish <port>[/<protocol>]` declares ports to publish on a new host (create-template key `publish`), reported as `published_endpoints` by `mngr create`/`mngr list --format json` and the discovery stream.
+- Added: Support for the `grok` agent type via the separately installed `imbue-mngr-grok` plugin, listed in the plugin catalog and offered unchecked by the install wizard.
+- Added: `imbue.mngr.agents.tui_utils.is_shell_command_message` (moved from `imbue.mngr_claude.dialogs`).
 
 ### Changed
 
@@ -20,6 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr connect` (and `create`/`start --connect`) now recovers when its SSH session to a remote agent drops (e.g. after the laptop sleeps): it resets the terminal modes the session enabled, restores and restarts a host that paused while disconnected, and exits non-zero when the session cannot be reattached.
 - Fixed: An SSH connection whose local address vanished (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake) is now treated as a dead connection and retried on a rebuilt connection, surfacing as `HostConnectionError` instead of a raw `OSError`; this stops the latchkey forward daemon's gateway provisioning from crashing on it.
 - Fixed: `mngr create` now removes an agent that cannot take input while starting (e.g. stopped on a dialog) and fails with `Failed to start agent <name>: ...`, instead of leaving it running with its worktree and branch deleted.
+- Fixed: `mngr gc` no longer deletes the volume of a host still being created when it listed hosts; volumes younger than the provider's `min_online_host_age_seconds` are spared on providers that report volume creation time (Modal, local).
 
 ## [v0.3.1] - 2026-10-28
 

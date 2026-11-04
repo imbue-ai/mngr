@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+gVisor is pinned to release `20261102`. Since August, gVisor ships each release only as a `gvisor.tar.zstd` tarball holding runsc, its containerd shim and the `gvisor-bin/` sidecars runsc runs, and runsc refuses sidecars from any other release. The shared install script (`render_gvisor_binary_install_script`, which now takes the release and install directory) downloads that tarball, checks its sha512, installs `zstd` when the host lacks it, and puts all three side by side in `/usr/local/bin`. It now skips only when the installed runsc already reports the pinned release, so it upgrades an older runsc in place instead of leaving it. The new release stops the gofer's inode-number map from growing for as long as a sandbox runs (google/gvisor#16197) and the 32 MiB file-descriptor table each tmux client call left behind (google/gvisor#15989).
+
 ## 2026-11-02
 
 MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

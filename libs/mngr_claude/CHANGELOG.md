@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `is_shell_command_message` moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`.
+
 ### Fixed
 
 - Fixed: A message sent to a claude agent still running its SessionStart hooks now confirms within seconds instead of being reported unconfirmed after the 90s window.

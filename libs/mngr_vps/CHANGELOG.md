@@ -10,6 +10,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: The VPS providers publish ports declared with `mngr create --publish` (recorded as `published_endpoints`); cloud VPS providers gain a `firewall_published_ports` config key their `prepare` opens (published-ports contract).
 
+### Changed
+
+- Changed: gVisor pinned to `20261102`, installed from its sha512-checked `gvisor.tar.zstd` release tarball (runsc, shim and `gvisor-bin/` sidecars); `render_gvisor_binary_install_script` now takes the release and install directory and upgrades an older runsc in place.
+
+### Fixed
+
+- Fixed: The new gVisor release stops a sandbox's memory growing for as long as it runs (gofer inode-number map, google/gvisor#16197) and the 32 MiB fd table leaked per tmux client call (google/gvisor#15989).
+
 ## [v0.1.11] - 2026-10-28
 
 ## [v0.1.10] - 2026-10-22

@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+Added the `gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows for as long as a workspace container runs on a runsc older than release `20261102`, the 2026-10-27 production survey of affected workspaces, and the runbook for moving the fleet onto `20261102`: `minds-admin install-runsc` and `minds-admin restart-workspace-container` on every leased workspace, one at a time, and a rebake of the available hosts.
+
+`install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball (runsc, its shim and the `gvisor-bin/` sidecars runsc needs beside it) and upgrades an older runsc it installed, instead of skipping whenever any runsc is present.
+
+The pool-hosts runbook (`docs/deploy/ops/pool-hosts.md`) gains an "Alerts: an empty or thin pool" section: what the new OpenObserve pool-stock rules (`mngr_pool_fast_path_miss`, `mngr_pool_available_below_floor`) watch at each release channel's desktop tag and where they notify (a Slack card at most once a day where the tier holds the webhook, and a payload-free GitHub issue where it holds the GitHub alerts token; production has only the webhook, so its pool alerts go to #studio-notifications), how to read the card, the fix for each lease outcome (bake, destroy a row without host keys, or check unreachable boxes and the management certificate), what the rules see of browser creates (they send no region, so only the miss rule counts them), that a tag no channel pins is not watched, that the connector must be deployed before the rules, and where each tier's recorded alert settings live. The box-telemetry reference notes that the same provisioning pass now creates these rules, and documents the optional `OBSERVABILITY_ALERTS_SLACK_WEBHOOK_URL`.
+
+The 0.10.0 deploy record gains a "Services follow-up (2026-11-03)" section: production deploy `20261103T200211Z` from `b6ac524b4b` (PR #2137's pool card) and the pool-alert rollout behind it. `next_deploy.md` names the new production services commit and drops the #2137 item, now done.
+
+The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`
+rather than `~/.local/bin/minds-desktop`. It is the first identifier the app picks
+for itself to take the product's `studio` spelling, after `STUDIO_ROOTS_OVERRIDE`.
+
+The old launcher is left in place. It is self-contained -- it execs
+`start-desktop.sh` out of the checkout it was written against -- so it keeps
+working, and an upgrade that removed it would break the two things that still
+name it by absolute path: a Raspberry Pi's menu and autostart entries, and a WSL
+install's Windows shortcut. Both are rewritten only by a run that passes
+`--raspberry-pi` or sets `WSL_DISTRO_NAME`, so a plain `--version latest` upgrade
+would otherwise leave them pointing at a file that no longer exists. Delete
+`~/.local/bin/minds-desktop` by hand if you want it gone; only the new name
+tracks later installer changes.
+
+The name is `studio-desktop`, not `imbue-studio`: the packaged `.deb` and
+AppImage already install an executable called `imbue-studio`, and the generated
+launcher puts `~/.local/bin` first on `PATH`, so that spelling would shadow the
+packaged binary even inside the launcher's own subprocesses.
+
+`style_guide.md` no longer exempts the app's own identifiers from the product
+name. They move to `studio` one at a time, where nothing outside this repo reads
+them. `minds-v*` release tags are the standing exception, and the rule now says
+why: every provisioned workspace matches those tags with a frozen copy of its own
+`update-self` regex, so a `studio-v*` release would stop each existing workspace
+updating, with nothing shipped afterwards able to reach the code that failed.
+
 ## 2026-11-02
 
 MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. The latchkey handler test doubles pass an unused `ConcurrencyGroup` instead of widening the field to accept `None`, and the permissions view sorts its available connections before building the view rather than inside the constructor call. Type-checker-only; behavior is unchanged.

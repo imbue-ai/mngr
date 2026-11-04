@@ -1,1 +1,0 @@
-The Modal provider's `list_volumes` reports each host volume's creation time (`VolumeInfo.created_at`). `mngr gc` needs it to spare a volume too young to trust the host listing: the volume of a host still being created when gc listed hosts is no longer deleted.

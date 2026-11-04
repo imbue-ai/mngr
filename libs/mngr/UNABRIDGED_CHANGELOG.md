@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+`mngr gc` no longer deletes the volume of a host that was still being created when it listed hosts. The volume pass judged a volume orphaned whenever its host was missing from the host listing taken at the start of the collection, so a host created during a long collection, or still being set up when the listing was taken, lost its volume and everything on it. A volume created later than the provider's minimum host age (`min_online_host_age_seconds`, 10 minutes by default) before the listing is now spared until a later collection. This applies to providers that report a volume's creation time: Modal and local. For the others the listing alone still decides.
+
+Support for the `grok` agent type, provided by the separately installed `imbue-mngr-grok` plugin.
+
+- The plugin catalog lists `imbue-mngr-grok` (entry point `grok`) as an independent agent-type plugin, not recommended by default, so the install wizard offers it unchecked among the extras. Its detection signal, `GrokSignalCheck`, accepts only Grok Build's `grok X.Y.Z (<hash>)` version output; the wizard checks signals only for recommended plugins, so it does not run this one.
+
+- Docs: `grok` joins the external plugin agent types in `all_supported_agents.md`; the plugins and agent types concept pages name the separately installed agent-type plugins; the config README lists grok's `settings_overrides` among the patches that accumulate across config layers; `mngr message`'s help names grok, and the evidence that confirms its sends, among the agents its delivery guarantee covers, and says that a `!` shell command sent to claude or grok is best-effort like a slash command (so does the warning logged when such a send goes unconfirmed); and the generated capability matrix gains a `grok` column.
+
+- `imbue.mngr.agents.tui_utils` gains `is_shell_command_message`, the check for a leading-`!` shell-mode message, shared by the Claude and grok plugins.
+
+- Test support: the all-agent-types plugin-isolation fixture now loads `codex` and `grok` too, the common-transcript conformance meta-test expects a `grok` emitter, and the release harness's `agent_state_dir_by_name` is public for plugin release tests that look an agent's state dir up by name, as are its seed-command, recall and message-journey busy prompts (`SEED_TOOL_COMMAND`, `RECALL_PROMPT`, `MESSAGE_JOURNEY_BUSY_PROMPT`) for stub model servers that script replies to them.
+
 ## 2026-11-02
 
 MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Alongside that, a few annotations that ty 0.0.87 rejects are corrected (a forwarding test double's kwargs, a docker build test's count check), and the deliberate narrowings it flags are marked: the discovery events' discriminator `Literal`s, the streamed observation result's required call id, and the log stream wrapper's read-only `encoding`/`errors`. Type-checker-only; behavior is unchanged.

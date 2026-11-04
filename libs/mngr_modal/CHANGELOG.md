@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: The Modal provider publishes TCP ports declared with `mngr create --publish` as sandbox tunnels, reported as `host.published_endpoints` (UDP and port 22 refused).
+- Added: The Modal provider's `list_volumes` reports each volume's creation time (`VolumeInfo.created_at`), letting `mngr gc` spare volumes of hosts still being created.
 
 ### Changed
 

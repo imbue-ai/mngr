@@ -173,6 +173,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `minds:open-share-settings` accepts an optional `serviceName` to open the whole-workspace Share tab (embed contract v13).
 - Added: The browser sign-in permission dialog can accept a pasted token instead of opening a browser.
 - Added: Keybindings are an account-keyed setting delivered to workspaces in the profile snapshot, editable from a workspace via `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings` (gated by the `minds-workspaces-account-settings` latchkey verb).
+- Added: `docs/deploy/history/rollouts/gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows on runsc older than `20261102`, the affected-workspace survey, and the runbook for moving the fleet onto `20261102` (`minds-admin install-runsc` and `restart-workspace-container` per leased workspace, then a rebake).
+- Added: The pool-hosts runbook gains an "Alerts: an empty or thin pool" section covering the new pool-stock alert rules, their Slack card, and the fix for each lease outcome.
 
 ### Changed
 
@@ -370,6 +372,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `MINDS_DATA_HOME` is renamed `STUDIO_ROOTS_OVERRIDE`; setting only the old name raises.
 - Changed: Account-keyed settings (update window, auto-update toggle and offer answer, notifications master toggle) move from `config.toml` to per-account records synced through the connector, edited via `GET`/`PUT /ui/api/settings/<account_id>`, which replaces the `update-window`, `auto-update` and `auto-update-prompt` POST routes.
 - Changed: Per-workspace update facts (skipped target, row dismissals) and the backup-verification flag live in the workspace itself, so every computer managing it agrees; the desktop writes a workspace profile snapshot (`data/.state/profile/account.json`, contract `workspace_profile_contract.json`).
+- Changed: Production services deployed from `b6ac524b4b` (`20261103T200211Z`), shipping the pool card and the pool-stock alert rollout.
+- Changed: `install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball and upgrades an older runsc it installed instead of skipping.
+- Changed: The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`; the old `minds-desktop` launcher is left in place and keeps working (delete it by hand).
 
 ### Deprecated
 

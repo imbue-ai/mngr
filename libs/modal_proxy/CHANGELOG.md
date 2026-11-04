@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `VolumeInterface.get_created_at()` returns a volume's creation time (known for `volume_list` results, `None` for `volume_from_name` handles).
+
 ### Changed
 
 - Changed: `modal_proxy` distinguishes the Modal deployed-app-limit refusal from the ephemeral-app cap, raising a non-retryable `ModalProxyDeployedAppLimitError` instead of retrying a condition that cannot clear.

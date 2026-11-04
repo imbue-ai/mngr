@@ -1,1 +1,0 @@
-The 0.10.0 deploy record gains a "Services follow-up (2026-11-03)" section: production deploy `20261103T200211Z` from `b6ac524b4b` (PR #2137's pool card) and the pool-alert rollout behind it. `next_deploy.md` names the new production services commit and drops the #2137 item, now done.

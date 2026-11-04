@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+The Modal provider's `list_volumes` reports each host volume's creation time (`VolumeInfo.created_at`). `mngr gc` needs it to spare a volume too young to trust the host listing: the volume of a host still being created when gc listed hosts is no longer deleted.
+
 ## 2026-11-02
 
 MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

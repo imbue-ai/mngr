@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03
+
+`is_shell_command_message`, the check for a leading-`!` shell-mode message, moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`, where the grok plugin uses it too. Claude's handling of `!` messages is unchanged.
+
 ## 2026-11-02
 
 MIND-301: The code-guardian, fixme-fairy and skill-provisioned agents mark their `agent_config` narrowing, which ty 0.0.87 reports because it does not model a per-field `Field(frozen=True)` as read-only. A transcript test annotates the environment it hands to `subprocess.run`. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
