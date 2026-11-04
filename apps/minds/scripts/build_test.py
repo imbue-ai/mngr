@@ -74,6 +74,7 @@ WORKSPACE_PACKAGES = [
     "imbue-mngr-pi-coding",
     "imbue-mngr-opencode",
     "imbue-mngr-antigravity",
+    "imbue-mngr-grok",
     "imbue-mngr-vps",
     "imbue-common",
     "concurrency-group",
