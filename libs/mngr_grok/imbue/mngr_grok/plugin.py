@@ -102,7 +102,6 @@ from imbue.mngr_grok.grok_config import build_config_toml
 from imbue.mngr_grok.grok_config import build_hooks_json
 from imbue.mngr_grok.grok_config import build_launch_command
 from imbue.mngr_grok.grok_config import build_launch_env
-from imbue.mngr_grok.grok_config import build_requirements_toml
 from imbue.mngr_grok.grok_config import fold_settings_overrides_onto_empty_config
 from imbue.mngr_grok.grok_config import get_grok_home
 from imbue.mngr_grok.grok_config import parse_grok_config_text
@@ -152,7 +151,6 @@ _HOOK_HANDLER_SCRIPT_NAME: Final[str] = "grok_hook.py"
 _HOOKS_DIRNAME: Final[str] = "hooks"
 _HOOKS_CONFIG_FILENAME: Final[str] = "mngr.json"
 _CONFIG_FILENAME: Final[str] = "config.toml"
-_REQUIREMENTS_FILENAME: Final[str] = "requirements.toml"
 _PRIVATE_FILE_MODE: Final[str] = "0600"
 _EXECUTABLE_FILE_MODE: Final[str] = "0755"
 
@@ -268,15 +266,10 @@ class GrokAgentConfig(AgentTypeConfig):
         "configuration (hooks, skills, rules, agents, MCP servers, sessions). When False, grok keeps it "
         "except the Claude Code and Cursor hooks and the plugins in the user's Claude `enabledPlugins`.",
     )
-    pin_privacy_settings: bool = Field(
-        default=True,
-        description="When True (default), turn off grok's telemetry, trace upload, feedback, campaigns "
-        "and codebase upload in the per-agent configuration and environment.",
-    )
     memory: bool = Field(
         default=False,
         description="Whether grok's memory feature is enabled. The value is written explicitly to the "
-        "per-agent config.toml, so no remote or managed default can turn it on; when enabled, "
+        "per-agent config.toml, so no remote default can turn it on; when enabled, "
         "preservation on destroy also keeps the memory store.",
     )
     check_installation: bool = Field(
@@ -1265,7 +1258,6 @@ class GrokAgent(
             is_self_update_disabled=is_self_update_disabled(
                 self.agent_config.update_policy, is_unattended=not host.is_local
             ),
-            is_privacy_pinned=self.agent_config.pin_privacy_settings,
             is_memory_enabled=self.agent_config.memory,
             is_isolated_from_claude_config=isolation,
             subagent_names_to_disable=collect_agent_definition_names(host_paths.agent_definition_text_by_path),
@@ -1286,19 +1278,11 @@ class GrokAgent(
         agent_dir = self._get_agent_dir()
         grok_home = get_grok_home(agent_dir)
         rendered_config = self._build_grok_config(host, host_paths, mngr_ctx)
-        requirements_text = build_requirements_toml(self.agent_config.pin_privacy_settings)
         role_text = self._build_role_prompt_text(host)
         recorded_session_id = _read_optional_text_file(host, agent_dir / SESSION_ID_RELATIVE_PATH).strip()
 
         # One host command makes the directories and removes the files this provision does not write.
-        stale_paths = [
-            path
-            for path, is_stale in (
-                (grok_home / _REQUIREMENTS_FILENAME, requirements_text == ""),
-                (agent_dir / ROLE_PROMPT_RELATIVE_PATH, role_text == ""),
-            )
-            if is_stale
-        ]
+        stale_paths = [agent_dir / ROLE_PROMPT_RELATIVE_PATH] if role_text == "" else []
         directories = (
             grok_home / _HOOKS_DIRNAME,
             agent_dir / GROK_SESSIONS_RELATIVE_PATH,
@@ -1319,8 +1303,6 @@ class GrokAgent(
                 agent_dir / RENDERED_MODEL_SETTINGS_RELATIVE_PATH,
                 render_rendered_model_settings(rendered_config.own_model_settings),
             )
-            if requirements_text:
-                host.write_text_file(grok_home / _REQUIREMENTS_FILENAME, requirements_text)
             host.write_text_file(
                 grok_home / _HOOKS_DIRNAME / _HOOKS_CONFIG_FILENAME, json.dumps(build_hooks_json(), indent=2) + "\n"
             )
@@ -1337,7 +1319,6 @@ class GrokAgent(
                     shared_user_auth_path=host_paths.user_auth_path if self.agent_config.share_auth else None,
                     model=self.agent_config.model,
                     reasoning_effort=self.agent_config.reasoning_effort,
-                    is_privacy_pinned=self.agent_config.pin_privacy_settings,
                     is_isolated_from_claude_config=self.agent_config.isolate_from_claude_config,
                 ),
             )

@@ -361,7 +361,6 @@ def test_grok_agent_config_has_expected_defaults() -> None:
     assert config.settings_overrides == {}
     assert config.share_auth is True
     assert config.isolate_from_claude_config is True
-    assert config.pin_privacy_settings is True
     assert config.memory is False
     assert config.check_installation is True
     assert config.version is None
@@ -704,10 +703,10 @@ def test_provision_renders_the_grok_home_and_launch_state(
     }
     assert config["memory"] == {"enabled": False}
     assert config["cli"] == {"auto_update": False, "use_leader": False, "show_tips": False}
-    assert config["features"] == {"telemetry": False, "feedback": False, "campaigns": False, "remote_fetch": True}
+    assert config["features"] == {"remote_fetch": True}
+    assert config["harness"] == {"disable_workspace_teleport": True, "disable_codebase_upload": True}
     assert config["claude_compat"] == {"imported": True}
     assert stat.S_IMODE((grok_home / "config.toml").stat().st_mode) == 0o600
-    assert (grok_home / "requirements.toml").is_file()
     assert (grok_home / "hooks" / "mngr.json").read_text() == _json_dump(build_hooks_json())
     hook_handler = grok_home / "hooks" / "grok_hook.py"
     assert hook_handler.read_text() == _read_resource("grok_hook.py")
@@ -722,7 +721,6 @@ def test_provision_renders_the_grok_home_and_launch_state(
         shared_user_auth_path=tmp_path / ".grok" / "auth.json",
         model=None,
         reasoning_effort=None,
-        is_privacy_pinned=True,
         is_isolated_from_claude_config=True,
     )
     for script_name in (
@@ -848,18 +846,6 @@ def test_provision_refuses_a_role_over_grok_argument_limit(
 
     with pytest.raises(UserInputError, match="100002 bytes"):
         _provision(agent)
-
-
-def test_provision_removes_requirements_when_privacy_pins_are_off(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
-    _provision(agent)
-    assert (_grok_home(agent) / "requirements.toml").is_file()
-
-    _provision_again_with(agent, GrokAgentConfig(pin_privacy_settings=False))
-
-    assert not (_grok_home(agent) / "requirements.toml").exists()
 
 
 def test_provision_folds_settings_overrides_onto_the_rendered_config(

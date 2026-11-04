@@ -5,8 +5,7 @@ Every file was captured against a local stub model server; none comes from a rea
 
 | File | What it shows |
 |---|---|
-| `config_full_isolation.toml` | A per-agent `config.toml` with the privacy pins, `permission_mode = "ask"`, a custom stub model, the Claude isolation marker, every `[compat.claude]` and `[compat.cursor]` cell off and `[compat.codex] sessions = false`. `grok inspect --json` reported exactly two config warnings for it, both `unknown-field` (`claude_compat` and `privacy`, keys grok itself writes). The `[ui.status_line]` command path is replaced with `/fixture/statusline_silent.sh`. |
-| `requirements.toml` | The `requirements.toml` pins. With `GROK_MANAGED_CONFIG=0` it survived a session unchanged; without it grok deleted it about 3 s into the session. |
+| `config_full_isolation.toml` | A per-agent `config.toml` with codebase upload and workspace teleport off, `permission_mode = "ask"`, a custom stub model, the Claude isolation marker, every `[compat.claude]` and `[compat.cursor]` cell off and `[compat.codex] sessions = false`. `grok inspect --json` reported exactly two config warnings for it, both `unknown-field` (`claude_compat` and `privacy`, keys grok itself writes). The `[ui.status_line]` command path is replaced with `/fixture/statusline_silent.sh`. |
 | `hooks_mngr.json` | The hooks file that ran `./grok_hook.py` beside it directly (not through `sh`) for all 15 events, in 77 of 77 hook runs. |
 | `config_after_consent_accept.toml` | The `config.toml` grok rewrote after a consent notice was accepted: the `[consent.answers.<id>]` table with `version`, `account` and `acked`, plus the keys grok adds on that rewrite. The account is the stub's placeholder login. |
 | `session_buckets.json` | The 15 session bucket directories grok created, one per work dir: plain, dotted, space, NFC and NFD unicode, symlink and `/tmp` alias (stored as the canonical path), two punctuation sets, the 255/256-byte boundary and three long-form names. |

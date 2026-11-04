@@ -4,14 +4,7 @@ use_leader = false
 show_tips = false
 
 [features]
-telemetry = false
-feedback = false
-campaigns = false
 remote_fetch = false
-
-[telemetry]
-trace_upload = false
-mixpanel_enabled = false
 
 [harness]
 disable_workspace_teleport = true

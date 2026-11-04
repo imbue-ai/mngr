@@ -24,7 +24,6 @@ from imbue.mngr_grok.grok_config import build_launch_command
 from imbue.mngr_grok.grok_config import build_launch_env
 from imbue.mngr_grok.grok_config import build_pinned_grok_environment
 from imbue.mngr_grok.grok_config import build_removed_grok_environment_names
-from imbue.mngr_grok.grok_config import build_requirements_toml
 from imbue.mngr_grok.grok_config import compute_session_bucket_name
 from imbue.mngr_grok.grok_config import get_grok_home
 from imbue.mngr_grok.grok_config import merge_consent_answers
@@ -44,7 +43,6 @@ _DEFAULT_CONFIG_INPUTS: Final[dict[str, Any]] = {
     "reasoning_effort": None,
     "is_auto_allow_permissions": False,
     "is_self_update_disabled": True,
-    "is_privacy_pinned": True,
     "is_memory_enabled": False,
     "is_isolated_from_claude_config": True,
     "subagent_names_to_disable": (),
@@ -90,8 +88,7 @@ def test_build_config_toml_default_agent_renders_every_pin_and_full_isolation() 
 
     assert config == {
         "cli": {"auto_update": False, "use_leader": False, "show_tips": False},
-        "features": {"telemetry": False, "feedback": False, "campaigns": False, "remote_fetch": True},
-        "telemetry": {"trace_upload": False, "mixpanel_enabled": False},
+        "features": {"remote_fetch": True},
         "harness": {"disable_workspace_teleport": True, "disable_codebase_upload": True},
         "ui": {
             "permission_mode": "ask",
@@ -130,14 +127,6 @@ def test_build_config_toml_leaves_the_updater_alone_when_self_update_is_allowed(
     config = _build_config(is_self_update_disabled=False)
 
     assert config["cli"] == {"use_leader": False, "show_tips": False}
-
-
-def test_build_config_toml_without_privacy_pins_keeps_only_the_non_privacy_keys() -> None:
-    config = _build_config(is_privacy_pinned=False)
-
-    assert config["features"] == {"remote_fetch": True}
-    assert "telemetry" not in config
-    assert "harness" not in config
 
 
 def test_build_config_toml_writes_memory_enabled_when_memory_is_on() -> None:
@@ -429,16 +418,6 @@ def test_render_toml_round_trips_nested_tables_and_quotes_dotted_keys() -> None:
     assert tomlkit.parse(rendered).unwrap() == body
 
 
-def test_build_requirements_toml_matches_the_pins_that_survived_a_session() -> None:
-    rendered = build_requirements_toml(is_privacy_pinned=True)
-
-    assert tomlkit.parse(rendered).unwrap() == _read_fixture_toml("requirements.toml")
-
-
-def test_build_requirements_toml_is_empty_without_privacy_pins() -> None:
-    assert build_requirements_toml(is_privacy_pinned=False) == ""
-
-
 def test_build_hooks_json_uses_the_entry_shape_grok_ran_directly() -> None:
     fixture = json.loads((CONFIG_FIXTURES_DIR / "hooks_mngr.json").read_text())
 
@@ -493,12 +472,11 @@ def test_compute_session_bucket_name_rejects_a_relative_path() -> None:
 
 def test_build_pinned_grok_environment_under_isolation_turns_every_compat_surface_off() -> None:
     environment = build_pinned_grok_environment(
-        grok_home=Path("/state/plugin/grok/home"), is_privacy_pinned=True, is_isolated_from_claude_config=True
+        grok_home=Path("/state/plugin/grok/home"), is_isolated_from_claude_config=True
     )
 
     assert environment == {
         "GROK_HOME": "/state/plugin/grok/home",
-        "GROK_MANAGED_CONFIG": "0",
         "GROK_CHANGELOG_OFFLINE": "1",
         "GROK_CLAUDE_SKILLS_ENABLED": "0",
         "GROK_CLAUDE_RULES_ENABLED": "0",
@@ -513,20 +491,14 @@ def test_build_pinned_grok_environment_under_isolation_turns_every_compat_surfac
         "GROK_CURSOR_HOOKS_ENABLED": "0",
         "GROK_CURSOR_SESSIONS_ENABLED": "0",
         "GROK_CODEX_SESSIONS_ENABLED": "0",
-        "DISABLE_TELEMETRY": "1",
-        "GROK_TELEMETRY_TRACE_UPLOAD": "0",
-        "GROK_CAMPAIGNS": "0",
     }
 
 
 def test_build_pinned_grok_environment_opt_out_without_privacy_pins_turns_only_hooks_off() -> None:
-    environment = build_pinned_grok_environment(
-        grok_home=Path("/g"), is_privacy_pinned=False, is_isolated_from_claude_config=False
-    )
+    environment = build_pinned_grok_environment(grok_home=Path("/g"), is_isolated_from_claude_config=False)
 
     assert environment == {
         "GROK_HOME": "/g",
-        "GROK_MANAGED_CONFIG": "0",
         "GROK_CHANGELOG_OFFLINE": "1",
         "GROK_CLAUDE_HOOKS_ENABLED": "0",
         "GROK_CURSOR_HOOKS_ENABLED": "0",
@@ -592,7 +564,6 @@ def test_build_launch_env_renders_shell_quoted_assignments_and_arrays() -> None:
         shared_user_auth_path=Path("/home/u/.grok/auth.json"),
         model="grok-4.7",
         reasoning_effort=None,
-        is_privacy_pinned=False,
         is_isolated_from_claude_config=False,
     )
 
@@ -604,8 +575,8 @@ def test_build_launch_env_renders_shell_quoted_assignments_and_arrays() -> None:
         "launch_user_auth_path=/home/u/.grok/auth.json",
         "launch_model=grok-4.7",
         "launch_reasoning_effort=''",
-        "launch_pinned_environment=('GROK_HOME=/state dir/plugin/grok/home' GROK_MANAGED_CONFIG=0 "
-        "GROK_CHANGELOG_OFFLINE=1 GROK_CLAUDE_HOOKS_ENABLED=0 GROK_CURSOR_HOOKS_ENABLED=0)",
+        "launch_pinned_environment=('GROK_HOME=/state dir/plugin/grok/home' GROK_CHANGELOG_OFFLINE=1 "
+        "GROK_CLAUDE_HOOKS_ENABLED=0 GROK_CURSOR_HOOKS_ENABLED=0)",
         "launch_removed_environment=(GROK_AGENT GROK_CONFIG GROK_CONFIG_PATH GROK_FOLDER_TRUST CLAUDECODE)",
     ]
 
@@ -617,7 +588,6 @@ def test_build_launch_env_without_shared_auth_removes_the_inherited_auth_path() 
         shared_user_auth_path=None,
         model=None,
         reasoning_effort="high",
-        is_privacy_pinned=True,
         is_isolated_from_claude_config=True,
     )
 

@@ -10,7 +10,7 @@ New package `imbue-mngr-grok`: the `grok` agent type, which runs xAI's Grok Buil
 
 - Folder trust: mngr records grok's trust for the work dir before launch, only with consent (an existing grant, `--yes`, `auto_dismiss_dialogs_at_startup`, or an interactive prompt; otherwise the create fails), and writes a new grant to the user's own trust store.
 
-- Privacy: `pin_privacy_settings` (on by default) turns off grok's telemetry, trace upload, feedback, campaigns and codebase upload; the pins are not yet verified against xAI's server settings. Every agent's config records grok's privacy banner as acknowledged. Grok's memory stays off unless `memory = true`.
+- Privacy: grok's telemetry and analytics follow grok's defaults and the xAI account's settings; mngr turns off codebase upload and workspace teleport. Every agent's config records grok's privacy banner as acknowledged. Grok's memory stays off unless `memory = true`.
 
 - Sessions: `mngr stop` and `mngr start` resume the agent's session; `--from` and `--adopt` copy a session in and fork it; `mngr destroy` preserves the transcripts and sessions under `preserved/`.
 

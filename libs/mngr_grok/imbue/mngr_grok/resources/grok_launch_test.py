@@ -140,7 +140,6 @@ def _prepare_launch(
             shared_user_auth_path=tmp_path / "user grok" / "auth.json" if is_auth_shared else None,
             model=model,
             reasoning_effort=reasoning_effort,
-            is_privacy_pinned=True,
             is_isolated_from_claude_config=True,
         )
     )
@@ -460,9 +459,7 @@ def test_launch_removes_inherited_overrides_and_sets_the_pinned_environment(tmp_
     environment = result.invocations[0]["environment"]
     for removed_name in ("GROK_AGENT", "CLAUDECODE", "GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_FOLDER_TRUST"):
         assert removed_name not in environment
-    pinned_environment = build_pinned_grok_environment(
-        grok_home=launch.grok_home, is_privacy_pinned=True, is_isolated_from_claude_config=True
-    )
+    pinned_environment = build_pinned_grok_environment(grok_home=launch.grok_home, is_isolated_from_claude_config=True)
     assert {name: environment.get(name) for name in pinned_environment} == pinned_environment
     assert environment["GROK_AUTH_PATH"] == str(tmp_path / "user grok" / "auth.json")
     assert environment["MNGR_AGENT_STATE_DIR"] == str(launch.state_dir)

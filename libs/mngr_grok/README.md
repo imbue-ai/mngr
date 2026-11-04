@@ -82,7 +82,7 @@ Configuration is rendered when the agent is created; `mngr create <name> --reuse
 - `settings_overrides` (default `{}`): folded last onto the agent's `config.toml`; layers from several config scopes accumulate. Its `[permission]` table (`allow`, `ask`, `deny`) is the agent's permission policy.
 - `share_auth` (default `true`): see [Signing in](#signing-in).
 - `isolate_from_claude_config` (default `true`): see [Claude Code isolation](#claude-code-isolation).
-- `pin_privacy_settings` (default `true`) and `memory` (default `false`): see [Privacy and memory](#privacy-and-memory).
+- `memory` (default `false`): see [Privacy and memory](#privacy-and-memory).
 - `check_installation` (default `true`): install grok when it is missing and check that `grok --version` reports Grok Build; false assumes it is present.
 - `version` (default unset): the grok version to install; provisioning checks it against `grok --version`, per `version_mismatch`.
 - `version_mismatch` (default `ERROR`): what provisioning does when the installed grok does not report the pinned `version`: `ERROR` fails the create, `WARN` logs a warning and continues on the installed grok.
@@ -135,11 +135,11 @@ A new grant is also written to your own `trusted_folders.toml`, so later agents 
 
 ### Privacy and memory
 
-With `pin_privacy_settings = true` (the default), the agent's `config.toml`, its `requirements.toml` (which takes precedence over xAI's server settings and the environment) and its environment turn off grok's telemetry, trace upload, Mixpanel analytics, feedback, campaigns and codebase upload, and set `[harness] disable_workspace_teleport`. Whatever the setting, mngr turns off grok's leader mode, tips, prompt suggestions and changelog fetch, sets `[ui] cancel_subagents_on_turn_cancel = "always_continue"` so Ctrl+C cancels a turn without asking about running subagents and leaves them running, and an agent whose `settings_overrides` defines a model with its own credential (`base_url`, `api_key` or `env_key` in a `[model.<id>]` table) does not fetch xAI's remote settings.
+Grok's telemetry, trace upload, analytics, feedback and campaigns follow grok's defaults and the xAI account's settings, as the other agent types' CLIs follow theirs. mngr turns off grok's codebase upload and workspace teleport (`[harness]`), its leader mode, tips, prompt suggestions and changelog fetch, sets `[ui] cancel_subagents_on_turn_cancel = "always_continue"` so Ctrl+C cancels a turn without asking about running subagents and leaves them running, and an agent whose `settings_overrides` defines a model with its own credential (`base_url`, `api_key` or `env_key` in a `[model.<id>]` table) does not fetch xAI's remote settings.
 
-mngr also writes `[privacy] privacy_banner_acked` into every agent's `config.toml`, whatever the setting (a re-render keeps the time already there). That records grok's privacy banner, one of the screens grok can show before the session view, as acknowledged on your behalf. mngr does not change the account's retention setting.
+mngr also writes `[privacy] privacy_banner_acked` into every agent's `config.toml` (a re-render keeps the time already there). That records grok's privacy banner, one of the screens grok can show before the session view, as acknowledged on your behalf. mngr does not change the account's retention setting.
 
-> **Note:** the privacy pins are not yet verified against xAI's server settings with a real subscription login. Nor are the privacy banner's text, which accounts get it, or whether `privacy_banner_acked` keeps it away: no captured session has shown it.
+> **Note:** the privacy banner's text, which accounts get it, and whether `privacy_banner_acked` keeps it away are unverified: no captured session has shown it.
 
 `memory = false` (the default) writes `[memory] enabled = false`, so no server default turns grok's cross-session memory on. With `memory = true`, grok keeps its memory store in the agent's grok home; clones and adoptions start without it.
 

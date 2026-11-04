@@ -65,7 +65,6 @@ from imbue.mngr_grok.grok_config import REMOVED_GROK_ENVIRONMENT_VARIABLE_NAMES
 from imbue.mngr_grok.grok_config import ROOT_TURNS_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import SESSION_ID_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import build_pinned_grok_environment
-from imbue.mngr_grok.grok_config import build_requirements_toml
 from imbue.mngr_grok.grok_config import compute_session_bucket_name
 from imbue.mngr_grok.grok_config import get_grok_home
 from imbue.mngr_grok.grok_screen import GrokGateScreen
@@ -810,7 +809,7 @@ def test_claude_and_cursor_hook_probes_run_once_grok_imports_their_hooks(
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_requirements_survive_the_session_and_inspect_warns_only_about_two_known_keys(
+def test_inspect_warns_only_about_two_known_keys_in_the_rendered_config(
     pinned_grok_binary: Path,
     grok_stub_server: GrokStubModelServer,
     build_hermetic_grok_agent_environment: Callable[[str], dict[str, str]],
@@ -818,25 +817,19 @@ def test_requirements_survive_the_session_and_inspect_warns_only_about_two_known
     tmp_path: Path,
 ) -> None:
     hermetic_environment = build_hermetic_grok_agent_environment(grok_stub_server.get_origin_url())
-    # Grok removes a managed requirements.toml about 3 s into a session; the idle notification comes later.
-    agent_environment = {**hermetic_environment, "GROK_IDLE_NOTIFICATION_DELAY_MS": "5000"}
 
     with _running_grok_agent(
-        temp_mngr_ctx, build_stub_grok_config(grok_stub_server, agent_environment), tmp_path / "project"
+        temp_mngr_ctx, build_stub_grok_config(grok_stub_server, hermetic_environment), tmp_path / "project"
     ) as agent:
-        _send_and_wait_for_turn(agent, f"hello requirements {get_short_random_string()}")
-        _wait_for_hook_log_containing(agent, "event=notification")
+        _send_and_wait_for_turn(agent, f"hello inspect {get_short_random_string()}")
         grok_home = get_grok_home(_state_dir(agent))
-        requirements_text = (grok_home / "requirements.toml").read_text()
 
         inspect_environment = {
             name: value for name, value in os.environ.items() if name not in REMOVED_GROK_ENVIRONMENT_VARIABLE_NAMES
         }
         inspect_environment.update(hermetic_environment)
         inspect_environment.update(
-            build_pinned_grok_environment(
-                grok_home=grok_home, is_privacy_pinned=True, is_isolated_from_claude_config=True
-            )
+            build_pinned_grok_environment(grok_home=grok_home, is_isolated_from_claude_config=True)
         )
         inspect_result = subprocess.run(
             [str(pinned_grok_binary), "inspect", "--json"],
@@ -847,14 +840,12 @@ def test_requirements_survive_the_session_and_inspect_warns_only_about_two_known
             timeout=_PROCESS_TIMEOUT_SECONDS,
         )
 
-    assert requirements_text == build_requirements_toml(is_privacy_pinned=True)
     assert inspect_result.returncode == 0, inspect_result.stderr
     config_warnings = json.loads(inspect_result.stdout)["configWarnings"]
     assert sorted((warning["path"], warning["kind"]) for warning in config_warnings) == [
         ("claude_compat", "unknown-field"),
         ("privacy", "unknown-field"),
     ]
-    assert (grok_home / "requirements.toml").read_text() == requirements_text
 
 
 @pytest.mark.release

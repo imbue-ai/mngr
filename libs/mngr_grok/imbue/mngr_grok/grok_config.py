@@ -324,7 +324,6 @@ def build_config_toml(
     reasoning_effort: str | None,
     is_auto_allow_permissions: bool,
     is_self_update_disabled: bool,
-    is_privacy_pinned: bool,
     is_memory_enabled: bool,
     is_isolated_from_claude_config: bool,
     # Agent definition names found in the user's Claude and legacy grok agent dirs; used only under isolation.
@@ -348,16 +347,11 @@ def build_config_toml(
     is_session_login_bypassed = _does_override_select_custom_model(settings_overrides)
 
     cli_table: dict[str, Any] = {"auto_update": False} if is_self_update_disabled else {}
-    features_table: dict[str, Any] = (
-        {"telemetry": False, "feedback": False, "campaigns": False} if is_privacy_pinned else {}
-    )
     config: dict[str, Any] = {
         "cli": {**cli_table, "use_leader": False, "show_tips": False},
-        "features": {**features_table, "remote_fetch": not is_session_login_bypassed},
+        "features": {"remote_fetch": not is_session_login_bypassed},
+        "harness": {"disable_workspace_teleport": True, "disable_codebase_upload": True},
     }
-    if is_privacy_pinned:
-        config["telemetry"] = {"trace_upload": False, "mixpanel_enabled": False}
-        config["harness"] = {"disable_workspace_teleport": True, "disable_codebase_upload": True}
     config["ui"] = {
         "permission_mode": _PERMISSION_MODE_ALWAYS_APPROVE if is_auto_allow_permissions else _PERMISSION_MODE_ASK,
         "prompt_suggestions": False,
@@ -408,21 +402,6 @@ def render_toml(document_body: Mapping[str, Any]) -> str:
 
 
 @pure
-def build_requirements_toml(is_privacy_pinned: bool) -> str:
-    """The grok home's requirements.toml: privacy pins that beat server campaigns, remote settings and env vars."""
-    if not is_privacy_pinned:
-        return ""
-    return render_toml(
-        {
-            "features": {"telemetry": False},
-            "telemetry": {"trace_upload": False},
-            "harness": {"disable_workspace_teleport": True, "disable_codebase_upload": True},
-            "cli": {"use_leader": False},
-        }
-    )
-
-
-@pure
 def build_hooks_json() -> dict[str, Any]:
     """Build the grok home's hooks/mngr.json: every grok hook event runs the handler beside it."""
     return {
@@ -452,26 +431,16 @@ def compute_session_bucket_name(canonical_path: str) -> str:
 def build_pinned_grok_environment(
     *,
     grok_home: Path,
-    is_privacy_pinned: bool,
     is_isolated_from_claude_config: bool,
 ) -> dict[str, str]:
     """The environment variables set on every grok process, keeping it on its own home and mngr's pins."""
-    environment: dict[str, str] = {
-        "GROK_HOME": str(grok_home),
-        # Otherwise grok deletes the grok home's requirements.toml at session start.
-        "GROK_MANAGED_CONFIG": "0",
-        "GROK_CHANGELOG_OFFLINE": "1",
-    }
+    environment: dict[str, str] = {"GROK_HOME": str(grok_home), "GROK_CHANGELOG_OFFLINE": "1"}
     isolated_cells = COMPAT_CELL_NAMES if is_isolated_from_claude_config else ("hooks",)
     for compat_source in ("CLAUDE", "CURSOR"):
         for cell in isolated_cells:
             environment[f"GROK_{compat_source}_{cell.upper()}_ENABLED"] = "0"
     if is_isolated_from_claude_config:
         environment["GROK_CODEX_SESSIONS_ENABLED"] = "0"
-    if is_privacy_pinned:
-        environment["DISABLE_TELEMETRY"] = "1"
-        environment["GROK_TELEMETRY_TRACE_UPLOAD"] = "0"
-        environment["GROK_CAMPAIGNS"] = "0"
     return environment
 
 
@@ -513,14 +482,11 @@ def build_launch_env(
     shared_user_auth_path: Path | None,
     model: str | None,
     reasoning_effort: str | None,
-    is_privacy_pinned: bool,
     is_isolated_from_claude_config: bool,
 ) -> str:
     """Render plugin/grok/launch.env, the bash assignments the launch script sources."""
     pinned_environment = build_pinned_grok_environment(
-        grok_home=grok_home,
-        is_privacy_pinned=is_privacy_pinned,
-        is_isolated_from_claude_config=is_isolated_from_claude_config,
+        grok_home=grok_home, is_isolated_from_claude_config=is_isolated_from_claude_config
     )
     removed_environment_names = build_removed_grok_environment_names(is_auth_shared=shared_user_auth_path is not None)
     lines = [
