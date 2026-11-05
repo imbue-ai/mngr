@@ -1,0 +1,1 @@
+Fixed: the cron recipes count an agent reading mngr's new `RUNNING_BACKGROUND` state -- a turn that ended with declared work still outstanding -- as still working. The window sitter stops such an agent on a STOP verdict rather than leaving it to burn the window, and the task dispatcher counts it against its in-flight cap rather than launching past it.

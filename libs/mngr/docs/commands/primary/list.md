@@ -33,7 +33,7 @@ mngr list [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
+| `--running` | boolean | Show only agents that will move themselves: a turn in flight, or work left running that will start the next one (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
 | `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
 | `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |
@@ -87,13 +87,13 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 **Simple equality filters:**
 - `name == "my-agent"` - Match agent by exact name
-- `state == "RUNNING"` - Match running agents
+- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents that will move themselves, which is what `--running` selects
 - `host.provider == "docker"` - Match agents on Docker hosts
 - `type == "claude"` - Match agents of type "claude"
 - `labels.project == "mngr"` - Match agents with a specific project label
 
 **Compound expressions:**
-- `state == "RUNNING" && host.provider == "modal"` - Running agents on Modal
+- `(state == "RUNNING" || state == "RUNNING_BACKGROUND") && host.provider == "modal"` - Agents working on Modal (`&&` binds tighter than `||`, so the parentheses are load-bearing)
 - `state == "STOPPED" || state == "FAILED"` - Stopped or failed agents
 - `host.provider == "docker" && name.startsWith("test-")` - Docker agents with names starting with "test-"
 
@@ -131,8 +131,9 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `initial_branch` - Git branch mngr placed this agent's work_dir on at creation, whether it created the branch or checked out one that already existed. Read back from the work_dir after checkout, so it is None when the work_dir ended up on no branch at all (--branch accepts any checkout target, and a commit or tag detaches). Recorded at create time and not re-read, so an agent that checks out a different branch itself is not reflected here; None for transfer modes that involve no git (none, rsync).
 - `create_time` - Creation timestamp
 - `start_on_boot` - Whether agent starts on host boot
-- `state` - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
+- `state` - Agent lifecycle state (STOPPED/RUNNING/RUNNING_BACKGROUND/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
 - `pid` - PID of the agent's main process (e.g. claude) in its host's PID namespace, populated when the agent is running; None for stopped agents. Only watchable in-process (e.g. via psutil) when the host is the local machine (its provider is 'local').
+- `leases` - The work the agent declared still outstanding at its last turn end, which is what makes its state RUNNING_BACKGROUND. Empty for every other state, and for an agent whose type declares no leases
 - `url` - Agent URL (reported)
 - `start_time` - Last start time (reported)
 - `runtime_seconds` - Runtime in seconds

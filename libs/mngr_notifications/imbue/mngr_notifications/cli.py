@@ -183,7 +183,8 @@ CommandHelpMetadata(
     key="notify",
     one_line_description="Notify when agents transition to WAITING",
     synopsis="mngr notify [--no-verify]",
-    description="""Sends a desktop notification when any agent transitions from RUNNING to WAITING.
+    description="""Sends a desktop notification when any agent stops working and transitions to WAITING,
+whether it was mid-turn (RUNNING) or carrying work that outlived its turn (RUNNING_BACKGROUND).
 
 On startup, sends a test notification to verify delivery is working.
 On macOS, you will be asked to click the notification to confirm;

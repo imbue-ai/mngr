@@ -11,7 +11,8 @@ mngr notify [--no-verify]
 
 Notify when agents transition to WAITING.
 
-Sends a desktop notification when any agent transitions from RUNNING to WAITING.
+Sends a desktop notification when any agent stops working and transitions to WAITING,
+whether it was mid-turn (RUNNING) or carrying work that outlived its turn (RUNNING_BACKGROUND).
 
 On startup, sends a test notification to verify delivery is working.
 On macOS, you will be asked to click the notification to confirm;

@@ -55,6 +55,7 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import WorkLease
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import record_host_name
@@ -178,6 +179,22 @@ def test_format_value_as_string_snapshot_uses_name() -> None:
     snapshot = _create_test_snapshot("my-snapshot", 0)
     result = _format_value_as_string(snapshot)
     assert result == "my-snapshot"
+
+
+def test_get_field_value_names_the_work_leases_holding_an_agent() -> None:
+    """``--fields leases`` answers which work is holding a RUNNING_BACKGROUND agent, so it reads as names.
+
+    Each lease is a model, and a model with no display form of its own reaches this path as its
+    pydantic repr -- a column of ``name='task-abc' expires_at=datetime.datetime(...)``.
+    """
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    agent = make_test_agent_details(
+        state=AgentLifecycleState.RUNNING_BACKGROUND,
+        leases=(WorkLease(name="task-abc", expires_at=expires_at), WorkLease(name="task-def", expires_at=expires_at)),
+    )
+
+    assert _get_field_value(agent, "leases") == "task-abc, task-def"
+    assert _get_field_value(agent, "leases[0]") == "task-abc"
 
 
 # =============================================================================

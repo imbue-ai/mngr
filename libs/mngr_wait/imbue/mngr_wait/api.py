@@ -119,7 +119,12 @@ def _get_agent_lifecycle_state(
     host: OnlineHostInterface,
     agent_id: AgentId,
 ) -> AgentLifecycleState:
-    """Get the lifecycle state of a specific agent on an online host."""
+    """Get the lifecycle state of a specific agent on an online host.
+
+    Asked of ``get_lifecycle_state`` rather than of ``probe_lifecycle``: an agent type may
+    layer a promotion on top of the raw probe, as codex promotes RUNNING to WAITING while it
+    is parked on an approval, and a wait is for the state the user is shown.
+    """
     for agent in host.get_agents():
         if agent.id == agent_id:
             return agent.get_lifecycle_state()

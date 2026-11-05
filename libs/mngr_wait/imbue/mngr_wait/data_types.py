@@ -117,7 +117,12 @@ def _check_agent_state_match(
     combined_state: CombinedState,
     target_states: frozenset[str],
 ) -> str | None:
-    """Check state match for an agent target, handling RUNNING/STOPPED overlap."""
+    """Check state match for an agent target, handling RUNNING/STOPPED overlap.
+
+    An agent whose turn ended leaving a background task running reports
+    RUNNING_BACKGROUND, which is not a terminal state, so the default wait holds open until whatever
+    it declared has finished. A user who names RUNNING_BACKGROUND waits for exactly that.
+    """
     # Check agent-specific states first
     if combined_state.agent_state is not None:
         agent_state_str = combined_state.agent_state.value
@@ -130,7 +135,7 @@ def _check_agent_state_match(
             if SHARED_STATE_STOPPED in target_states:
                 return SHARED_STATE_STOPPED
         elif agent_state_str in target_states:
-            # Agent-only states (WAITING, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE)
+            # A state no host state shares the name of matches on the agent alone
             return agent_state_str
         else:
             # Agent state not in target states

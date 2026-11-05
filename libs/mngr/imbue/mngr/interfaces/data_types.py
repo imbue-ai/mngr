@@ -45,6 +45,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import WorkLease
 
 # Canonical mapping from IdleMode to the activity sources it enables.
 ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]] = {
@@ -681,7 +682,7 @@ class AgentDetails(FrozenModel):
     start_on_boot: bool = Field(description="Whether agent starts on host boot")
 
     state: AgentLifecycleState = Field(
-        description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
+        description="Agent lifecycle state (STOPPED/RUNNING/RUNNING_BACKGROUND/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
     pid: int | None = Field(
         default=None,
@@ -690,6 +691,14 @@ class AgentDetails(FrozenModel):
             "populated when the agent is running; None for stopped agents. Only watchable "
             "in-process (e.g. via psutil) when the host is the local machine (its provider "
             "is 'local')."
+        ),
+    )
+    leases: tuple[WorkLease, ...] = Field(
+        default=(),
+        description=(
+            "The work the agent declared still outstanding at its last turn end, which is what "
+            "makes its state RUNNING_BACKGROUND. Empty for every other state, and for an agent whose "
+            "type declares no leases"
         ),
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")

@@ -299,7 +299,7 @@ def timestamp_to_datetime(timestamp: int | None) -> datetime | None:
         return None
     try:
         return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, OverflowError) as e:
         logger.trace("Failed to convert timestamp {} to datetime: {}", timestamp, e)
         return None
 
@@ -502,6 +502,10 @@ def determine_lifecycle_probe_result(
     trusted (because we don't know what binary the agent type runs). In that
     case, states that would otherwise be REPLACED are reported as
     RUNNING_UNKNOWN_AGENT_TYPE instead.
+
+    This settles the state from the turn marker and the process table alone. Callers reach it
+    through ``determine_agent_probe_result`` in ``hosts.work_leases``, which reads the agent's work
+    leases on top of this result and reports RUNNING_BACKGROUND where a turn ended with work outstanding.
     """
     if not tmux_info:
         return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
@@ -586,17 +590,20 @@ def determine_lifecycle_probe_result(
 
 @pure
 def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
-    """Classify why an agent is waiting from two marker signals, or None if running.
+    """Classify why an agent's turn is not progressing from two marker signals, or None.
 
-    Shared by agent plugins so that the lifecycle state (which reads the same block signal
-    through ``determine_lifecycle_probe_result``) and a ``waiting_reason`` field generator
-    make the *same* decision from the same inputs and cannot drift. Callers differ
-    only in how they derive ``is_active`` -- e.g. from the live process plus an
-    ``active`` marker, or from a single cheap ``active`` marker read.
+    Shared by agent plugins so that every ``waiting_reason`` field generator reaches the
+    same verdict from the same two signals. Callers differ only in how they derive
+    ``is_active`` -- e.g. from the live process plus an ``active`` marker, or from a
+    single cheap ``active`` marker read.
 
-    - not active -> END_OF_TURN (idle, turn complete)
+    - not active -> END_OF_TURN (the turn is complete)
     - active and blocked on a permission dialog -> PERMISSIONS
     - active and not blocked -> None (actively running)
+
+    These are the turn's own signals. The lifecycle reads one witness more -- the agent's
+    work leases -- so an agent whose turn ended while declared work is still outstanding
+    reports END_OF_TURN and a state of RUNNING_BACKGROUND together.
 
     PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
     during a live turn, so a *stranded* permission marker (one that outlived its

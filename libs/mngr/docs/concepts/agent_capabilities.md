@@ -30,7 +30,7 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 
 - **raw_transcript** -- Copies the agent's native session JSONL verbatim into the agent state dir. Baseline; every port wants it.
 - **common_transcript** -- Emits the agent-agnostic common transcript that `mngr transcript` renders. Baseline; every port wants it.
-- **waiting_reason_field** -- Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.
+- **waiting_reason_field** -- Surfaces why an agent's turn is not progressing (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.
 - **live_output** -- Publishes a live, in-progress view of the agent's output before a turn completes -- a streaming snapshot of the rendered pane for TUI agents, or incremental stdout chunks for headless agents. Lowest-priority; only needed if a consuming UI wants live streaming.
 - **session_preservation** -- Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.
 - **session_resume** -- Adopts an existing conversation into a freshly created interactive agent (e.g. `--adopt-session <id>` or `--from <agent>` carry-forward), so it resumes prior context in a live session. The read-side counterpart to session_preservation; interactive-only, since a headless run has no live session to resume.

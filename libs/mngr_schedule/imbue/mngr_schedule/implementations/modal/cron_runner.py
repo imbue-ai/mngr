@@ -43,7 +43,6 @@ from typing import Any
 
 import modal
 
-# --- Deploy-time configuration ---
 # At deploy time (modal.is_local() == True), we read configuration from a
 # single JSON env var and write it to /staging/deploy_config.json. At runtime,
 # we read from that baked-in file. Local filesystem paths (build context,
@@ -88,7 +87,6 @@ _TARGET_REPO_PATH: str = _deploy_config.get("target_repo_path", "/code/project")
 _AUTO_MERGE_BRANCH: str | None = _deploy_config.get("auto_merge_branch")
 
 
-# --- Image definition ---
 # The image is built in layers:
 # 1. Base: mngr Dockerfile (system deps, uv, Claude Code, mngr installed)
 # 2. Target repo: user's project tarball extracted to target_repo_path
@@ -140,9 +138,6 @@ else:
 app = modal.App(name=_APP_NAME, image=_image)
 
 
-# --- Runtime functions ---
-
-
 class CronRunnerError(Exception):
     """Errors raised by the in-container verify path.
 
@@ -162,7 +157,9 @@ class CronRunnerError(Exception):
 # could not be accessed during the most recent discovery attempt" -- the agent
 # may still be running, we just can't currently see it. Treating it as terminal
 # would let a transient provider hiccup fail an otherwise-successful schedule.
-RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE", "UNKNOWN"})
+RUNNING_STATES: frozenset[str] = frozenset(
+    {"RUNNING", "RUNNING_BACKGROUND", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE", "UNKNOWN"}
+)
 
 # Accepted values for the `verify_mode` parameter of `run_scheduled_trigger`.
 # Mirror of `imbue.mngr_schedule.data_types.VerifyMode` values (lowercased);

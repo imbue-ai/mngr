@@ -30,7 +30,6 @@ from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
-from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import find_agent_session_name
 from imbue.mngr.hosts.common import find_first_pane_info
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -41,6 +40,9 @@ from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.hosts.tmux import quote_tmux_text_argument
+from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.work_leases import determine_agent_probe_result
+from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
@@ -291,7 +293,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Get the lifecycle state of this agent using tmux format variables.
 
         Collects tmux state and ps output via SSH, then delegates to the shared
-        determine_lifecycle_probe_result pure function for the actual state logic.
+        determine_agent_probe_result pure function for the actual state logic.
         """
         return self.probe_lifecycle().state
 
@@ -303,9 +305,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         ``probe_lifecycle_from_snapshot``, the method subclasses override (a listing
         calls it directly with a snapshot shared across the host's agents). The PID
         is that of the running agent process (e.g. ``claude``) when the agent is
-        RUNNING/WAITING, else None. It is a PID in the agent host's namespace, so
-        callers watching the process for spontaneous death must only do so when that
-        host is the local machine.
+        RUNNING, RUNNING_BACKGROUND or WAITING, else None. It is a PID in the agent
+        host's namespace, so callers watching the process for spontaneous death must
+        only do so when that host is the local machine.
         """
         return self.probe_lifecycle_from_snapshot(self.host.read_lifecycle_snapshot())
 
@@ -321,18 +323,30 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                 logger.trace("Determined agent {} lifecycle state: UNKNOWN (tmux panes unreadable)", self.name)
                 return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
-            # Check if the active file exists
-            is_active = self._check_file_exists(self._get_agent_dir() / "active")
+            work_state = self.host.execute_idempotent_command(
+                build_lifecycle_probe_read_command(str(self._get_agent_dir())),
+                timeout_seconds=5.0,
+            )
+            # A read that failed says nothing about whether a turn is open.
+            if not work_state.success:
+                logger.trace(
+                    "Determined agent {} lifecycle state: UNKNOWN (work state unreadable: {})",
+                    self.name,
+                    work_state.stderr,
+                )
+                return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
+            reading = parse_lifecycle_probe_reading(work_state.stdout)
 
             expected_process_name = self.get_expected_process_name()
             is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
-            probe = determine_lifecycle_probe_result(
+            probe = determine_agent_probe_result(
                 tmux_info=self._find_primary_pane_info(readable_snapshot),
-                is_active=is_active,
-                is_blocked_on_dialog=self.is_blocked_on_dialog() if is_active else False,
+                is_blocked_on_dialog=self.is_blocked_on_dialog() if reading.is_active else False,
                 expected_process_name=expected_process_name,
                 ps_output=readable_snapshot.ps_output,
+                reading=reading,
+                now=datetime.now(timezone.utc),
                 is_agent_type_known=is_type_known,
             )
             logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)

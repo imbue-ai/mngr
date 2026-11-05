@@ -1,7 +1,8 @@
 """Report what would hold a mutating backup program back: busy chats and an in-flight backup tick.
 
-The chats are the agents actively RUNNING, UNKNOWN (state unreadable, so
-possibly mid-turn), or WAITING with their chat busy per the template's
+The chats are the agents actively RUNNING, RUNNING_BACKGROUND (their turn ended with
+work they declared still outstanding), UNKNOWN (state unreadable, so possibly
+mid-turn), or WAITING with their chat busy per the template's
 background-task CLI when it has one (agents sharing the
 repo-root work_dir, excluding the ``main``-type services agent --
 worktree/worker agents live elsewhere and never count). Reads ``--agent-id``

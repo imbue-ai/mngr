@@ -104,7 +104,10 @@ def add_agent_filter_options(command: TDecorated) -> TDecorated:
     command = optgroup.option(
         "--running",
         is_flag=True,
-        help="Show only running agents (alias for --include 'state == \"RUNNING\"')",
+        help=(
+            "Show only agents that will move themselves: a turn in flight, or work left running "
+            'that will start the next one (alias for --include \'state == "RUNNING" || state == "RUNNING_BACKGROUND"\')'
+        ),
     )(command)
     command = optgroup.option(
         "--exclude",
@@ -152,7 +155,9 @@ def build_agent_filter_cel(
     exclude: list[str] = list(opts.exclude)
 
     if opts.running:
-        include.append(f'state == "{AgentLifecycleState.RUNNING.value}"')
+        include.append(
+            f'state == "{AgentLifecycleState.RUNNING.value}" || state == "{AgentLifecycleState.RUNNING_BACKGROUND.value}"'
+        )
     if opts.stopped:
         include.append(f'state == "{AgentLifecycleState.STOPPED.value}"')
     if opts.archived:

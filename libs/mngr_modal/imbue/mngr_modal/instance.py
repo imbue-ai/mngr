@@ -50,7 +50,6 @@ from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
@@ -58,6 +57,7 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
+from imbue.mngr.hosts.work_leases import determine_agent_probe_result
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
@@ -107,6 +107,7 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
+from imbue.mngr.providers.listing_utils import build_lifecycle_probe_reading
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
@@ -3321,15 +3322,16 @@ log "=== Shutdown script completed ==="
         # Lifecycle state from tmux info
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        lifecycle = determine_lifecycle_probe_result(
+        lifecycle = determine_agent_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
-            is_active=agent_raw.get("is_active", False),
+            reading=build_lifecycle_probe_reading(agent_raw),
             # This listing stats marker files by fixed name and has no agent to ask, so a
             # blocked agent reads RUNNING here.
             is_blocked_on_dialog=False,
             expected_process_name=expected_process_name,
             ps_output=ps_output,
             is_agent_type_known=is_type_known,
+            now=now,
         )
 
         return AgentDetails(
@@ -3342,6 +3344,7 @@ log "=== Shutdown script completed ==="
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
+            leases=lifecycle.leases,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

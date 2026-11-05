@@ -11,8 +11,6 @@ from imbue.mngr_wait.data_types import validate_state_strings
 from imbue.mngr_wait.primitives import ALL_VALID_STATE_STRINGS
 from imbue.mngr_wait.primitives import WaitTargetType
 
-# === compute_default_target_states ===
-
 
 def test_default_agent_states_include_agent_terminal_states() -> None:
     states = compute_default_target_states(WaitTargetType.AGENT)
@@ -55,9 +53,6 @@ def test_default_host_states_exclude_running_and_transient() -> None:
     assert "UNKNOWN" not in states
     assert "UNAUTHENTICATED" not in states
     assert "STOPPING" not in states
-
-
-# === describe_combined_state ===
 
 
 def test_describe_combined_state_host_target_shows_host_state() -> None:
@@ -106,9 +101,6 @@ def test_describe_combined_state_host_target_stopped() -> None:
     combined_state = CombinedState(host_state=HostState.STOPPED)
     result = describe_combined_state(combined_state, WaitTargetType.HOST)
     assert result == "STOPPED"
-
-
-# === check_state_match ===
 
 
 @pytest.mark.parametrize(
@@ -262,7 +254,37 @@ def test_check_state_match_agent_target_with_no_agent_state(
     assert result == expected
 
 
-# === validate_state_strings ===
+def test_a_default_wait_does_not_end_while_work_the_agent_declared_is_still_outstanding() -> None:
+    """The case this exists for: a background task the agent started will start another turn.
+
+    Such an agent reports RUNNING_BACKGROUND rather than WAITING, which is not a terminal state, so a
+    wait that would otherwise report finished work that is still running holds open instead.
+    """
+    combined_state = CombinedState(agent_state=AgentLifecycleState.RUNNING_BACKGROUND)
+
+    result = check_state_match(
+        combined_state, WaitTargetType.AGENT, compute_default_target_states(WaitTargetType.AGENT)
+    )
+
+    assert result is None
+
+
+def test_a_default_wait_ends_once_the_user_is_the_next_mover() -> None:
+    combined_state = CombinedState(agent_state=AgentLifecycleState.WAITING)
+
+    result = check_state_match(
+        combined_state, WaitTargetType.AGENT, compute_default_target_states(WaitTargetType.AGENT)
+    )
+
+    assert result == "WAITING"
+
+
+def test_naming_running_background_waits_for_exactly_that() -> None:
+    combined_state = CombinedState(agent_state=AgentLifecycleState.RUNNING_BACKGROUND)
+
+    result = check_state_match(combined_state, WaitTargetType.AGENT, frozenset({"RUNNING_BACKGROUND"}))
+
+    assert result == "RUNNING_BACKGROUND"
 
 
 def test_validate_state_strings_accepts_valid_states() -> None:

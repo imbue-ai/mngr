@@ -38,6 +38,9 @@ from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
+from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.primitives import ActivitySource
@@ -1520,6 +1523,46 @@ def test_probe_lifecycle_is_unknown_when_the_lifecycle_snapshot_cannot_be_read(
     assert agent.probe_lifecycle() == LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
 
+@pytest.mark.parametrize(
+    ("work_state_result", "expected_probe"),
+    (
+        pytest.param(
+            CommandResult(success=True, stdout="ACTIVE=\n", stderr=""),
+            LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=12345),
+            id="read_reports_no_turn",
+        ),
+        pytest.param(
+            CommandResult(success=False, stdout="", stderr="timed out"),
+            LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN),
+            id="read_failed",
+        ),
+    ),
+)
+def test_probe_lifecycle_separates_a_work_state_read_that_answered_from_one_that_failed(
+    temp_mngr_ctx: MngrContext,
+    work_state_result: CommandResult,
+    expected_probe: LifecycleProbeResult,
+) -> None:
+    """The same live agent: a read that answered settles the state, a read that failed does not.
+
+    Taking a failed read for "no turn marker" would settle a working agent at WAITING, the one
+    state that tells every consumer the user is the next mover -- ``mngr notify`` announces it
+    finished, a default ``mngr wait`` ends, and the gate every workspace backup runs first
+    stops counting the chat as running.
+    """
+    primary_window_name = temp_mngr_ctx.config.tmux.primary_window_name
+    agent_session_name = temp_mngr_ctx.config.agent_session_name(AgentName("stub-agent"))
+    stub = _StubHost(
+        command_results=[
+            *_lifecycle_snapshot_results(agent_session_name, primary_window_name),
+            work_state_result,
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent.probe_lifecycle() == expected_probe
+
+
 def test_agent_name_rejects_slash() -> None:
     """AgentName must reject names containing '/' to prevent path issues."""
     with pytest.raises(InvalidName):
@@ -1810,3 +1853,85 @@ def test_send_message_fails_within_its_command_timeouts_when_tmux_hangs(
         agent.send_message("hello")
 
     assert time.monotonic() - started_at < 15.0
+
+
+def _read_work_state(agent: BaseAgent) -> tuple[bool, str]:
+    """Whether the agent's real work-state read found a turn, and the lease lines it returned."""
+    result = agent.host.execute_idempotent_command(
+        build_lifecycle_probe_read_command(str(agent._get_agent_dir())), timeout_seconds=5.0
+    )
+    assert result.success, result.stderr
+    reading = parse_lifecycle_probe_reading(result.stdout)
+    return reading.is_active, reading.raw_leases
+
+
+@pytest.mark.parametrize(
+    "lease_dir_shape",
+    [
+        pytest.param("absent", id="no_working_dir"),
+        pytest.param("empty", id="empty_working_dir"),
+    ],
+)
+def test_work_state_reports_the_active_marker_whatever_shape_the_lease_dir_is_in(
+    test_agent: BaseAgent, lease_dir_shape: str
+) -> None:
+    """The marker must survive a lease read that finds nothing to read.
+
+    The lease read globs the working dir, and an unmatched glob reaches awk as a literal
+    path it cannot open. Were the command to carry that failure, every agent that has never
+    leased work -- which is every agent, most of the time -- would read as having no `active`
+    marker, i.e. as WAITING while it works.
+    """
+    agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
+    if lease_dir_shape == "empty":
+        (agent_dir / WORK_LEASE_DIR_NAME).mkdir(parents=True)
+
+    assert _read_work_state(test_agent) == (False, "")
+
+    (agent_dir / "active").write_text("")
+
+    assert _read_work_state(test_agent) == (True, "")
+
+
+def test_work_state_reads_the_leases_alongside_the_marker(test_agent: BaseAgent) -> None:
+    """One read answers both questions the lifecycle decision asks of the agent's state dir."""
+    agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
+    lease_dir = agent_dir / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir(parents=True)
+    (lease_dir / "task-one").write_text("until:2000000000\n")
+    (lease_dir / "task-two").write_text("pid:4821\n")
+    (agent_dir / "active").write_text("")
+
+    assert _read_work_state(test_agent) == (True, "task-one\tuntil:2000000000\ntask-two\tpid:4821")
+
+
+@pytest.mark.parametrize(
+    "unreadable_lease_shape",
+    [
+        pytest.param("dangling_symlink", id="lease_cleared_mid_read"),
+        pytest.param("directory", id="lease_name_taken_by_a_directory"),
+    ],
+)
+def test_work_state_keeps_the_leases_around_one_the_read_cannot_read(
+    test_agent: BaseAgent, unreadable_lease_shape: str
+) -> None:
+    """A path the glob yielded but the read cannot read a line from must cost only itself.
+
+    Otherwise the scan loses every lease sorted after the bad one and the agent reads WAITING
+    while its work is in flight. Both shapes reach the read: a lease disappears between the
+    shell expanding the glob and the read reaching it, because the stop hook clears the lease
+    directory at each turn end; and a directory under a lease's name is what a writer leaves
+    when it cannot remove one. awk survives the first on its own, and dies on the second with
+    an i/o error, so the scan hands it regular files alone.
+    """
+    agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
+    lease_dir = agent_dir / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir(parents=True)
+    (lease_dir / "task-a").write_text("until:2000000000\n")
+    if unreadable_lease_shape == "directory":
+        (lease_dir / "task-b").mkdir()
+    else:
+        (lease_dir / "task-b").symlink_to(lease_dir / "already-gone")
+    (lease_dir / "task-c").write_text("pid:4821\n")
+
+    assert _read_work_state(test_agent) == (False, "task-a\tuntil:2000000000\ntask-c\tpid:4821")

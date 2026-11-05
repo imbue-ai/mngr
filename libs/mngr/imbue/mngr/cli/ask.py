@@ -109,7 +109,7 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I list all agents that are running or waiting?\n"
     "response: Use a CEL filter on the `state` field:\n"
-    '    mngr list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    '    mngr list --include \'state == "RUNNING" || state == "RUNNING_BACKGROUND" || state == "WAITING"\'\n\n'
     #
     "user: How do I list agents whose name contains 'prod'?\n"
     "response: mngr list --include 'name.contains(\"prod\")'\n\n"
@@ -118,9 +118,10 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr list --include 'idle_seconds > 3600'\n\n"
     #
     "user: How do I list running agents on Modal?\n"
-    'response: mngr list --include \'state == "RUNNING" && host.provider == "modal"\'\n'
+    'response: mngr list --include \'(state == "RUNNING" || state == "RUNNING_BACKGROUND") && host.provider == "modal"\'\n'
     "To include agents that are waiting for input, add WAITING:\n"
-    '    mngr list --include \'(state == "RUNNING" || state == "WAITING") && host.provider == "modal"\'\n\n'
+    '    mngr list --include \'(state == "RUNNING" || state == "RUNNING_BACKGROUND" || state == "WAITING")'
+    ' && host.provider == "modal"\'\n\n'
     #
     "user: How do I list agents for the mngr project?\n"
     "response: mngr list --include 'labels.project == \"mngr\"'\n\n"
@@ -196,7 +197,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mngr list --running --format json\n\n"
     #
     "user: list all agents that are running or waiting\n"
-    'response: mngr list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    'response: mngr list --include \'state == "RUNNING" || state == "RUNNING_BACKGROUND" || state == "WAITING"\'\n\n'
     #
     "user: list agents whose name contains prod\n"
     "response: mngr list --include 'name.contains(\"prod\")'\n\n"
@@ -205,7 +206,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mngr list --include 'idle_seconds > 3600'\n\n"
     #
     "user: list running agents on modal\n"
-    'response: mngr list --include \'state == "RUNNING" && host.provider == "modal"\'\n\n'
+    'response: mngr list --include \'(state == "RUNNING" || state == "RUNNING_BACKGROUND") && host.provider == "modal"\'\n\n'
     #
     "user: list agents for the mngr project\n"
     "response: mngr list --include 'labels.project == \"mngr\"'\n\n"

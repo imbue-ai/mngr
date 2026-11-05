@@ -12,6 +12,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import ValidationError
+from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -396,6 +397,9 @@ class AgentLifecycleState(UpperCaseStrEnum):
 
     STOPPED = auto()
     RUNNING = auto()
+    # The turn has ended, but work the agent declared is still outstanding and will wake it:
+    # a background command, a subagent, a monitor or a workflow. The user is not the next mover.
+    RUNNING_BACKGROUND = auto()
     WAITING = auto()
     REPLACED = auto()
     # this happens when an agent is running but our configuration doesn't have an entry for that agent type (e.g. if it was launched remotely or by someone else)
@@ -414,11 +418,71 @@ class AgentLifecycleState(UpperCaseStrEnum):
 RUNNING_AGENT_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
     {
         AgentLifecycleState.RUNNING,
+        AgentLifecycleState.RUNNING_BACKGROUND,
         AgentLifecycleState.WAITING,
         AgentLifecycleState.REPLACED,
         AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
     }
 )
+
+
+class LifecycleProbeReading(FrozenModel):
+    """What one read of an agent's state directory saw of its turn and its outstanding work.
+
+    The single shape both collection paths produce -- the one-agent probe and the batched
+    host listing -- so the rule that reduces it runs on identical input either way.
+    """
+
+    is_active: bool = Field(
+        default=False,
+        description="Whether the agent's turn marker is present, which is what having a turn open means",
+    )
+    raw_leases: str = Field(
+        default="",
+        description="The collected `<name>\\t<bound>` lease lines, one per line, still to be parsed",
+    )
+
+
+class InvalidWorkLeaseError(ValueError):
+    """Raised when a work lease is unnamed, badly named, or states no bound it could expire by."""
+
+
+# The characters a lease name may use. Narrow because the name has to survive being a file
+# name and being carried in the tab-delimited stream a host's leases are collected over, where
+# a name holding a tab or a newline would corrupt every other agent's leases in the same read.
+WORK_LEASE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_.-]+\Z")
+
+
+class WorkLease(FrozenModel):
+    """One declared unit of in-flight work that will wake its agent when it finishes.
+
+    Whatever starts the work writes a lease under the agent's ``leases/`` directory, and
+    the lifecycle probe reads them back, so work that dies without cleaning up stops counting
+    without anyone having to come back and remove it.
+
+    Every lease states a deadline, so a lease can always expire. The deadline is the only
+    bound: nothing a harness reports at turn end identifies the work's own process.
+    """
+
+    name: str = Field(description="Lease file name, e.g. `task-b09b409g6`")
+    expires_at: datetime | None = Field(default=None, description="Instant after which this lease no longer counts")
+
+    @model_validator(mode="after")
+    def _check_is_named_and_bounded(self) -> Self:
+        if not self.name:
+            raise InvalidWorkLeaseError("Work lease must be named")
+        if WORK_LEASE_NAME_PATTERN.match(self.name) is None:
+            raise InvalidWorkLeaseError(
+                f"Work lease name {self.name!r} must use only the characters {WORK_LEASE_NAME_PATTERN.pattern}"
+            )
+        if self.expires_at is None:
+            raise InvalidWorkLeaseError(
+                f"Work lease {self.name!r} must state an expiry, else it could never stop holding its agent"
+            )
+        return self
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class LifecycleProbeResult(FrozenModel):
@@ -429,24 +493,30 @@ class LifecycleProbeResult(FrozenModel):
         default=None,
         description=(
             "PID of the agent's running main process (e.g. claude) in its host's PID "
-            "namespace, populated when the agent is RUNNING or WAITING. Only watchable "
-            "in-process (e.g. via psutil) when the probed host is the local machine."
+            "namespace, populated when the agent is RUNNING, RUNNING_BACKGROUND or WAITING. "
+            "Only watchable in-process (e.g. via psutil) when the probed host is the local machine."
         ),
+    )
+    leases: tuple[WorkLease, ...] = Field(
+        default=(),
+        description="The work leases that still hold, in the order read, naming what RUNNING_BACKGROUND is waiting on",
     )
 
 
 class WaitingReason(UpperCaseStrEnum):
-    """Why an agent in the WAITING lifecycle state is waiting.
+    """Why an agent's turn is not progressing.
 
     Reported as the ``waiting_reason`` field by agent plugins (see the
     ``agent_field_generators`` hook). Shared across plugins so the codex and claude
     implementations agree on the vocabulary; see ``classify_waiting_reason`` in
-    ``imbue.mngr.hosts.common`` for the shared rule that produces it.
+    ``imbue.mngr.hosts.common`` for the shared rule that produces it. It answers for the
+    turn, which is why RUNNING_BACKGROUND needs no value of its own here: an agent that ended its turn with
+    work still outstanding reports END_OF_TURN and RUNNING_BACKGROUND together.
     """
 
     # Blocked on a tool-approval dialog, waiting for the user to respond.
     PERMISSIONS = auto()
-    # Idle with its turn complete, waiting for the user's next message.
+    # The turn is complete; nothing further happens until something wakes the agent.
     END_OF_TURN = auto()
 
 

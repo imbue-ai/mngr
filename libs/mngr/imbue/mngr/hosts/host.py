@@ -3113,9 +3113,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             env_vars = self._collect_agent_env_vars(agent, options)
             self._write_agent_env_file(agent, env_vars)
 
-            # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
-            # exist at both host and agent level so that all bash scripts can source
-            # them for logging, timestamp utilities, and raw-transcript primitives.
+            # Put the shared shell libraries at both host and agent level so that any
+            # bash script can source them (see _ensure_shared_shell_libs).
             ensure_shared_libs_thread = start_mngr_thread(
                 concurrency_group=concurrency_group, target=self._ensure_shared_shell_libs, args=(agent,)
             )
@@ -3181,6 +3180,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         "mngr_log.sh",
         "mngr_transcript_lib.sh",
         "mngr_common_transcript_lib.sh",
+        "mngr_work_lease_lib.sh",
     )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
@@ -3202,13 +3202,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           by per-agent ``common_transcript.sh`` converters and the turn-end
           hooks that flush them (claude's ``wait_for_stop_hook.sh``,
           antigravity's ``statusline.sh``).
+        - ``mngr_work_lease_lib.sh`` provides the work-lease writers, by which a
+          turn-end hook declares the work its turn left running so the agent
+          reads RUNNING_BACKGROUND rather than WAITING.
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
         # These should stay per-file write_file calls (not upload_files_in_bulk) because
         # they need the executable bit (mode="0755"), which the rsync staging helper does
-        # not preserve. The set is fixed and tiny (two libs x two destinations), so the
-        # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
+        # not preserve. The set is fixed and small, so the per-file cost is negligible and
+        # this is exempt from the bulk-upload ratchet.
         for name in self._SHARED_SHELL_LIB_NAMES:
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")

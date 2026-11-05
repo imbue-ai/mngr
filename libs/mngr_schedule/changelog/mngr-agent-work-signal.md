@@ -1,0 +1,1 @@
+Fixed: a scheduled agent that ends its turn with declared work still outstanding reports mngr's new `RUNNING_BACKGROUND` state, which full verification now counts as still running rather than as a failed run.

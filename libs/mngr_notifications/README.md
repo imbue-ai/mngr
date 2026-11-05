@@ -2,7 +2,7 @@
 
 Desktop notifications when agents need your attention.
 
-A plugin for [mngr](https://github.com/imbue-ai/mngr) that adds the `mngr notify` command. It monitors the event stream from `mngr observe` and sends a native desktop notification whenever an agent transitions from RUNNING to WAITING.
+A plugin for [mngr](https://github.com/imbue-ai/mngr) that adds the `mngr notify` command. It monitors the event stream from `mngr observe` and sends a native desktop notification whenever an agent stops working and transitions to WAITING, whether it was mid-turn (RUNNING) or carrying work that outlived its turn (RUNNING_BACKGROUND).
 
 ## Requirements
 

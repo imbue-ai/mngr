@@ -60,6 +60,11 @@ def test_timestamp_to_datetime_returns_none_for_invalid() -> None:
     assert result is None
 
 
+def test_timestamp_to_datetime_returns_none_past_the_end_of_time() -> None:
+    """A timestamp too large for the platform's time_t raises OverflowError, not ValueError."""
+    assert timestamp_to_datetime(99999999999999999999) is None
+
+
 def test_compute_idle_seconds_returns_none_when_all_none() -> None:
     assert compute_idle_seconds(None, None, None) is None
 

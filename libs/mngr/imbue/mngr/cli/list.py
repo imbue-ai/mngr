@@ -1361,13 +1361,13 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 **Simple equality filters:**
 - `name == "my-agent"` - Match agent by exact name
-- `state == "RUNNING"` - Match running agents
+- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents that will move themselves, which is what `--running` selects
 - `host.provider == "docker"` - Match agents on Docker hosts
 - `type == "claude"` - Match agents of type "claude"
 - `labels.project == "mngr"` - Match agents with a specific project label
 
 **Compound expressions:**
-- `state == "RUNNING" && host.provider == "modal"` - Running agents on Modal
+- `(state == "RUNNING" || state == "RUNNING_BACKGROUND") && host.provider == "modal"` - Agents working on Modal (`&&` binds tighter than `||`, so the parentheses are load-bearing)
 - `state == "STOPPED" || state == "FAILED"` - Stopped or failed agents
 - `host.provider == "docker" && name.startsWith("test-")` - Docker agents with names starting with "test-"
 

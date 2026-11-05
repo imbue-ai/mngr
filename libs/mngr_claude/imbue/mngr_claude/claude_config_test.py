@@ -11,9 +11,11 @@ from typing import Any
 import pytest
 from inline_snapshot import snapshot
 
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
 from imbue.mngr_claude.claude_config import COMPACTING_MARKER_FILENAME
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import HOOK_WORK_LEASE_NAME_PREFIX
 from imbue.mngr_claude.claude_config import LAST_COMPACTION_FILENAME
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
@@ -1323,8 +1325,83 @@ def test_build_readiness_hooks_config_session_start_startup_branch_removes_compa
 
     assert (
         'case "$_MNGR_SOURCE" in startup|resume) rm -f "$MNGR_AGENT_STATE_DIR/compacting";'
+        ' rm -f "$MNGR_AGENT_STATE_DIR"/leases/task-*;'
         ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && rm -f "$MNGR_AGENT_STATE_DIR/active"'
     ) in command
+
+
+def test_hook_lease_prefix_matches_the_stop_hook_script() -> None:
+    """The one place the prefix is two literals, held together here rather than by a comment.
+
+    The SessionStart hook that clears the leases is built from the Python constant, and the
+    Stop hook that writes them is a shell script that cannot import it. Were the two to
+    drift, a restart would leave behind exactly the leases it exists to clear, and the agent
+    would read as working until each one's deadline passed.
+    """
+    script = (Path(__file__).parent / "resources" / "wait_for_stop_hook.sh").read_text()
+
+    assert f'WORK_LEASE_NAME_PREFIX="{HOOK_WORK_LEASE_NAME_PREFIX}"' in script
+
+
+def _write_work_leases(state_dir: Path) -> Path:
+    """Lay out one lease the stop hook owns and one a different writer owns."""
+    lease_dir = state_dir / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir()
+    (lease_dir / f"{HOOK_WORK_LEASE_NAME_PREFIX}b3tzesn7m").write_text("until:4102444800\n")
+    (lease_dir / "mngr-long-build").write_text("pid:4821\n")
+    return lease_dir
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize("source", ["startup", "resume"])
+def test_session_start_clears_the_work_leases_of_the_process_that_died(tmp_path: Path, source: str) -> None:
+    """A restarted agent runs none of the background work its last turn left in flight.
+
+    Those leases are bounded only by their deadline, so an agent restarted mid-lease would
+    otherwise sit at a prompt reporting RUNNING -- and `mngr wait` would block on it -- for
+    hours. A lease under another name belongs to a writer this restart says nothing about,
+    and is left to expire on its own bound.
+    """
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    (state_dir / "active").write_text("")
+    lease_dir = _write_work_leases(state_dir)
+    payload = json.dumps({"session_id": "sess-compaction-48213", "source": source})
+
+    result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert not (state_dir / "active").exists()
+    assert [path.name for path in lease_dir.iterdir()] == ["mngr-long-build"]
+
+
+@_REQUIRES_JQ
+def test_session_start_leaves_the_work_leases_alone_on_a_compaction(tmp_path: Path) -> None:
+    """Auto-compaction fires mid-turn, so the work it interrupts is still in flight."""
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    lease_dir = _write_work_leases(state_dir)
+    payload = json.dumps({"session_id": "sess-compaction-48213", "source": "compact"})
+
+    result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert sorted(path.name for path in lease_dir.iterdir()) == [
+        "mngr-long-build",
+        f"{HOOK_WORK_LEASE_NAME_PREFIX}b3tzesn7m",
+    ]
+
+
+@_REQUIRES_JQ
+def test_session_start_resets_an_agent_that_never_leased_any_work(tmp_path: Path) -> None:
+    """The ordinary restart: no lease directory at all, and the marker reset must still land."""
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    (state_dir / "active").write_text("")
+    payload = json.dumps({"session_id": "sess-compaction-48213", "source": "startup"})
+
+    result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert not (state_dir / "active").exists()
+    assert not (state_dir / WORK_LEASE_DIR_NAME).exists()
 
 
 @_REQUIRES_JQ

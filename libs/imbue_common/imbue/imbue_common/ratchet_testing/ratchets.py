@@ -672,9 +672,19 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mngr l
 # for them and they are not the class of script this ratchet guards.
 _STRICT_MODE_EXEMPT_DIR_PREFIXES: Final[tuple[str, ...]] = (".minds/template/",)
 
+# Suffix marking a shell library: a file that is sourced into another script's
+# shell rather than executed. Strict mode declared at its top level would apply
+# to the sourcing script instead of to itself, so such a file declares nothing
+# and guards each command instead.
+_STRICT_MODE_EXEMPT_FILE_SUFFIX: Final[str] = "_lib.sh"
+
 
 def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
-    """Find bash scripts missing 'set -euo pipefail' in the git repo containing cwd."""
+    """Find runnable bash scripts missing 'set -euo pipefail' in the git repo containing cwd.
+
+    Declarative templates and sourced ``*_lib.sh`` libraries are not runnable scripts and are
+    left out entirely rather than counted.
+    """
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         cwd=cwd,
@@ -698,9 +708,12 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
 
     violations: list[str] = []
     for sh_file in sh_files:
-        # Skip declarative, non-runnable schema templates (see the prefix list above).
+        # Skip declarative, non-runnable schema templates and sourced libraries
+        # (see the prefix list and the suffix above).
         relative_path = sh_file.relative_to(repo_root).as_posix()
         if any(relative_path.startswith(prefix) for prefix in _STRICT_MODE_EXEMPT_DIR_PREFIXES):
+            continue
+        if relative_path.endswith(_STRICT_MODE_EXEMPT_FILE_SUFFIX):
             continue
         # Skip files that git tracks but aren't present on disk. This happens in
         # offload release sandboxes where the build COPY context omits some

@@ -408,13 +408,17 @@ def test_every_copy_of_the_wordmark_draws_the_same_artwork() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    The secret-file templates at ``.minds/template/*.sh`` are excluded entirely
-    by ``find_bash_scripts_without_strict_mode`` (not merely accommodated in the
-    count): they are shell-sourceable env declarations (commented ``export KEY=``
-    files consumed by ``scripts/push_vault_from_file.py`` and ``minds-admin env
-    deploy`` when seeding HCP Vault / Modal secrets), not executable scripts, so
-    ``set -euo pipefail`` is meaningless for them and would only leak strict mode
-    into whatever shell sources them.
+    Two kinds of ``*.sh`` file are excluded entirely by
+    ``find_bash_scripts_without_strict_mode`` rather than merely accommodated in
+    the count, because neither is a script that runs on its own and declaring
+    strict mode in either would only reach whatever shell sources it:
+
+    - the secret-file templates at ``.minds/template/*.sh``, shell-sourceable env
+      declarations (commented ``export KEY=`` files consumed by
+      ``scripts/push_vault_from_file.py`` and ``minds-admin env deploy`` when
+      seeding HCP Vault / Modal secrets);
+    - the sourced shell libraries named ``*_lib.sh``, whose callers include hooks
+      already running under ``set -e``.
 
     The snapshot below is an upper bound on the remaining committed scripts that
     trip the ratchet. Most fall into two groups:
@@ -426,7 +430,7 @@ def test_prevent_bash_without_strict_mode() -> None:
       (a per-session tmux repaint that signals every pane's children and must not
       abort when one pane's signal fails).
 
-    - Marker/hook/launch and transcript-library resources under the merged
+    - Marker, hook and launch resources under the merged
       ``libs/mngr{,_codex,_opencode,_antigravity}/.../resources/`` plugin ports,
       which routinely omit ``-e`` because they probe for files that may be absent
       and act on non-zero exits, which ``-e`` would abort. Hardening any that do
@@ -435,9 +439,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     ``find_bash_scripts_without_strict_mode`` counts only tracked ``*.sh`` files
     present on disk, so the effective count can differ between a full local
     checkout and an offload sandbox whose thin-diff image omits some tracked
-    paths; the snapshot is pinned to the highest observed count. Adding
-    ``sigwinch_panes.sh`` alongside the per-session SIGWINCH client-attached hook
-    raised that count from 11 to 12.
+    paths; the snapshot is pinned to the highest observed count.
 
     The helper scans the whole git repository containing ``_REPO_ROOT``; the
     result is scoped to scripts under the mngr checkout itself.
@@ -446,7 +448,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     violations = [
         v for v in find_bash_scripts_without_strict_mode(_REPO_ROOT) if Path(v).resolve().is_relative_to(checkout_root)
     ]
-    assert len(violations) <= snapshot(23), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(21), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 

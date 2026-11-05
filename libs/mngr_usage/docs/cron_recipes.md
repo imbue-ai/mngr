@@ -94,7 +94,7 @@ case "$state" in
       mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
     fi
     ;;
-  RUNNING | WAITING)
+  RUNNING | RUNNING_BACKGROUND | WAITING)
     # Stop only on an explicit STOP (window left its tail, or weekly pace caught
     # up). KEEP -- or empty, i.e. no data this tick -- leaves it running.
     if [[ "$status" == "STOP" ]]; then
@@ -184,9 +184,10 @@ for a in $(mngr list --include 'labels.queue == "live" && state == "WAITING"' --
   mngr stop "$a" && mngr label "$a" --label queue=in-review
 done
 
-# After the retirement above, any live pool agents left are RUNNING; count those
-# and bail if we're at the cap.
-alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --ids | wc -l | tr -d ' ')"
+# After the retirement above, any live pool agents left are still working --
+# mid-turn, or carrying work that outlived their turn, which is what --running
+# selects. Count those and bail if we're at the cap.
+alive="$(mngr list --running --include 'labels.queue == "live"' --ids | wc -l | tr -d ' ')"
 [[ "$alive" -lt "$MAX_PARALLEL" ]] || exit 0
 
 # Only launch if there's spare capacity going unused.

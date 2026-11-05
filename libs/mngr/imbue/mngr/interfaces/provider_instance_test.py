@@ -1050,11 +1050,17 @@ class _UnexpectedHostReadError(Exception):
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+@pytest.mark.allow_warnings(match="Unhandled exception in thread")
 def test_discover_within_per_host_timeout_rereads_a_host_whose_read_crashed(temp_mngr_ctx: MngrContext) -> None:
     """A read that crashes with an unexpected exception leaves its host unknown for that poll only.
 
     The next poll sharing the registry reads the host again, rather than skipping it as
     a read still in flight.
+
+    The crash this provokes is logged by the reading thread as it unwinds, which can happen
+    after the discovery call has already returned on its timeout, so the record is allowed for
+    the whole test rather than only inside the capture. The match keeps every other warning
+    failing.
     """
     host_id = HostId.generate()
     read_attempts: list[HostId] = []

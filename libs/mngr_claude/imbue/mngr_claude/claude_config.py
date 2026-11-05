@@ -17,6 +17,7 @@ from loguru import logger
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
 from imbue.mngr.utils.file_utils import atomic_write
 
 
@@ -818,6 +819,13 @@ COMPACTING_MARKER_FILENAME: Final[str] = "compacting"
 # literal in the hook shell snippets below.
 LAST_COMPACTION_FILENAME: Final[str] = "last_compaction.json"
 
+# Prefix naming the work leases (under ``$MNGR_AGENT_STATE_DIR/<WORK_LEASE_DIR_NAME>/``) that
+# ``wait_for_stop_hook.sh`` writes for the background work a turn leaves running, and so the only
+# ones mngr_claude may clear -- a lease under another name belongs to a different writer and
+# expires on its own bound. It is also a literal in that script, which cannot import it;
+# ``test_hook_lease_prefix_matches_the_stop_hook_script`` holds the two sides together.
+HOOK_WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
+
 
 # Shell snippet that appends one activity event so `mngr observe` promptly
 # re-fetches the agent's state.
@@ -889,14 +897,15 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       kept only for old senders and is scheduled for removal.
       Filtering on source ensures normal startup/resume don't fire stale signals.
       Finally, on ``startup``/``resume`` it clears the 'active' and
-      'permissions_waiting' markers (see below): a fresh Claude process is not
-      mid-turn, so any marker left over from a turn that was abandoned by an
-      abnormal exit (container restart, OOM, crash -- where the Stop hook never
-      ran) is stale and must be reset, otherwise the agent reports RUNNING
-      forever. ``compact`` is excluded because auto-compaction fires mid-turn
-      while Claude is genuinely active. The same branch removes a stranded
-      'compacting' marker (a compaction cancelled with Escape or cut short by a
-      crash fires no PostCompact).
+      'permissions_waiting' markers (see below) and this hook set's work leases:
+      a fresh Claude process is not mid-turn and runs none of the background work
+      the previous process left running, so anything left over from a turn that
+      was abandoned by an abnormal exit (container restart, OOM, crash -- where
+      the Stop hook never ran) is stale and must be reset, otherwise the agent
+      reports RUNNING. ``compact`` is excluded because auto-compaction fires
+      mid-turn while Claude is genuinely active. The same branch removes a
+      stranded 'compacting' marker (a compaction cancelled with Escape or cut
+      short by a crash fires no PostCompact).
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
     - PreCompact: writes the 'compacting' marker (atomically via .tmp + mv) and emits an
       activity event. Fires for both a ``/compact`` and Claude's own auto-compaction.
@@ -933,6 +942,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
     - permissions_waiting: Claude is blocked on a permission dialog (always WAITING when present)
+    - leases/task-<id>: one work lease per background task a turn left running, holding
+      its ``until:`` epoch second. Written by wait_for_stop_hook.sh
+      through mngr_work_lease_lib.sh, which
+      rewrites its whole set at each turn end; an agent holding a live lease reports
+      RUNNING_BACKGROUND though its turn has ended.
+      The next startup/resume SessionStart removes them, since what they stand for died with
+      the previous process.
     - claude_process_started: touched on every startup/resume SessionStart (a
       fresh, not-mid-turn Claude process). Its mtime is the restart boundary:
       a transcript event older than it belongs to a turn the current process
@@ -1022,13 +1038,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         },
                         {
                             # A fresh Claude process (startup/resume) is never
-                            # mid-turn, so record the process-start time and reset
-                            # the activity markers. This heals the case where a
-                            # turn was abandoned by an abnormal exit (container
-                            # restart, OOM, crash): the Stop hook never ran to
-                            # clear 'active', so without this the agent would
-                            # report RUNNING forever after restart. The
-                            # 'claude_process_started' marker's mtime gives
+                            # mid-turn and runs none of the background work the
+                            # previous process left behind, so record the
+                            # process-start time and reset the activity markers
+                            # and this hook's work leases. This heals the case
+                            # where a turn was abandoned by an abnormal exit
+                            # (container restart, OOM, crash): the Stop hook never
+                            # ran to clear 'active', and the leases its last run
+                            # wrote outlive the tasks they stand for, so without
+                            # this the agent would report RUNNING after restart --
+                            # forever on the marker, until the deadline on a lease.
+                            # The 'claude_process_started' marker's mtime gives
                             # consumers (e.g. the system interface activity
                             # indicator) a restart boundary to compare transcript
                             # timestamps against -- any transcript event older
@@ -1042,6 +1062,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in startup|resume)'
                                 ' rm -f "$MNGR_AGENT_STATE_DIR/compacting";'
+                                f' rm -f "$MNGR_AGENT_STATE_DIR"/{WORK_LEASE_DIR_NAME}/{HOOK_WORK_LEASE_NAME_PREFIX}*;'
                                 ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
                                 + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT
                                 + " ;; esac"

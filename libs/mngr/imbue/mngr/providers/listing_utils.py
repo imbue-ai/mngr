@@ -38,7 +38,11 @@ from imbue.mngr.hosts.common import TMUX_PANE_LISTING_FORMAT
 from imbue.mngr.hosts.common import find_agent_session_name
 from imbue.mngr.hosts.common import find_first_pane_info
 from imbue.mngr.hosts.common import parse_tmux_pane_listings
+from imbue.mngr.hosts.work_leases import LEASE_PREFIX
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
+from imbue.mngr.hosts.work_leases import build_work_lease_scan
 from imbue.mngr.interfaces.data_types import TmuxPaneListing
+from imbue.mngr.primitives import LifecycleProbeReading
 
 # Unique delimiters for parsing the single-command output
 SEP_DATA_JSON_START: Final[str] = "---MNGR_DATA_JSON_START---"
@@ -51,6 +55,8 @@ SEP_PS_START: Final[str] = "---MNGR_PS_START---"
 SEP_PS_END: Final[str] = "---MNGR_PS_END---"
 SEP_AGENT_MTIMES_START: Final[str] = "---MNGR_AGENT_MTIMES_START---"
 SEP_AGENT_MTIMES_END: Final[str] = "---MNGR_AGENT_MTIMES_END---"
+SEP_AGENT_LEASES_START: Final[str] = "---MNGR_AGENT_LEASES_START---"
+SEP_AGENT_LEASES_END: Final[str] = "---MNGR_AGENT_LEASES_END---"
 SEP_TMUX_PANES_START: Final[str] = "---MNGR_TMUX_PANES_START---"
 SEP_TMUX_PANES_END: Final[str] = "---MNGR_TMUX_PANES_END---"
 
@@ -208,12 +214,13 @@ echo '{SEP_TMUX_PANES_END}'
 def _build_agents_section_script(is_host_running: bool) -> str:
     """Build the script section that emits every agent under ``$HOST_DIR/agents``.
 
-    Everything that can be collected for all agents at once is: one ``stat`` covers
-    every activity file, and the caller's tmux listing is one command. The per-agent
-    loop is left with its ``cat`` of the data.json (and a ``tr`` of the URL file for an
-    agent that has one), because on a sandboxed runtime (gVisor) each process spawn
-    costs tens of milliseconds and a host can carry dozens of agents. A stopped host
-    has no running agent, so its leftover ``active`` markers are not read.
+    Everything that can be collected for all agents at once is: one ``stat`` covers every
+    activity file, one ``awk`` covers every work lease, and the caller's tmux listing is one
+    command. The per-agent loop is left with its ``cat`` of the data.json (and a ``tr`` of
+    the URL file for an agent that has one), because on a sandboxed runtime (gVisor) each
+    process spawn costs tens of milliseconds and a host can carry dozens of agents. A
+    stopped host has no running agent, so its leftover ``active`` markers and work leases
+    are not read.
     """
     active_check = (
         """if [ -f "${agent_dir}active" ]; then
@@ -224,6 +231,15 @@ def _build_agents_section_script(is_host_running: bool) -> str:
         if is_host_running
         else 'echo "ACTIVE=false"'
     )
+    # One scan carries every agent on the host, so each lease must name its owner as well as
+    # itself: the agent's directory sits two components above the lease file.
+    lease_key_expression = 'parts[n - 2] "\\t" parts[n]'
+    work_leases_scan = (
+        f"""{build_work_lease_scan(f'"$HOST_DIR"/agents/*/{WORK_LEASE_DIR_NAME}/*', lease_key_expression)} """
+        f"""2>/dev/null || true"""
+        if is_host_running
+        else "true"
+    )
     activity_mtimes_stat = _build_stat_flavor_dispatch_script(
         gnu_command="""stat -c '%Y %n' "$HOST_DIR"/agents/*/activity/user "$HOST_DIR"/agents/*/activity/agent "$HOST_DIR"/agents/*/activity/start 2>/dev/null""",
         bsd_command="""stat -f '%m %N' "$HOST_DIR"/agents/*/activity/user "$HOST_DIR"/agents/*/activity/agent "$HOST_DIR"/agents/*/activity/start 2>/dev/null""",
@@ -232,6 +248,9 @@ def _build_agents_section_script(is_host_running: bool) -> str:
 echo '{SEP_AGENT_MTIMES_START}'
 {activity_mtimes_stat}
 echo '{SEP_AGENT_MTIMES_END}'
+echo '{SEP_AGENT_LEASES_START}'
+{work_leases_scan}
+echo '{SEP_AGENT_LEASES_END}'
 if [ -d "$HOST_DIR/agents" ]; then
     for agent_dir in "$HOST_DIR/agents"/*/; do
         [ -d "$agent_dir" ] || continue
@@ -476,6 +495,33 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
 
 
 @pure
+def build_lifecycle_probe_reading(agent_raw: Mapping[str, Any]) -> LifecycleProbeReading:
+    """The turn marker and work leases of one batched listing row, in the shape the reducer takes.
+
+    Named here rather than in the protocol module because the key names are this listing's
+    own, and a provider should hand the reducer a reading rather than assemble one.
+    """
+    return LifecycleProbeReading(
+        is_active=bool(agent_raw.get("is_active", False)),
+        raw_leases=str(agent_raw.get("raw_work_leases", "")),
+    )
+
+
+@pure
+def _parse_agent_work_leases(block: str) -> dict[str, str]:
+    """Group ``LEASE=<agent id>\\t<name>\\t<bound>`` lines into raw lease text per agent."""
+    lease_lines_by_agent: dict[str, list[str]] = {}
+    for line in block.splitlines():
+        if not line.startswith(LEASE_PREFIX):
+            continue
+        agent_id, separator, lease = line[len(LEASE_PREFIX) :].partition("\t")
+        if not separator or not agent_id:
+            continue
+        lease_lines_by_agent.setdefault(agent_id, []).append(lease)
+    return {agent_id: "\n".join(lines) for agent_id, lines in lease_lines_by_agent.items()}
+
+
+@pure
 def _parse_agent_activity_mtimes(block: str) -> dict[tuple[str, str], int]:
     """Each ``(agent dir name, activity file name)``'s mtime from the batched ``stat -c '%Y %n'`` block."""
     mtime_by_agent_activity: dict[tuple[str, str], int] = {}
@@ -493,6 +539,7 @@ def _join_batched_agent_fields(
     agent_raw: Mapping[str, Any],
     agent_dir_name: str,
     mtime_by_agent_activity: Mapping[tuple[str, str], int],
+    raw_leases_by_agent: Mapping[str, str],
     tmux_panes: Sequence[TmuxPaneListing],
     tmux_session_prefix: str | None,
     tmux_window_name: str | None,
@@ -517,7 +564,12 @@ def _join_batched_agent_fields(
     tmux_info = (
         (find_first_pane_info(tmux_panes, session_name, str(tmux_window_name)) or None) if session_name else None
     )
-    return {**agent_raw, **activity_mtimes, "tmux_info": tmux_info}
+    return {
+        **agent_raw,
+        **activity_mtimes,
+        "tmux_info": tmux_info,
+        "raw_work_leases": raw_leases_by_agent.get(agent_dir_name, ""),
+    }
 
 
 def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
@@ -525,6 +577,7 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     agent_raw_by_dir_name: dict[str, dict[str, Any]] = {}
     mtime_by_agent_activity: dict[tuple[str, str], int] = {}
+    raw_leases_by_agent: dict[str, str] = {}
     tmux_panes: tuple[TmuxPaneListing, ...] = ()
     tmux_session_prefix: str | None = None
     tmux_window_name: str | None = None
@@ -590,6 +643,10 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             idx += 1
             mtimes_block, idx = _extract_delimited_block(lines, idx, SEP_AGENT_MTIMES_END)
             mtime_by_agent_activity = _parse_agent_activity_mtimes(mtimes_block)
+        elif line.strip() == SEP_AGENT_LEASES_START:
+            idx += 1
+            leases_block, idx = _extract_delimited_block(lines, idx, SEP_AGENT_LEASES_END)
+            raw_leases_by_agent = _parse_agent_work_leases(leases_block)
         elif line.strip().startswith(SEP_AGENT_START):
             agent_dir_name = line.strip().removeprefix(SEP_AGENT_START).removesuffix("---")
             idx += 1
@@ -605,6 +662,7 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             agent_raw,
             agent_dir_name,
             mtime_by_agent_activity,
+            raw_leases_by_agent,
             tmux_panes,
             tmux_session_prefix,
             tmux_window_name,

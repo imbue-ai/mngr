@@ -1539,9 +1539,9 @@ class AgentObserver(MutableModel):
         same-numbered local process. Locality is keyed on the ``local`` provider,
         the one and only user of the local connector. A remote agent, or a local
         agent with no ``pid`` that is no longer running, closes any existing
-        watcher. An UNKNOWN reading, and a RUNNING or WAITING one without a ``pid``
-        (read from tmux alone, without the host's process table), leave the watcher
-        as it is: an unreadable probe is no evidence the watched process exited.
+        watcher. An UNKNOWN reading, and a live one without a ``pid`` (read from
+        tmux alone, without the host's process table), leave the watcher as it is:
+        an unreadable probe is no evidence the watched process exited.
         """
         if agent.state == AgentLifecycleState.UNKNOWN:
             return
@@ -1550,7 +1550,11 @@ class AgentObserver(MutableModel):
             self._close_watcher(instance_key_str)
             return
         if agent.pid is None:
-            if agent.state not in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING):
+            if agent.state not in (
+                AgentLifecycleState.RUNNING,
+                AgentLifecycleState.RUNNING_BACKGROUND,
+                AgentLifecycleState.WAITING,
+            ):
                 self._close_watcher(instance_key_str)
             return
         self._open_or_replace_watcher(instance_key_str, str(agent.host.id), agent.pid)

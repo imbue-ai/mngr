@@ -285,10 +285,15 @@ TARGET can be an agent ID (agent-*), host ID (host-*), or an agent/host name.
 If TARGET is omitted, it is read from stdin (one line, must be an ID like agent-* or host-*).
 
 States can be provided as positional arguments after TARGET, via the repeatable --state option, or both.
-Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN) and
-all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED, UNKNOWN).
+Valid states include all agent lifecycle states (STOPPED, RUNNING, RUNNING_BACKGROUND, WAITING, REPLACED,
+RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN) and all host states (BUILDING, STARTING, RUNNING,
+STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED, UNKNOWN).
 
-If no states are specified, waits for any terminal state (the target stops running).
+If no states are specified, waits until nothing but you will move the target: for an agent,
+that means any terminal state AND nothing left that would wake it, so a turn that ended
+leaving a background task running keeps the wait open for as long as that work is
+outstanding. Naming states explicitly waits for exactly those, whether or not such work
+is outstanding. An agent whose type does not report its work is judged on its state alone.
 
 When watching an agent, both agent and host states are tracked:
 - STOPPED counts if either the agent or host is stopped
@@ -303,7 +308,7 @@ Exit codes:
       nothing stays 1, since it is as likely a typo as a gone target)""",
     examples=(
         ("Wait for an agent to finish", "mngr wait my-agent DONE"),
-        ("Wait for any terminal state", "mngr wait agent-abc123"),
+        ("Wait until nothing but you will move it", "mngr wait agent-abc123"),
         ("Wait for agent to enter WAITING", "mngr wait my-agent WAITING"),
         ("Wait with timeout", "mngr wait my-agent DONE --timeout 5m"),
         ("Wait for host to stop", "mngr wait host-xyz789 STOPPED"),

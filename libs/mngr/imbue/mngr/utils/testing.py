@@ -78,6 +78,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import WorkLease
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_all_registries
@@ -1219,6 +1220,7 @@ def make_test_agent_details(
     idle_seconds: float | None = None,
     resource: HostResources | None = None,
     published_endpoints: Sequence[PublishedEndpoint] = (),
+    leases: Sequence[WorkLease] = (),
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -1248,6 +1250,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         pid=pid,
+        leases=tuple(leases),
         user_activity_time=user_activity_time,
         idle_seconds=idle_seconds,
         labels=labels or {},

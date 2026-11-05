@@ -1,0 +1,7 @@
+Fixed: a grok agent now reports mngr's new `RUNNING_BACKGROUND` state while the work its turn left running is still outstanding, rather than `WAITING`.
+
+grok reports its in-flight work on every end-of-turn `Stop`, but mngr kept only the subagents from that snapshot and discarded every other kind. A turn that ended with a background shell command running therefore read `WAITING` -- indistinguishable from an agent waiting on you -- right up until the command finished and woke it. The turn-end hook now declares one work lease per in-flight task whatever its kind, so that agent reads `RUNNING_BACKGROUND` and `mngr ls` names the work holding it.
+
+A background subagent used to be covered a different way, by holding the turn marker open, so such an agent reported `RUNNING` as though a turn were in progress. It is leased like any other background work now and reports `RUNNING_BACKGROUND`, which says what is actually true: the turn has ended and something other than you will move the agent next. A subagent still running inside a turn keeps the marker open exactly as before.
+
+A lease ends when its work does -- when the task is absent from the next turn's snapshot, when a subagent ends, fails or is cancelled, or when the session ends -- and otherwise expires on its own deadline. A permission dialog a background subagent is waiting on still outranks the work it left running, so such an agent reports `WAITING` on you rather than `RUNNING_BACKGROUND`.

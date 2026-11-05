@@ -12,7 +12,8 @@ mngr kanpan [--include CEL] [--exclude CEL] [--running] [--stopped] [--archived]
 TUI board showing agents grouped by lifecycle state with PR status.
 
 Launches a terminal UI that displays all mngr agents organized by their
-lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, UNKNOWN).
+lifecycle state (RUNNING, RUNNING_BACKGROUND, WAITING, STOPPED, DONE, REPLACED,
+RUNNING_UNKNOWN_AGENT_TYPE, UNKNOWN).
 
 Each agent shows its name, current state, and associated GitHub PR information
 including PR number, state (open/closed/merged), and CI check status.
@@ -47,7 +48,7 @@ mngr kanpan [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
+| `--running` | boolean | Show only agents that will move themselves: a turn in flight, or work left running that will start the next one (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
 | `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
 | `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |

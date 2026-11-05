@@ -239,7 +239,7 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
     ),
     AgentCapability(
         key="waiting_reason_field",
-        description="Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.",
+        description="Surfaces why an agent's turn is not progressing (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.",
         detection_kind=CapabilityDetectionKind.FIELD_GENERATOR,
         scope=CapabilityScope.INTERACTIVE_ONLY,
     ),

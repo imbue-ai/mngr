@@ -191,6 +191,47 @@ has_blocked_stop_hook() {
     [ "$latest_record" = "blocked" ]
 }
 
+# How long a work lease stays valid. Nothing refreshes it: a turn end rewrites the whole
+# set, so this only has to outlast the longest background task that runs without waking
+# the agent, and it bounds how long work that died silently can hold an agent working.
+WORK_LEASE_TTL_SECONDS="${HOOK_WORK_LEASE_TTL_SECONDS:-14400}"
+
+# Names the leases this hook writes, and so the ones it may clear. The directory belongs to
+# the agent and anything that starts work may lease there, so a lease under another name is
+# someone else's and self-expires on its own bound. The value is also
+# HOOK_WORK_LEASE_NAME_PREFIX in claude_config.py, which builds the SessionStart hook that
+# clears them; a test pins the two sides together.
+WORK_LEASE_NAME_PREFIX="task-"
+
+# Record the background work this turn leaves running, one lease per task, so the agent keeps
+# reading as working until that work wakes it. Claude Code reports the in-flight set on the
+# Stop payload precisely so a hook can tell "session is done" from "session is paused waiting
+# for background work to wake it", and the set is empty when nothing is in flight. A task that
+# reports a terminal status is skipped anyway: leasing one would hold the agent for a whole
+# TTL, which is the failure this lease exists to prevent. Claude Code's task statuses are
+# pending, running, completed, failed, killed and paused; a status this does not name is
+# leased, because a lease withheld from live work is the error that matters. This hook's own leases are rewritten
+# each turn end, so work that has finished since the last one stops counting.
+#
+# `session_crons` is deliberately not leased: a schedule is an appointment rather than work in
+# flight, so an agent with one armed is idle until it fires. See specs/agent-running-background.
+write_work_leases() {
+    local lease_names
+    command -v mngr_work_lease_declare >/dev/null 2>&1 || return 0
+    lease_names=$(printf '%s' "$HOOK_INPUT" \
+        | jq -r --arg task_prefix "$WORK_LEASE_NAME_PREFIX" '
+            .background_tasks // [] | .[]
+                | select((.status // "")
+                    | . != "completed" and . != "failed" and . != "killed" and . != "cancelled")
+                | $task_prefix + ((.task_id // .id // empty) | tostring)' 2>/dev/null) || true
+    mngr_work_lease_clear "$WORK_LEASE_NAME_PREFIX"
+    [ -n "$lease_names" ] || return 0
+    printf '%s\n' "$lease_names" | while IFS= read -r lease_name; do
+        [ -n "$lease_name" ] || continue
+        mngr_work_lease_declare "$lease_name" "$WORK_LEASE_TTL_SECONDS"
+    done
+}
+
 # Whether the agent keeps working past this turn end: a queued prompt starts the
 # next turn, or (except on an interrupt, $1 non-empty) another stop hook blocked it
 is_turn_continuing() {
@@ -206,6 +247,10 @@ is_turn_continuing() {
 mark_inactive() {
     local reason="${1:-}"
     local flush_lock_timeout="${2:-$FLUSH_LOCK_TIMEOUT_NORMAL}"
+    # Guarded, like the flush below: this runs ahead of the marker clear, so under
+    # `set -e` any failure recording the leases would strand the turn-end signal --
+    # leaving the agent reading RUNNING forever rather than merely leaseless.
+    write_work_leases || true
     # Flush the transcript pipeline before clearing the marker (see the comment
     # above the lib source below). This lives in mark_inactive -- not
     # run_post_completion -- so it runs on EVERY turn-end path, including the
@@ -286,6 +331,13 @@ upload_autofix_issues() {
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
     # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
     source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+fi
+
+# The work-lease writers. Sourced defensively, like the lib above: an agent provisioned
+# before this one existed declares no leases and still reaches the end of its turn.
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_work_lease_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh"
 fi
 
 # Post-completion actions (run after all other stop hooks finish)

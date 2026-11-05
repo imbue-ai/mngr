@@ -68,13 +68,13 @@ from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.work_leases import determine_agent_probe_result
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -117,6 +117,7 @@ from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
+from imbue.mngr.providers.listing_utils import build_lifecycle_probe_reading
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -1846,15 +1847,16 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        lifecycle = determine_lifecycle_probe_result(
+        lifecycle = determine_agent_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
-            is_active=agent_raw.get("is_active", False),
+            reading=build_lifecycle_probe_reading(agent_raw),
             # This listing stats marker files by fixed name and has no agent to ask, so a
             # blocked agent reads RUNNING here.
             is_blocked_on_dialog=False,
             expected_process_name=expected_process_name,
             ps_output=ps_output,
             is_agent_type_known=is_type_known,
+            now=now,
         )
         idle_timeout_raw = agent_data.get("idle_timeout_seconds", 800)
         idle_mode_value = agent_data.get("idle_mode", "DISABLED")
@@ -1869,6 +1871,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
+            leases=lifecycle.leases,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

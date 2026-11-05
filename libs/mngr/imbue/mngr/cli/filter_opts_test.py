@@ -23,9 +23,10 @@ def test_passthrough_include_and_exclude(cg: ConcurrencyGroup) -> None:
     assert exclude == ('state == "DONE"',)
 
 
-def test_running_alias(cg: ConcurrencyGroup) -> None:
+def test_running_alias_covers_work_that_outlives_a_turn(cg: ConcurrencyGroup) -> None:
+    """--running asks which agents will move themselves, which RUNNING alone no longer answers."""
     include, exclude = build_agent_filter_cel(AgentFilterCliOptions(running=True), cg)
-    assert include == ('state == "RUNNING"',)
+    assert include == ('state == "RUNNING" || state == "RUNNING_BACKGROUND"',)
     assert exclude == ()
 
 
@@ -114,7 +115,7 @@ def test_combined_aliases_compose(cg: ConcurrencyGroup) -> None:
     )
     assert include == (
         'name == "foo"',
-        'state == "RUNNING"',
+        'state == "RUNNING" || state == "RUNNING_BACKGROUND"',
         'labels.project == "mngr"',
     )
     assert exclude == (

@@ -10,6 +10,7 @@ from imbue.mngr.api.observe import get_agent_states_events_path
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.notifier import Notifier
 from imbue.mngr_notifications.notifier import build_execute_command
@@ -25,10 +26,10 @@ def watch_for_waiting_agents(
     observe_process: RunningProcess | None = None,
     ready_event: threading.Event | None = None,
 ) -> None:
-    """Watch the mngr observe event stream for RUNNING -> WAITING transitions.
+    """Watch the mngr observe event stream for transitions into WAITING.
 
     Tails the agent_states events file written by `mngr observe` and sends
-    desktop notifications when agents transition from RUNNING to WAITING.
+    desktop notifications when agents leave RUNNING or RUNNING_BACKGROUND for WAITING.
     Runs until stop_event is set or interrupted.
 
     If observe_process is provided, periodically checks that it is still alive
@@ -46,11 +47,11 @@ def watch_for_waiting_agents(
 
     last_size = _get_file_size(events_path)
     # Per-agent-instance bit (keyed ``<agent_id>@<host_id>``): True iff the
-    # agent transitioned from RUNNING to UNKNOWN and has not yet transitioned
-    # out. Used to recognize the indirect RUNNING -> UNKNOWN -> WAITING
-    # sequence as equivalent to RUNNING -> WAITING. Cleared on any transition
-    # out of UNKNOWN that isn't WAITING. Instance-keyed because agent ids are
-    # only unique per host, so two same-id agents must not share the bit.
+    # agent transitioned from RUNNING or RUNNING_BACKGROUND to UNKNOWN and has not yet
+    # transitioned out. Used to recognize the indirect RUNNING/RUNNING_BACKGROUND ->
+    # UNKNOWN -> WAITING sequence as equivalent to the direct one. Cleared on any
+    # transition out of UNKNOWN that isn't WAITING. Instance-keyed because agent
+    # ids are only unique per host, so two same-id agents must not share the bit.
     was_running_before_unknown_by_instance: dict[str, bool] = {}
 
     if ready_event is not None:
@@ -109,16 +110,19 @@ def _process_events(
     """Parse JSONL content and send notifications for agents going to WAITING.
 
     Recognized transitions:
-    - ``RUNNING -> WAITING`` (direct): fire notification.
-    - ``RUNNING -> UNKNOWN -> WAITING`` (indirect): fire notification on the
-      ``UNKNOWN -> WAITING`` step iff this agent was previously RUNNING before
-      going UNKNOWN. UNKNOWN is emitted by ``AgentObserver`` for agents on
-      providers that could not be reached during the most recent discovery
-      attempt; recovery from UNKNOWN should not suppress the "now waiting"
-      notification.
+    - ``RUNNING/RUNNING_BACKGROUND -> WAITING`` (direct): fire notification.
+    - ``RUNNING/RUNNING_BACKGROUND -> UNKNOWN -> WAITING`` (indirect): fire notification
+      on the ``UNKNOWN -> WAITING`` step iff this agent was in one of those two
+      states before going UNKNOWN. UNKNOWN is emitted by ``AgentObserver`` for
+      agents on providers that could not be reached during the most recent
+      discovery attempt; recovery from UNKNOWN should not suppress the "now
+      waiting" notification.
 
-    The per-agent flag is set when ``RUNNING -> UNKNOWN`` is observed, cleared
-    on any other transition out of UNKNOWN.
+    An agent hands the turn back through RUNNING_BACKGROUND rather than RUNNING whenever
+    a background task outlived its turn.
+
+    The per-agent flag is set when ``RUNNING/RUNNING_BACKGROUND -> UNKNOWN`` is observed,
+    cleared on any other transition out of UNKNOWN.
     """
     for line in content.splitlines():
         record = parse_event_line(line, AGENT_STATES_SOURCE)
@@ -137,8 +141,11 @@ def _process_events(
         host_id = host_data.get("id") if isinstance(host_data, dict) else None
         instance_key = f"{agent_id}@{host_id}" if host_id is not None else agent_id
 
-        # Maintain the "was RUNNING before UNKNOWN" bit BEFORE deciding whether to fire.
-        if old_state == "RUNNING" and new_state == "UNKNOWN":
+        # Maintain the "was the agent moving itself before UNKNOWN" bit BEFORE deciding whether to fire.
+        if (
+            old_state in (AgentLifecycleState.RUNNING.value, AgentLifecycleState.RUNNING_BACKGROUND.value)
+            and new_state == "UNKNOWN"
+        ):
             was_running_before_unknown_by_instance[instance_key] = True
         elif old_state == "UNKNOWN" and new_state != "WAITING":
             # Any non-WAITING transition out of UNKNOWN clears the bit
@@ -149,7 +156,10 @@ def _process_events(
             # which is consumed by the firing-decision below.
             pass
 
-        is_direct_transition = old_state == "RUNNING" and new_state == "WAITING"
+        is_direct_transition = (
+            old_state in (AgentLifecycleState.RUNNING.value, AgentLifecycleState.RUNNING_BACKGROUND.value)
+            and new_state == "WAITING"
+        )
         is_indirect_transition = (
             old_state == "UNKNOWN"
             and new_state == "WAITING"

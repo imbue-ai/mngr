@@ -1,0 +1,1 @@
+Changed: this provider's batched listing now collects each agent's work leases alongside its `active` marker, so an agent whose turn has ended while declared work is still outstanding reports the new `RUNNING_BACKGROUND` state rather than `WAITING`.

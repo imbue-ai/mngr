@@ -55,8 +55,8 @@ Filter which agents appear on the board using CEL expressions:
 # Show only agents for a specific project
 mngr kanpan --project mngr
 
-# Show only running agents
-mngr kanpan --include 'state == "RUNNING"'
+# Show only agents that are still working: mid-turn, or carrying work that outlived their turn
+mngr kanpan --include 'state == "RUNNING" || state == "RUNNING_BACKGROUND"'
 
 # Exclude done agents
 mngr kanpan --exclude 'state == "DONE"'
