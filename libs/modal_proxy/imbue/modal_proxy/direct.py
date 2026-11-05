@@ -8,10 +8,12 @@
 # ModalProxy* types rather than keeping its own list of the Modal classes they
 # came from.
 
+import concurrent.futures
 import io
 import os
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import AbstractContextManager
@@ -49,6 +51,7 @@ from tenacity import stop_after_delay
 from tenacity import wait_exponential
 from tenacity import wait_random
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
@@ -56,6 +59,7 @@ from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyBlockStorageError
+from imbue.modal_proxy.errors import ModalProxyCallTimeoutError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
 from imbue.modal_proxy.errors import ModalProxyDeployedAppLimitError
@@ -300,6 +304,52 @@ _retry_transient = retry(
 )
 
 
+# How long one attempt at a volume call may go without progress -- an answer, or, for a
+# read, another chunk of the file -- before it is cancelled and re-issued. Modal's SDK
+# sets no deadline on these calls, so an attempt Modal never answers would otherwise wait
+# forever (MIND-290). Modal's own client gives a control-plane attempt 10s where it
+# bounds one at all; this leaves room to re-issue within the transient retry budget.
+_ATTEMPT_STALL_SECONDS: Final[float] = 20.0
+
+
+class _AttemptDeadline(MutableModel):
+    """When one attempt at a Modal call counts as stalled: ``stall_seconds`` after it last made progress."""
+
+    stall_seconds: float = Field(frozen=True, description="How long the attempt may go without progress")
+    last_progress_at: float = Field(
+        default_factory=time.monotonic, description="time.monotonic() at the attempt's start or latest progress"
+    )
+
+    def extend(self, **_progress_report: Any) -> None:
+        """Record progress; shaped as Modal's ``progress_cb``, which Modal calls from its event loop thread."""
+        self.last_progress_at = time.monotonic()
+
+    def seconds_remaining(self) -> float:
+        return max(0.0, self.last_progress_at + self.stall_seconds - time.monotonic())
+
+
+def _start_cancellable_call(
+    modal_call: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs
+) -> concurrent.futures.Future[_R]:
+    """Start a Modal SDK call as a future whose cancellation stops the call.
+
+    synchronicity, which generates Modal's blocking API, accepts ``_future=True`` on any
+    call and returns the ``concurrent.futures.Future`` of the call's task on Modal's event
+    loop; cancelling the future cancels the task. Modal's stubs do not declare the keyword.
+    """
+    return modal_call(*args, **kwargs, _future=True)  # ty: ignore[invalid-argument-type, invalid-return-type]
+
+
+def _await_attempt(attempt: concurrent.futures.Future[_R], deadline: _AttemptDeadline, call_description: str) -> _R:
+    """Wait for one attempt at a Modal call, cancelling it once it has stalled past its deadline."""
+    while not concurrent.futures.wait((attempt,), timeout=deadline.seconds_remaining()).done:
+        if deadline.seconds_remaining() <= 0.0 and attempt.cancel():
+            raise ModalProxyCallTimeoutError(
+                f"Modal made no progress on {call_description} for {deadline.stall_seconds:g}s; cancelled the attempt"
+            )
+    return attempt.result()
+
+
 # How long one `modal deploy` subprocess may run before it is considered hung.
 # Every deploy failure another attempt could clear is reported as a
 # ModalProxyDeployRetryableError and left at that; `mngr_modal.routes.deployment`
@@ -465,6 +515,12 @@ class DirectVolume(VolumeInterface):
     volume: modal.Volume = Field(description="The underlying modal.Volume", repr=False)
     volume_name: str | None = Field(default=None, description="Volume name if known")
     created_at: datetime | None = Field(default=None, description="When the volume was created, if known")
+    attempt_stall_seconds: float = Field(
+        default=_ATTEMPT_STALL_SECONDS,
+        gt=0,
+        frozen=True,
+        description="How long one attempt at a volume call may go without progress before it is cancelled",
+    )
 
     def get_name(self) -> str | None:
         return self.volume_name
@@ -477,13 +533,15 @@ class DirectVolume(VolumeInterface):
     def get_object_id(self) -> str:
         # from_name hands back an unhydrated handle, so hydrating is what actually
         # asks the server to resolve the name -- and raises NotFoundError if it cannot.
-        self.volume.hydrate()
+        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
+        _await_attempt(_start_cancellable_call(self.volume.hydrate), deadline, "hydrate")
         return self.volume.object_id
 
     @_retry_transient
     @_translate_exceptions
     def listdir(self, path: str) -> list[FileEntry]:
-        entries = self.volume.listdir(path)
+        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
+        entries = _await_attempt(_start_cancellable_call(self.volume.listdir, path), deadline, f"listdir({path!r})")
         return [
             FileEntry(
                 path=e.path,
@@ -497,12 +555,26 @@ class DirectVolume(VolumeInterface):
     @_retry_transient
     @_translate_exceptions
     def read_file(self, path: str) -> bytes:
-        return b"".join(self.volume.read_file(path))
+        # read_file_into_fileobj rather than read_file: a generator cannot be started as a
+        # future, and its progress reports let a long transfer outlast the stall deadline.
+        contents = io.BytesIO()
+        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
+        _await_attempt(
+            _start_cancellable_call(self.volume.read_file_into_fileobj, path, contents, progress_cb=deadline.extend),
+            deadline,
+            f"read_file({path!r})",
+        )
+        return contents.getvalue()
 
     @_retry_transient
     @_translate_exceptions
     def remove_file(self, path: str, *, recursive: bool = False) -> None:
-        self.volume.remove_file(path, recursive=recursive)
+        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
+        _await_attempt(
+            _start_cancellable_call(self.volume.remove_file, path, recursive=recursive),
+            deadline,
+            f"remove_file({path!r})",
+        )
 
     @_retry_transient
     @_translate_exceptions

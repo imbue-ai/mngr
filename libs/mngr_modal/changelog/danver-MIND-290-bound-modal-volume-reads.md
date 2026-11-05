@@ -1,0 +1,1 @@
+mngr commands on Modal no longer hang when Modal stops answering a state-volume read, listing or removal (MIND-290). A stalled attempt is cancelled after 20s without progress and retried within the existing 60s budget. The Modal SDK is pinned at 1.6.1. Five Modal acceptance tests that these stalls turned red are marked `@pytest.mark.flaky` while MIND-290 is open.

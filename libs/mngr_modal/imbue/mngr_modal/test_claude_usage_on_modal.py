@@ -23,6 +23,9 @@ from imbue.mngr_claude_usage.plugin import _stable_shim_path
 from imbue.mngr_modal.instance import ModalProviderInstance
 
 
+# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
+# deadline of its own and can stall past the test's timeout.
+@pytest.mark.flaky
 @pytest.mark.modal
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)

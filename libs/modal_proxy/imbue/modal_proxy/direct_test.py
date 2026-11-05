@@ -1,9 +1,13 @@
 import ast
 import inspect
+import io
 import os
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from collections.abc import Generator
+from concurrent.futures import Future
 from datetime import datetime
 from pathlib import Path
 from types import FunctionType
@@ -23,6 +27,7 @@ from modal._grpc_client import _STATUS_TO_EXCEPTION
 from modal._utils.grpc_utils import RETRYABLE_GRPC_STATUS_CODES
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
+from modal.types import FileEntry as ModalFileEntry
 from modal.types import FileEntryType as ModalFileEntryType
 from modal.volume import _raise_on_block_response_error
 from pydantic import BaseModel
@@ -59,6 +64,7 @@ from imbue.modal_proxy.direct import build_modal_cli_env
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyBlockStorageError
+from imbue.modal_proxy.errors import ModalProxyCallTimeoutError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
@@ -94,6 +100,7 @@ _BLOCK_STORAGE_500_MESSAGE: Final[str] = (
     '<span class="cf-error-code">1101</span>\n'
 )
 _BLOCK_STORAGE_404_MESSAGE: Final[str] = "Request failed with status 404 Not Found: block not found"
+_FAKE_VOLUME_OBJECT_ID: Final[str] = "vo-3c8e41f0d9a27b65"
 
 
 # These are deliberately local concrete stubs used only by
@@ -358,6 +365,9 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
         pytest.param(ModalProxyServiceError("deadline exceeded"), True, id="service_error"),
         pytest.param(ModalProxyRateLimitError("rate limit"), True, id="rate_limit"),
         pytest.param(ModalProxyBlockStorageError(_BLOCK_STORAGE_500_MESSAGE), True, id="block_storage_error"),
+        pytest.param(
+            ModalProxyCallTimeoutError("Modal made no progress on listdir('/hosts/') for 20s"), True, id="call_timeout"
+        ),
         # grpclib raises these below the SDK, so they are not modal.exception.Error
         # and reach the predicate untranslated.
         pytest.param(StreamTerminatedError("stream dropped"), True, id="stream_terminated"),
@@ -722,25 +732,61 @@ def test_direct_modal_interface_respects_explicit_sandbox_v2_opt_out(monkeypatch
 
 
 class _FakeModalVolume:
-    """Minimal stand-in for modal.Volume that streams a file back a block at a time.
+    """Stand-in for modal.Volume, called the way the boundary calls it: with ``_future=True``.
 
-    Raises ``error`` from partway through the stream until ``fail_times`` reads have been
-    made, which is where a block-storage failure actually surfaces: Modal fetches each block
-    as the caller consumes the generator, not when it hands the generator over.
+    Every call hands back a ``concurrent.futures.Future``, one per attempt. The first
+    ``stalled_attempt_count`` attempts never finish, the way a request Modal accepts and
+    never answers does. The next ``failed_attempt_count`` attempts fail with ``error``. The
+    rest answer at once. ``_future`` has no default, so a call made without it fails.
     """
 
-    def __init__(self, blocks: Sequence[bytes], error: modal.exception.Error, fail_times: int) -> None:
-        self._blocks = tuple(blocks)
+    def __init__(
+        self,
+        *,
+        contents: bytes = b"",
+        entries: Sequence[ModalFileEntry] = (),
+        stalled_attempt_count: int = 0,
+        error: modal.exception.Error | None = None,
+        failed_attempt_count: int = 0,
+    ) -> None:
+        self._contents = contents
+        self._entries = list(entries)
+        self._stalled_attempt_count = stalled_attempt_count
         self._error = error
-        self._fail_times = fail_times
-        self.read_count = 0
+        self._failed_attempt_count = failed_attempt_count
+        self.object_id: str | None = None
+        self.attempts: list[Future[Any]] = []
 
-    def read_file(self, path: str) -> Generator[bytes, None, None]:
-        self.read_count += 1
-        for index, block in enumerate(self._blocks):
-            if self.read_count <= self._fail_times and index > 0:
-                raise self._error
-            yield block
+    def _attempt(self, answer: Callable[[], Any]) -> Future[Any]:
+        attempt: Future[Any] = Future()
+        attempt_index = len(self.attempts)
+        self.attempts.append(attempt)
+        if attempt_index < self._stalled_attempt_count:
+            return attempt
+        if attempt_index < self._stalled_attempt_count + self._failed_attempt_count:
+            assert self._error is not None
+            attempt.set_exception(self._error)
+            return attempt
+        attempt.set_result(answer())
+        return attempt
+
+    def _hydrated(self) -> "_FakeModalVolume":
+        self.object_id = _FAKE_VOLUME_OBJECT_ID
+        return self
+
+    def hydrate(self, *, _future: bool) -> Future[Any]:
+        return self._attempt(self._hydrated)
+
+    def listdir(self, path: str, *, _future: bool, recursive: bool = False) -> Future[Any]:
+        return self._attempt(lambda: self._entries)
+
+    def read_file_into_fileobj(
+        self, path: str, fileobj: io.BytesIO, *, _future: bool, progress_cb: Callable[..., None]
+    ) -> Future[Any]:
+        return self._attempt(lambda: fileobj.write(self._contents))
+
+    def remove_file(self, path: str, *, _future: bool, recursive: bool = False) -> Future[Any]:
+        return self._attempt(lambda: None)
 
 
 class _FakeModalSandbox:
@@ -888,14 +934,14 @@ def test_read_file_rides_out_a_block_storage_server_error() -> None:
     the wording check this arrives as a plain ModalProxyError and fails on its first blip.
     """
     fake = _FakeModalVolume(
-        blocks=(b'{"host_id":', b' "host-1"}'),
+        contents=b'{"host_id": "host-1"}',
         error=modal.exception.ExecutionError(_BLOCK_STORAGE_500_MESSAGE),
-        fail_times=1,
+        failed_attempt_count=1,
     )
     volume = DirectVolume.model_construct(volume=fake)
 
     assert volume.read_file("/hosts/host-1.json") == b'{"host_id": "host-1"}'
-    assert fake.read_count == 2, "expected one failed read followed by a successful retry"
+    assert len(fake.attempts) == 2, "expected one failed read followed by a successful retry"
 
 
 def test_modal_still_reports_a_failed_block_request_in_the_words_we_read_as_transient() -> None:
@@ -913,6 +959,80 @@ def test_modal_still_reports_a_failed_block_request_in_the_words_we_read_as_tran
         "first 5xx again. Update _BLOCK_STORAGE_SERVER_ERROR_RE in modal_proxy/errors.py to "
         f"match what Modal now raises:\n{raise_site_source}"
     )
+
+
+_SHORT_ATTEMPT_STALL_SECONDS: Final[float] = 0.05
+
+
+@pytest.mark.parametrize(
+    ("call_volume", "expected_answer"),
+    [
+        pytest.param(lambda volume: volume.get_object_id(), _FAKE_VOLUME_OBJECT_ID, id="get_object_id"),
+        pytest.param(
+            lambda volume: volume.listdir("/hosts/"),
+            [FileEntry(path="hosts/host-1.json", type=FileEntryType.FILE, mtime=1700000000.0, size=21)],
+            id="listdir",
+        ),
+        pytest.param(lambda volume: volume.read_file("/hosts/host-1.json"), b'{"host_id": "host-1"}', id="read_file"),
+        pytest.param(lambda volume: volume.remove_file("/hosts/host-1.json"), None, id="remove_file"),
+    ],
+)
+def test_a_volume_call_modal_never_answers_is_cancelled_and_reissued(
+    call_volume: Callable[[DirectVolume], object], expected_answer: object
+) -> None:
+    """A request Modal accepts and never answers must not hold the caller until an outer budget fires.
+
+    The stalled attempt has to be cancelled, not just abandoned: left running, it could still
+    complete after the call that replaced it (MIND-290).
+    """
+    fake = _FakeModalVolume(
+        contents=b'{"host_id": "host-1"}',
+        entries=(ModalFileEntry(path="hosts/host-1.json", type=ModalFileEntryType.FILE, mtime=1700000000, size=21),),
+        stalled_attempt_count=1,
+    )
+    volume = DirectVolume.model_construct(volume=fake, attempt_stall_seconds=_SHORT_ATTEMPT_STALL_SECONDS)
+
+    assert call_volume(volume) == expected_answer
+    assert [attempt.cancelled() for attempt in fake.attempts] == [True, False]
+
+
+class _SteadilyStreamingModalVolume:
+    """Stand-in for modal.Volume whose read reports progress without pause for ``transfer_seconds``.
+
+    That is a transfer that outlasts any one stall window but never goes silent: a large file
+    on a slow link.
+    """
+
+    def __init__(self, *, contents: bytes, transfer_seconds: float) -> None:
+        self._contents = contents
+        self._transfer_seconds = transfer_seconds
+        self.attempts: list[Future[int]] = []
+
+    def read_file_into_fileobj(
+        self, path: str, fileobj: io.BytesIO, *, _future: bool, progress_cb: Callable[..., None]
+    ) -> Future[int]:
+        attempt: Future[int] = Future()
+        self.attempts.append(attempt)
+        threading.Thread(target=self._stream, args=(attempt, fileobj, progress_cb), daemon=True).start()
+        return attempt
+
+    def _stream(self, attempt: Future[int], fileobj: io.BytesIO, progress_cb: Callable[..., None]) -> None:
+        finished_at = time.monotonic() + self._transfer_seconds
+        while time.monotonic() < finished_at and not attempt.cancelled():
+            progress_cb(advance=1)
+        if attempt.set_running_or_notify_cancel():
+            attempt.set_result(fileobj.write(self._contents))
+
+
+def test_read_file_lets_a_transfer_outlast_the_stall_window_while_bytes_keep_arriving() -> None:
+    """The deadline bounds silence, not duration, so a long download is not cut off and re-started."""
+    fake = _SteadilyStreamingModalVolume(
+        contents=b"outputs archive", transfer_seconds=4 * _SHORT_ATTEMPT_STALL_SECONDS
+    )
+    volume = DirectVolume.model_construct(volume=fake, attempt_stall_seconds=_SHORT_ATTEMPT_STALL_SECONDS)
+
+    assert volume.read_file("/archives/outputs.tar.gz") == b"outputs archive"
+    assert [attempt.cancelled() for attempt in fake.attempts] == [False]
 
 
 def test_transient_retry_gives_up_on_elapsed_time_not_attempt_count() -> None:

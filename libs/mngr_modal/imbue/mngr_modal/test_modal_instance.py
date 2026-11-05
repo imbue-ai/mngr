@@ -294,6 +294,9 @@ def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> No
         assert len(tags) == 2
 
 
+# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
+# deadline of its own and can stall past the test's timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -> None:
@@ -337,6 +340,9 @@ def test_list_snapshots_returns_initial_snapshot(initial_snapshot_provider: Moda
         assert snapshots[0].name == "initial"
 
 
+# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
+# deadline of its own and can stall past the test's timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_delete_snapshot(real_modal_provider: ModalProviderInstance) -> None:
@@ -613,6 +619,9 @@ def test_restart_after_graceful_stop_without_initial_snapshot(
             pass
 
 
+# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
+# deadline of its own and can stall past the test's timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_restart_fails_after_hard_kill_without_initial_snapshot(
@@ -711,6 +720,9 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
         assert "blocked" in result.stdout
 
 
+# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
+# deadline of its own and can stall past the test's timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_cidr_allowlist_allows_traffic_within_range(

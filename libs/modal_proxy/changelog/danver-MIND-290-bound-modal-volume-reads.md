@@ -1,0 +1,3 @@
+`DirectVolume`'s reads and metadata calls (`read_file`, `listdir`, `remove_file`, `get_object_id`) no longer wait forever on a request Modal never answers (MIND-290). An attempt that makes no progress for 20s -- no answer, or for `read_file` no further bytes -- is cancelled and re-issued under the existing 60s transient retry as the new transient `ModalProxyCallTimeoutError`. The cancel goes through synchronicity's `_future=True` convention, so a stalled attempt cannot complete later. `read_file` reads through `Volume.read_file_into_fileobj`, whose progress callback keeps a long download alive.
+
+The Modal SDK moves from 1.5.4 to 1.6.1 (synchronicity 0.12.5 to 0.12.6), the newest release inside the `exclude-newer` cooldown.

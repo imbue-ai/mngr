@@ -187,6 +187,14 @@ class ModalProxyRateLimitError(ModalProxyTransientError):
     """Raised when a Modal API rate limit is exceeded."""
 
 
+class ModalProxyCallTimeoutError(ModalProxyTransientError):
+    """Raised when one attempt at a Modal call made no progress for as long as an attempt is given.
+
+    The attempt is cancelled before this is raised, so it cannot finish after the call
+    that replaces it.
+    """
+
+
 class ModalProxyRemoteError(ModalProxyError):
     """Raised on Modal remote execution errors."""
 
