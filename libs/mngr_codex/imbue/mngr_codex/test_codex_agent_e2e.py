@@ -231,6 +231,7 @@ def test_codex_message_delivery_journey(tmp_path: Path) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(900)

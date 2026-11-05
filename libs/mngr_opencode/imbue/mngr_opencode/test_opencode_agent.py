@@ -182,6 +182,7 @@ def _opencode_agent_state_dir(host_dir: Path) -> Path:
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="opencode")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(900)

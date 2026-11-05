@@ -1,0 +1,1 @@
+`test_codex_agent_with_unoffered_pinned_model_starts_on_account_default` is marked `harness_internals(harness="codex")`, the shared marker for a release test that pins an internal of the harness CLI mngr reads.

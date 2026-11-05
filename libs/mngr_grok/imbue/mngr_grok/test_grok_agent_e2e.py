@@ -292,6 +292,7 @@ def test_grok_concurrent_message_delivery(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
@@ -341,6 +342,7 @@ def test_grok_send_while_busy_is_confirmed_by_its_queued_row_while_the_turn_runs
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
@@ -375,6 +377,7 @@ def test_grok_tool_call_runs_in_the_work_dir_and_reaches_the_common_transcript(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
@@ -416,6 +419,7 @@ def test_grok_subagent_is_tracked_while_it_runs_and_reaches_the_common_transcrip
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
@@ -468,6 +472,7 @@ def test_grok_restart_after_new_resumes_the_new_session(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(900)

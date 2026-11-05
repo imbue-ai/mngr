@@ -1,0 +1,1 @@
+`test_decoder_field_map_matches_installed_antigravity_binary` is marked `harness_internals(harness="antigravity")`, the shared marker for a release test that pins an internal of the harness CLI mngr reads.

@@ -2135,6 +2135,8 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx2" },
+    { name = "imbue-mngr-autocompact" },
     { name = "imbue-mngr-modal" },
 ]
 
@@ -2147,7 +2149,11 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
+dev = [
+    { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "imbue-mngr-autocompact", editable = "libs/mngr_autocompact" },
+    { name = "imbue-mngr-modal", editable = "libs/mngr_modal" },
+]
 
 [[package]]
 name = "imbue-mngr-claude-usage"

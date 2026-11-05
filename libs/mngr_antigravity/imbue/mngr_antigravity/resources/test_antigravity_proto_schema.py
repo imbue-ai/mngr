@@ -85,6 +85,7 @@ def _index(descriptors: dict[str, bytes]) -> tuple[dict[str, dict[str, int]], di
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="antigravity")
 def test_decoder_field_map_matches_installed_antigravity_binary(tmp_path: Path) -> None:
     """Every field number / enum value decode_agy_transcript.py hard-codes must match live agy."""
     messages, enums = _index(_load_descriptors(tmp_path))

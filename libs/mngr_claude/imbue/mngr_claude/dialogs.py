@@ -512,11 +512,11 @@ class Blocking(Dialog, ABC):
 
 
 class ModelSwitchWarning(MatchesPattern, Answerable):
-    """Raised after choosing an entry in the ``/model`` picker: switching mid-session
-    invalidates the prompt cache, so claude asks to confirm.
+    """Raised when ``/model`` -- a ``/model <name>`` or a pick in its picker -- would switch the
+    model mid-session: that invalidates the prompt cache, so claude asks to confirm.
 
     The case this whole feature exists for. It opens *because of* the message just sent,
-    so only the post-submit check can see it.
+    so the next send's preflight is the first check that sees it.
     """
 
     def get_nickname(self) -> str:

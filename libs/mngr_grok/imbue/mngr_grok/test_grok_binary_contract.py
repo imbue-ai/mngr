@@ -461,12 +461,14 @@ def _system_prompt_text(request_body: Mapping[str, Any]) -> str:
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.usefixtures("pinned_grok_binary")
 def test_pinned_grok_passes_the_catalog_signal() -> None:
     assert check_signal(GrokSignalCheck())
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_hooks_run_from_the_relative_path_and_carry_the_fields_the_handler_reads(
     pinned_grok_binary: Path,
@@ -558,6 +560,7 @@ def test_hooks_run_from_the_relative_path_and_carry_the_fields_the_handler_reads
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_grok_agent_is_unset_for_hooks_and_set_for_tools(
     pinned_grok_binary: Path,
@@ -719,6 +722,7 @@ def _write_claude_configuration(home: Path, hook_log_path: Path, markers: Mappin
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.parametrize(
     ("is_isolated_from_claude_config", "expected_marker_names"),
@@ -767,6 +771,7 @@ def test_claude_isolation_runs_no_claude_or_cursor_hook_and_loads_only_the_defin
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_claude_and_cursor_hook_probes_run_once_grok_imports_their_hooks(
     pinned_grok_binary: Path,
@@ -808,6 +813,7 @@ def test_claude_and_cursor_hook_probes_run_once_grok_imports_their_hooks(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_inspect_warns_only_about_two_known_keys_in_the_rendered_config(
     pinned_grok_binary: Path,
@@ -849,6 +855,7 @@ def test_inspect_warns_only_about_two_known_keys_in_the_rendered_config(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_new_session_lives_in_the_computed_bucket_and_resumes_after_a_stop_before_its_first_prompt(
     pinned_grok_binary: Path,
@@ -882,6 +889,7 @@ def test_new_session_lives_in_the_computed_bucket_and_resumes_after_a_stop_befor
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 def test_fork_keeps_the_source_role_and_resumes_after_a_stop_before_its_first_prompt(
@@ -935,6 +943,7 @@ def test_fork_keeps_the_source_role_and_resumes_after_a_stop_before_its_first_pr
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_footer_first_hint_names_what_enter_does(
     pinned_grok_binary: Path,
@@ -971,6 +980,7 @@ def test_footer_first_hint_names_what_enter_does(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.rsync
 def test_a_consent_notice_fails_the_startup_check_before_mngr_answers_it(
@@ -1042,6 +1052,7 @@ def _write_blocking_stop_hook(tmp_path: Path) -> tuple[Path, Path]:
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_blocking_stop_hook_keeps_the_agent_active_through_its_continuation(
     pinned_grok_binary: Path,
@@ -1087,6 +1098,7 @@ def test_a_blocking_stop_hook_keeps_the_agent_active_through_its_continuation(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_an_auto_wake_turn_writes_turn_completed_under_its_task_completed_prompt_id(
     pinned_grok_binary: Path,
@@ -1118,6 +1130,7 @@ def test_an_auto_wake_turn_writes_turn_completed_under_its_task_completed_prompt
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_background_subagent_keeps_the_agent_active_from_its_spawn_to_its_wake_turn(
     pinned_grok_binary: Path,
@@ -1148,6 +1161,7 @@ def test_a_background_subagent_keeps_the_agent_active_from_its_spawn_to_its_wake
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_ctrl_c_during_a_foreground_tool_cancels_the_turn_and_leaves_grok_running(
     pinned_grok_binary: Path,
@@ -1188,6 +1202,7 @@ def test_ctrl_c_during_a_foreground_tool_cancels_the_turn_and_leaves_grok_runnin
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_ctrl_c_cancels_a_turn_without_asking_and_leaves_a_running_background_subagent_running(
     pinned_grok_binary: Path,
@@ -1266,6 +1281,7 @@ def _start_held_turn(agent: GrokAgent, held_message: str, run_id: str) -> str:
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.timeout(450)
 def test_a_turn_a_person_cancels_before_its_first_reply_goes_unreported_and_ends_at_the_idle_notification(
@@ -1306,6 +1322,7 @@ def test_a_turn_a_person_cancels_before_its_first_reply_goes_unreported_and_ends
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 @pytest.mark.parametrize(
     ("build_held_message", "min_held_message_length"),
@@ -1371,6 +1388,7 @@ def test_mngr_s_ctrl_c_before_the_first_reply_ends_the_dropped_turn_at_once_and_
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_an_empty_model_reply_keeps_the_turn_in_flight_through_grok_s_retry(
     pinned_grok_binary: Path,
@@ -1407,6 +1425,7 @@ def test_an_empty_model_reply_keeps_the_turn_in_flight_through_grok_s_retry(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_five_line_message_typed_with_send_keys_arrives_as_one_prompt(
     pinned_grok_binary: Path,
@@ -1433,6 +1452,7 @@ def test_a_five_line_message_typed_with_send_keys_arrives_as_one_prompt(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_updates_carry_the_kinds_and_fields_the_converter_maps(
     pinned_grok_binary: Path,
@@ -1505,6 +1525,7 @@ def test_updates_carry_the_kinds_and_fields_the_converter_maps(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_send_after_text_left_in_the_composer_is_confirmed_by_the_prompt_it_joins(
     pinned_grok_binary: Path,
@@ -1531,6 +1552,7 @@ def test_a_send_after_text_left_in_the_composer_is_confirmed_by_the_prompt_it_jo
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_send_without_ascii_letters_to_a_busy_grok_is_confirmed_by_its_queued_row(
     pinned_grok_binary: Path,
@@ -1558,6 +1580,7 @@ def test_a_send_without_ascii_letters_to_a_busy_grok_is_confirmed_by_its_queued_
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_new_command_send_is_confirmed_by_the_root_session_it_starts(
     pinned_grok_binary: Path,
@@ -1577,6 +1600,7 @@ def test_a_new_command_send_is_confirmed_by_the_root_session_it_starts(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
 def test_a_tool_approved_on_its_permission_card_runs_as_running_and_takes_a_queued_message(
     pinned_grok_binary: Path,
