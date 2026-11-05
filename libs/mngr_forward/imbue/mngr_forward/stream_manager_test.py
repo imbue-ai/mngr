@@ -39,8 +39,10 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.primitives import MNGR_BINARY
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
@@ -72,6 +74,9 @@ def _agent(agent_id: AgentId, host_id: HostId = _HOST_ID, labels: dict[str, str]
         provider_name=ProviderInstanceName("modal"),
         certified_data={"labels": labels or {}},
     )
+
+
+_AGENT_1 = _agent(TEST_AGENT_ID_1)
 
 
 def _serialize(event_obj: object) -> str:
@@ -488,26 +493,28 @@ class _RecordingConcurrencyGroup:
 
     Only the two methods ``_start_events_stream`` touches are implemented:
     ``is_shutting_down`` (always False so the spawn path runs) and
-    ``run_process_in_background`` (records and returns a fresh live fake).
+    ``run_process_in_background`` (records the command and returns a fresh live fake).
     """
 
     def __init__(self) -> None:
         self.spawned: list[_FakeEventsProcess] = []
+        self.commands: list[list[str]] = []
 
     def is_shutting_down(self) -> bool:
         return False
 
     def run_process_in_background(
-        self, *, on_output: Callable[[str, bool], None], **_kwargs: object
+        self, *, command: list[str], on_output: Callable[[str, bool], None], **_kwargs: object
     ) -> _FakeEventsProcess:
         process = _FakeEventsProcess(on_output)
         self.spawned.append(process)
+        self.commands.append(list(command))
         return process
 
 
-def _start_events(manager: ForwardStreamManager, instance_key: AgentInstanceKey) -> None:
+def _start_events(manager: ForwardStreamManager, agent: DiscoveredAgent) -> None:
     """Invoke the manager's private per-agent events-stream starter (test hook)."""
-    manager._start_events_stream(instance_key)  # noqa: SLF001
+    manager._start_events_stream(agent)  # noqa: SLF001
 
 
 def _pacing_state(
@@ -542,14 +549,14 @@ def test_dead_events_stream_is_respawned_on_next_start(
 
     # First start spawns a live stream; a second start leaves the live stream
     # alone (no duplicate spawn).
-    _start_events(manager, _INSTANCE_1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 1
 
     # Once the stream exits (host restart broke --follow), the next start must
     # drop the dead entry and respawn a fresh one rather than skip the agent.
     fake_cg.spawned[0].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
 
@@ -560,17 +567,64 @@ def test_events_stream_status_reports_the_current_childs_last_line_not_its_prede
     manager, _resolver, _buf, _counter = setup
     fake_cg = _RecordingConcurrencyGroup()
     _install_recording_cg(manager, fake_cg)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].print_stdout_line('{"source": "requests"}\n')
     assert manager.get_events_stream_status(_INSTANCE_1).seconds_since_last_line is not None
 
     fake_cg.spawned[0].mark_dead(1)
     assert manager.get_events_stream_status(_INSTANCE_1).describe() == "no events stream running"
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     status = manager.get_events_stream_status(_INSTANCE_1)
     assert status.running_seconds is not None
     assert status.seconds_since_last_line is None
+
+
+def test_events_stream_names_a_discovered_agent_by_its_ids_and_provider(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """The child reads the agent straight from its ids and provider, so it runs no discovery first; so does a respawn."""
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    expected_command = [
+        MNGR_BINARY,
+        "event",
+        f"{TEST_AGENT_ID_1}@{_HOST_ID}.modal",
+        "services",
+        "--latest-by",
+        "services:service",
+        "--follow",
+        "--quiet",
+    ]
+
+    _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter))
+    fake_cg.spawned[0].mark_dead(1)
+    _start_events(manager, _AGENT_1)
+
+    assert fake_cg.commands == [expected_command, expected_command]
+
+
+def test_events_stream_logs_how_long_each_child_took_to_deliver_its_first_line(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """Each child's first line is logged once with its delay, so a slow-to-route new agent is diagnosable."""
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    with capture_loguru(level="INFO") as log_output:
+        _start_events(manager, _AGENT_1)
+        fake_cg.spawned[0].print_stdout_line('{"source": "services", "service": "web", "url": "http://x:1"}\n')
+        fake_cg.spawned[0].print_stdout_line('{"source": "services", "service": "api", "url": "http://x:2"}\n')
+        first_line_logs = [line for line in log_output.getvalue().splitlines() if "delivered its first line" in line]
+        assert len(first_line_logs) == 1
+        assert str(_INSTANCE_1) in first_line_logs[0]
+
+        # A respawned child is timed afresh.
+        fake_cg.spawned[0].mark_dead(1)
+        _start_events(manager, _AGENT_1)
+        fake_cg.spawned[1].print_stdout_line('{"source": "services", "service": "web", "url": "http://x:1"}\n')
+        assert log_output.getvalue().count("delivered its first line") == 2
 
 
 def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path: Path) -> None:
@@ -616,17 +670,17 @@ def test_crash_looping_events_stream_respawn_is_backed_off(
     fake_cg = _RecordingConcurrencyGroup()
     _install_recording_cg(manager, fake_cg)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(1)
     # First death respawns immediately (the backoff window opens now).
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
     # The respawn dies instantly too; snapshot-cadence retries inside the
     # window must NOT spawn again.
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
 
@@ -644,9 +698,9 @@ def test_events_stream_backoff_resets_after_a_healthy_stream(
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
     # Simulate the respawned stream living past the healthy age, seen alive by a
@@ -656,9 +710,9 @@ def test_events_stream_backoff_resets_after_a_healthy_stream(
     backoff_by_instance, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
     spawned_at_by_instance[instance_str] = now - 3600.0
     next_respawn_at_by_instance[instance_str] = now - 1.0
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 3
     # The stored next-step backoff is initial*2 -- proof the healthy stream
     # reset the ladder rather than continuing to escalate from the crash loop.
@@ -680,14 +734,14 @@ def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(1)
     # First death respawns immediately and stores the escalated next-step
     # backoff (4.0); the respawn dies instantly and its death is noticed by a
     # snapshot inside the window, which keeps the corpse.
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
     # Simulate 61 seconds passing while the corpse waits (shift every stored
@@ -696,7 +750,7 @@ def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
     for pacing in (next_respawn_at_by_instance, spawned_at_by_instance):
         for key in pacing:
             pacing[key] -= 61.0
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 3
     # The ladder kept escalating (4 -> stored 8): the instantly-dead stream was
     # not misclassified as healthy just because its corpse sat for 61s.
@@ -724,12 +778,12 @@ def test_events_stream_exit_log_carries_the_childs_last_stderr_lines(
     infos: list[str] = []
     sink_id = logger.add(infos.append, level="INFO", format="{message}")
     try:
-        _start_events(manager, _INSTANCE_1)
+        _start_events(manager, _AGENT_1)
         # Seven stderr lines; only the newest five may survive in the tail.
         for idx in range(7):
             _feed_events_stderr(manager, _INSTANCE_1, f"stderr-line-{idx}")
         fake_cg.spawned[0].mark_dead(1)
-        _start_events(manager, _INSTANCE_1)
+        _start_events(manager, _AGENT_1)
 
         exit_logs = [message for message in infos if "exited (returncode=1)" in message]
         assert len(exit_logs) == 1
@@ -743,7 +797,7 @@ def test_events_stream_exit_log_carries_the_childs_last_stderr_lines(
         fake_cg.spawned[1].mark_dead(1)
         backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
         next_respawn_at_by_instance[str(_INSTANCE_1)] = time.monotonic() - 1.0
-        _start_events(manager, _INSTANCE_1)
+        _start_events(manager, _AGENT_1)
         exit_logs_after = [message for message in infos if "exited (returncode=1)" in message]
         assert len(exit_logs_after) == 2
         assert "stderr-line-6" not in exit_logs_after[1]
@@ -770,12 +824,12 @@ def test_gone_target_stream_backs_off_far_longer_without_touching_the_ladder(
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     before = time.monotonic()
     # One gone-target exit is not enough: it takes the ordinary ladder, so a
     # transiently unreadable host record is retried in seconds.
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
     backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
     assert next_respawn_at_by_instance[instance_str] - before < 60.0
@@ -786,7 +840,7 @@ def test_gone_target_stream_backs_off_far_longer_without_touching_the_ladder(
     fake_cg.spawned[1].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
     before = time.monotonic()
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 3
     backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
     assert next_respawn_at_by_instance[instance_str] - before > 600.0
@@ -796,13 +850,13 @@ def test_gone_target_stream_backs_off_far_longer_without_touching_the_ladder(
 
     # Inside the long window, snapshot-cadence retries must not spawn.
     fake_cg.spawned[2].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
-    _start_events(manager, _INSTANCE_1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 3
 
     # Once the window passes (discovery may have been stale), it retries again.
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 4
 
 
@@ -820,22 +874,22 @@ def test_an_ordinary_exit_clears_the_gone_target_strikes(
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
 
     # An ordinary crash in between clears the strike.
     _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
 
     # So this gone-target exit is strike one again, not two: ordinary ladder.
     _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
     fake_cg.spawned[2].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     before = time.monotonic()
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
     assert next_respawn_at_by_instance[instance_str] - before < 60.0
 
@@ -855,19 +909,19 @@ def test_a_healthy_run_clears_the_gone_target_strikes(
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
 
     # The respawn runs long enough to count as healthy, is seen alive by a
     # snapshot, and then dies, again with the gone-target code.
     _backoff, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
     spawned_at_by_instance[instance_str] = time.monotonic() - (_EVENTS_STREAM_HEALTHY_AGE_SECONDS + 1.0)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[1].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     before = time.monotonic()
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
 
     # The healthy run reset the count, so this is strike one: ordinary ladder,
     # not the long window.
@@ -889,9 +943,9 @@ def test_a_stream_first_noticed_dead_after_a_long_snapshot_gap_does_not_reset_th
     _install_recording_cg(manager, fake_cg)
     instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     fake_cg.spawned[0].mark_dead(1)
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 2
 
     # The respawn dies at once, and the next snapshot only arrives well past
@@ -900,7 +954,7 @@ def test_a_stream_first_noticed_dead_after_a_long_snapshot_gap_does_not_reset_th
     fake_cg.spawned[1].mark_dead(1)
     spawned_at_by_instance[instance_str] = time.monotonic() - (_EVENTS_STREAM_HEALTHY_AGE_SECONDS + 30.0)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
-    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _AGENT_1)
     assert len(fake_cg.spawned) == 3
     # The ladder kept escalating (stored 4 -> 8) instead of resetting to 4.
     assert backoff_by_instance[instance_str] == 8.0
@@ -1004,7 +1058,7 @@ def test_held_back_stream_starts_on_the_first_snapshot_showing_the_host_running(
     for idx in range(3):
         fake_cg.spawned[idx].mark_dead(1)
         _pacing_state(manager)[1][instance_str] = time.monotonic() - 1.0
-        _start_events(manager, _INSTANCE_1)
+        _start_events(manager, _AGENT_1)
     fake_cg.spawned[3].mark_dead(1)
     assert len(fake_cg.spawned) == 4
 

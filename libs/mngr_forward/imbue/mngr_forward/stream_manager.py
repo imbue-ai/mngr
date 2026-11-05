@@ -9,9 +9,9 @@ plugin needs:
   in-process tail of a shared discovery events file written by another
   observer. Either way lines drive the envelope writer's ``observe`` stream and
   the ``ForwardResolver``'s known-agent set + per-host SSH info.
-- One ``mngr event <agent_id>@<host_id> services requests --follow --quiet``
-  per filter-matching agent instance produces service-registration / request
-  events (host-scoped addressing, since an agent id is only unique per host).
+- One ``mngr event <agent_id>@<host_id>.<provider> services --follow --quiet``
+  per filter-matching agent instance produces service-registration events
+  (host-scoped addressing, since an agent id is only unique per host).
   Lines pass through to the envelope writer's ``event`` stream and drive
   the resolver's per-agent service map. No stream is started while discovery
   reports the agent's host as down (stopped, paused, crashed and the like); it
@@ -44,6 +44,7 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
@@ -58,10 +59,13 @@ from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
@@ -80,19 +84,18 @@ _SERVICES_SOURCE = "services"
 _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS: Final[float] = 2.0
 _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS: Final[float] = 60.0
 _EVENTS_STREAM_HEALTHY_AGE_SECONDS: Final[float] = 60.0
-# A child whose stderr says its target agent/host does not exist cannot succeed
-# until discovery changes its mind, so it retries far less often than the
-# crash-loop ladder's cap. Still finite: the child's view can be transiently
-# stale (e.g. an agent listing hiccup during a host restart), so never respawning
-# again would strand a live agent's stream -- the exact wedge this plugin's
-# respawn machinery exists to prevent.
+# A child that exits saying its target host does not exist cannot succeed until
+# discovery changes its mind, so it retries far less often than the crash-loop
+# ladder's cap. Still finite: the child's view can be transiently stale (e.g. a
+# listing hiccup during a host restart), so never respawning again would strand a
+# live agent's stream -- the exact wedge this plugin's respawn machinery exists to prevent.
 _EVENTS_GONE_TARGET_RESPAWN_BACKOFF_SECONDS: Final[float] = 900.0
 # How many of a child's most recent stderr lines are kept for its exit log line.
 _EVENTS_STDERR_TAIL_MAX_LINES: Final[int] = 5
 # How many gone-target exits, with no healthy run in between, before the long
 # backoff applies. A stream is only ever started for an agent this forward's own
-# aggregator currently tracks, so a gone-target exit means the child's discovery
-# view and ours disagree -- and one disagreement is not worth 15 minutes of
+# aggregator currently tracks, so a gone-target exit means the child's view of the
+# host and ours disagree -- and one disagreement is not worth 15 minutes of
 # silence for an agent that may well be alive.
 _EVENTS_GONE_TARGET_STRIKES_REQUIRED: Final[int] = 2
 # Host states in which the host is definitively not running. No events stream is
@@ -114,6 +117,18 @@ _HOST_STATES_WITHOUT_EVENTS_STREAM: Final[frozenset[HostState]] = frozenset(
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
+
+
+@pure
+def _events_stream_address(instance_key: AgentInstanceKey, provider_name: ProviderInstanceName) -> str:
+    """The ``mngr event`` address of an agent instance, naming its provider.
+
+    ``mngr event`` reads an agent named by its ids and its provider straight from
+    them. Without the provider it first runs discovery over the agent's whole
+    provider, which can delay the instance's services by seconds.
+    """
+    host_address = HostAddress(host=instance_key.host_id, provider=provider_name)
+    return str(AgentAddress(agent=instance_key.agent_id, host=host_address))
 
 
 class ForwardStreamManager(MutableModel):
@@ -437,7 +452,7 @@ class ForwardStreamManager(MutableModel):
         present_agent_instances = self._aggregator.get_agent_by_instance()
         for agent in filtered_agents:
             if agent.instance_key in present_agent_instances:
-                self._start_events_stream(agent.instance_key)
+                self._start_events_stream(agent)
 
     def _apply_event_and_reconcile(self, event: DiscoveryEvent) -> None:
         """Fold one discovery event into the aggregator and apply the resulting membership delta."""
@@ -454,17 +469,19 @@ class ForwardStreamManager(MutableModel):
                 self._ssh_by_host_id.pop(host_id_str, None)
         for instance_key in delta.removed_agent_instances:
             self._teardown_agent(instance_key)
-        for instance_key in delta.added_agent_instances:
-            self._setup_agent(instance_key)
+        if delta.added_agent_instances:
+            agent_by_instance = self._aggregator.get_agent_by_instance()
+            for instance_key in delta.added_agent_instances:
+                self._setup_agent(agent_by_instance[instance_key])
 
-    def _setup_agent(self, instance_key: AgentInstanceKey) -> None:
+    def _setup_agent(self, agent: DiscoveredAgent) -> None:
+        instance_key = agent.instance_key
         ssh_info = self._ssh_for_agent(instance_key)
         if ssh_info is not None:
             self.resolver.update_ssh_info(instance_key, ssh_info)
-        self._start_events_stream(instance_key)
-        provider_name = self._provider_name_for_agent(instance_key)
+        self._start_events_stream(agent)
         for callback in self._on_agent_discovered_callbacks:
-            self._safely_call(callback, instance_key.agent_id, ssh_info, provider_name, name="on_agent_discovered")
+            self._safely_call(callback, agent.agent_id, ssh_info, str(agent.provider_name), name="on_agent_discovered")
 
     def _teardown_agent(self, instance_key: AgentInstanceKey) -> None:
         with self._lock:
@@ -494,7 +511,7 @@ class ForwardStreamManager(MutableModel):
                     callback,
                     agent.agent_id,
                     ssh_info,
-                    self._provider_name_for_agent(agent.instance_key),
+                    str(agent.provider_name),
                     name="on_agent_discovered (ssh-info-late)",
                 )
 
@@ -503,7 +520,7 @@ class ForwardStreamManager(MutableModel):
         # A host that just came back up gets its agents' streams now rather than
         # at the next snapshot.
         for agent in self._agents_on_host(str(event.host.host_id)):
-            self._start_events_stream(agent.instance_key)
+            self._start_events_stream(agent)
 
     def _agents_on_host(self, host_id_str: str) -> list[DiscoveredAgent]:
         return [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
@@ -517,12 +534,6 @@ class ForwardStreamManager(MutableModel):
         with self._lock:
             return self._ssh_by_host_id.get(str(instance_key.host_id))
 
-    def _provider_name_for_agent(self, instance_key: AgentInstanceKey) -> str:
-        agent = self._aggregator.get_agent_by_instance().get(instance_key)
-        if agent is None:
-            return "unknown"
-        return str(agent.provider_name)
-
     def _host_state_without_events_stream(self, instance_key: AgentInstanceKey) -> HostState | None:
         """Return the agent's host state if it rules out an events stream, else None."""
         host = self._aggregator.get_host_by_id().get(str(instance_key.host_id))
@@ -532,7 +543,8 @@ class ForwardStreamManager(MutableModel):
 
     # Per-agent events streams
 
-    def _start_events_stream(self, instance_key: AgentInstanceKey) -> None:
+    def _start_events_stream(self, agent: DiscoveredAgent) -> None:
+        instance_key = agent.instance_key
         if self._cg.is_shutting_down():
             return
         if not self._filtered_event_sources:
@@ -617,16 +629,18 @@ class ForwardStreamManager(MutableModel):
             # empty map on the first spawn.
             self._events_services.setdefault(instance_str, {})
             self._events_last_line_at_by_instance.pop(instance_str, None)
+            # Recorded before the spawn so the child's first line is always timed against its own start.
+            self._events_spawned_at_by_instance[instance_str] = time.monotonic()
         sources: Sequence[str] = self._filtered_event_sources
+        # A host-scoped address keeps this stream unambiguous even when the same
+        # agent id exists on another host mid-migration.
+        address = _events_stream_address(instance_key, agent.provider_name)
         try:
-            # The instance key doubles as a host-scoped CLI address
-            # (``<agent_id>@<host_id>``), so this stream stays unambiguous even
-            # when the same agent id exists on another host mid-migration.
             process = self._cg.run_process_in_background(
                 command=[
                     self.mngr_binary,
                     "event",
-                    instance_str,
+                    address,
                     *sources,
                     # Each services event re-announces one service, so only each
                     # service's latest registration matters; replaying the whole
@@ -645,7 +659,6 @@ class ForwardStreamManager(MutableModel):
             )
             with self._lock:
                 self._events_processes[instance_str] = process
-                self._events_spawned_at_by_instance[instance_str] = time.monotonic()
             # A respawn after an exit is already announced by the exit line above.
             if existing is None:
                 logger.info("Started per-agent events stream for {}", instance_key)
@@ -714,8 +727,18 @@ class ForwardStreamManager(MutableModel):
         stripped = line.strip()
         if not stripped:
             return
+        now = time.monotonic()
         with self._lock:
-            self._events_last_line_at_by_instance[str(instance_key)] = time.monotonic()
+            is_first_line = str(instance_key) not in self._events_last_line_at_by_instance
+            self._events_last_line_at_by_instance[str(instance_key)] = now
+            spawned_at = self._events_spawned_at_by_instance.get(str(instance_key))
+        # How long a child takes to deliver anything bounds how soon a new agent's origins can route.
+        if is_first_line and spawned_at is not None:
+            logger.info(
+                "Per-agent events stream for {} delivered its first line {:.1f}s after it started",
+                instance_key,
+                now - spawned_at,
+            )
         self.envelope_writer.emit_event(instance_key.agent_id, stripped)
 
         try:

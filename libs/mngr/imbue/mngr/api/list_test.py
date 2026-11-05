@@ -2866,7 +2866,7 @@ def test_the_single_agent_lookup_blames_the_unreachable_backend_too(temp_mngr_ct
 # A lookup that matches nothing exits with the gone-target code only when every
 # identifier it was given is machine-generated. mngr_forward reads the exit code
 # alone to decide whether respawning its per-agent `mngr event --follow` child
-# could ever succeed, and it always addresses `<agent_id>@<host_id>`. A name is
+# could ever succeed, and it always addresses an agent by its ids. A name is
 # user-typed, so a miss there is as likely a typo and must keep the ordinary
 # code -- otherwise `mngr stop <typo>` is indistinguishable from a gone target.
 _MISSING_AGENT_NAME = AgentName("some-machine")

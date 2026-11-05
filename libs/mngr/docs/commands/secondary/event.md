@@ -18,7 +18,9 @@ TARGET identifies an agent or a host by text:
 Bare names without `@` are always interpreted as agent names. An agent named by
 its ids and its provider (`agent-...@host-....PROVIDER`, as `mngr create --format
 jsonl` reports them in its `created` event) is read without discovery, which on a
-machine with many containers and providers takes seconds.
+machine with many containers and providers takes seconds. Such an address reads the
+events from that host without looking the agent up, so while the host is readable an
+agent that is not on it shows no events rather than failing with "not found".
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.

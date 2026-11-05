@@ -13,6 +13,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
@@ -55,9 +56,11 @@ from imbue.mngr.api.events import stream_all_events
 from imbue.mngr.cli.testing import SAMPLE_ATIF_STREAM_EVENTS
 from imbue.mngr.cli.testing import write_common_transcript_events
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.errors import EventsFollowReaderDiedError
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
@@ -75,7 +78,9 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.cel_utils import compile_cel_filters
@@ -275,8 +280,8 @@ def test_resolve_events_target_finds_agent_by_instance_key_address(
 ) -> None:
     """An ``ID@HOST-ID`` address (an agent instance key) resolves to the agent.
 
-    This is the address form the forward plugin uses for its per-instance
-    event-stream subprocesses, so host-id-qualified resolution must work.
+    An agent instance key doubles as a CLI address, so host-id-qualified
+    resolution must work.
     """
     per_host_dir = local_provider.host_dir
     host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
@@ -315,6 +320,39 @@ def test_resolve_events_target_reads_an_agent_named_by_its_ids_and_provider_with
 
     assert target.host_id == host.id
     assert read_event_content(target, "output.log") == "by-ids log content 51733\n"
+
+
+_DISABLED_LOCAL_PROVIDER_NAME = ProviderInstanceName("disabled-local")
+
+
+@pytest.mark.parametrize(
+    "provider_name", [_DISABLED_LOCAL_PROVIDER_NAME, ProviderInstanceName("removed-provider")], ids=str
+)
+def test_an_agent_named_by_its_ids_under_a_provider_discovery_would_not_load_is_not_found(
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+    provider_name: ProviderInstanceName,
+) -> None:
+    """A removed or disabled provider reads nothing, so the target is reported gone, as every other lookup does.
+
+    The disabled instance runs the local backend, so reading it by its ids would
+    find these events if the provider's enabled state were ignored.
+    """
+    providers = {
+        _DISABLED_LOCAL_PROVIDER_NAME: LocalProviderConfig(backend=ProviderBackendName("local"), is_enabled=False)
+    }
+    config = temp_mngr_ctx.config.model_copy_update(to_update(temp_mngr_ctx.config.field_ref().providers, providers))
+    mngr_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    agent_id = AgentId.generate()
+    agent_events_dir = local_provider.host_dir / "agents" / str(agent_id) / "events"
+    agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (agent_events_dir / "output.log").write_text("unreadable log content 62844\n")
+
+    address = AgentAddress(agent=agent_id, host=HostAddress(host=host.id, provider=provider_name))
+    with pytest.raises(NoMatchingHostsError) as exc_info:
+        resolve_events_target(address, mngr_ctx)
+    assert exc_info.value.exit_code == EXIT_CODE_TARGET_NOT_FOUND
 
 
 def test_resolve_events_target_finds_host(

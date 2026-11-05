@@ -32,6 +32,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import EventsFollowReaderDiedError
@@ -295,11 +296,14 @@ def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -
     # (``agent-...@host-....docker``, as a create's ``created`` event reports
     # them) needs no discovery, which on a machine with many containers and
     # providers costs seconds a caller following a short boot does not have.
+    # The provider is loaded the way discovery loads it, so one that is removed,
+    # disabled, empty or unreachable is left to the lookup below to report.
     if (
         isinstance(address.agent, AgentId)
         and address.host is not None
         and isinstance(address.host.host, HostId)
         and address.host.provider is not None
+        and get_all_provider_instances_and_skipped(mngr_ctx, (str(address.host.provider),))[0]
     ):
         with log_span("Getting events access for agent {} by its ids", address.agent):
             direct_target = try_build_events_target_for_agent(

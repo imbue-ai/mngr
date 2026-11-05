@@ -56,7 +56,9 @@ host and matches the agent there. The other hosts are never contacted.
 - If the agent is not on that host (it moved, was destroyed, or never lived
   there), or the host no longer exists, the command fails with "not found" and
   names the host. mngr does not fall back to searching other hosts, so retry
-  with the bare agent id if you want that.
+  with the bare agent id if you want that. `mngr event` is the exception: it
+  reads the events on that host without looking the agent up, so while the host
+  is readable an agent that is not there shows no events rather than failing.
 - The shortcut applies only when every address given to the command is pinned
   this way. A host *name* (`NAME@my-host.docker`), a missing provider, or a mix
   of pinned and unpinned addresses still runs discovery, as does `--all`. It also
