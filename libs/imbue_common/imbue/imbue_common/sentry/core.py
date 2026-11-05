@@ -691,6 +691,21 @@ def get_or_create_anonymous_user_id(id_file_path: Path) -> str:
     return uuid.uuid4().hex
 
 
+# Which frames Sentry treats as this project's own code. It derives an issue's culprit from the
+# last in-app frame and shows only in-app frames until a reader expands the rest, so a wrong answer
+# here files every issue under someone else's function.
+#
+# The SDK cannot guess it for a shipped desktop build. It marks a frame not-in-app when its path
+# contains ``site-packages`` and in-app when the path is under ``project_root``, which defaults to
+# the process's working directory. A shipped build installs our code into a venv, so the first rule
+# excludes ``imbue`` from every process; and a process launched from the directory that also holds
+# the bundled interpreter has the second rule promote the stdlib in its place. Naming both sets
+# outright decides it by whose code a frame is rather than by where the build puts it, and gives a
+# source checkout -- whose layout happens to answer correctly -- the same answer.
+IN_APP_MODULE_PREFIXES: Final[tuple[str, ...]] = ("imbue",)
+NOT_IN_APP_MODULE_PREFIXES: Final[tuple[str, ...]] = tuple(sorted(sys.stdlib_module_names))
+
+
 def setup_sentry(
     dsn: str,
     # The Sentry environment label (e.g. ``production`` / ``staging`` / ``development``). Which Sentry
@@ -803,6 +818,8 @@ def setup_sentry(
         # we log our own traceback_with_variables anyways.
         include_local_variables=False,
         transport=ImbueSentryHttpTransport,
+        in_app_include=list(IN_APP_MODULE_PREFIXES),
+        in_app_exclude=list(NOT_IN_APP_MODULE_PREFIXES),
     )
     logger.info("Sentry initialized")
 

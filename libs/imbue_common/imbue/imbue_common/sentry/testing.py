@@ -59,6 +59,10 @@ def capturing_sentry_client(
         default_integrations=False,
         auto_enabling_integrations=False,
         send_default_pii=False,
+        # Likewise for which frames count as ours: a dev checkout's layout answers that differently
+        # from a shipped build's, so tests have to read the answer from the same place production does.
+        in_app_include=list(sentry_core.IN_APP_MODULE_PREFIXES),
+        in_app_exclude=list(sentry_core.NOT_IN_APP_MODULE_PREFIXES),
     )
     with isolation_scope() as scope:
         # The forked isolation and current scopes inherit whatever an earlier test in this worker left

@@ -24,6 +24,7 @@ from sentry_sdk.integrations.logging import EventHandler
 from sentry_sdk.integrations.logging import unignore_logger
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
+from sentry_sdk.utils import set_in_app_in_frames
 
 from imbue.imbue_common.sentry.core import BUG_REPORT_DESCRIPTION_EXTRA_KEY
 from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
@@ -371,6 +372,90 @@ def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() ->
     assert len(captured_events) == 1
     user = cast(dict, captured_events[0]["user"])
     assert user["id"] == "0123456789abcdef0123456789abcdef"
+
+
+# The on-disk layout of a shipped desktop build, as its events report it: our own code installed
+# into a venv, the interpreter's stdlib in a sibling directory, and both under the directory the
+# ``mngr latchkey forward`` daemon is launched from -- which is what ``project_root`` defaults to. A
+# dev checkout has none of this (our code is not under site-packages and the stdlib is not under the
+# cwd), so these paths are spelled out rather than taken from the running interpreter.
+_PACKAGED_APP_ROOT = "/Users/someone/Library/Application Support/Imbue Studio/production"
+_PACKAGED_SITE_PACKAGES = f"{_PACKAGED_APP_ROOT}/.venv/lib/python3.12/site-packages"
+_PACKAGED_STDLIB = f"{_PACKAGED_APP_ROOT}/.uv-python/cpython-3.12.13-macos-aarch64-none/lib/python3.12"
+
+
+@pytest.mark.parametrize(
+    ("module", "abs_path", "is_in_app"),
+    [
+        pytest.param(
+            "imbue.mngr_forward.ssh_tunnel",
+            f"{_PACKAGED_SITE_PACKAGES}/imbue/mngr_forward/ssh_tunnel.py",
+            True,
+            id="our-installed-code",
+        ),
+        pytest.param("imbue", f"{_PACKAGED_SITE_PACKAGES}/imbue/__init__.py", True, id="our-package-root"),
+        pytest.param("logging", f"{_PACKAGED_STDLIB}/logging/__init__.py", False, id="stdlib-logging"),
+        pytest.param("threading", f"{_PACKAGED_STDLIB}/threading.py", False, id="stdlib-threading"),
+        pytest.param(
+            "concurrent.futures._base",
+            f"{_PACKAGED_STDLIB}/concurrent/futures/_base.py",
+            False,
+            id="stdlib-submodule",
+        ),
+        pytest.param("paramiko.client", f"{_PACKAGED_SITE_PACKAGES}/paramiko/client.py", False, id="third-party"),
+    ],
+)
+def test_a_packaged_builds_frames_are_in_app_by_whose_code_they_are(
+    module: str, abs_path: str, is_in_app: bool
+) -> None:
+    """Sentry's culprit is the last in-app frame, so this decides what every issue is filed under.
+
+    The SDK's own guess reads a packaged build backwards: it excludes anything under
+    ``site-packages`` (our venv install) and includes anything under ``project_root``
+    (the bundled stdlib), which is how ``logging`` and ``threading`` came to be the
+    culprit of desktop-client issues.
+    """
+    frames: list[dict[str, object]] = [{"module": module, "abs_path": abs_path}]
+    with capturing_sentry_client():
+        options = sentry_sdk.get_client().options
+        set_in_app_in_frames(
+            frames,
+            in_app_exclude=options["in_app_exclude"],
+            in_app_include=options["in_app_include"],
+            project_root=_PACKAGED_APP_ROOT,
+        )
+
+    assert frames[0]["in_app"] is is_in_app
+
+
+class _ProbeError(Exception):
+    """Raised by the probe handler below to put a run of stdlib frames in a captured traceback."""
+
+
+class _RaisingLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        raise _ProbeError("probe")
+
+
+def test_a_captured_exceptions_stdlib_frames_are_ruled_out_of_the_app_rather_than_left_open() -> None:
+    """The classification reaches real events, rather than only being computable from the options.
+
+    Asserted on a stdlib frame because that is the half a dev checkout can answer:
+    an unconfigured client leaves such a frame's verdict absent for Sentry to guess at,
+    and in a shipped build guesses it in-app. The frames on our side of the line are
+    pinned against a packaged layout above, since a checkout does not reproduce one.
+    """
+    probe_logger = logging.getLogger("in_app_probe")
+    probe_logger.addHandler(_RaisingLogHandler())
+    with capturing_sentry_client() as captured_events:
+        try:
+            probe_logger.error("probe")
+        except _ProbeError:
+            sentry_sdk.capture_exception()
+
+    frames = cast(list[dict], captured_events[0]["exception"]["values"][0]["stacktrace"]["frames"])
+    stdlib_verdicts = [frame.get("in_app") for frame in frames if frame["module"] == "logging"]
+    assert stdlib_verdicts and all(verdict is False for verdict in stdlib_verdicts)
 
 
 def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
