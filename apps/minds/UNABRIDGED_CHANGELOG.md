@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-04
+
+- The smoke journey runs default-workspace-template's CI test suites inside the
+  Imbue Cloud workspace it creates, right after creating it. Which suites run,
+  and how, comes from the template's own `offload-modal*.toml` at the version
+  the workspace was created from, retries included; the run goes through the
+  app's own mngr on the app's sign-in.
+
+- Every template test is a subtest of the journey labelled
+  `dwt:<suite>::<node id>`, so each one that fails in the workspace is its own
+  `SUBFAILED` result, and the journey carries on past it. Reports, logs and a
+  `summary.md` land under `.test_output/smoke/<test name>/dwt/`, and each
+  session writes `.test_output/smoke/verdict.json`, counting template failures
+  apart from the rest.
+
+- The suites get 75 minutes, and the journey's timeout grows from 60 to 145
+  minutes.
+
+- `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips the template's tests in a run, reported
+  as a skipped `Step 3b` subtest; unset or `0` runs them, and any other value
+  errors the journey before the app launches.
+
+- Freeing space for a new workspace's backups now finds the destroyed workspace's real backup bucket. Before, when neither the workspace record nor this device's backup settings named the bucket, the app guessed a machine-named bucket that newer workspaces don't have, deleted the destroyed workspace's record without freeing anything, and left the new workspace without backups.
+
+- "Remove from this list" on a landing-page tile no longer deletes the workspace record outright. A record holding the workspace's restore secrets moves to "Recently destroyed", so its backups stay restorable through the retention window. A workspace this device is still destroying no longer shows a duplicate tile with that control.
+
+The gVisor memory runbook (`gvisor-inode-map-leak.md`) records the 2026-11-03 production sweep onto runsc `20261102`: 283 leased workspaces restarted onto the new sandbox, 27 deferred on a connected client (all later restarted, 26 of them forced while their chats were idle) and 27 blocked, the halt on a workspace restarted onto a full data quota and how it was recovered, and the fleet's sentry memory afterwards, and the 2026-11-04 rebake of the 48 available hosts onto it, including why a pre-0.10.0 bake fails on a box that holds a 0.10.0 slice.
+
+`docs/deploy/next_deploy.md` gains two analytics items: run `apps/analytics/scripts/redact_client_activity_text.sql` once against the production metrics lake after the deploy carrying the fixed client-activity collector (collected chat sends had landed with their truncated text intact), and fill in the reports README's data-start floors for the app-usage signals and tables once production collects the `gateway_requests` feed and the `window_opened` events.
+
+- The desktop app bundles the `imbue-mngr-grok` agent-type plugin, and minds run from source depends on it, so creates keep working once the default workspace template configures `[agent_types.grok]`.
+
+- The paste-lane deployment test names the xAI lane among the lanes it leaves out: its sign-in checks the key against xAI, so a fake key cannot stand in.
+
+The ToDesktop build upload excludes `.env` files from `apps/minds`, so a developer's local credentials can never ride into a packaged app.
+
+The Vault setup doc's `secrets/mngr/ci` inventory lists the CI LiteLLM proxy leaves (`LITELLM_PROXY_URL`, `LITELLM_MASTER_KEY`) that TMR and the flake sweep now mint their agents' keys from, and no longer names those jobs as consumers of the shared Anthropic key.
+
 ## 2026-11-03
 
 Added the `gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows for as long as a workspace container runs on a runsc older than release `20261102`, the 2026-10-27 production survey of affected workspaces, and the runbook for moving the fleet onto `20261102`: `minds-admin install-runsc` and `minds-admin restart-workspace-container` on every leased workspace, one at a time, and a rebake of the available hosts.

@@ -175,6 +175,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Keybindings are an account-keyed setting delivered to workspaces in the profile snapshot, editable from a workspace via `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings` (gated by the `minds-workspaces-account-settings` latchkey verb).
 - Added: `docs/deploy/history/rollouts/gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows on runsc older than `20261102`, the affected-workspace survey, and the runbook for moving the fleet onto `20261102` (`minds-admin install-runsc` and `restart-workspace-container` per leased workspace, then a rebake).
 - Added: The pool-hosts runbook gains an "Alerts: an empty or thin pool" section covering the new pool-stock alert rules, their Slack card, and the fix for each lease outcome.
+- Added: The desktop app bundles the `imbue-mngr-grok` agent-type plugin.
 
 ### Changed
 
@@ -375,6 +376,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Production services deployed from `b6ac524b4b` (`20261103T200211Z`), shipping the pool card and the pool-stock alert rollout.
 - Changed: `install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball and upgrades an older runsc it installed instead of skipping.
 - Changed: The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`; the old `minds-desktop` launcher is left in place and keeps working (delete it by hand).
+- Changed: "Remove from this list" on a landing-page tile retires the workspace record instead of deleting it: any record but an untouched stub moves to "Recently destroyed", so its backups stay restorable through the retention window.
 
 ### Deprecated
 
@@ -545,6 +547,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A new remote workspace's latchkey gateway now receives the desktop's policy instead of a deny-all default that had rejected the Screen's in-workspace API calls.
 - Fixed: A bug report filed while an earlier report from the same workspace is still collecting now waits and collects afresh, instead of running a concurrent collection that let both time out.
 - Fixed: Electron's log path now points at the tier's log root (on macOS the default omitted the tier).
+- Fixed: Freeing backup space for a new workspace finds a destroyed workspace's real (workspace-named) backup bucket, instead of guessing a machine-named one, deleting the record without freeing anything, and leaving the new workspace without backups.
 
 ### Security
 
@@ -558,6 +561,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Security: The share-URL readiness probe verifies certificate chains against the system roots instead of disabling verification altogether.
 - Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
 - Security: Local Lima VMs and cloud-connection VPSes booting a kernel below the CVE-2026-98432 floor (Debian `6.12.113-1`) are badged "Security update", with a "Restart machine" action that moves them onto the fixed kernel.
+- Security: The ToDesktop build upload excludes `.env` files from `apps/minds`, so local credentials cannot ride into a packaged app.
 
 ## [v0.2.8] - 2026-05-13
 

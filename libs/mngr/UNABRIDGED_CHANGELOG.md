@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-04
+
+The `mngr imbue_cloud` command reference documents the new `sync records retire` command, which keeps a workspace record holding anything to recover as a destroyed tombstone instead of deleting it.
+
+The `MNGR_SECRET_ENV_NAMES` documentation now covers everything that honors it: besides the e2e fixture's transcripts, the `scrub-artifact` CI action and the TMR report mirror redact the named variables' values from what they publish (and anything else credential-shaped, with a warning), and the TMR workflows add the ephemeral `ANTHROPIC_API_KEY` and `GH_TOKEN` to the list. The e2e fixture reads the list through the same skitwright parser as the action and the mirror, so it also honors `VAULT_SECRET_ENV_NAMES` directly, and it seeds `pass_env = ["ANTHROPIC_BASE_URL"]` for `create` in its profile, so a tutorial block that forwards `ANTHROPIC_API_KEY` to an agent also forwards the proxy URL a CI-minted key belongs to.
+
 ## 2026-11-03
 
 `mngr gc` no longer deletes the volume of a host that was still being created when it listed hosts. The volume pass judged a volume orphaned whenever its host was missing from the host listing taken at the start of the collection, so a host created during a long collection, or still being set up when the listing was taken, lost its volume and everything on it. A volume created later than the provider's minimum host age (`min_online_host_age_seconds`, 10 minutes by default) before the listing is now spared until a later collection. This applies to providers that report a volume's creation time: Modal and local. For the others the listing alone still decides.

@@ -1,3 +1,0 @@
-- Freeing space for a new workspace's backups now finds the destroyed workspace's real backup bucket. Before, when neither the workspace record nor this device's backup settings named the bucket, the app guessed a machine-named bucket that newer workspaces don't have, deleted the destroyed workspace's record without freeing anything, and left the new workspace without backups.
-
-- "Remove from this list" on a landing-page tile no longer deletes the workspace record outright. A record holding the workspace's restore secrets moves to "Recently destroyed", so its backups stay restorable through the retention window. A workspace this device is still destroying no longer shows a duplicate tile with that control.

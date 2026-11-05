@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `imbue.skitwright.redaction.redact_secret_values(text, env, secret_names)`, which replaces each named environment variable's value in `text` with `<redacted NAME>` to keep credentials out of saved transcripts.
+- Added: `imbue.skitwright.artifact_scrub`, which rewrites every text file under given paths, redacting named credential values and credential-shaped patterns (Anthropic, LiteLLM and OpenAI keys, Modal and GitHub tokens, AWS access key ids, private-key blocks) and reporting each pattern redaction by file and line.
 
 ### Changed
 

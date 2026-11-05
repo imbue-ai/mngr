@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `skitwright` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-04
+
+New `imbue.skitwright.artifact_scrub`: rewrites every text file under a set of paths so the named credential values are redacted by value and anything else credential-shaped (Anthropic keys, LiteLLM and OpenAI keys, Modal tokens, GitHub tokens, AWS access key ids, private-key blocks, documentation placeholders excepted) is redacted by pattern, reporting each pattern redaction with its file and line. It backs the `scrub-artifact` CI action and the TMR report mirror.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

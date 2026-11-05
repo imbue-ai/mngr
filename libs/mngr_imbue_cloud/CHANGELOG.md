@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: Imbue Cloud slices publish the ports a create declares, reported as `published_endpoints`; `ShareInfo` and the lease wire types gain `published_ports`/`media_port` (published-ports contract).
+- Added: `mngr imbue_cloud sync records retire <workspace-id>` retires a workspace record instead of deleting it, keeping one with anything to recover as a destroyed tombstone (`status: retired`); it fails rather than deletes against a connector without retirement.
 
 ### Changed
 

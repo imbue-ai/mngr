@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-04
+
+- New `mngr imbue_cloud sync records retire <workspace-id>` retires a workspace record instead of deleting it: a record holding anything to recover is kept as a destroyed tombstone, and the command reports `status: retired`. Against a connector without retirement it fails rather than deleting the record.
+
 ## 2026-11-02
 
 MIND-301: Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.
