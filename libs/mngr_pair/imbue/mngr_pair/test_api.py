@@ -1,4 +1,8 @@
+import os
+import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
 from typing import cast
 
@@ -22,7 +26,9 @@ from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import determine_git_sync_actions
 from imbue.mngr_pair.api import pair_files
 from imbue.mngr_pair.api import sync_git_state
+from imbue.mngr_pair.remote import SshEndpoint
 from imbue.mngr_pair.remote import UnisonRoot
+from imbue.mngr_pair.remote import write_ssh_wrapper_script
 
 
 @pytest.fixture
@@ -49,9 +55,7 @@ def pair_ctx(tmp_path: Path) -> SyncTestContext:
     )
 
 
-# =============================================================================
 # Test: sync_git_state
-# =============================================================================
 
 
 def test_sync_git_state_performs_push_when_local_is_ahead(pair_ctx: SyncTestContext, cg: ConcurrencyGroup) -> None:
@@ -110,9 +114,7 @@ def test_sync_git_state_performs_pull_when_agent_is_ahead(pair_ctx: SyncTestCont
     assert (pair_ctx.local_dir / "agent_file.txt").exists()
 
 
-# =============================================================================
 # Test: pair_files context manager
-# =============================================================================
 
 
 def test_pair_files_raises_when_unison_not_installed_and_mocked(
@@ -287,9 +289,7 @@ def test_pair_files_with_no_git_requirement(tmp_path: Path, cg: ConcurrencyGroup
         syncer.stop()
 
 
-# =============================================================================
 # Test: UnisonSyncer with actual unison
-# =============================================================================
 
 
 @pytest.mark.unison
@@ -492,6 +492,81 @@ def test_unison_syncer_handles_process_crash(tmp_path: Path, cg: ConcurrencyGrou
         assert syncer.is_running is False
     finally:
         # stop() should be safe to call even after process crash
+        syncer.stop()
+
+
+def _write_fake_ssh_that_serves_unison_locally(directory: Path) -> Path:
+    """A stand-in ssh that does what OpenSSH does to its stdio, then runs the server end here.
+
+    OpenSSH's client session puts each non-tty stdio descriptor it inherited into
+    non-blocking mode, its stderr included, and then relays the remote command's
+    stdio. This one sets that flag and execs the unison server it was asked to
+    start, so the "remote" replica is a local directory and the only ssh
+    behaviour in play is the one that matters.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    fake_ssh = directory / "ssh"
+    fake_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "os.set_blocking(2, False)\n"
+        "args = sys.argv[1:]\n"
+        "server = args.index('-server') - 1\n"
+        "os.execv(args[server], args[server:])\n"
+    )
+    fake_ssh.chmod(0o755)
+    return fake_ssh
+
+
+@pytest.mark.unison
+def test_remote_syncer_survives_a_narration_burst_while_ssh_runs(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote first pass over thousands of files must not kill unison.
+
+    unison narrates every item on its stderr faster than a reader drains it, so
+    that pipe fills; and OpenSSH, having inherited that stderr, has made it
+    non-blocking. A refused write there is fatal to unison (Sys_blocked_io),
+    which is how pairing a large folder used to end with "exited with code 3"
+    before the first pass was through. The wrapper keeps ssh's stderr elsewhere.
+    """
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    file_count = 3000
+    for i in range(file_count):
+        (remote / f"f{i}.txt").write_text(f"file {i}\n")
+
+    # The wrapper resolves ssh from PATH, so the stand-in goes first on it.
+    fake_ssh = _write_fake_ssh_that_serves_unison_locally(tmp_path / "bin")
+    monkeypatch.setenv("PATH", f"{fake_ssh.parent}{os.pathsep}{os.environ['PATH']}")
+    unison_path = shutil.which("unison")
+    assert unison_path is not None, "the unison mark means unison is installed"
+    endpoint = SshEndpoint(user="root", hostname="fakehost", port=22, key_path=tmp_path / "id")
+
+    settled = threading.Event()
+    syncer = UnisonSyncer(
+        source_root=UnisonRoot(path=remote, ssh=endpoint),
+        target_root=UnisonRoot(path=local),
+        ssh_wrapper=write_ssh_wrapper_script(endpoint, tmp_path / "transport"),
+        remote_unison_path=Path(unison_path),
+        is_ignoring_archives=True,
+        sync_direction=SyncDirection.BOTH,
+        conflict_mode=ConflictMode.NEWER,
+        on_transfer_change=lambda is_transferring, _progress: None if is_transferring else settled.set(),
+        cg=cg,
+    )
+    try:
+        syncer.start()
+        wait_for(
+            lambda: settled.is_set() or syncer._running_process is not None and syncer._running_process.is_finished(),
+            timeout=60.0,
+            error_message="The first pass neither settled nor ended",
+        )
+        assert settled.is_set(), f"unison ended before its first pass settled; ssh said: {syncer.read_ssh_stderr()!r}"
+        assert sorted(path.name for path in local.iterdir()) == sorted(f"f{i}.txt" for i in range(file_count))
+    finally:
         syncer.stop()
 
 

@@ -335,8 +335,23 @@ def ensure_remote_unison(host: OnlineHostInterface) -> Path:
     raise UnisonVersionError(f"Could not determine the remote unison path from: {result.stdout.strip()}")
 
 
-def write_ssh_wrapper_script(endpoint: SshEndpoint, directory: Path) -> Path:
-    """Write an executable ``ssh`` wrapper carrying mngr's options, and return its path.
+class SshWrapper(FrozenModel):
+    """The ``ssh`` wrapper one pairing hands unison, and the file ssh's stderr lands in."""
+
+    script_path: Path = Field(description="Executable wrapper script, passed to unison as -sshcmd")
+    stderr_log_path: Path = Field(
+        description="Where the wrapper sends ssh's stderr; absent until the wrapper has first run"
+    )
+
+    def read_stderr(self) -> str:
+        """Everything ssh has written to its stderr so far, or empty when it wrote nothing."""
+        if not self.stderr_log_path.exists():
+            return ""
+        return self.stderr_log_path.read_text(errors="replace")
+
+
+def write_ssh_wrapper_script(endpoint: SshEndpoint, directory: Path) -> SshWrapper:
+    """Write an executable ``ssh`` wrapper carrying mngr's options.
 
     This exists because unison's ``-sshargs`` is split on bare whitespace with no
     shell-quote processing -- it execs ssh directly, no shell involved -- so a key
@@ -348,9 +363,24 @@ def write_ssh_wrapper_script(endpoint: SshEndpoint, directory: Path) -> Path:
     <servercmd> -server ...``) after whatever ``-sshcmd`` names. Those land after
     the destination, which looks wrong but is fine -- OpenSSH re-enters its option
     loop once it has consumed the hostname.
+
+    ssh's stderr goes to a file beside the script rather than to unison's own stderr,
+    which is what unison would otherwise hand it. The two would then share one open
+    file description, and OpenSSH puts every non-tty stdio descriptor of its session
+    into non-blocking mode -- which, being a property of the description rather than
+    of the descriptor number, makes unison's stderr non-blocking too. unison writes
+    its whole transfer narration there through a buffered OCaml channel and does not
+    expect a write to be refused, so the first time that pipe is full (a sync of a
+    few thousand files narrates faster than a reader drains) it dies with
+    ``Uncaught exception Sys_blocked_io``. Nothing is lost by the detour: the file
+    holds what ssh itself has to say, including the server unison's stderr, and
+    ``SshWrapper.read_stderr`` surfaces it when the sync ends badly.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script_path = directory / "ssh-wrapper.sh"
-    script_path.write_text(f'#!/bin/sh\nexec {endpoint.as_transport_command()} "$@"\n')
+    stderr_log_path = directory / "ssh-stderr.log"
+    script_path.write_text(
+        f'#!/bin/sh\nexec {endpoint.as_transport_command()} "$@" 2>>{shlex.quote(str(stderr_log_path))}\n'
+    )
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
-    return script_path
+    return SshWrapper(script_path=script_path, stderr_log_path=stderr_log_path)

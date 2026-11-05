@@ -139,6 +139,8 @@ class PairActivityReporter(MutableModel):
 
 _BYTE_UNITS: Final[tuple[str, ...]] = ("B", "KB", "MB", "GB", "TB")
 
+_SSH_STDERR_LINES_QUOTED: Final[int] = 20
+
 
 @pure
 def format_byte_size(byte_count: int) -> str:
@@ -177,6 +179,22 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
             write_human_line("Pairing stopped")
         case _ as unreachable:
             assert_never(unreachable)
+
+
+@pure
+def describe_unison_exit(exit_code: int, ssh_stderr: str) -> str:
+    """The error for a unison that ended on its own, with ssh's side of it when there is one.
+
+    unison reports a lost connection as just that, and the reason -- a refused
+    key, a host that went away -- is in what ssh wrote. Only the end of it is
+    quoted: a long-running session can accumulate plenty that is beside the point.
+    """
+    message = f"Unison exited with code {exit_code}"
+    ssh_lines = ssh_stderr.strip().splitlines()
+    if not ssh_lines:
+        return message
+    quoted = "\n".join(ssh_lines[-_SSH_STDERR_LINES_QUOTED:])
+    return f"{message}. ssh reported:\n{quoted}"
 
 
 class SyncStopSignal(MutableModel):
@@ -490,7 +508,7 @@ def pair(ctx: click.Context, **kwargs) -> None:
             # A nonzero code after a stop was asked for is just how the process
             # died on the way out, not a failure worth reporting.
             if not stop_signal.is_stop_requested and stop_signal.exit_code not in (None, 0):
-                raise MngrError(f"Unison exited with code {stop_signal.exit_code}")
+                raise MngrError(describe_unison_exit(stop_signal.exit_code, syncer.read_ssh_stderr()))
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")
     finally:

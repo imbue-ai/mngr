@@ -16,11 +16,10 @@ from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import determine_git_sync_actions
 from imbue.mngr_pair.api import parse_transfer_progress
 from imbue.mngr_pair.remote import SshEndpoint
+from imbue.mngr_pair.remote import SshWrapper
 from imbue.mngr_pair.remote import UnisonRoot
 
-# =============================================================================
 # Test: UnisonSyncer
-# =============================================================================
 
 
 def test_unison_syncer_builds_basic_command(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -161,9 +160,7 @@ def test_unison_syncer_is_not_running_initially(tmp_path: Path, cg: ConcurrencyG
     assert syncer.is_running is False
 
 
-# =============================================================================
 # Test: determine_git_sync_actions
-# =============================================================================
 
 
 def test_determine_git_sync_returns_none_for_non_git_directories(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -346,9 +343,7 @@ def test_determine_git_sync_detects_both_diverged(tmp_path: Path, cg: Concurrenc
     assert result.local_is_ahead is True
 
 
-# =============================================================================
 # Test: GitSyncAction
-# =============================================================================
 
 
 def _make_syncer(
@@ -423,9 +418,7 @@ def test_git_sync_action_default_values() -> None:
     assert action.local_branch == "main"
 
 
-# =============================================================================
 # Test: UnisonSyncer against a remote replica
-# =============================================================================
 
 
 def _remote_syncer(
@@ -438,7 +431,7 @@ def _remote_syncer(
     return UnisonSyncer(
         source_root=UnisonRoot(path=Path("/work/repo"), ssh=endpoint),
         target_root=UnisonRoot(path=local),
-        ssh_wrapper_path=tmp_path / "ssh-wrapper.sh",
+        ssh_wrapper=SshWrapper(script_path=tmp_path / "ssh-wrapper.sh", stderr_log_path=tmp_path / "ssh-stderr.log"),
         remote_unison_path=Path("/root/.mngr/bin/unison"),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=conflict_mode,
@@ -467,6 +460,20 @@ def test_local_syncer_passes_no_transport_flags(tmp_path: Path, cg: ConcurrencyG
 
     assert "-sshcmd" not in cmd
     assert "-servercmd" not in cmd
+
+
+def test_remote_syncer_reports_what_ssh_wrote(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """The wrapper keeps ssh's stderr in a file, and the syncer is where a caller reads it from."""
+    syncer = _remote_syncer(tmp_path, cg)
+    (tmp_path / "ssh-stderr.log").write_text("Connection closed by 10.0.0.4 port 2222\n")
+
+    assert syncer.read_ssh_stderr() == "Connection closed by 10.0.0.4 port 2222\n"
+
+
+def test_local_syncer_has_nothing_from_ssh_to_report(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    syncer = _make_syncer(tmp_path, cg)
+
+    assert syncer.read_ssh_stderr() == ""
 
 
 def test_remote_syncer_prefer_names_the_full_ssh_root(tmp_path: Path, cg: ConcurrencyGroup) -> None:

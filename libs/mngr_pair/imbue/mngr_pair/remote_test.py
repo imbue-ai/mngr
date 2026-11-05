@@ -1,8 +1,10 @@
 """Unit tests for ``remote.py`` -- unison roots, SSH transport, and version gating."""
 
+import os
 import shlex
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -18,6 +20,7 @@ from imbue.mngr_pair.remote import MINIMUM_UNISON_VERSION
 from imbue.mngr_pair.remote import REMOTE_UNISON_SHA256
 from imbue.mngr_pair.remote import REMOTE_UNISON_VERSION
 from imbue.mngr_pair.remote import SshEndpoint
+from imbue.mngr_pair.remote import SshWrapper
 from imbue.mngr_pair.remote import UnisonRoot
 from imbue.mngr_pair.remote import UnisonVersionError
 from imbue.mngr_pair.remote import build_remote_unison_script
@@ -27,9 +30,7 @@ from imbue.mngr_pair.remote import is_version_compatible
 from imbue.mngr_pair.remote import parse_unison_version
 from imbue.mngr_pair.remote import write_ssh_wrapper_script
 
-# =============================================================================
 # Test: version parsing and the compatibility floor
-# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -70,9 +71,7 @@ def test_minimum_version_is_the_documented_interop_boundary() -> None:
     assert MINIMUM_UNISON_VERSION == (2, 52)
 
 
-# =============================================================================
 # Test: UnisonRoot rendering
-# =============================================================================
 
 
 def test_local_root_renders_as_a_bare_path() -> None:
@@ -113,9 +112,7 @@ def test_local_root_accepts_a_relative_path() -> None:
     assert UnisonRoot(path=Path("local-dir")).as_root_arg() == "local-dir"
 
 
-# =============================================================================
 # Test: SshEndpoint construction
-# =============================================================================
 
 
 def test_ssh_endpoint_is_none_for_a_local_host() -> None:
@@ -132,9 +129,7 @@ def test_ssh_endpoint_refuses_a_remote_host_with_no_connection_info() -> None:
     assert "SSH connection info" in str(exc_info.value)
 
 
-# =============================================================================
 # Test: the generated ssh wrapper
-# =============================================================================
 
 
 def test_ssh_wrapper_survives_a_key_path_containing_spaces(tmp_path: Path) -> None:
@@ -159,7 +154,7 @@ def test_ssh_wrapper_survives_a_key_path_containing_spaces(tmp_path: Path) -> No
     fake_ssh.chmod(0o755)
 
     result = subprocess.run(
-        [str(wrapper), "-l", "root", "somehost", "-e", "none"],
+        [str(wrapper.script_path), "-l", "root", "somehost", "-e", "none"],
         capture_output=True,
         text=True,
         env={"PATH": f"{fake_ssh_dir}:/usr/bin:/bin"},
@@ -183,20 +178,76 @@ def test_ssh_wrapper_is_executable_and_pins_host_key_checking(tmp_path: Path) ->
     )
 
     wrapper = write_ssh_wrapper_script(endpoint, tmp_path / "wrapper")
-    body = wrapper.read_text()
+    body = wrapper.script_path.read_text()
 
-    assert wrapper.stat().st_mode & 0o100, "wrapper must be executable"
+    assert wrapper.script_path.stat().st_mode & 0o100, "wrapper must be executable"
     assert body.startswith("#!/bin/sh")
-    assert body.rstrip().endswith('"$@"'), "unison appends its own arguments"
+    assert '"$@"' in body, "unison appends its own arguments"
     assert "StrictHostKeyChecking=yes" in body
     # Without these, a BatchMode child can hang on the macOS agent socket.
     assert "IdentitiesOnly=yes" in body
     assert "IdentityAgent=none" in body
 
 
-# =============================================================================
+def _write_fake_ssh_that_makes_its_stderr_non_blocking(directory: Path) -> Path:
+    """A stand-in for OpenSSH's one relevant habit: its stdio goes non-blocking.
+
+    OpenSSH's client session sets O_NONBLOCK on each non-tty stdio descriptor
+    it was started with. This one does the same to its stderr, says something
+    there, and exits, so a caller can check what that did to the descriptor
+    it handed over.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    fake_ssh = directory / "ssh"
+    fake_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "os.set_blocking(2, False)\n"
+        "sys.stderr.write('ssh: something the far side said\\n')\n"
+    )
+    fake_ssh.chmod(0o755)
+    return fake_ssh
+
+
+def test_ssh_wrapper_keeps_sshs_non_blocking_stderr_away_from_unisons(tmp_path: Path) -> None:
+    """ssh making its stderr non-blocking must not make unison's stderr non-blocking.
+
+    Both would share one open file description if the wrapper let ssh inherit
+    the stderr it was given, and the flag lives on the description: unison's
+    next full-pipe write would then fail with Sys_blocked_io instead of waiting.
+    The wrapper is run with a pipe as its stderr, with the write end kept, so
+    the test can read the flag ssh left on that very description.
+    """
+    endpoint = SshEndpoint(user="root", hostname="h", port=22, key_path=tmp_path / "id")
+    wrapper = write_ssh_wrapper_script(endpoint, tmp_path / "wrapper")
+    fake_ssh = _write_fake_ssh_that_makes_its_stderr_non_blocking(tmp_path / "bin")
+
+    read_fd, write_fd = os.pipe()
+    try:
+        subprocess.run(
+            [str(wrapper.script_path), "-l", "root", "somehost"],
+            stderr=write_fd,
+            env={"PATH": f"{fake_ssh.parent}:/usr/bin:/bin"},
+            check=True,
+        )
+        # The flag ssh set must be on some other description than the one unison keeps writing to.
+        assert os.get_blocking(write_fd), "ssh's non-blocking stderr leaked onto the stderr unison would share"
+        os.close(write_fd)
+        assert os.read(read_fd, 4096) == b"", "nothing ssh says should reach unison's stderr"
+    finally:
+        os.close(read_fd)
+
+    # What ssh said went to the file instead, and is what the sync reports when it ends badly.
+    assert wrapper.read_stderr() == "ssh: something the far side said\n"
+
+
+def test_ssh_wrapper_stderr_reads_as_empty_before_ssh_has_run(tmp_path: Path) -> None:
+    wrapper = SshWrapper(script_path=tmp_path / "ssh-wrapper.sh", stderr_log_path=tmp_path / "ssh-stderr.log")
+
+    assert wrapper.read_stderr() == ""
+
+
 # Test: the remote provisioning script
-# =============================================================================
 
 
 def test_remote_script_pins_version_and_checksum() -> None:
@@ -251,9 +302,7 @@ def test_remote_script_gate_tracks_the_python_constant() -> None:
     assert f'[ "$min" -ge {minor} ]' in script
 
 
-# =============================================================================
 # Test: the remote provisioning script, actually executed
-# =============================================================================
 
 
 def _write_stub(directory: Path, name: str, body: str) -> Path:
@@ -475,9 +524,7 @@ def test_running_the_script_ignores_a_present_but_broken_unison(tmp_path: Path) 
     assert result.stdout.strip() == "MNGR_UNISON_UNSUPPORTED Linux/aarch64"
 
 
-# =============================================================================
 # Test: ensure_remote_unison result handling
-# =============================================================================
 
 
 class _ScriptedHost(FakeHost):
@@ -539,9 +586,7 @@ def test_ensure_remote_unison_raises_when_no_result_line_is_emitted() -> None:
         ensure_remote_unison(host)
 
 
-# =============================================================================
 # Test: the local version gate
-# =============================================================================
 
 
 @pytest.mark.unison

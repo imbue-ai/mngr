@@ -36,6 +36,7 @@ from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import SystemDependency
 from imbue.mngr.utils.git_utils import is_ancestor
 from imbue.mngr_pair.remote import SshEndpoint
+from imbue.mngr_pair.remote import SshWrapper
 from imbue.mngr_pair.remote import UnisonRoot
 from imbue.mngr_pair.remote import check_local_unison_version
 from imbue.mngr_pair.remote import ensure_remote_unison
@@ -165,10 +166,10 @@ class UnisonSyncer(MutableModel):
             "a relative one can point out of the replica, where neither side agrees what it reaches"
         ),
     )
-    ssh_wrapper_path: Path | None = Field(
+    ssh_wrapper: SshWrapper | None = Field(
         frozen=True,
         default=None,
-        description="Executable ssh wrapper passed as -sshcmd; None when both replicas are local",
+        description="The ssh wrapper passed as -sshcmd, with the file ssh's stderr goes to; None when both replicas are local",
     )
     remote_unison_path: Path | None = Field(
         frozen=True,
@@ -248,8 +249,8 @@ class UnisonSyncer(MutableModel):
         # made (the ssh:// root syntax has nowhere to put a port or a key), and
         # -servercmd decides which unison answers, so a too-old one on the host's PATH
         # can never be picked up by accident.
-        if self.ssh_wrapper_path is not None:
-            cmd.extend(["-sshcmd", str(self.ssh_wrapper_path)])
+        if self.ssh_wrapper is not None:
+            cmd.extend(["-sshcmd", str(self.ssh_wrapper.script_path)])
         if self.remote_unison_path is not None:
             cmd.extend(["-servercmd", str(self.remote_unison_path)])
 
@@ -397,6 +398,16 @@ class UnisonSyncer(MutableModel):
         if self._running_process is None:
             return 0
         return self._running_process.wait()
+
+    def read_ssh_stderr(self) -> str:
+        """What ssh wrote to its stderr during this sync, or empty for a local pairing.
+
+        Kept off unison's own stderr (see ``write_ssh_wrapper_script``), so it is
+        the one place a failed handshake or a dropped connection explains itself.
+        """
+        if self.ssh_wrapper is None:
+            return ""
+        return self.ssh_wrapper.read_stderr()
 
     @property
     def is_running(self) -> bool:
@@ -663,8 +674,8 @@ def _remote_unison_transport(
     endpoint: SshEndpoint | None,
     host: OnlineHostInterface,
     cg: ConcurrencyGroup,
-) -> Generator[tuple[Path | None, Path | None], None, None]:
-    """Yield the ``-sshcmd`` wrapper path and ``-servercmd`` path for one pairing.
+) -> Generator[tuple[SshWrapper | None, Path | None], None, None]:
+    """Yield the ``-sshcmd`` wrapper and ``-servercmd`` path for one pairing.
 
     Both are ``None`` for a local pairing, which runs a single unison process and
     so needs no transport and no version negotiation at all. For a remote one this
@@ -762,7 +773,7 @@ def pair_files(
     # build for -- pairing is impossible, and discovering that after the git
     # reconciliation would leave both repositories written to with no sync to show
     # for it.
-    with _remote_unison_transport(endpoint, host, cg) as (ssh_wrapper_path, remote_unison_path):
+    with _remote_unison_transport(endpoint, host, cg) as (ssh_wrapper, remote_unison_path):
         # Determine and perform git sync (skip when --no-require-git is set,
         # since the user explicitly opted out of git-based behavior)
         if is_require_git and agent is not None and agent_is_git and local_is_git:
@@ -794,7 +805,7 @@ def pair_files(
             target_root=UnisonRoot(path=local_path),
             is_ignoring_archives=is_ignoring_archives,
             is_syncing_links=is_syncing_links,
-            ssh_wrapper_path=ssh_wrapper_path,
+            ssh_wrapper=ssh_wrapper,
             remote_unison_path=remote_unison_path,
             sync_direction=sync_direction,
             conflict_mode=conflict_mode,

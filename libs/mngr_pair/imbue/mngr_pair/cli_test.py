@@ -22,6 +22,7 @@ from imbue.mngr_pair.cli import _emit_pair_stopped
 from imbue.mngr_pair.cli import _emit_pair_syncing
 from imbue.mngr_pair.cli import _resolve_source
 from imbue.mngr_pair.cli import _sigterm_requests_stop
+from imbue.mngr_pair.cli import describe_unison_exit
 from imbue.mngr_pair.cli import pair
 from imbue.mngr_pair.remote import UnisonRoot
 
@@ -234,3 +235,28 @@ def test_pair_help_offers_the_standard_start_flag() -> None:
     assert result.exit_code == 0
     assert "--start" in result.output
     assert "--no-start" in result.output
+
+
+# Test: describing a unison that ended on its own
+
+
+def test_unison_exit_is_described_by_its_code_alone_when_ssh_said_nothing() -> None:
+    assert describe_unison_exit(3, "") == "Unison exited with code 3"
+    assert describe_unison_exit(3, "  \n") == "Unison exited with code 3"
+
+
+def test_unison_exit_quotes_what_ssh_said() -> None:
+    message = describe_unison_exit(3, "kex_exchange_identification: Connection closed by remote host\n")
+
+    assert message == (
+        "Unison exited with code 3. ssh reported:\nkex_exchange_identification: Connection closed by remote host"
+    )
+
+
+def test_unison_exit_quotes_only_the_end_of_a_long_ssh_log() -> None:
+    ssh_stderr = "".join(f"line {i}\n" for i in range(50))
+
+    message = describe_unison_exit(1, ssh_stderr)
+
+    assert "line 29" not in message
+    assert message.endswith("line 30\n" + "\n".join(f"line {i}" for i in range(31, 50)))
