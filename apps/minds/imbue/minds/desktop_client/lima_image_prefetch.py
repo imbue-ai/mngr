@@ -50,9 +50,6 @@ KILL_SWITCH_ENV_VAR: Final[str] = "MINDS_DISABLE_LIMA_IMAGE_CACHE"
 # Subdirectory under the env data root holding the per-env image cache.
 LIMA_IMAGE_CACHE_DIRNAME: Final[str] = "lima-images"
 
-# The gate resolves the release tag against the remote; a hung remote must not stall a create.
-_LS_REMOTE_TIMEOUT_SECONDS: Final[float] = 30.0
-
 # Background auto-retry backoff bounds for a published-but-failing download.
 _RETRY_INITIAL_BACKOFF_SECONDS: Final[float] = 5.0
 _RETRY_MAX_BACKOFF_SECONDS: Final[float] = 120.0
@@ -79,33 +76,6 @@ def baked_refs(current_release_tag: str, current_release_commit: str | None) -> 
     if current_release_commit is None:
         return frozenset({current_release_tag})
     return frozenset({current_release_tag, current_release_commit})
-
-
-def resolve_release_tag_commit(*, repo_url: str, release_tag: str, concurrency_group: ConcurrencyGroup) -> str | None:
-    """Resolve ``release_tag`` to the commit it names, or None if it cannot be resolved.
-
-    An annotated tag's ``ls-remote`` output carries both the tag object and, on a
-    ``^{}`` line, the commit it peels to; the peeled commit is the one a create pins.
-    None is not an error: the gate simply keeps matching on the tag name alone.
-    """
-    peeled_ref = f"refs/tags/{release_tag}^{{}}"
-    cg = concurrency_group.make_concurrency_group(name="lima-image-resolve-release-tag")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=["git", "ls-remote", repo_url, f"refs/tags/{release_tag}", peeled_ref],
-            is_checked_after=False,
-            timeout=_LS_REMOTE_TIMEOUT_SECONDS,
-        )
-    if result.returncode != 0:
-        logger.warning("Could not resolve {} in {}; SHA-pinned creates will build in-VM", release_tag, repo_url)
-        return None
-
-    commit_by_ref: dict[str, str] = {}
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            commit_by_ref[parts[1].strip()] = parts[0].strip()
-    return commit_by_ref.get(peeled_ref) or commit_by_ref.get(f"refs/tags/{release_tag}")
 
 
 def make_lima_image_source(client_env_config: ClientEnvConfig | None) -> LimaImageSource | None:

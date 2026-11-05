@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import ORPHANED_SCRATCH_CLONE_AGE_SECONDS
 from imbue.minds.desktop_client.agent_creator import SCRATCH_CLONE_DIR_PREFIX
+from imbue.minds.desktop_client.agent_creator import TemplateCloneCacheInterface
 from imbue.minds.desktop_client.agent_creator import _BootstrapProgressTail
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _bootstrap_follow_command
@@ -88,6 +89,7 @@ from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
+from imbue.minds.desktop_client.testing import make_test_workspace_template_cache
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import vault_kv_stub_body
@@ -95,6 +97,8 @@ from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCache
+from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCacheStatus
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import GitRefNotFoundError
@@ -107,6 +111,7 @@ from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import TemplateReleaseTag
 from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -1486,6 +1491,7 @@ def _make_test_creator(
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
     on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = None,
+    template_clone_cache: TemplateCloneCacheInterface | None = None,
     latchkey: Latchkey | None = None,
 ) -> AgentCreator:
     paths = InstallationPaths(data_dir=tmp_path)
@@ -1494,6 +1500,7 @@ def _make_test_creator(
     return AgentCreator(
         paths=paths,
         root_concurrency_group=cg,
+        template_clone_cache=template_clone_cache,
         report_backup_setup_failure=report_backup_setup_failure,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
@@ -2694,6 +2701,111 @@ def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_pat
     assert finished == [(create_attempt_id, aid)]
     info = creator.get_create_attempt_info(create_attempt_id)
     assert info is not None and info.status is AgentCreateAttemptStatus.DONE
+
+
+_CACHED_RELEASE_TAG = TemplateReleaseTag("minds-v7.3.1")
+
+
+def _make_cached_template_origin(tmp_path: Path) -> Path:
+    origin = tmp_path / "template-origin"
+    _make_origin_repo_with_branch(origin, "release-branch")
+    _git(origin, "tag", "-a", str(_CACHED_RELEASE_TAG), "release-branch", "-m", "release")
+    return origin
+
+
+def _record_mngr_create_cwd_body(record: Path, agent_id: AgentId, host_id: HostId) -> str:
+    """A ``mngr`` stub that writes what ``mngr create`` would read from its cwd's repo, then reports the create."""
+    quoted_record = shlex.quote(str(record))
+    return (
+        f'if [ "$1" = "create" ]; then\n'
+        f"  git rev-parse --abbrev-ref HEAD > {quoted_record}\n"
+        f"  git rev-parse HEAD >> {quoted_record}\n"
+        f"  git remote get-url origin >> {quoted_record}\n"
+        f"fi\n" + mngr_create_stub_body(agent_id, host_id)
+    )
+
+
+def _make_ready_template_cache(
+    tmp_path: Path, origin_url: str, concurrency_group: ConcurrencyGroup
+) -> WorkspaceTemplateCache:
+    cache = make_test_workspace_template_cache(origin_url, _CACHED_RELEASE_TAG, tmp_path, concurrency_group)
+    assert cache.prefetch_once() is WorkspaceTemplateCacheStatus.READY
+    return cache
+
+
+def _install_mngr_recording_create_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a ``mngr`` stub on PATH whose create records what it read from its cwd's repo; returns the record's path."""
+    record = tmp_path / "mngr-create-cwd.txt"
+    install_stub_mngr_on_path(
+        tmp_path / "fake-bin",
+        monkeypatch,
+        _record_mngr_create_cwd_body(record, AgentId.generate(), HostId.generate()),
+    )
+    return record
+
+
+def _run_create_of_cached_release(
+    tmp_path: Path, origin_url: str, cache: WorkspaceTemplateCache
+) -> tuple[AgentCreator, CreateAttemptId]:
+    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
+        creator = _make_test_creator(
+            tmp_path, mngr_forward_port=port, preauth_cookie="any-preauth", template_clone_cache=cache
+        )
+        create_attempt_id = creator.start_create_attempt(
+            origin_url, host_name="cached-template-71003", branch=str(_CACHED_RELEASE_TAG)
+        )
+        _wait_until_finished(creator, create_attempt_id)
+        creator.wait_for_all()
+    return creator, create_attempt_id
+
+
+def _create_log(creator: AgentCreator, create_attempt_id: CreateAttemptId) -> tuple[str, ...]:
+    log_sink = creator.get_log_sink(create_attempt_id)
+    assert log_sink is not None
+    return log_sink.tail_lines(CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES)
+
+
+@pytest.mark.timeout(30)
+def test_a_create_of_the_cached_template_release_runs_mngr_create_in_a_copy_of_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    origin = _make_cached_template_origin(tmp_path)
+    origin_url = "file://{}".format(origin)
+    release_commit = _git(origin, "rev-parse", f"{_CACHED_RELEASE_TAG}^{{commit}}")
+    cache = _make_ready_template_cache(tmp_path, origin_url, root_concurrency_group)
+    # From here a network clone fails, so a finished create can only have come from the cache.
+    origin.rename(tmp_path / "template-origin-offline")
+    record = _install_mngr_recording_create_cwd(tmp_path, monkeypatch)
+
+    creator, create_attempt_id = _run_create_of_cached_release(tmp_path, origin_url, cache)
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.DONE, info
+    assert record.read_text().split() == [str(_CACHED_RELEASE_TAG), release_commit, origin_url]
+    create_log = _create_log(creator, create_attempt_id)
+    assert any("from this computer's cache" in line for line in create_log)
+    assert not any(line.startswith("[Imbue Studio] Cloning") for line in create_log)
+
+
+@pytest.mark.timeout(30)
+def test_a_create_clones_from_the_network_when_the_cached_copy_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    origin = _make_cached_template_origin(tmp_path)
+    origin_url = "file://{}".format(origin)
+    release_commit = _git(origin, "rev-parse", f"{_CACHED_RELEASE_TAG}^{{commit}}")
+    cache = _make_ready_template_cache(tmp_path, origin_url, root_concurrency_group)
+    # The OS may empty the cache root at any time.
+    shutil.rmtree(cache.entry_dir / ".git" / "objects")
+    record = _install_mngr_recording_create_cwd(tmp_path, monkeypatch)
+
+    creator, create_attempt_id = _run_create_of_cached_release(tmp_path, origin_url, cache)
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.DONE, info
+    assert record.read_text().split() == [str(_CACHED_RELEASE_TAG), release_commit, origin_url]
+    assert any(line.startswith("[Imbue Studio] Cloning") for line in _create_log(creator, create_attempt_id))
+    assert cache.status is WorkspaceTemplateCacheStatus.UNAVAILABLE
 
 
 @pytest.mark.timeout(30)

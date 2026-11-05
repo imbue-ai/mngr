@@ -121,7 +121,6 @@ from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
-from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -152,6 +151,9 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
 from imbue.minds.desktop_client.workspace_recovery import WorkspaceSshEndpointSource
+from imbue.minds.desktop_client.workspace_template_cache import TEMPLATE_CACHE_DIRNAME
+from imbue.minds.desktop_client.workspace_template_cache import make_workspace_template_cache
+from imbue.minds.desktop_client.workspace_template_cache import resolve_release_tag_commit
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import CreateAttemptId
@@ -816,18 +818,37 @@ def run(
         )
         # A create may pin the release tag's commit rather than name the tag (CI does,
         # for reproducibility). Resolve it once so those creates still take the fast path.
+        current_release_commit = resolve_release_tag_commit(
+            repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
+            release_tag=FALLBACK_BRANCH,
+            concurrency_group=root_concurrency_group,
+        )
+        if current_release_commit is None:
+            logger.warning(
+                "Could not resolve {} in {}; SHA-pinned creates will build in-VM",
+                FALLBACK_BRANCH,
+                DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
+            )
         lima_image_gate = LimaImageCreateGate(
             prefetcher=lima_image_prefetcher,
             current_release_tag=FALLBACK_BRANCH,
-            current_release_commit=resolve_release_tag_commit(
-                repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
-                release_tag=FALLBACK_BRANCH,
-                concurrency_group=root_concurrency_group,
-            ),
+            current_release_commit=current_release_commit,
             default_repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
             is_dev_loop=is_local_workspace_defaults_opt_in(),
         )
         logger.info("  lima image prefetch: started ({})", FALLBACK_BRANCH)
+
+    # A background prefetch keeps a clone of the pinned release in the cache root, so a
+    # create of the default workspace copies it locally instead of cloning from GitHub.
+    workspace_template_cache = make_workspace_template_cache(
+        repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
+        pinned_ref=FALLBACK_BRANCH,
+        cache_dir=minds_dir_for_role(MindsPathRole.CACHE, root_name) / TEMPLATE_CACHE_DIRNAME,
+        concurrency_group=root_concurrency_group,
+    )
+    if workspace_template_cache is not None:
+        workspace_template_cache.start_prefetch()
+        logger.info("  workspace template prefetch: started ({})", FALLBACK_BRANCH)
 
     # Pending-create-attempt records: written before each ``mngr create`` spawns and
     # deleted only once discovery confirms the workspace, so a quit/crash
@@ -869,6 +890,7 @@ def run(
         mngr_forward_ca_cert_path=forward_ca_cert_path,
         system_interface_health_tracker=system_interface_health_tracker,
         lima_image_gate=lima_image_gate,
+        template_clone_cache=workspace_template_cache,
         pending_create_attempt_store=pending_create_attempt_store,
         # CreateAttempt-row changes (a create starting, finishing, or failing) wake
         # the chrome SSE through the resolver's change callbacks so the

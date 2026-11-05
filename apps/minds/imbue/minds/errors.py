@@ -38,6 +38,22 @@ class GitOperationError(MindError):
     ...
 
 
+class InvalidTemplateReleaseTagError(MindError, ValueError):
+    """Raised when a string is not a ``minds-vX.Y.Z[-pre]`` template release tag.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure when
+    raised from the ``TemplateReleaseTag`` primitive's constructor.
+    """
+
+    ...
+
+
+class WorkspaceTemplateCacheError(MindError):
+    """Raised when the cached workspace template clone cannot be checked or copied."""
+
+    ...
+
+
 class MngrCommandError(MindError):
     """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched)."""
 

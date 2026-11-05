@@ -10,6 +10,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import ContentDomainError
+from imbue.minds.errors import InvalidTemplateReleaseTagError
 from imbue.minds.errors import WorkspaceMessageTypeError
 
 # The AWS regions offered when registering an AWS connection (a connection is
@@ -293,6 +294,20 @@ class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
 
     ...
+
+
+# A semver prerelease suffix is allowed (``minds-v0.9.0-rc.1``); its identifiers keep the tag safe as a file name.
+TEMPLATE_RELEASE_TAG_PATTERN: Final[str] = r"minds-v\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+_TEMPLATE_RELEASE_TAG_RE: Final[re.Pattern[str]] = re.compile(f"^{TEMPLATE_RELEASE_TAG_PATTERN}$")
+
+
+class TemplateReleaseTag(GitBranch):
+    """A ``minds-vX.Y.Z`` (or ``minds-vX.Y.Z-pre``) template release tag, which the release process never moves."""
+
+    def __new__(cls, value: str) -> Self:
+        if _TEMPLATE_RELEASE_TAG_RE.match(value.strip()) is None:
+            raise InvalidTemplateReleaseTagError(f"Not a minds-vX.Y.Z template release tag: {value!r}")
+        return super().__new__(cls, value)
 
 
 # One DNS label as the connector's share coordinates accept it: lowercase

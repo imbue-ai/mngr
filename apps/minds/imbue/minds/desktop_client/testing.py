@@ -119,8 +119,11 @@ from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
+from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCache
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
+from imbue.minds.primitives import GitUrl
+from imbue.minds.primitives import TemplateReleaseTag
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.workspace_programs import update_workspace
@@ -2077,3 +2080,33 @@ def armed_update_schedule_file(
         "last_skip_reason": "",
         "last_skip_at": None,
     }
+
+
+def make_test_workspace_template_cache(
+    repo_url: str,
+    release_tag: TemplateReleaseTag,
+    tmp_path: Path,
+    concurrency_group: ConcurrencyGroup,
+    prefetch_retry_waits_seconds: tuple[float, ...] = (),
+) -> WorkspaceTemplateCache:
+    """A template cache of ``repo_url`` at ``release_tag`` under ``tmp_path``, with no prefetch retries unless given."""
+    return WorkspaceTemplateCache(
+        repo_url=GitUrl(repo_url),
+        release_tag=release_tag,
+        cache_dir=tmp_path / "template-cache",
+        concurrency_group=concurrency_group,
+        prefetch_retry_waits_seconds=prefetch_retry_waits_seconds,
+    )
+
+
+def materialize_cached_release(
+    cache: WorkspaceTemplateCache, clone_dir: Path, waits_out: list[str], stall_timeout_seconds: float = 30.0
+) -> bool:
+    """Ask ``cache`` for a clone of its own repo and release, as a create of it would; each wait appends to ``waits_out``."""
+    return cache.materialize_clone(
+        repo_url=str(cache.repo_url),
+        ref=str(cache.release_tag),
+        clone_dir=clone_dir,
+        stall_timeout_seconds=stall_timeout_seconds,
+        on_waiting=lambda: waits_out.append("waited"),
+    )

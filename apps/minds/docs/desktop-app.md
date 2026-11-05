@@ -347,7 +347,7 @@ The tree below shows the macOS paths; the Linux roots hold the same contents.
 
 ~/Library/Caches/Imbue Studio/<tier>/
   .uv-cache/              # uv package cache
-  template-cache/         # cached workspace-template clone
+  template-cache/         # clone of the pinned workspace-template release, fetched at launch; creates copy it
 
 ~/Library/Logs/Imbue Studio/<tier>/
   minds.log               # Combined stdout/stderr log from the backend

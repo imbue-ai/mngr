@@ -43,7 +43,7 @@ See [the desktop client design doc](../imbue/minds/desktop_client/README.md) for
 
 When a user visits the desktop client and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The desktop client:
 
-1. Clones the repository to a temp directory (if a URL) or uses the local path directly
+1. Clones the repository to a temp directory (if a URL) or uses the local path directly. For the default template at the app's pinned release tag, it copies a clone the app fetched in the background at launch instead of cloning from GitHub
 2. Runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` to create the workspace host and its primary agent (the agent id is read back from the `created` JSONL event; Imbue Studio does not pre-generate one)
 3. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 

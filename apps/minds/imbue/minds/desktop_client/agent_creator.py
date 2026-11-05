@@ -18,6 +18,8 @@ import ssl
 import tempfile
 import threading
 import time
+from abc import ABC
+from abc import abstractmethod
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -652,10 +654,15 @@ def clone_git_repo(
     *,
     branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float | None = None,
+    git_config: Mapping[str, str] | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- this function creates it.
+    ``timeout_seconds`` bounds each git step; None lets git run as long as it does.
+    ``git_config`` is set on every git step as ``git -c`` would, so it is not
+    written into the clone's own config.
 
     The two cases take deliberately different code paths:
 
@@ -713,48 +720,61 @@ def clone_git_repo(
     # explicit-ref path, `init`/`remote add` are local-only and never fail in
     # healthy environments; `fetch` is the step that can legitimately error
     # (auth, network, ref-not-found).
+    config_args = [arg for key, value in (git_config or {}).items() for arg in ("-c", f"{key}={value}")]
     cg = _make_child_cg("git-clone", parent_cg)
     failed: tuple[str, str] | None = None
+    is_timed_out = False
     with cg:
         if branch is None:
             # Plain clone: git resolves the remote's default branch and leaves a
             # named local branch checked out (see docstring for why this matters).
-            commands: tuple[list[str], ...] = (["git", "clone", str(git_url), str(clone_dir)],)
+            git_steps: tuple[list[str], ...] = (["clone", str(git_url), str(clone_dir)],)
         else:
-            commands = (
-                ["git", "init", "-q"],
-                ["git", "remote", "add", "origin", str(git_url)],
-                ["git", "fetch", "origin", str(branch)],
-                ["git", "checkout", "--detach", "FETCH_HEAD"],
+            git_steps = (
+                ["init", "-q"],
+                ["remote", "add", "origin", str(git_url)],
+                ["fetch", "origin", str(branch)],
+                ["checkout", "--detach", "FETCH_HEAD"],
             )
-        for command in commands:
+        for git_step in git_steps:
             result = cg.run_process_to_completion(
-                command=command,
+                command=["git", *config_args, *git_step],
+                timeout=timeout_seconds,
                 cwd=clone_dir,
                 is_checked_after=False,
                 on_output=redacted_on_output,
                 env=git_env,
             )
+            if result.is_timed_out:
+                failed = (git_step[0], "timed out after {}s".format(timeout_seconds))
+                is_timed_out = True
+                break
             if result.returncode != 0:
                 stderr = result.stderr.strip()
                 stdout = result.stdout.strip()
-                failed = (command[1], stderr if stderr else stdout)
+                failed = (git_step[0], stderr if stderr else stdout)
                 break
     if failed is not None:
         step_name, output = failed
         message = "git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output))
         if (
             step_name == "fetch"
+            and not is_timed_out
             and branch is not None
             and not _FULL_SHA_RE.match(str(branch))
-            and _is_ref_missing_on_remote(clone_dir, branch, git_env, parent_cg)
+            and _is_ref_missing_on_remote(clone_dir, branch, git_env, config_args, timeout_seconds, parent_cg)
         ):
             raise GitRefNotFoundError(message)
         raise GitCloneError(message)
 
 
 def _is_ref_missing_on_remote(
-    clone_dir: Path, branch: GitBranch, git_env: dict[str, str], parent_cg: ConcurrencyGroup | None
+    clone_dir: Path,
+    branch: GitBranch,
+    git_env: dict[str, str],
+    config_args: Sequence[str],
+    timeout_seconds: float | None,
+    parent_cg: ConcurrencyGroup | None,
 ) -> bool:
     """Whether the ``origin`` remote of ``clone_dir`` answers but has no ref named ``branch``.
 
@@ -773,7 +793,8 @@ def _is_ref_missing_on_remote(
     cg = _make_child_cg("git-ls-remote", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
-            command=["git", "ls-remote", "--exit-code", "origin", *patterns],
+            command=["git", *config_args, "ls-remote", "--exit-code", "origin", *patterns],
+            timeout=timeout_seconds,
             cwd=clone_dir,
             is_checked_after=False,
             env=git_env,
@@ -897,6 +918,26 @@ def _rsync_worktree_over_clone(
         rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
+class TemplateCloneCacheInterface(MutableModel, ABC):
+    """A local source of template clones that spares a create the network clone of a release it already holds."""
+
+    @abstractmethod
+    def materialize_clone(
+        self,
+        repo_url: str,
+        ref: str,
+        clone_dir: Path,
+        stall_timeout_seconds: float,
+        on_waiting: Callable[[], None],
+    ) -> bool:
+        """Leave ``clone_dir`` as ``clone_git_repo(repo_url, clone_dir, branch=ref)`` would and return True, else return False with ``clone_dir`` absent.
+
+        A download of the release that is still running is waited for (``on_waiting`` is
+        called first) for as long as it keeps receiving data; ``stall_timeout_seconds``
+        without any ends the wait.
+        """
+
+
 # Constant agent name for every agent Imbue Studio creates. Imbue Studio runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
@@ -927,6 +968,11 @@ _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 # so the next create still gets the fast path.
 _PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 600.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+
+# How long a create waiting on the template download the app started at launch lets it
+# go without receiving data before cloning the template itself. While data still arrives
+# the create keeps waiting: a second clone in parallel would only split the bandwidth.
+_TEMPLATE_CACHE_STALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
 # How long a cold-booted workspace is given to answer its first HTTP 200 through
 # the plugin. First-boot provisioning (uv sync, npm ci + run build for the
@@ -1088,6 +1134,15 @@ class _PrebakedImageFallbackReporter(MutableModel):
 
     def __call__(self, reason: str) -> None:
         self.log_line(f"[Imbue Studio] Building the workspace in the VM (slower): {reason}.")
+
+
+class _TemplateCacheWaitReporter(MutableModel):
+    """Tells the create log that the create is waiting on the template download the app started at launch."""
+
+    log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
+
+    def __call__(self) -> None:
+        self.log_line("[Imbue Studio] Waiting for the workspace template download that started with the app...")
 
 
 def provider_instance_name_for_launch(
@@ -2165,6 +2220,15 @@ class AgentCreator(MutableModel):
             "gates on the verified image and points Lima at it; None disables the path."
         ),
     )
+    template_clone_cache: TemplateCloneCacheInterface | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Local copy of the pinned workspace template release. A create from exactly that repo URL at "
+            "that release tag copies its clone from here instead of cloning from the network; any other "
+            "source, any cache failure, or None clones from the network."
+        ),
+    )
     pending_create_attempt_store: PendingCreateAttemptStore | None = Field(
         default=None,
         frozen=True,
@@ -2893,25 +2957,26 @@ class AgentCreator(MutableModel):
                     repo_name = extract_repo_name(repo_source)
                     scratch_clone_root = make_scratch_clone_root(repo_name)
                     clone_target = scratch_clone_root / repo_name
-                    log_sink.put("[Imbue Studio] Cloning {}...".format(_redact_url_credentials(repo_source)))
-                    # Clone only the requested branch (non-shallow) when one is
-                    # given: cheaper than a full clone, yet keeps the complete
-                    # ancestry that the downstream mirror-push into the agent
-                    # container requires (a shallow clone would be rejected with
-                    # "shallow update not allowed"). Every launch mode reaches
-                    # mngr create's git-mirror push (a cloned-repo source + a
-                    # new host always resolves to TransferMode.GIT_MIRROR), so a
-                    # shallow clone is never safe here regardless of mode. The
-                    # checkout below is then a no-op for this path, but still
-                    # does the work when the source is a pre-existing local
-                    # directory.
-                    clone_git_repo(
-                        GitUrl(repo_source),
-                        clone_target,
-                        on_output=emit_log,
-                        branch=GitBranch(branch) if branch else None,
-                        parent_cg=self.root_concurrency_group,
-                    )
+                    if not self._copy_clone_from_template_cache(repo_source, branch, clone_target, log_sink):
+                        log_sink.put("[Imbue Studio] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                        # Clone only the requested branch (non-shallow) when one is
+                        # given: cheaper than a full clone, yet keeps the complete
+                        # ancestry that the downstream mirror-push into the agent
+                        # container requires (a shallow clone would be rejected with
+                        # "shallow update not allowed"). Every launch mode reaches
+                        # mngr create's git-mirror push (a cloned-repo source + a
+                        # new host always resolves to TransferMode.GIT_MIRROR), so a
+                        # shallow clone is never safe here regardless of mode. The
+                        # checkout below is then a no-op for this path, but still
+                        # does the work when the source is a pre-existing local
+                        # directory.
+                        clone_git_repo(
+                            GitUrl(repo_source),
+                            clone_target,
+                            on_output=emit_log,
+                            branch=GitBranch(branch) if branch else None,
+                            parent_cg=self.root_concurrency_group,
+                        )
                     workspace_dir = clone_target
                     is_workspace_dir_scratch_clone = True
 
@@ -3277,6 +3342,25 @@ class AgentCreator(MutableModel):
             if scratch_clone_root is not None:
                 shutil.rmtree(scratch_clone_root, ignore_errors=True)
             log_sink.put(LOG_SENTINEL)
+
+    def _copy_clone_from_template_cache(
+        self, repo_source: str, branch: str, clone_target: Path, log_sink: CreateAttemptLogSink
+    ) -> bool:
+        """Copy the create's clone from the template cache when it holds this repo at this release; False means clone it."""
+        if self.template_clone_cache is None or not branch:
+            return False
+        is_copied = self.template_clone_cache.materialize_clone(
+            repo_url=repo_source,
+            ref=branch,
+            clone_dir=clone_target,
+            stall_timeout_seconds=_TEMPLATE_CACHE_STALL_TIMEOUT_SECONDS,
+            on_waiting=_TemplateCacheWaitReporter(log_line=log_sink.put),
+        )
+        if is_copied:
+            log_sink.put(
+                "[Imbue Studio] Copied the workspace template ({}) from this computer's cache.".format(branch)
+            )
+        return is_copied
 
     def _discard_dead_create_attempts_holding_name(
         self,
