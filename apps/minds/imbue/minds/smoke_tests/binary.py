@@ -464,6 +464,22 @@ def app_mngr_executable(binary: StudioBinary, data_home: Path, test_venv_bin_dir
             assert_never(unreachable)
 
 
+# CLEANUP: drop this name once every channel serves a build cut after the override's rename to
+# STUDIO_ROOTS_OVERRIDE (which came after minds-v0.10.0): a build cut before it reads only this one.
+_PUBLISHED_BUILD_ROOTS_OVERRIDE_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+
+
+@pure
+def roots_override_env(data_home: Path) -> dict[str, str]:
+    """The env that keeps the app's state, cache and logs under ``data_home``, in each name a published build reads.
+
+    The smoke suite drives the published builds, which can be older than this
+    checkout. A build that does not see its name for the override uses the
+    real roots, so the suite would look for the app's mngr where it never put it.
+    """
+    return {STUDIO_ROOTS_OVERRIDE_ENV_VAR: str(data_home), _PUBLISHED_BUILD_ROOTS_OVERRIDE_ENV_VAR: str(data_home)}
+
+
 @pure
 def app_environment(environ: Mapping[str, str], launch_env: Mapping[str, str]) -> dict[str, str]:
     """The environment the app under test runs in: the shell's, minus this test process's own, plus ``launch_env``.
@@ -523,7 +539,7 @@ def launched_studio_app(
     if no_op_command is None:
         raise SmokeConfigError(f"`{_NO_OP_COMMAND}` is not on PATH; it stands in for the app's browser.")
     launch_env = {
-        STUDIO_ROOTS_OVERRIDE_ENV_VAR: str(data_home),
+        **roots_override_env(data_home),
         MINDS_ROOT_NAME_ENV_VAR: str(binary.root_name),
         ACTIVATED_CLIENT_CONFIG_PATH_ENV_VAR: str(resolve_smoke_client_config_path(backend.env_name)),
         _BROWSER_ENV_VAR: no_op_command,

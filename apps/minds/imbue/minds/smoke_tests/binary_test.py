@@ -20,6 +20,7 @@ from imbue.minds.smoke_tests.binary import published_build_cache_root
 from imbue.minds.smoke_tests.binary import published_build_layout_or_none
 from imbue.minds.smoke_tests.binary import published_channel_studio_binary
 from imbue.minds.smoke_tests.binary import resolve_studio_binary
+from imbue.minds.smoke_tests.binary import roots_override_env
 from imbue.minds.smoke_tests.data_types import SmokeBackend
 from imbue.minds.smoke_tests.data_types import StudioBinary
 from imbue.minds.smoke_tests.data_types import StudioBinaryKind
@@ -253,3 +254,11 @@ def test_a_failed_populate_publishes_nothing_so_the_next_run_retries(tmp_path: P
     assert not (tmp_path / "alpha-0.8.6-macos-arm64-abcd").exists()
     # Nor any scratch directory: a half-written tree must not survive to be mistaken for a build.
     assert [path.name for path in tmp_path.iterdir() if path.name.startswith("alpha-")] == []
+
+
+def test_the_app_keeps_its_roots_in_the_data_home_under_the_old_override_name_and_the_new() -> None:
+    """A published build cut before the override's rename reads only the old name, and would otherwise use the real roots."""
+    assert roots_override_env(Path("/tmp/run/studio-data-home")) == {
+        "STUDIO_ROOTS_OVERRIDE": "/tmp/run/studio-data-home",
+        "MINDS_DATA_HOME": "/tmp/run/studio-data-home",
+    }
