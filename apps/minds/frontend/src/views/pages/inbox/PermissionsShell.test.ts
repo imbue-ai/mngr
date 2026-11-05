@@ -47,6 +47,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   selected_account_value: ":new-account",
   new_account_value: ":new-account",
   wildcard_permission: "any",
+  implicit_note: "",
   proxy: null,
   is_browser_auth_supported: false,
   manual_credentials: AWS_PROMPT,

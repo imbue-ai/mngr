@@ -14,6 +14,7 @@ import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
 import { SectionHeader } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -455,7 +456,13 @@ function renderConnectionPanel(
       ]),
       connection.granted_count > 0 ? renderRevokeAllButton(model, local, connection) : null,
     ]),
-    m("p", { class: "type-body text-secondary mb-4" }, "Choose what agents in this workspace can do."),
+    // A service with one scope has no scope heading to hang the implicit
+    // permissions hint on, so the intro carries it; several scopes each
+    // carry their own on their heading below.
+    m("div", { class: "flex items-center gap-1.5 mb-4" }, [
+      m("p", { class: "type-body text-secondary" }, "Choose what agents in this workspace can do."),
+      connection.scopes.length === 1 ? renderImplicitPermissionsHint(connection.scopes[0].implicit_note) : null,
+    ]),
     connection.is_connected
       ? null
       : m(
@@ -467,7 +474,10 @@ function renderConnectionPanel(
     connection.desktop_egress.is_supported ? renderDesktopEgressRow(model, local, connection) : null,
     connection.scopes.map((scopePanel) => [
       connection.scopes.length > 1
-        ? m("h3", { class: "type-heading text-primary mt-6 mb-1" }, scopePanel.heading)
+        ? m("h3", { class: "type-heading text-primary mt-6 mb-1 flex items-center gap-1.5" }, [
+            m("span", scopePanel.heading),
+            renderImplicitPermissionsHint(scopePanel.implicit_note),
+          ])
         : null,
       scopePanel.groups.map((group) => [
         m("p", { class: "type-section text-tertiary mt-6 mb-1" }, group.heading),

@@ -43,7 +43,9 @@ from imbue.minds.desktop_client.latchkey.response_events import load_response_ev
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import build_implicit_permissions_test_catalog
 from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
+from imbue.minds.desktop_client.latchkey.testing import implicit_permissions_test_info
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
@@ -3113,3 +3115,77 @@ def test_apply_grant_request_rejects_a_proxy_field_that_is_not_one_of_the_switch
     assert not _rules_copy_path(handler, host_id).exists()
     assert carried_with_rules == []
     assert load_response_events(tmp_path) == []
+
+
+# Implicit permissions: the handshake every grant carries
+
+
+def _build_notion_mcp_handler(tmp_path: Path) -> tuple[LatchkeyPermissionGrantHandler, ServicePermissionInfo]:
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        services_catalog=build_implicit_permissions_test_catalog(),
+    )
+    return handler, implicit_permissions_test_info()
+
+
+def test_grant_writes_the_handshake_beside_what_the_user_chose(tmp_path: Path) -> None:
+    """The rule carries the scope's implicit permission, while the user and the agent only hear about the choice."""
+    handler, info = _build_notion_mcp_handler(tmp_path)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-mcp",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=info,
+        granted_permissions=("notion-mcp-search",),
+        account_choice="",
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [{account_scope_key("notion-mcp-api", ""): ["notion-mcp-search", "notion-mcp-session"]}]
+    assert "notion-mcp-search" in result.message
+    assert "notion-mcp-session" not in result.message
+
+
+def test_grant_refuses_the_handshake_as_a_choice(tmp_path: Path) -> None:
+    """The dialog never offers it, so a form naming it is a crafted one."""
+    handler, info = _build_notion_mcp_handler(tmp_path)
+
+    with pytest.raises(LatchkeyPermissionFlowError, match="not in catalog"):
+        handler.grant(
+            request_event_id="evt-mcp",
+            agent_id=AgentId(),
+            host_id=HostId(),
+            service_info=info,
+            granted_permissions=("notion-mcp-session",),
+            account_choice="",
+            manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+            desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+        )
+
+
+def test_build_request_detail_payload_keeps_the_handshake_out_of_the_rows_and_notes_it(tmp_path: Path) -> None:
+    """An agent asking for the handshake by name gets no row for it; the note says every grant includes it."""
+    handler, _ = _build_notion_mcp_handler(tmp_path)
+    event = create_predefined_permission_request(
+        agent_id=str(AgentId()),
+        scope="notion-mcp-api",
+        permissions=("notion-mcp-session", "notion-mcp-search"),
+        rationale="need to search the workspace",
+    )
+
+    payload = handler.build_request_detail_payload(
+        permission_request=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    assert "notion-mcp-session" not in _offered_permissions(payload)
+    assert payload.checked_permissions == ("notion-mcp-search",)
+    assert payload.implicit_note == "Granted along with anything below: Open and maintain an MCP session."

@@ -22,12 +22,15 @@
  *       Detent's ``$comment``), and ``permissions`` (an array of
  *       ``{name, description}`` objects -- the Detent permission-schema
  *       name plus its own plain-English summary -- that may be granted
- *       under the scope). The catch-all ``any`` permission is always
- *       injected at index 0 of every scope's ``permissions`` array, so
- *       a caller can *       always request unrestricted access under
- *       a known scope. Returns 404 when the service is unknown. Backed
- *       by the ``services.json`` file that ships alongside this extension,
- *       which is keyed by raw service name.
+ *       under the scope; a protocol handshake every grant under the
+ *       scope carries also has ``is_implicit: true``, and is added to a
+ *       grant rather than offered as a choice). The catch-all ``any``
+ *       permission is always injected at index 0 of every scope's
+ *       ``permissions`` array, so a caller can always request
+ *       unrestricted access under a known scope. Returns 404 when the
+ *       service is unknown. Backed by the ``services.json`` file that
+ *       ships alongside this extension, which is keyed by raw service
+ *       name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -478,13 +481,15 @@ function handleGetCollection(response, filePath) {
  * The file is a JSON object keyed by raw service name (``slack``,
  * ``google-gmail``, ...). Each value is an array of ``{scope:
  * <schema_name>, display_name: <label>, description: <summary>,
- * permissions: [{name: <schema_name>, description: <summary>}, ...]}``
- * objects (a single service may expose more than one scope) where
- * ``scope`` is the Detent scope schema name as a plain string,
- * ``display_name`` is a human-readable label, the optional scope-level
- * ``description`` is the scope's plain-English summary (Detent's
- * ``$comment``), and each permission carries its own name plus an
- * optional ``description``.
+ * permissions: [{name: <schema_name>, description: <summary>,
+ * is_implicit: <bool>}, ...]}`` objects (a single service may expose
+ * more than one scope) where ``scope`` is the Detent scope schema name
+ * as a plain string, ``display_name`` is a human-readable label, the
+ * optional scope-level ``description`` is the scope's plain-English
+ * summary (Detent's ``$comment``), and each permission carries its own
+ * name plus an optional ``description`` and an optional boolean
+ * ``is_implicit`` (a protocol handshake every grant under the scope
+ * carries rather than a choice).
  */
 function readAvailableServices() {
   let raw;
@@ -534,8 +539,9 @@ function readAvailableServices() {
           `entry ${index} for '${serviceName}': 'description' must be a string`,
         );
       }
-      // Each permission is a ``{name, description?}`` object: ``name`` is a
-      // non-empty string and ``description``, when present, is a string.
+      // Each permission is a ``{name, description?, is_implicit?}`` object:
+      // ``name`` is a non-empty string, ``description``, when present, is a
+      // string, and ``is_implicit``, when present, is a boolean.
       const permissions = entry.permissions;
       if (!Array.isArray(permissions)) {
         throw new AvailableServicesUnavailableError(
@@ -549,12 +555,14 @@ function readAvailableServices() {
           !Array.isArray(item) &&
           typeof item.name === 'string' &&
           item.name.length > 0 &&
-          (item.description === undefined || typeof item.description === 'string'),
+          (item.description === undefined || typeof item.description === 'string') &&
+          (item.is_implicit === undefined || typeof item.is_implicit === 'boolean'),
       );
       if (!isEveryPermissionWellFormed) {
         throw new AvailableServicesUnavailableError(
           `entry ${index} for '${serviceName}': each 'permissions' item must be ` +
-            `an object with a non-empty string 'name' and optional string 'description'`,
+            `an object with a non-empty string 'name', optional string 'description' ` +
+            `and optional boolean 'is_implicit'`,
         );
       }
     });

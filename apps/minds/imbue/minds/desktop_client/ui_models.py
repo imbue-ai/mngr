@@ -952,6 +952,12 @@ class UiPermissionScopePanel(FrozenModel):
     scope: str = Field(description="Detent scope schema name; the rule-key half posted on a connector flip")
     heading: str = Field(description="Scope display name, shown as a divider when a service has several scopes")
     groups: tuple[UiPermissionToggleGroup, ...] = Field(description="Toggle groups, full access first, extras last")
+    implicit_note: str = Field(
+        description=(
+            "What every grant under the scope carries without a toggle (the protocol handshake), shown behind "
+            "an information icon; empty when the scope has no implicit permission"
+        )
+    )
 
 
 class UiCredentialParameter(FrozenModel):
@@ -1009,7 +1015,12 @@ class UiPermissionConnection(FrozenModel):
     account_label: str = Field(description="User-facing account label")
     is_connected: bool = Field(description="False for an account with grants but no stored credentials")
     show_account_label: bool = Field(description="Whether the nav entry needs the account label to disambiguate")
-    granted_count: int = Field(description="Total permissions currently granted across the service's scopes")
+    granted_count: int = Field(
+        description=(
+            "Chosen permissions currently granted across the service's scopes; the scopes' implicit "
+            "permissions are not counted"
+        )
+    )
     scopes: tuple[UiPermissionScopePanel, ...] = Field(description="One toggle panel per scope the service exposes")
     sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
     desktop_egress: UiDesktopEgressSetting = Field(

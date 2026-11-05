@@ -110,6 +110,12 @@ class UiPredefinedPermissionDetail(FrozenModel):
     permission_groups: tuple[UiPermissionGrantGroup, ...] = Field(
         description="Every grantable permission under the scope, grouped: full access first, the wildcard last"
     )
+    implicit_note: str = Field(
+        description=(
+            "What any grant under the scope carries without being offered as a row (the protocol handshake), "
+            "shown behind an information icon; empty when the scope has no implicit permission"
+        )
+    )
     checked_permissions: tuple[str, ...] = Field(description="Schemas to pre-check")
     account_choices: tuple[UiPermissionAccountChoice, ...] = Field(description="Accounts the grant can attach to")
     selected_account_value: str = Field(description="Preselected account choice value")

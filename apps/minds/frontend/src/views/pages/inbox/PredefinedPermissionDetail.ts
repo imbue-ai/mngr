@@ -27,6 +27,7 @@ import {
 } from "../../components/DesktopEgressRouteSetting";
 import { Select } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
 import { renderPermissionSwitch } from "../../components/PermissionSwitch";
 import { serviceMark } from "../../components/ServiceMark";
 import { renderSwitch } from "../../components/Switch";
@@ -108,11 +109,14 @@ function summaryView(model: InboxModel, detail: Detail): m.Children {
     "Adjust",
   );
   return m("div", { id: "permissions-simple-view" }, [
-    m(
-      "h3",
-      { class: "type-section text-tertiary" },
-      "Approving will let the agent",
-    ),
+    m("div", { class: "flex items-center gap-1.5" }, [
+      m(
+        "h3",
+        { class: "type-section text-tertiary" },
+        "Approving will let the agent",
+      ),
+      renderImplicitPermissionsHint(detail.implicit_note),
+    ]),
     rows.length === 0
       ? m("p", { id: "permissions-empty-summary", class: "mt-2 type-body text-secondary" }, [
           "Nothing yet — use ",
@@ -205,6 +209,9 @@ function editorGroup(
   model: InboxModel,
   detail: Detail,
   group: UiPermissionGrantGroup,
+  // The scope's implicit-permissions hint, carried by the first group so it
+  // leads the editor the way it leads the summary.
+  hint: m.Children,
 ): m.Children {
   return m(
     "div",
@@ -214,7 +221,10 @@ function editorGroup(
         : "flex flex-col gap-1",
     },
     [
-      m("p", { class: "type-section text-tertiary" }, group.heading),
+      m("div", { class: "flex items-center gap-1.5" }, [
+        m("p", { class: "type-section text-tertiary" }, group.heading),
+        hint,
+      ]),
       m(
         "div",
         { class: "flex flex-col pr-2" },
@@ -239,7 +249,14 @@ function editorView(model: InboxModel, detail: Detail): m.Children {
         "Back to agent's picks",
       ],
     ),
-    ...detail.permission_groups.map((group) => editorGroup(model, detail, group)),
+    ...detail.permission_groups.map((group, index) =>
+      editorGroup(
+        model,
+        detail,
+        group,
+        index === 0 ? renderImplicitPermissionsHint(detail.implicit_note) : null,
+      ),
+    ),
   ]);
 }
 

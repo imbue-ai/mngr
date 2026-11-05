@@ -36,6 +36,7 @@ from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 from imbue.mngr_latchkey.file_sharing import FileSharingGrant
 from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -484,6 +485,40 @@ PERMISSIONS_CATALOG_PAYLOAD: dict[str, object] = {
 def build_permissions_test_catalog() -> ServicesCatalog:
     """The catalog :data:`PERMISSIONS_CATALOG_PAYLOAD` describes."""
     return ServicesCatalog.from_catalog_payload(PERMISSIONS_CATALOG_PAYLOAD)
+
+
+# A hosted MCP service, for the suites that exercise implicit permissions: the
+# session handshake every grant carries, beside two permissions the user picks.
+IMPLICIT_PERMISSIONS_CATALOG_PAYLOAD: dict[str, object] = {
+    "notion-mcp": [
+        {
+            "scope": "notion-mcp-api",
+            "display_name": "Notion (MCP)",
+            "permissions": [
+                {
+                    "name": "notion-mcp-session",
+                    "description": "Open and maintain an MCP session.",
+                    "is_implicit": True,
+                },
+                {"name": "notion-mcp-read-all", "description": "Read everything."},
+                {"name": "notion-mcp-search", "description": "Search the workspace."},
+            ],
+        },
+    ],
+}
+
+
+def build_implicit_permissions_test_catalog() -> ServicesCatalog:
+    """The catalog :data:`IMPLICIT_PERMISSIONS_CATALOG_PAYLOAD` describes."""
+    return ServicesCatalog.from_catalog_payload(IMPLICIT_PERMISSIONS_CATALOG_PAYLOAD)
+
+
+def implicit_permissions_test_info() -> ServicePermissionInfo:
+    """The ``notion-mcp-api`` scope of :data:`IMPLICIT_PERMISSIONS_CATALOG_PAYLOAD`."""
+    info = build_implicit_permissions_test_catalog().get_by_scope("notion-mcp-api")
+    if info is None:
+        raise AssertionError("expected the implicit-permissions test catalog to expose the notion-mcp-api scope")
+    return info
 
 
 def seed_connector_grant(

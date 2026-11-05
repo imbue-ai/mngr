@@ -23,6 +23,14 @@ the catalog under the friendlier ``description`` key: the scope's summary sits
 on the scope entry, and each permission becomes a ``{"name", "description"}``
 object so its summary is colocated with its name.
 
+Some permissions are *implicit*: a protocol handshake (the MCP ``initialize``
+and ``tools/list`` calls, the JMAP session document, the DAV principal
+discovery) that no client can skip and that grants no content on its own. detent
+does not mark these, so the split is curated here (:func:`_is_implicit_permission`)
+and emitted as ``"is_implicit": true`` on the permission. Readers never offer
+an implicit permission as a choice; they add it to every non-empty grant under
+its scope instead.
+
 Display names and the service ordering are editorial metadata that detent does
 not carry, so they live here as curated constants. A scope without a curated
 display name falls back to a title-cased service name and is reported on stderr
@@ -91,6 +99,13 @@ _AWS_SCOPE_SCHEMAS: Final[frozenset[str]] = frozenset({"aws"})
 # under them do not (``fastmail-dav-api`` owns ``fastmail-dav-read-all``), so the
 # suffix is stripped before a permission is matched against a scope by prefix.
 _SCOPE_NAME_SUFFIX: Final[str] = "-api"
+
+# Every hosted MCP wrapper names its handshake permission ``<service>-mcp-session``
+# (``initialize``, ``tools/list``, ``ping``, ...), which every MCP client must
+# be able to call before any tool. The two non-MCP handshakes are named
+# individually: Fastmail's JMAP session document and its DAV principal discovery.
+_IMPLICIT_PERMISSION_SUFFIX: Final[str] = "-mcp-session"
+_IMPLICIT_PERMISSION_NAMES: Final[frozenset[str]] = frozenset({"fastmail-session", "fastmail-dav-discover"})
 
 # Label for a service as a whole, where that is not just its scope's label.
 # A multi-scope service disambiguates each scope with a parenthetical (``GitHub
@@ -222,14 +237,17 @@ class DetentSchemasNotFoundError(GenerateServicesError, FileNotFoundError):
 
 
 class _CatalogPermission(FrozenModel):
-    """A single grantable permission schema and its plain-English summary."""
+    """A single permission schema under a scope and its plain-English summary; a choice unless marked implicit."""
 
     name: str = Field(description="Detent permission schema name (e.g. ``slack-read-all``).")
     description: str = Field(description="Plain-English summary of the permission (detent's ``$comment``).")
+    is_implicit: bool = Field(
+        description="Whether the permission is a handshake every grant under the scope carries rather than a choice.",
+    )
 
 
 class _ScopeCatalogEntry(FrozenModel):
-    """One scope a service exposes, plus the permissions grantable under it."""
+    """One scope a service exposes, plus the permission schemas under it."""
 
     scope: str = Field(description="Detent scope schema name (e.g. ``slack-api``).")
     display_name: str = Field(description="Human-readable label shown in the permission dialog.")
@@ -239,7 +257,10 @@ class _ScopeCatalogEntry(FrozenModel):
     )
     description: str = Field(description="Plain-English summary of the scope (detent's ``$comment``).")
     permissions: tuple[_CatalogPermission, ...] = Field(
-        description="Permissions grantable under the scope, each with its plain-English summary.",
+        description=(
+            "Permission schemas under the scope, each with its plain-English summary: the choices the user "
+            "can grant plus any implicit ones."
+        ),
     )
 
 
@@ -309,6 +330,11 @@ def _description_for_schema(schema: Mapping[str, object]) -> str:
     return comment if isinstance(comment, str) else ""
 
 
+def _is_implicit_permission(permission_name: str) -> bool:
+    """Whether a permission is a protocol handshake every grant under its scope must carry."""
+    return permission_name.endswith(_IMPLICIT_PERMISSION_SUFFIX) or permission_name in _IMPLICIT_PERMISSION_NAMES
+
+
 def _build_scope_entries_for_service(
     service_name: str,
     schemas_by_name: Mapping[str, Mapping[str, object]],
@@ -336,6 +362,7 @@ def _build_scope_entries_for_service(
             _CatalogPermission(
                 name=permission_name,
                 description=_description_for_schema(schemas_by_name[permission_name]),
+                is_implicit=_is_implicit_permission(permission_name),
             )
             for permission_name in permission_names
         )
@@ -375,14 +402,18 @@ def _service_sort_key(service_name: str) -> tuple[int, str]:
 
 
 def _dump_entry(entry: _ScopeCatalogEntry) -> dict[str, object]:
-    """Serialize a scope entry, omitting ``service_display_name`` when it adds nothing.
+    """Serialize a scope entry, omitting the keys that would only restate a default.
 
-    Most services take their single scope's label as their own name, so the
-    key is emitted only for the few that are curated differently.
+    Most services take their single scope's label as their own name, and most
+    permissions are ordinary choices, so ``service_display_name`` and
+    ``is_implicit`` are emitted only where they say something.
     """
     dumped = entry.model_dump()
     if not dumped["service_display_name"]:
         del dumped["service_display_name"]
+    for permission in dumped["permissions"]:
+        if not permission["is_implicit"]:
+            del permission["is_implicit"]
     return dumped
 
 

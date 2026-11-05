@@ -5,7 +5,7 @@ from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
-# -- Sync-path resolution (scope -> canonical service name) --------------------
+# Sync-path resolution (scope -> canonical service name)
 
 
 def test_all_service_names_includes_known_services() -> None:
@@ -40,7 +40,7 @@ def test_services_for_permissions_wildcard_grants_every_service() -> None:
     assert ServicesCatalog().services_for_permissions(config) == ServicesCatalog().all_service_names()
 
 
-# -- Dialog-facing catalog (ServicesCatalog / ServicePermissionInfo) ----------
+# Dialog-facing catalog (ServicesCatalog / ServicePermissionInfo)
 
 
 def _make_catalog(payload: dict[str, object]) -> ServicesCatalog:
@@ -195,7 +195,7 @@ def test_default_catalog_omits_hidden_builtin_services() -> None:
         assert hidden_service_name not in service_names
 
 
-# -- Additional (custom) services merged into the bundled catalog -------------
+# Additional (custom) services merged into the bundled catalog
 
 
 def test_default_catalog_includes_additional_claude_ai_service() -> None:
@@ -216,7 +216,7 @@ def test_additional_service_scope_resolves_to_its_service_name() -> None:
     assert ServicesCatalog().services_for_permissions(config) == frozenset({"claude-ai"})
 
 
-# -- Service-level display names ----------------------------------------------
+# Service-level display names
 
 
 def test_service_display_name_names_the_service_not_one_of_its_scopes() -> None:
@@ -229,3 +229,78 @@ def test_service_display_name_names_the_service_not_one_of_its_scopes() -> None:
     # parenthetical and all -- there it is part of the name, not a scope marker.
     assert catalog.get("notion-mcp")[0].service_display_name == "Notion (MCP)"
     assert catalog.get("slack")[0].service_display_name == "Slack"
+
+
+# Implicit permissions (the handshake every grant carries)
+
+
+_NOTION_MCP_PAYLOAD: dict[str, object] = {
+    "notion-mcp": [
+        {
+            "scope": "notion-mcp-api",
+            "display_name": "Notion (MCP)",
+            "permissions": [
+                {"name": "notion-mcp-session", "description": "Open an MCP session.", "is_implicit": True},
+                {"name": "notion-mcp-read-all", "description": "Read everything."},
+                {"name": "notion-mcp-search"},
+            ],
+        },
+    ],
+}
+
+
+def test_catalog_sets_implicit_permissions_aside_from_the_grantable_ones() -> None:
+    """An implicit permission is never offered as a choice, but its description still travels."""
+    info = _make_catalog(_NOTION_MCP_PAYLOAD).get("notion-mcp")[0]
+
+    assert info.permission_schemas == ("any", "notion-mcp-read-all", "notion-mcp-search")
+    assert info.implicit_permission_schemas == ("notion-mcp-session",)
+    assert info.description_by_permission_name == {
+        "notion-mcp-session": "Open an MCP session.",
+        "notion-mcp-read-all": "Read everything.",
+    }
+
+
+def test_with_implicit_permissions_follows_a_choice_with_the_handshake_and_leaves_nothing_empty() -> None:
+    info = _make_catalog(_NOTION_MCP_PAYLOAD).get("notion-mcp")[0]
+
+    assert info.with_implicit_permissions(("notion-mcp-search",)) == ("notion-mcp-search", "notion-mcp-session")
+    assert info.with_implicit_permissions(("any",)) == ("any", "notion-mcp-session")
+    # A set that already names the handshake is not given it twice.
+    assert info.with_implicit_permissions(("notion-mcp-session", "notion-mcp-search")) == (
+        "notion-mcp-session",
+        "notion-mcp-search",
+    )
+    assert info.with_implicit_permissions(()) == ()
+
+
+def test_with_implicit_permissions_is_the_choice_itself_for_a_scope_without_any() -> None:
+    catalog = _make_catalog(
+        {"slack": [{"scope": "slack-api", "display_name": "Slack", "permissions": [{"name": "slack-read-all"}]}]},
+    )
+    info = catalog.get("slack")[0]
+
+    assert info.implicit_permission_schemas == ()
+    assert info.with_implicit_permissions(("slack-read-all",)) == ("slack-read-all",)
+
+
+def test_default_catalog_marks_every_handshake_permission_implicit() -> None:
+    """Drift guard: every hosted MCP wrapper's session permission, and Fastmail's two handshakes, are implicit.
+
+    ``scripts/generate_services_json.py`` curates the split; a regeneration that
+    lost it would offer a "Session" toggle again and write grants an MCP client
+    cannot open a session with.
+    """
+    catalog = ServicesCatalog()
+    mcp_service_names = sorted(name for name in catalog.all_service_names() if name.endswith("-mcp"))
+    assert len(mcp_service_names) > 0
+    for service_name in mcp_service_names:
+        info = catalog.get(service_name)[0]
+        assert info.implicit_permission_schemas == (f"{service_name}-session",), service_name
+        assert f"{service_name}-session" not in info.permission_schemas, service_name
+    jmap = catalog.get_by_scope("fastmail-api")
+    dav = catalog.get_by_scope("fastmail-dav-api")
+    assert jmap is not None and jmap.implicit_permission_schemas == ("fastmail-session",)
+    assert dav is not None and dav.implicit_permission_schemas == ("fastmail-dav-discover",)
+    slack = catalog.get_by_scope("slack-api")
+    assert slack is not None and slack.implicit_permission_schemas == ()

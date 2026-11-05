@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import classify_perm
 from imbue.minds.desktop_client.latchkey.permission_toggles import compute_connector_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import compute_self_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
+from imbue.minds.desktop_client.latchkey.permission_toggles import describe_implicit_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import describe_why_desktop_egress_is_unsupported
 from imbue.minds.desktop_client.latchkey.permission_toggles import describe_why_workspace_desktop_egress_is_unsupported
 from imbue.minds.desktop_client.latchkey.permission_toggles import list_workspace_desktops
@@ -41,7 +42,9 @@ from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import build_implicit_permissions_test_catalog
 from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
+from imbue.minds.desktop_client.latchkey.testing import implicit_permissions_test_info
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -1863,3 +1866,67 @@ def test_a_custom_services_own_header_is_what_the_pane_collects_and_stores(tmp_p
 
     assert stored_account == DEFAULT_ACCOUNT
     assert latchkey.auth_set_calls[0][1][-2:] == ("-H", "X-Api-Key: k-42")
+
+
+# Implicit permissions: the handshake every grant carries
+
+
+def test_compute_connector_permissions_adds_the_handshake_to_whatever_is_chosen() -> None:
+    enabled = compute_connector_permissions(implicit_permissions_test_info(), (), "notion-mcp-search", True)
+    assert enabled == ("notion-mcp-search", "notion-mcp-session")
+
+
+def test_compute_connector_permissions_drops_the_handshake_with_the_last_chosen_permission() -> None:
+    """Nothing chosen means nothing granted: a rule holding the handshake alone would be useless and misleading."""
+    current = ("notion-mcp-search", "notion-mcp-session")
+    assert compute_connector_permissions(implicit_permissions_test_info(), current, "notion-mcp-search", False) == ()
+
+
+def test_compute_connector_permissions_repairs_a_grant_written_without_its_handshake() -> None:
+    """A rule from before the handshake was implied picks it up on its first flip."""
+    updated = compute_connector_permissions(
+        implicit_permissions_test_info(), ("notion-mcp-search",), "notion-mcp-read-all", True
+    )
+    assert updated == ("notion-mcp-read-all", "notion-mcp-search", "notion-mcp-session")
+
+
+def test_compute_connector_permissions_refuses_to_flip_the_handshake_itself() -> None:
+    with pytest.raises(PermissionToggleError):
+        compute_connector_permissions(
+            implicit_permissions_test_info(), ("notion-mcp-search", "notion-mcp-session"), "notion-mcp-session", False
+        )
+
+
+def test_describe_implicit_permissions_reads_the_catalog_description_and_is_empty_without_any() -> None:
+    assert describe_implicit_permissions(implicit_permissions_test_info()) == (
+        "Granted along with anything below: Open and maintain an MCP session."
+    )
+    assert describe_implicit_permissions(_slack_info()) == ""
+
+
+def test_describe_implicit_permissions_falls_back_to_the_derived_label_without_a_catalog_description() -> None:
+    info = implicit_permissions_test_info()
+    undescribed = info.model_copy_update(to_update(info.field_ref().description_by_permission_name, {}))
+    assert describe_implicit_permissions(undescribed) == "Granted along with anything below: Session"
+
+
+def test_build_workspace_permissions_view_gives_the_handshake_no_toggle_but_a_note(tmp_path: Path) -> None:
+    """The handshake is neither a row nor counted as a grant; the scope panel carries the note instead."""
+    agent_id, host = AgentId(), HostId()
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"notion-mcp": [_ACCOUNT]},
+    )
+    seed_connector_grant(
+        latchkey.plugin_data_dir, host, "notion-mcp-api", _ACCOUNT, ("notion-mcp-search", "notion-mcp-session")
+    )
+
+    view = _build_view(latchkey, agent_id, host, services_catalog=build_implicit_permissions_test_catalog())
+
+    connection = view.connections[0]
+    assert connection.granted_count == 1
+    scope_panel = connection.scopes[0]
+    toggle_states = {toggle.permission: toggle.is_granted for group in scope_panel.groups for toggle in group.toggles}
+    assert toggle_states == {"any": False, "notion-mcp-read-all": False, "notion-mcp-search": True}
+    assert scope_panel.implicit_note == "Granted along with anything below: Open and maintain an MCP session."

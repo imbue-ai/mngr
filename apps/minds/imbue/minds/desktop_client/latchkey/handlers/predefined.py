@@ -92,6 +92,7 @@ from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchke
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
+from imbue.minds.desktop_client.latchkey.permission_toggles import describe_implicit_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import describe_why_workspace_desktop_egress_is_unsupported
 from imbue.minds.desktop_client.latchkey.permission_toggles import group_permissions_by_area
 from imbue.minds.desktop_client.latchkey.permission_toggles import list_workspace_desktops
@@ -846,7 +847,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # request snapshots this very file.
         self._apply_grant_to_permissions_file(
             host_id=host_id,
-            scope=service_info.scope,
+            service_info=service_info,
             account=resolved,
             granted_permissions=granted_permissions,
         )
@@ -1260,6 +1261,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             display_name=service_info.display_name,
             service_name=service_info.name,
             permission_groups=_build_permission_grant_groups(service_info),
+            implicit_note=describe_implicit_permissions(service_info),
             checked_permissions=tuple(pre_checked),
             account_choices=tuple(
                 UiPermissionAccountChoice(
@@ -1600,7 +1602,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     def _apply_grant_to_permissions_file(
         self,
         host_id: HostId,
-        scope: str,
+        service_info: ServicePermissionInfo,
         account: str,
         granted_permissions: Sequence[str],
     ) -> None:
@@ -1613,18 +1615,23 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         we hand all three over so the grant applies to ``account`` and to no
         other account of the service.
 
-        A custom service's scope is not a detent builtin, so the grant also has
-        to carry the scope's own definition or the rule would reference a
-        ``$def`` this file need not have -- the catalog entry supplies it.
+        ``service_info`` is the scope's catalog entry. A custom service's scope
+        is not a detent builtin, so the grant also has to carry the scope's own
+        definition or the rule would reference a ``$def`` this file need not
+        have -- the entry supplies it. The entry also adds the scope's implicit
+        permissions (the protocol handshake the chosen ones cannot be used
+        without) to what the user chose.
 
         Writes this computer's canonical copy only; the carry that follows is
         what pushes the result (with the credential it rides on) to a remote
         workspace's own machine.
         """
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        info = self.services_catalog.get_by_scope(scope)
         rule_key, permissions, schemas = build_account_grant(
-            scope, account, granted_permissions, info.scope_schema if info is not None else None
+            service_info.scope,
+            account,
+            service_info.with_implicit_permissions(granted_permissions),
+            service_info.scope_schema,
         )
         self.gateway_client.set_permission_rule(
             permissions_file_path=path,

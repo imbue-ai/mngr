@@ -79,6 +79,9 @@ export interface PredefinedPermissionDetail {
   service_name: string;
   /** Every offered permission, grouped: full access first, the wildcard last. */
   permission_groups: UiPermissionGrantGroup[];
+  /** What any grant carries without being a row (the protocol handshake);
+   * "" when the scope has none. Shown behind an information icon. */
+  implicit_note: string;
   checked_permissions: string[];
   account_choices: PermissionAccountChoice[];
   selected_account_value: string;

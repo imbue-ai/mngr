@@ -175,8 +175,9 @@ def _as_nonempty_str(value: object) -> str:
 
 def _assert_entry_well_formed(entry: object) -> None:
     # ``name`` is required on every permission; the scope-level and
-    # per-permission ``description`` fields are optional (detent's
-    # ``$comment``), so we only assert their type when present.
+    # per-permission ``description`` fields (detent's ``$comment``) and the
+    # per-permission ``is_implicit`` flag are optional, so we only assert
+    # their types when present.
     entry_dict = _as_dict(entry)
     assert {"scope", "display_name", "permissions"} <= set(entry_dict.keys())
     assert isinstance(entry_dict.get("description", ""), str)
@@ -184,6 +185,7 @@ def _assert_entry_well_formed(entry: object) -> None:
         permission_dict = _as_dict(permission)
         _as_nonempty_str(permission_dict["name"])
         assert isinstance(permission_dict.get("description", ""), str)
+        assert isinstance(permission_dict.get("is_implicit", False), bool)
 
 
 def test_available_for_service_exposes_descriptions(node_extension: str) -> None:
@@ -204,6 +206,23 @@ def test_available_for_service_exposes_descriptions(node_extension: str) -> None
     slack_permissions = [_as_dict(p) for p in _as_list(slack_entry["permissions"])]
     slack_read_all = next(p for p in slack_permissions if p["name"] == "slack-read-all")
     _as_nonempty_str(slack_read_all["description"])
+
+
+def test_available_for_service_carries_the_implicit_mark(node_extension: str) -> None:
+    """A hosted MCP service's session handshake reaches the caller marked ``is_implicit``; its choices are unmarked."""
+    status, payload = _get_json(f"{node_extension}/permissions/available/notion-mcp")
+
+    assert status == 200
+    entries = _as_list(payload)
+    assert len(entries) > 0
+    for entry in entries:
+        _assert_entry_well_formed(entry)
+
+    permissions = [_as_dict(p) for p in _as_list(_as_dict(entries[0])["permissions"])]
+    is_implicit_by_name = {p["name"]: p.get("is_implicit", False) for p in permissions}
+    assert is_implicit_by_name["notion-mcp-session"] is True
+    assert is_implicit_by_name["notion-mcp-read-all"] is False
+    assert is_implicit_by_name["any"] is False
 
 
 def test_available_injects_any_permission_for_every_scope(node_extension: str) -> None:

@@ -845,7 +845,17 @@ Each entry has the shape:
   available option (the gateway file does not list it) at the head of
   this list, though the dialog offers it last, in its trailing Extras
   group; it is never preselected, but the user can opt into it
-  explicitly.
+  explicitly. A permission marked `is_implicit` is the opposite kind of
+  thing: a protocol handshake (an MCP service's `*-mcp-session`, Fastmail's
+  JMAP `fastmail-session` and DAV `fastmail-dav-discover`) that every
+  client needs before it can use anything else, and that grants no content
+  on its own. It is never offered as a switch. Instead every grant written
+  under the scope -- by the dialog or by a Permissions tab toggle --
+  carries it whenever anything else is granted, and drops it with the last
+  chosen permission. Both surfaces say so behind an information icon beside
+  the scope's permissions (its tooltip quotes the catalog's description of
+  the handshake), so the user can find out what the grant includes without
+  being shown a switch that cannot be turned off on its own.
 
 The Imbue Studio desktop client caches the response in-process on first access
 so each request renders without re-fetching. To add a new builtin
@@ -1087,6 +1097,14 @@ Three properties are worth knowing:
   grants but no stored credential offers no Sign out -- there is nothing
   left to clear -- and its toggles can be turned off but not on, since
   turning one on would grant something with no credentials behind it.
+
+A connector's implicit permissions (see [Service catalog](#service-catalog))
+have no toggle. An information icon beside the connection's intro (or beside
+each scope's heading, for a service with several) carries the note saying
+what every grant under the scope includes. Every connector write recomputes
+them with the rest of the rule: turning any permission on puts the handshake
+in, turning the last one off takes it out with the rule, and a rule written
+before the handshake was implied picks it up on its first flip.
 
 Re-enabling a `latchkey-self` toggle needs the permission's schema
 definition to still be in the host file -- detent fails the whole check on

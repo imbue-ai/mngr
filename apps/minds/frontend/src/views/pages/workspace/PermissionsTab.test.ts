@@ -20,6 +20,7 @@ import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
 import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
+import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { Spinner } from "../../components/Spinner";
 import type { AnyVnode } from "../../../testing";
 import { allText, attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
@@ -1765,5 +1766,61 @@ describe("PermissionsTab shared paths", () => {
       body: { path: row.path, enabled: true, conflict: "NEWER" },
     });
     remove();
+  });
+});
+
+describe("PermissionsTab implicit permissions", () => {
+  const NOTE = "Granted along with anything below: Open and maintain an MCP session.";
+
+  function hints(node: unknown): AnyVnode[] {
+    return withAttr(node, IMPLICIT_PERMISSIONS_HINT_ATTR);
+  }
+
+  function scopePanel(note: string, scope = "notion-mcp-api", heading = "Notion (MCP)") {
+    return {
+      scope,
+      heading,
+      implicit_note: note,
+      groups: [
+        {
+          heading: "Full access",
+          toggles: [{ permission: `${scope}-read-all`, label: "Read everything", description: "", is_granted: true }],
+        },
+      ],
+    };
+  }
+
+  it("draws nothing for a connection whose grants carry no handshake", async () => {
+    const { root } = await render(permissionsView());
+    expect(hints(root)).toHaveLength(0);
+  });
+
+  it("hangs the note on the intro of a single-scope connection, as a tooltip rather than a row", async () => {
+    const { root } = await render(
+      permissionsView({ connections: [slackConnection({ scopes: [scopePanel(NOTE)] })] }),
+    );
+    const found = hints(root);
+    expect(found).toHaveLength(1);
+    expect(attrsOf(found[0])["data-tooltip"]).toBe(NOTE);
+    expect(allText(root)).not.toContain(NOTE);
+    expect(switches(root)).toHaveLength(1);
+  });
+
+  it("hangs each scope's note on that scope's heading when a connection has several", async () => {
+    const { root } = await render(
+      permissionsView({
+        connections: [
+          slackConnection({
+            scopes: [scopePanel(NOTE, "fastmail-api", "Fastmail"), scopePanel("", "fastmail-dav-api", "Fastmail (DAV)")],
+          }),
+        ],
+      }),
+    );
+    const found = hints(root);
+    expect(found).toHaveLength(1);
+    const heading = collectVnodes(root).find(
+      (node) => node.tag === "h3" && allText(node).includes("Fastmail") && !allText(node).includes("DAV"),
+    ) as AnyVnode;
+    expect(hints(heading)).toHaveLength(1);
   });
 });

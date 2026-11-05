@@ -8,14 +8,23 @@ the Detent scope schema -- the very string that appears as a rule key in
 a per-host ``permissions.json`` (``{"slack-api": [...]}``) and that an
 agent's permission request carries -- plus a human-readable
 ``display_name``, an optional ``description`` (Detent's ``$comment``),
-and the grantable ``permissions`` (each with its own optional
-description). A single service may expose more than one scope (e.g.
+and the ``permissions`` under the scope (each with its own optional
+description, and marked ``is_implicit`` where it is not a choice). A
+single service may expose more than one scope (e.g.
 ``github`` -> ``github-rest-api``, ``github-git``).
 
 The file is generated (see ``scripts/generate_services_json.py``) from detent's
 builtin request schemas *plus* minds' own additional (custom) services, so this
 module -- and the gateway extensions that read the same file -- never have to
 know which of the two a service came from.
+
+A permission the file marks ``is_implicit`` is a protocol handshake (an MCP
+session, a JMAP session document) that no client can skip and that grants no
+content by itself. It is never offered as a choice: :class:`ServicePermissionInfo`
+keeps it out of ``permission_schemas`` and lists it under
+``implicit_permission_schemas`` instead, and every writer of a grant built from
+chosen permissions adds it to any non-empty permission set through
+:meth:`ServicePermissionInfo.with_implicit_permissions`.
 
 This module is the single chokepoint for that file. All access goes
 through :class:`ServicesCatalog`, which serves two layers:
@@ -43,6 +52,7 @@ missing or malformed file is a packaging bug; it surfaces as
 """
 
 from collections.abc import Mapping
+from collections.abc import Sequence
 from functools import cache
 from importlib import resources
 from pathlib import Path
@@ -94,11 +104,15 @@ class ServiceCatalogError(RuntimeError):
 
 
 class _AvailablePermission(FrozenModel):
-    """A single grantable permission schema and its plain-English summary."""
+    """A single permission schema under a scope and its plain-English summary; a choice unless marked implicit."""
 
     name: str = Field(min_length=1, description="Detent permission schema name (e.g. ``slack-read-all``).")
     description: str = Field(
         default="", description="Plain-English summary of the permission (Detent's ``$comment``)."
+    )
+    is_implicit: bool = Field(
+        default=False,
+        description="Whether the permission is a handshake every grant under the scope carries rather than a choice.",
     )
 
 
@@ -119,7 +133,11 @@ class _ServiceScopeEntry(FrozenModel):
     )
     description: str = Field(default="", description="Plain-English summary of the scope (Detent's ``$comment``).")
     permissions: tuple[_AvailablePermission, ...] = Field(
-        default=(), description="Permissions the user can grant for this scope, each with its summary."
+        default=(),
+        description=(
+            "Permission schemas under this scope, each with its summary: the choices the user can grant "
+            "plus any implicit ones."
+        ),
     )
     scope_schema: Mapping[str, JsonValue] | None = Field(
         default=None,
@@ -152,14 +170,22 @@ class ServicePermissionInfo(FrozenModel):
         description=(
             "Detent permission schemas the user can grant for this scope. The catch-all "
             "``any`` schema is always injected at index 0 as an available option (not "
-            "pre-checked) so the user can opt into unrestricted access if they want."
+            "pre-checked) so the user can opt into unrestricted access if they want. "
+            "Implicit permissions are not among them."
+        ),
+    )
+    implicit_permission_schemas: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Detent permission schemas every non-empty grant under this scope carries without being "
+            "chosen: the protocol handshake a client cannot skip. Empty for most scopes."
         ),
     )
     description_by_permission_name: Mapping[str, str] = Field(
         default_factory=dict,
         description=(
-            "Plain-English summary per permission schema name (Detent's ``$comment``). "
-            "Permissions without a summary are omitted; the injected ``any`` never has one."
+            "Plain-English summary per permission schema name (Detent's ``$comment``), implicit ones "
+            "included. Permissions without a summary are omitted; the injected ``any`` never has one."
         ),
     )
     scope_schema: Mapping[str, JsonValue] | None = Field(
@@ -170,6 +196,18 @@ class ServicePermissionInfo(FrozenModel):
             "written grant defines the scope its rule refers to; ``None`` for shipped scopes."
         ),
     )
+
+    def with_implicit_permissions(self, chosen_permissions: Sequence[str]) -> tuple[str, ...]:
+        """The permission set to write for a grant of ``chosen_permissions``.
+
+        A non-empty choice is followed by the scope's implicit permissions, so the
+        handshake the chosen ones depend on is always granted with them; an empty
+        choice stays empty, so revoking the last chosen permission revokes the
+        handshake too rather than leaving a rule that grants nothing usable.
+        """
+        if not chosen_permissions:
+            return ()
+        return tuple(dict.fromkeys((*chosen_permissions, *self.implicit_permission_schemas)))
 
 
 class ServiceAccountGrant(FrozenModel):
@@ -204,12 +242,16 @@ def _service_info_from_entry(name: str, entry: _ServiceScopeEntry) -> ServicePer
 
     Prepends the catch-all ``any`` schema as the first available option,
     deduplicating in case the file lists it explicitly. The dialog
-    renders it as an opt-in choice, not a pre-checked default. Per-schema
-    descriptions are carried over so the dialog can show them.
+    renders it as an opt-in choice, not a pre-checked default. Implicit
+    permissions are set aside rather than offered. Per-schema descriptions
+    are carried over so the dialog can show them.
     """
     permission_schemas: tuple[str, ...] = (WILDCARD_PERMISSION_NAME,) + tuple(
-        permission.name for permission in entry.permissions if permission.name != WILDCARD_PERMISSION_NAME
+        permission.name
+        for permission in entry.permissions
+        if permission.name != WILDCARD_PERMISSION_NAME and not permission.is_implicit
     )
+    implicit_permission_schemas = tuple(permission.name for permission in entry.permissions if permission.is_implicit)
     description_by_permission_name = {
         permission.name: permission.description for permission in entry.permissions if permission.description
     }
@@ -220,6 +262,7 @@ def _service_info_from_entry(name: str, entry: _ServiceScopeEntry) -> ServicePer
         service_display_name=entry.service_display_name or entry.display_name,
         description=entry.description,
         permission_schemas=permission_schemas,
+        implicit_permission_schemas=implicit_permission_schemas,
         description_by_permission_name=description_by_permission_name,
         scope_schema=entry.scope_schema,
     )

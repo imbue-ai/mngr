@@ -389,7 +389,8 @@
       "permissions": [
         {
           "name": "notion-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Notion content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Notion content.",
+          "is_implicit": true
         },
         {
           "name": "notion-mcp-read-all",
@@ -1597,7 +1598,8 @@
       "permissions": [
         {
           "name": "airtable-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Airtable content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Airtable content.",
+          "is_implicit": true
         },
         {
           "name": "airtable-mcp-read-all",
@@ -1678,7 +1680,8 @@
       "permissions": [
         {
           "name": "anydo-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Any.do content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Any.do content.",
+          "is_implicit": true
         },
         {
           "name": "anydo-mcp-read-all",
@@ -1796,7 +1799,8 @@
       "permissions": [
         {
           "name": "atlassian-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Atlassian content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Atlassian content.",
+          "is_implicit": true
         },
         {
           "name": "atlassian-mcp-read-all",
@@ -1877,7 +1881,8 @@
       "permissions": [
         {
           "name": "attio-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Attio data."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Attio data.",
+          "is_implicit": true
         },
         {
           "name": "attio-mcp-read-all",
@@ -1970,7 +1975,8 @@
       "permissions": [
         {
           "name": "beehiiv-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify beehiiv content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify beehiiv content.",
+          "is_implicit": true
         },
         {
           "name": "beehiiv-mcp-read-all",
@@ -1991,7 +1997,8 @@
       "permissions": [
         {
           "name": "buildkite-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Buildkite data."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Buildkite data.",
+          "is_implicit": true
         },
         {
           "name": "buildkite-mcp-read-all",
@@ -2064,7 +2071,8 @@
       "permissions": [
         {
           "name": "cal-com-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Cal.com content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Cal.com content.",
+          "is_implicit": true
         },
         {
           "name": "cal-com-mcp-read-all",
@@ -2141,7 +2149,8 @@
       "permissions": [
         {
           "name": "canva-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Canva content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Canva content.",
+          "is_implicit": true
         },
         {
           "name": "canva-mcp-read-all",
@@ -2222,7 +2231,8 @@
       "permissions": [
         {
           "name": "fastmail-session",
-          "description": "Fetch the JMAP session document, which names the apiUrl, downloadUrl and account ids. Required for any JMAP client to function; reveals account metadata but no mail, contact or calendar content."
+          "description": "Fetch the JMAP session document, which names the apiUrl, downloadUrl and account ids. Required for any JMAP client to function; reveals account metadata but no mail, contact or calendar content.",
+          "is_implicit": true
         },
         {
           "name": "fastmail-read-all",
@@ -2277,7 +2287,8 @@
       "permissions": [
         {
           "name": "fastmail-dav-discover",
-          "description": "Discover the authenticated principal and the collections belonging to it (a current-user-principal PROPFIND, RFC 5397). Required before any DAV client can locate an address book or calendar."
+          "description": "Discover the authenticated principal and the collections belonging to it (a current-user-principal PROPFIND, RFC 5397). Required before any DAV client can locate an address book or calendar.",
+          "is_implicit": true
         },
         {
           "name": "fastmail-dav-read-all",
@@ -2314,7 +2325,8 @@
       "permissions": [
         {
           "name": "fathom-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Fathom content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Fathom content.",
+          "is_implicit": true
         },
         {
           "name": "fathom-mcp-read-all",
@@ -2347,7 +2359,8 @@
       "permissions": [
         {
           "name": "gamma-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Gamma content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Gamma content.",
+          "is_implicit": true
         },
         {
           "name": "gamma-mcp-read-all",
@@ -2433,7 +2446,8 @@
       "permissions": [
         {
           "name": "granola-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Granola content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Granola content.",
+          "is_implicit": true
         },
         {
           "name": "granola-mcp-read-all",
@@ -2507,7 +2521,8 @@
       "permissions": [
         {
           "name": "invideo-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify invideo content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify invideo content.",
+          "is_implicit": true
         },
         {
           "name": "invideo-mcp-read-all",
@@ -2528,7 +2543,8 @@
       "permissions": [
         {
           "name": "linktree-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Linktree content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Linktree content.",
+          "is_implicit": true
         },
         {
           "name": "linktree-mcp-read-all",
@@ -2601,7 +2617,8 @@
       "permissions": [
         {
           "name": "neon-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Neon data."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Neon data.",
+          "is_implicit": true
         },
         {
           "name": "neon-mcp-read-all",
@@ -2682,7 +2699,8 @@
       "permissions": [
         {
           "name": "netlify-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Netlify content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Netlify content.",
+          "is_implicit": true
         },
         {
           "name": "netlify-mcp-read-all",
@@ -2797,7 +2815,8 @@
       "permissions": [
         {
           "name": "otter-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Otter.ai content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Otter.ai content.",
+          "is_implicit": true
         },
         {
           "name": "otter-mcp-read-all",
@@ -2826,7 +2845,8 @@
       "permissions": [
         {
           "name": "paypal-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PayPal data."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PayPal data.",
+          "is_implicit": true
         },
         {
           "name": "paypal-mcp-read-all",
@@ -2903,7 +2923,8 @@
       "permissions": [
         {
           "name": "peloton-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Peloton content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Peloton content.",
+          "is_implicit": true
         },
         {
           "name": "peloton-mcp-read-all",
@@ -2936,7 +2957,8 @@
       "permissions": [
         {
           "name": "posthog-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PostHog content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify PostHog content.",
+          "is_implicit": true
         },
         {
           "name": "posthog-mcp-read-all",
@@ -3150,7 +3172,8 @@
       "permissions": [
         {
           "name": "readwise-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Readwise content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Readwise content.",
+          "is_implicit": true
         },
         {
           "name": "readwise-mcp-read-all",
@@ -3215,7 +3238,8 @@
       "permissions": [
         {
           "name": "supabase-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Supabase content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Supabase content.",
+          "is_implicit": true
         },
         {
           "name": "supabase-mcp-read-all",
@@ -3349,7 +3373,8 @@
       "permissions": [
         {
           "name": "ticktick-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify TickTick content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify TickTick content.",
+          "is_implicit": true
         },
         {
           "name": "ticktick-mcp-read-all",
@@ -3487,7 +3512,8 @@
       "permissions": [
         {
           "name": "trello-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Trello content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Trello content.",
+          "is_implicit": true
         },
         {
           "name": "trello-mcp-read-all",
@@ -3548,7 +3574,8 @@
       "permissions": [
         {
           "name": "vercel-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Vercel content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Vercel content.",
+          "is_implicit": true
         },
         {
           "name": "vercel-mcp-read-all",
@@ -3629,7 +3656,8 @@
       "permissions": [
         {
           "name": "webflow-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Webflow content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Webflow content.",
+          "is_implicit": true
         },
         {
           "name": "webflow-mcp-read-all",
@@ -3706,7 +3734,8 @@
       "permissions": [
         {
           "name": "wix-mcp-session",
-          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Wix content."
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Wix content.",
+          "is_implicit": true
         },
         {
           "name": "wix-mcp-read-all",

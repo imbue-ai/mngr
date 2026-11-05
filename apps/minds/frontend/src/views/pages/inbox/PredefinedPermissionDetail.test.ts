@@ -4,6 +4,7 @@ import { InboxModel } from "../../../models/inbox";
 import type { PredefinedPermissionDetail } from "../../../models/inbox";
 import { DESKTOPS } from "../../../models/workspacePermissions.testing";
 import { Select } from "../../components/FormControls";
+import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import type { AnyVnode } from "../../../testing";
 import { attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
@@ -76,6 +77,7 @@ const DETAIL: PredefinedPermissionDetail = {
   selected_account_value: "alice@x",
   new_account_value: ":new-account",
   wildcard_permission: "any",
+  implicit_note: "",
   proxy: null,
   is_browser_auth_supported: true,
   manual_credentials: null,
@@ -663,5 +665,37 @@ describe("PredefinedPermissionDetailView proxy", () => {
     await model.approve();
     expect(grants).toHaveLength(1);
     expect(grants[0].get("proxy")).toBe("true");
+  });
+});
+
+describe("PredefinedPermissionDetailView implicit permissions", () => {
+  const NOTE = "Granted along with anything below: Open and maintain an MCP session.";
+
+  function hints(node: unknown): AnyVnode[] {
+    return withAttr(node, IMPLICIT_PERMISSIONS_HINT_ATTR);
+  }
+
+  it("draws nothing for a scope whose grants carry no handshake", () => {
+    const model = makeModel();
+    expect(hints(renderBody(model, DETAIL))).toHaveLength(0);
+    model.showPermissionEditor();
+    expect(hints(renderBody(model, DETAIL))).toHaveLength(0);
+  });
+
+  it("puts the note behind an information icon in the summary and once in the editor", () => {
+    const detail = { ...DETAIL, implicit_note: NOTE };
+    const model = makeModel(detail);
+
+    const summaryHints = hints(renderBody(model, detail));
+    expect(summaryHints).toHaveLength(1);
+    expect(attrsOf(summaryHints[0])["data-tooltip"]).toBe(NOTE);
+    expect(attrsOf(summaryHints[0])["aria-label"]).toBe(NOTE);
+    // The note is a tooltip, not body copy, and no row is drawn for it.
+    expect(collectText(renderBody(model, detail))).not.toContain(NOTE);
+
+    model.showPermissionEditor();
+    const editorHints = hints(renderBody(model, detail));
+    expect(editorHints).toHaveLength(1);
+    expect(editorSwitches(renderBody(model, detail))).toHaveLength(SCHEMA_NAMES.length);
   });
 });

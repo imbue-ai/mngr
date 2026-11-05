@@ -108,6 +108,7 @@ export function slackConnection(overrides: Partial<UiPermissionConnection> = {})
             ],
           },
         ],
+        implicit_note: "",
       },
     ],
     ...overrides,

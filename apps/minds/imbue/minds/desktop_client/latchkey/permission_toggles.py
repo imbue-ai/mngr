@@ -13,7 +13,11 @@ Three families of toggles, mirroring the permission-request types:
   granted per ``(scope, account)`` rule (see
   :mod:`imbue.mngr_latchkey.account_scopes`). Toggling writes the rule with
   :func:`build_account_grant`, so the generated per-account schema always
-  travels with it; turning the last permission off deletes the rule.
+  travels with it; turning the last permission off deletes the rule. A scope's
+  *implicit* permissions (the protocol handshake, see
+  :attr:`ServicePermissionInfo.implicit_permission_schemas`) get no toggle:
+  every write adds them to a non-empty set and drops them with the last chosen
+  permission, and the panel says so through ``implicit_note``.
 * **File-sharing toggles** -- the ``minds-file-server-*`` permission names on
   the shared ``latchkey-self`` rule. The rule also carries baseline / accounts
   / workspace permissions, so a rewrite always preserves every name this
@@ -136,6 +140,10 @@ _FULL_ACCESS_GROUP_KEY: Final[str] = "aa-full-access"
 _EXTRAS_HEADING: Final[str] = "Extras"
 _EXTRAS_GROUP_KEY: Final[str] = "zz-extras"
 
+# Leads the note behind a scope's information icon; the catalog's description
+# of each implicit permission follows it.
+_IMPLICIT_NOTE_PREFIX: Final[str] = "Granted along with anything below: "
+
 # Leading verb tokens recognized in verb-first permission names
 # (``github-read-repos``, ``google-gmail-send-messages``,
 # ``notion-mcp-create-pages``). A name starting with one of these reads as
@@ -205,6 +213,12 @@ class ScopeTogglePanel(FrozenModel):
     scope: str = Field(description="Detent scope schema name; the rule key half of the grant.")
     heading: str = Field(description="Scope display name, shown as a divider when a service has several scopes.")
     groups: tuple[PermissionToggleGroup, ...] = Field(description="Toggle groups, full access first, extras last.")
+    implicit_note: str = Field(
+        description=(
+            "What every grant under the scope carries without a toggle of its own (the protocol handshake); "
+            "empty when the scope has no implicit permission."
+        ),
+    )
 
 
 class ServiceSignIn(FrozenModel):
@@ -276,7 +290,12 @@ class ConnectionPanel(FrozenModel):
     show_account_label: bool = Field(
         description="Whether the nav entry needs the account label to disambiguate (service has several accounts).",
     )
-    granted_count: int = Field(description="Total permissions currently granted across the service's scopes.")
+    granted_count: int = Field(
+        description=(
+            "Chosen permissions currently granted across the service's scopes; the scopes' implicit "
+            "permissions are not counted."
+        ),
+    )
     scopes: tuple[ScopeTogglePanel, ...] = Field(description="One toggle panel per scope the service exposes.")
     sign_in: ServiceSignIn = Field(
         description="How the service's *next* account is connected; identical across its accounts.",
@@ -422,6 +441,31 @@ def group_permissions_by_area(info: ServicePermissionInfo) -> tuple[PermissionAr
     )
 
 
+@pure
+def describe_implicit_permissions(info: ServicePermissionInfo) -> str:
+    """The note telling the user what a scope's grants carry without a choice; empty when nothing is implicit.
+
+    Shared by the Permissions tab and the grant dialog, which both show it
+    behind an information icon rather than as a row: a permission that cannot
+    be turned off on its own is not a toggle, but the user should still be able
+    to find out it is there.
+    """
+    if not info.implicit_permission_schemas:
+        return ""
+    descriptions = (_describe_implicit_permission(info, permission) for permission in info.implicit_permission_schemas)
+    return _IMPLICIT_NOTE_PREFIX + " ".join(descriptions)
+
+
+@pure
+def _describe_implicit_permission(info: ServicePermissionInfo, permission: str) -> str:
+    """The catalog's summary of one implicit permission, or its derived label when the catalog has none."""
+    description = info.description_by_permission_name.get(permission, "")
+    if description:
+        return description
+    _, _, label = classify_permission(permission, info.scope, info.name)
+    return label
+
+
 def _build_scope_panel(info: ServicePermissionInfo, granted: frozenset[str]) -> ScopeTogglePanel:
     """Render one scope's grouped permissions as toggle rows carrying their host state."""
     groups = tuple(
@@ -439,7 +483,12 @@ def _build_scope_panel(info: ServicePermissionInfo, granted: frozenset[str]) -> 
         )
         for group in group_permissions_by_area(info)
     )
-    return ScopeTogglePanel(scope=info.scope, heading=info.display_name, groups=groups)
+    return ScopeTogglePanel(
+        scope=info.scope,
+        heading=info.display_name,
+        groups=groups,
+        implicit_note=describe_implicit_permissions(info),
+    )
 
 
 def _granted_by_scope_account(
@@ -803,7 +852,12 @@ def build_workspace_permissions_view(
                         account_label=account_label(account),
                         is_connected=account in stored,
                         show_account_label=len(panel_accounts) > 1,
-                        granted_count=sum(len(granted.get((info.scope, account), frozenset())) for info in infos),
+                        granted_count=sum(
+                            len(
+                                granted.get((info.scope, account), frozenset()) - set(info.implicit_permission_schemas)
+                            )
+                            for info in infos
+                        ),
                         scopes=scopes,
                         sign_in=sign_in,
                         desktop_egress=desktop_egress,
@@ -958,7 +1012,10 @@ def compute_connector_permissions(
     The result is complete (never a diff): catalog permissions in catalog
     order with the toggled one added or removed, followed by any names in the
     current grant that the catalog does not know (hand-edited entries are
-    preserved verbatim rather than silently dropped). Raises
+    preserved verbatim rather than silently dropped), followed by the scope's
+    implicit permissions whenever anything else is left -- so a rule written
+    before the handshake was implied gets it on its first flip, and the rule
+    empties, and is deleted, once the last chosen permission goes. Raises
     :class:`PermissionToggleError` for a permission outside the scope's
     catalog surface -- defence-in-depth against a crafted request.
     """
@@ -966,14 +1023,14 @@ def compute_connector_permissions(
         raise PermissionToggleError(
             f"Permission '{permission}' is not grantable for scope '{info.scope}'.",
         )
-    membership = set(current)
+    membership = set(current) - set(info.implicit_permission_schemas)
     if enabled:
         membership.add(permission)
     else:
         membership.discard(permission)
     known = [name for name in info.permission_schemas if name in membership]
     unknown = [name for name in current if name not in info.permission_schemas and name in membership]
-    return tuple(known + unknown)
+    return info.with_implicit_permissions(known + unknown)
 
 
 def apply_connector_toggle(

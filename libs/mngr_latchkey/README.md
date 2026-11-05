@@ -1209,7 +1209,9 @@ root is rejected with HTTP 403.
   "description": "...", "permissions": [{"name": "<schema_name>",
   "description": "..."}, ...]}`. The scope-level `description` and each
   permission's `description` carry detent's per-schema `$comment`
-  summaries (both optional).
+  summaries (both optional). A permission that is a protocol handshake
+  every grant under its scope carries also has `"is_implicit": true`;
+  the paragraph on implicit permissions below says what that means.
 * `GET /permissions/available/<service_name>` returns the permission
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is
@@ -1250,6 +1252,21 @@ uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
 
 Display names and the service ordering are editorial metadata detent does
 not carry; they live as curated constants in that script.
+
+So is which permissions are *implicit*. A hosted MCP service's
+`<service>-mcp-session` permission (the `initialize`, `tools/list` and `ping`
+calls), Fastmail's JMAP `fastmail-session` and its DAV `fastmail-dav-discover`
+are protocol handshakes: no client can skip them, they grant no content on
+their own, and a rule holding only narrower permissions is one the agent
+cannot use. The generator marks them `"is_implicit": true`;
+`ServicePermissionInfo` keeps them out of the grantable `permission_schemas`
+(so no dialog or toggle offers them) and lists them under
+`implicit_permission_schemas`, and every writer of a grant built from chosen
+permissions (the dialog and the Permissions tab toggle) goes through
+`ServicePermissionInfo.with_implicit_permissions`, which appends them to any
+non-empty permission set and leaves an empty one empty. An agent may
+still name one in a permission request (the gateway accepts every catalog
+permission); it is simply not offered as a choice.
 
 Services hidden from agents (`core.HIDDEN_BUILTIN_SERVICES`, currently just
 `notion`) are left out of the catalog: latchkey never injects their
