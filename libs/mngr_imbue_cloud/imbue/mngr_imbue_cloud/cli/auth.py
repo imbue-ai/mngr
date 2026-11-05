@@ -12,6 +12,7 @@ import threading
 import urllib.parse
 import webbrowser
 from collections.abc import Generator
+from collections.abc import Mapping
 from contextlib import contextmanager
 from enum import auto
 from pathlib import Path
@@ -22,6 +23,7 @@ import click
 from loguru import logger
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
@@ -605,6 +607,24 @@ def _unverified_email_from_callback(params: dict[str, str]) -> str | None:
     return None
 
 
+@pure
+def _email_verification_from_callback(params: Mapping[str, str], signed_in_email: str) -> bool | None:
+    """Whether the callback reported the signed-in address as verified, or None when it said nothing about it.
+
+    A connector that predates the ``verified`` parameter sends none, and a
+    callback naming a different address says nothing about this account.
+    """
+    if params.get("email", "").casefold() != signed_in_email.casefold():
+        return None
+    match params.get("verified"):
+        case "1":
+            return True
+        case "0":
+            return False
+        case _:
+            return None
+
+
 def _make_callback_handler_class(
     box: _CallbackCaptureBox,
     success_redirect_url: str | None,
@@ -893,6 +913,11 @@ def login(
     hands back (PKCE-bound) for this machine's own session. The browser
     session established along the way stays in the browser; this device gets
     independent tokens.
+
+    The emitted JSON's ``is_email_verified`` says whether the hosted page saw
+    the address as verified when the sign-in finished (null when the
+    connector does not say), so an embedder need not ask ``is-verified``
+    straight after.
     """
     parsed_account = parse_account(account) if account else None
 
@@ -946,7 +971,7 @@ def login(
         token_response = client.auth_device_token(code=code, code_verifier=code_verifier, redirect_uri=callback_url)
         payload = _persist_auth_response(token_response, parsed_account, store)
         capture_box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
-    emit_json(payload)
+    emit_json({**payload, "is_email_verified": _email_verification_from_callback(captured, payload["email"])})
 
 
 @auth.command(name="forgot-password")

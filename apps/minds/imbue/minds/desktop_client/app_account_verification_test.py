@@ -9,9 +9,12 @@ the structured JSON body, and serve the resend button's endpoint.
 import json
 from pathlib import Path
 
+import pytest
+
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import record_web_login_flow_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 
@@ -102,6 +105,45 @@ def test_verification_check_reports_the_connector_verdict_for_a_signed_in_email(
     assert json.loads(unverified.data) == {"verified": False, "email": "alice@example.com"}
     assert json.loads(verified.data) == {"verified": True, "email": "alice@example.com"}
     assert cli.is_verified_checks == ["alice@example.com", "alice@example.com"]
+
+
+@pytest.mark.witnesses(
+    "start-flow.verified-at-sign-in", partial="asserts the backend's verification answer, not the start page's create"
+)
+def test_verification_check_answers_from_a_sign_in_that_reported_the_email_verified(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _make_client_with_account(tmp_path, cli)
+    record_web_login_flow_for_test("alice@example.com", is_email_verified=True)
+
+    response = client.get("/accounts/verification?email=alice@example.com")
+
+    assert json.loads(response.data) == {"verified": True, "email": "alice@example.com"}
+    assert cli.is_verified_checks == []
+
+
+@pytest.mark.parametrize("is_email_verified", [False, None])
+def test_verification_check_asks_the_connector_when_the_sign_in_did_not_report_it_verified(
+    tmp_path: Path, is_email_verified: bool | None
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _make_client_with_account(tmp_path, cli)
+    record_web_login_flow_for_test("alice@example.com", is_email_verified=is_email_verified)
+    cli.verified_emails.add("alice@example.com")
+
+    response = client.get("/accounts/verification?email=alice@example.com")
+
+    assert json.loads(response.data) == {"verified": True, "email": "alice@example.com"}
+    assert cli.is_verified_checks == ["alice@example.com"]
+
+
+def test_verification_check_ignores_a_verified_sign_in_whose_account_is_not_signed_in(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _make_client_with_account(tmp_path, cli)
+    record_web_login_flow_for_test("bob@example.com", is_email_verified=True)
+
+    response = client.get("/accounts/verification?email=bob@example.com")
+
+    assert response.status_code == 409
 
 
 def test_verification_check_409s_for_an_email_this_install_has_not_signed_in(tmp_path: Path) -> None:

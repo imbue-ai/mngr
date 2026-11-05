@@ -1,6 +1,7 @@
 import base64
 import json
 import tempfile
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -65,6 +66,8 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.supertokens_routes import _WebLoginFlowStatus
+from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -1299,6 +1302,21 @@ def make_resolver_with_data(
             resolver.update_services(AgentId(agent_id_str), services, labels, display_names=display_names)
 
     return resolver
+
+
+def record_web_login_flow_for_test(
+    email: str, is_email_verified: bool | None, state: str = "done", ttl_seconds: float = 60.0
+) -> None:
+    """Track a browser sign-in flow for ``email`` whose hosted page gave ``is_email_verified``.
+
+    A negative ``ttl_seconds`` records a flow that has already expired.
+    """
+    _record_web_login_status(
+        f"flow-{uuid4().hex}",
+        _WebLoginFlowStatus(
+            state=state, email=email, is_email_verified=is_email_verified, deadline=time.monotonic() + ttl_seconds
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)

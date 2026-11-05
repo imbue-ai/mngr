@@ -1,7 +1,8 @@
 // The chat primitives the start flow and the creation page are drawn with: a
 // user turn (the grey bubble on the right), an agent turn (a bare paragraph
 // streamed a character at a time), the row of buttons a question offers, the
-// two-column comparison, and the undo control beside an answered bubble.
+// two-column comparison, the undo control beside an answered bubble, and the
+// line the agent shows while the user waits on it.
 //
 // Arrival is CSS: every turn carries its own delay as a custom property and a
 // fresh `key`, so a newly mounted node runs its animation from the start and a
@@ -18,6 +19,7 @@ import type { DisclosurePoint, TableColumn } from "../../../models/startFlow";
 import { Button } from "../../components/Button";
 import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
+import { Spinner } from "../../components/Spinner";
 
 /** The column every transcript sits in: the chat's 720px measure, 48px between turns. */
 export const TRANSCRIPT_COLUMN_CLASS =
@@ -166,6 +168,25 @@ function turnDetails(details: TurnDetails): m.Children {
       },
       details.lines.join("\n"),
     ),
+  );
+}
+
+/**
+ * The agent working on something the user is waiting for: a spinner and what
+ * is under way, quieter than a turn. It arrives after `delayMs`, so a wait that
+ * is over by then never shows it.
+ */
+export function pendingTurn(attrs: ArrivalAttrs & { text: string; id?: string }): m.Children {
+  return m(
+    "p",
+    {
+      key: attrs.key,
+      id: attrs.id,
+      role: "status",
+      class: "mt-10 flex items-center gap-2 text-secondary first:mt-0" + arrivalClass(attrs),
+      style: arrivalStyle(attrs),
+    },
+    [m(Spinner, { size: "sm" }), attrs.text],
   );
 }
 

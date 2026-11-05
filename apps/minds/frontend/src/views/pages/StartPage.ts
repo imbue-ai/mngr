@@ -24,6 +24,8 @@ import { fetchSigninLanding, markOnboardingComplete, recordErrorReportingConsent
 import type { SigninLanding } from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
+  CLOUD_CREATE_CHECKING_TEXT,
+  CLOUD_CREATE_STARTING_TEXT,
   FLOW,
   FLOW_OPTIONS_GAP_MS,
   FLOW_THINK_MS,
@@ -40,6 +42,7 @@ import {
   SIGN_IN_INTRO_BY_CHOICE,
   answerStep,
   chooseExistingLogin,
+  cloudCreatePendingAtMs,
   continueExistingLoginWithoutWorkspaces,
   dismissPendingModal,
   finishPendingModal,
@@ -78,6 +81,7 @@ import {
   answerRow,
   choiceTable,
   disclosureList,
+  pendingTurn,
   scrollAnchor,
   userTurn,
 } from "./start/transcript";
@@ -273,9 +277,10 @@ export const StartPage: m.ClosureComponent = () => {
     m.redraw();
   }
 
+  // The defaults only ever build the Imbue Cloud body, so the local probes are left out.
   function loadDefaults(): void {
     if (defaults !== null) return;
-    fetchCreateFormDefaults(null, getAppContext().shell.accountId)
+    fetchCreateFormDefaults(null, getAppContext().shell.accountId, true)
       .then((loaded) => {
         defaults = loaded;
       })
@@ -429,6 +434,8 @@ export const StartPage: m.ClosureComponent = () => {
       return;
     }
     isSubmittingCloud = true;
+    // The line under the transcript now says the workspace is starting.
+    redraw();
     const accountId = flowAccount(flow).userId;
     // The create is submitted under the flow's account, so the window becomes
     // that account's (its creation page and first workspace belong to it) --
@@ -452,7 +459,7 @@ export const StartPage: m.ClosureComponent = () => {
     const ready =
       cached !== null && !areDefaultsStale(cached, accountId)
         ? Promise.resolve(cached)
-        : fetchCreateFormDefaults(null, accountId);
+        : fetchCreateFormDefaults(null, accountId, true);
     const fail = (message: string): void => {
       isSubmittingCloud = false;
       flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
@@ -765,6 +772,18 @@ export const StartPage: m.ClosureComponent = () => {
             key: "signin-landing-checking",
             text: SIGNIN_LANDING_CHECKING_TEXT,
             startAtMs: FLOW_THINK_MS,
+          }),
+        );
+      }
+      // A create that is being checked or sent says which; the verification
+      // wait, which polls the same check, has its own question instead.
+      if (state.isCloudCreatePending && (isCheckingVerification || isSubmittingCloud)) {
+        children.push(
+          pendingTurn({
+            key: `cloud-create-pending-${state.entries.length}`,
+            id: "start-cloud-create-pending",
+            delayMs: cloudCreatePendingAtMs(state.entries),
+            text: isSubmittingCloud ? CLOUD_CREATE_STARTING_TEXT : CLOUD_CREATE_CHECKING_TEXT,
           }),
         );
       }

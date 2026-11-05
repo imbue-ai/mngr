@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
+from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
@@ -290,6 +291,29 @@ def test_mngr_create_failure_shows_only_the_quota_refusal_message() -> None:
     )
     assert str(error) == "This account is on the waitlist."
     assert error.error_class == "ImbueCloudQuotaExceededError"
+    assert error.output_tail is not None
+    assert "FAST PATH" in error.output_tail
+
+
+def test_mngr_create_failure_shows_only_the_email_verification_refusal_message() -> None:
+    """A lease refused for an unverified email says where the link went, not mngr's transcript.
+
+    The start flow can send a cloud create on the sign-in's client-side verdict
+    alone, and the connector still checks the email on the lease, so a
+    disagreement between the two reaches the person as this refusal.
+    """
+    message = (
+        "Creating a remote workspace requires a verified email address. We just emailed a verification link "
+        "to alice@example.com -- check your inbox (and your spam folder), click the link, then retry."
+    )
+    capture = _CreateEventCapture()
+    capture(
+        json.dumps({"event": "error", "error_class": EMAIL_NOT_VERIFIED_ERROR_CLASS, "message": message}),
+        is_stdout=True,
+    )
+    error = _mngr_create_failure(1, "", f"imbue_cloud[x] FAST PATH: leasing\nError: {message}", capture)
+    assert str(error) == message
+    assert error.error_class == EMAIL_NOT_VERIFIED_ERROR_CLASS
     assert error.output_tail is not None
     assert "FAST PATH" in error.output_tail
 
@@ -2809,15 +2833,26 @@ def test_a_create_clones_from_the_network_when_the_cached_copy_is_gone(
 
 
 @pytest.mark.timeout(30)
-def test_a_quota_refused_create_fails_the_attempt_without_an_error_log(tmp_path: Path, monkeypatch) -> None:
-    """A waitlisted account's refusal is a correct outcome shown on the creating page, not a fault to report.
+@pytest.mark.parametrize(
+    ("error_class", "message"),
+    [
+        (QUOTA_EXCEEDED_ERROR_CLASS, "This account is on the waitlist."),
+        (
+            EMAIL_NOT_VERIFIED_ERROR_CLASS,
+            "Creating a remote workspace requires a verified email address. We just emailed a verification link "
+            "to alice@example.com -- check your inbox (and your spam folder), click the link, then retry.",
+        ),
+    ],
+)
+def test_an_account_refused_create_fails_the_attempt_without_an_error_log(
+    tmp_path: Path, monkeypatch, error_class: str, message: str
+) -> None:
+    """A waitlisted or unverified account's refusal is a correct outcome shown on the creating page, not a fault.
 
     ERROR records become error-tracker events, so logging this one there filed an
     event for every waitlisted person who tried to create a workspace.
     """
-    refusal = json.dumps(
-        {"event": "error", "error_class": QUOTA_EXCEEDED_ERROR_CLASS, "message": "This account is on the waitlist."}
-    )
+    refusal = json.dumps({"event": "error", "error_class": error_class, "message": message})
     install_stub_mngr_on_path(
         tmp_path / "fake-bin", monkeypatch, f'if [ "$1" = "create" ]; then echo \'{refusal}\'; exit 1; fi\nexit 0'
     )
@@ -2830,7 +2865,7 @@ def test_a_quota_refused_create_fails_the_attempt_without_an_error_log(tmp_path:
 
     info = creator.get_create_attempt_info(create_attempt_id)
     assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert info.error == "This account is on the waitlist."
+    assert info.error == message
     assert error_records == []
 
 

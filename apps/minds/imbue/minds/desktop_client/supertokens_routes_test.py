@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_provider_materializer_for_test
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import record_web_login_flow_for_test
 from imbue.minds.desktop_client.conftest import session_store_account_source
 from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
 from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.supertokens_routes import _read_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _run_web_login_subprocess
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.supertokens_routes import is_email_verified_by_web_login
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.testing import stub_mngr_host_dir
@@ -347,6 +349,75 @@ def test_run_web_login_subprocess_marks_finishing_before_mirroring(tmp_path: Pat
     final = _read_web_login_status(flow_id)
     assert final is not None
     assert final.state == "done"
+
+
+def test_run_web_login_subprocess_keeps_the_sign_ins_verification_verdict(tmp_path: Path) -> None:
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_session_to_return = ImbueCloudAuthSession(
+        user_id=f"user-{uuid4().hex}", email=email, display_name=None, is_email_verified=True
+    )
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+    assert not is_email_verified_by_web_login(email)
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=tmp_path / "login-url.txt",
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path, cli),
+        sync_scheduler=None,
+        output_format=OutputFormat.JSON,
+        notify_accounts_changed=_do_nothing,
+        provider_materializer=None,
+    )
+
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "done"
+    assert status.is_email_verified is True
+    assert is_email_verified_by_web_login(email.upper())
+    assert not is_email_verified_by_web_login(f"other-{uuid4().hex}@example.com")
+
+
+@pytest.mark.parametrize(
+    ("state", "is_email_verified", "expected"),
+    [
+        ("finishing", True, True),
+        ("done", True, True),
+        ("done", False, False),
+        ("done", None, False),
+        ("running", True, False),
+        ("error", True, False),
+    ],
+)
+def test_is_email_verified_by_web_login_trusts_only_a_finished_sign_ins_positive_verdict(
+    state: str, is_email_verified: bool | None, expected: bool
+) -> None:
+    email = f"user-{uuid4().hex}@example.com"
+    record_web_login_flow_for_test(email, is_email_verified, state=state)
+
+    assert is_email_verified_by_web_login(email) is expected
+
+
+@pytest.mark.parametrize(
+    ("earlier", "later", "expected"), [(True, False, False), (False, True, True), (True, None, False)]
+)
+def test_is_email_verified_by_web_login_goes_by_the_latest_sign_in(
+    earlier: bool | None, later: bool | None, expected: bool
+) -> None:
+    email = f"user-{uuid4().hex}@example.com"
+    for is_email_verified in (earlier, later):
+        record_web_login_flow_for_test(email, is_email_verified)
+
+    assert is_email_verified_by_web_login(email) is expected
+
+
+def test_is_email_verified_by_web_login_forgets_an_expired_flow() -> None:
+    email = f"user-{uuid4().hex}@example.com"
+    record_web_login_flow_for_test(email, is_email_verified=True, ttl_seconds=-1.0)
+
+    assert not is_email_verified_by_web_login(email)
 
 
 def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: Path) -> None:

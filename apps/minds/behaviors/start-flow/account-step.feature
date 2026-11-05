@@ -24,6 +24,22 @@ Feature: The account step
     Then the answer reads "Continue as alice@example.com"
     And the cloud create runs under "alice@example.com"
 
+  @starting-line
+  Scenario: A cloud create still on its way says what it is waiting on
+    Given the account "alice@example.com" is signed in
+    When the user presses "Continue"
+    And the cloud create has not gone out once the agent's reply has arrived
+    Then a spinner and "Checking your account…" appear under that reply while the email verification is checked
+    And the line reads "Starting your workspace…" once the create is being sent
+    And it is gone once the create goes out or is refused
+    And an email the check finds unverified gets the verification question, never "Starting your workspace…"
+
+  @verified-at-sign-in
+  Scenario: A sign-in that finds the email verified sends the cloud create at once
+    Given no account is signed in
+    When the user signs in as "alice@example.com", whose email is verified
+    Then the cloud create goes out as soon as the sign-in lands, without asking about verification
+
   @unverified-then-new-account
   Scenario: A second account created after abandoning an unverified first one is the one used
     Given no account is signed in

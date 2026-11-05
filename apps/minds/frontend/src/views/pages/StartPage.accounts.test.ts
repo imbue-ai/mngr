@@ -7,13 +7,16 @@ import type { UiAccountEntry } from "../../channel/messages";
 import { createEmptyStores } from "../../models/boot";
 import type { CreateFormDefaults } from "../../models/create";
 import { VERIFICATION_POLL_MS } from "../../models/emailVerification";
-import { dismissPendingModal, startFlow } from "../../models/startFlow";
+import { CLOUD_CREATE_CHECKING_TEXT, CLOUD_CREATE_STARTING_TEXT, dismissPendingModal, startFlow } from "../../models/startFlow";
+import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
 import { webLogin } from "../../models/webLogin";
 import {
+  type AnyVnode,
   accountEntry,
   accountsMessage,
   allText,
   attrsOf,
+  byId,
   collectVnodes,
   createFormDefaults,
   jsonResponse,
@@ -66,6 +69,15 @@ function emailOf(url: string): string {
   return decodeURIComponent(url.split("email=")[1] ?? "");
 }
 
+/** A gate a mocked request awaits, held shut until the test calls `release`. */
+function heldGate(): { gate: Promise<void>; release: () => void } {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
+}
+
 describe("the account step on the live page", () => {
   let shell: ShellState;
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -85,6 +97,19 @@ describe("the account step on the live page", () => {
 
   function createCalls(): unknown[][] {
     return fetchMock.mock.calls.filter(([url]) => url === CREATE_URL);
+  }
+
+  /** Answer `override` first; a request it resolves to undefined goes to the default mock. */
+  function interceptFetch(override: (url: string) => Promise<Response | undefined>): void {
+    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
+    fetchMock.mockImplementation(async (url: string) => (await override(url)) ?? defaultFetch(url));
+  }
+
+  /** Accept error reporting, choose Imbue Cloud, and continue as the account already signed in. */
+  function continueAsSignedInAccount(page: { view: () => unknown }): void {
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    pressLast(page.view(), "data-answer", "continue");
   }
 
   beforeEach(() => {
@@ -116,6 +141,7 @@ describe("the account step on the live page", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     clearAppContextForTests();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -155,31 +181,25 @@ describe("the account step on the live page", () => {
 
   it("a verification verdict that lands after switching accounts is not applied to the new account", async () => {
     // Alice is verified, but her check is held until after the flow has moved on to Bob, who is not.
-    let releaseAliceCheck: () => void = () => undefined;
-    const aliceCheck = new Promise<void>((resolve) => {
-      releaseAliceCheck = resolve;
-    });
-    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
-    fetchMock.mockImplementation(async (url: string) => {
+    const aliceCheck = heldGate();
+    interceptFetch(async (url: string) => {
       if (url.startsWith("/accounts/verification")) {
         const email = emailOf(url);
-        if (email === ALICE.email) await aliceCheck;
+        if (email === ALICE.email) await aliceCheck.gate;
         return jsonResponse({ verified: email === ALICE.email });
       }
-      return defaultFetch(url);
+      return undefined;
     });
     signIn([ALICE]);
     const page = renderStartPage();
-    pressLast(page.view(), "data-answer", "reporting-yes");
-    pressLast(page.view(), "data-answer", "cloud");
-    pressLast(page.view(), "data-answer", "continue");
+    continueAsSignedInAccount(page);
     expect(verificationChecks()).toEqual([ALICE.email]);
 
     pressLast(page.view(), "aria-label", "Change answer");
     pressLast(page.view(), "data-answer", "signin");
     signIn([ALICE, BOB]);
     page.update();
-    releaseAliceCheck();
+    aliceCheck.release();
 
     await vi.waitFor(() => expect(allText(page.view())).toContain("I verified it"));
     expect(verificationChecks()).toEqual([ALICE.email, BOB.email]);
@@ -189,28 +209,22 @@ describe("the account step on the live page", () => {
 
   it("an 'I verified it' press that lands after switching accounts does not answer the new account's question", async () => {
     // Alice's first check says unverified; her press check is held, then says verified once the flow waits on Bob.
-    let releaseAlicePress: () => void = () => undefined;
-    const alicePress = new Promise<void>((resolve) => {
-      releaseAlicePress = resolve;
-    });
+    const alicePress = heldGate();
     let aliceChecks = 0;
-    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
-    fetchMock.mockImplementation(async (url: string) => {
+    interceptFetch(async (url: string) => {
       if (url.startsWith("/accounts/verification")) {
         const email = emailOf(url);
         if (email !== ALICE.email) return jsonResponse({ verified: false });
         aliceChecks += 1;
         if (aliceChecks === 1) return jsonResponse({ verified: false });
-        await alicePress;
+        await alicePress.gate;
         return jsonResponse({ verified: true });
       }
-      return defaultFetch(url);
+      return undefined;
     });
     signIn([ALICE]);
     const page = renderStartPage();
-    pressLast(page.view(), "data-answer", "reporting-yes");
-    pressLast(page.view(), "data-answer", "cloud");
-    pressLast(page.view(), "data-answer", "continue");
+    continueAsSignedInAccount(page);
     await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
     pressLast(page.view(), "data-answer", "verified");
     await vi.waitFor(() => expect(aliceChecks).toBe(2));
@@ -220,8 +234,8 @@ describe("the account step on the live page", () => {
     signIn([ALICE, BOB]);
     page.update();
     await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(BOB.email));
-    releaseAlicePress();
-    await alicePress;
+    alicePress.release();
+    await alicePress.gate;
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(startFlow.state.verificationEmail).toBe(BOB.email);
@@ -242,9 +256,7 @@ describe("the account step on the live page", () => {
     });
     signIn([BOB]);
     const page = renderStartPage();
-    pressLast(page.view(), "data-answer", "reporting-yes");
-    pressLast(page.view(), "data-answer", "cloud");
-    pressLast(page.view(), "data-answer", "continue");
+    continueAsSignedInAccount(page);
 
     await vi.waitFor(() =>
       expect(startFlow.state.entries.at(-1)).toMatchObject({
@@ -255,6 +267,108 @@ describe("the account step on the live page", () => {
     expect(createCalls()).toHaveLength(0);
     const undos = collectVnodes(page.view()).filter((node) => attrsOf(node)["aria-label"] === "Change answer");
     expect(undos.length).toBeGreaterThan(0);
+  });
+
+  it("reads the create defaults without the local probes, both on arrival and for the create", async () => {
+    const page = renderStartPage();
+    // The arrival read is under the window's local profile, so the create under Bob must read the defaults again.
+    signIn([BOB]);
+    continueAsSignedInAccount(page);
+
+    await vi.waitFor(() => expect(createCalls()).toHaveLength(1));
+    const defaultsReads = fetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.startsWith("/ui/api/create/form-defaults"));
+    const cloudDefaultsUrl = (accountId: string): string =>
+      `/ui/api/create/form-defaults?account=${accountId}&skip_local_probes=1`;
+    expect(defaultsReads).toEqual([cloudDefaultsUrl(LOCAL_PROFILE_USER_ID), cloudDefaultsUrl(BOB.user_id)]);
+  });
+
+  /** The line under the transcript that says what the owed cloud create waits on, if it is there. */
+  function pendingLine(page: { view: () => unknown }): AnyVnode | undefined {
+    return byId(page.view(), "start-cloud-create-pending");
+  }
+
+  it("says it is checking the account during the check, and that the workspace is starting while the create is sent", async () => {
+    const check = heldGate();
+    const create = heldGate();
+    interceptFetch(async (url: string) => {
+      if (url.startsWith("/accounts/verification")) await check.gate;
+      if (url === CREATE_URL) await create.gate;
+      return undefined;
+    });
+    signIn([BOB]);
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    expect(pendingLine(page)).toBeUndefined();
+
+    pressLast(page.view(), "data-answer", "continue");
+    const checking = pendingLine(page);
+    if (checking === undefined) throw new Error("no line says the account is being checked");
+    expect(allText(checking)).toContain(CLOUD_CREATE_CHECKING_TEXT);
+    expect(allText(page.view())).not.toContain(CLOUD_CREATE_STARTING_TEXT);
+    // It waits for the agent's note to land, so a create sent sooner never shows it.
+    expect(String(attrsOf(checking).style)).toMatch(/--start-chat-delay: [1-9]\d*ms/);
+
+    // Bob is verified: the create goes out and is held in flight. A settled
+    // promise does not repaint a mithril page, so the page asks for one.
+    const redrawsBeforeVerdict = vi.mocked(m.redraw).mock.calls.length;
+    check.release();
+    await vi.waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(vi.mocked(m.redraw).mock.calls.length).toBeGreaterThan(redrawsBeforeVerdict);
+    const starting = pendingLine(page);
+    if (starting === undefined) throw new Error("no line says the workspace is starting");
+    expect(allText(starting)).toContain(CLOUD_CREATE_STARTING_TEXT);
+    expect(allText(page.view())).not.toContain(CLOUD_CREATE_CHECKING_TEXT);
+
+    create.release();
+    await vi.waitFor(() => expect(startFlow.state.entries.at(-1)).toMatchObject({ id: "again" }));
+    expect(pendingLine(page)).toBeUndefined();
+  });
+
+  it("never says the workspace is starting for an email the check finds unverified", async () => {
+    const check = heldGate();
+    interceptFetch(async (url: string) => {
+      if (url.startsWith("/accounts/verification")) await check.gate;
+      return undefined;
+    });
+    signIn([ALICE]);
+    const page = renderStartPage();
+    continueAsSignedInAccount(page);
+    expect(allText(page.view())).toContain(CLOUD_CREATE_CHECKING_TEXT);
+    expect(allText(page.view())).not.toContain(CLOUD_CREATE_STARTING_TEXT);
+
+    check.release();
+    await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
+    expect(pendingLine(page)).toBeUndefined();
+    expect(createCalls()).toHaveLength(0);
+  });
+
+  it("says nothing about the create while it waits on the emailed link", async () => {
+    vi.useFakeTimers();
+    const poll = heldGate();
+    let checks = 0;
+    interceptFetch(async (url: string) => {
+      if (url.startsWith("/accounts/verification")) {
+        checks += 1;
+        if (checks > 1) await poll.gate;
+        return jsonResponse({ verified: false });
+      }
+      return undefined;
+    });
+    signIn([ALICE]);
+    const page = renderStartPage();
+    continueAsSignedInAccount(page);
+    await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
+
+    // The next poll's check is held in flight.
+    await vi.advanceTimersByTimeAsync(VERIFICATION_POLL_MS);
+    expect(checks).toBe(2);
+    expect(allText(page.view())).toContain("I verified it");
+    expect(pendingLine(page)).toBeUndefined();
+
+    poll.release();
   });
 
   /** The mocked sign-in module as the tests set its outcome; module-level, so a test puts it back. */
@@ -387,13 +501,12 @@ describe("the account step on the live page", () => {
   it("the existing-login landing waits out a pending record fetch before deciding", async () => {
     let landingAsks = 0;
     signinLandingByAccount = { [BOB.user_id]: { state: "pending", workspace_count: 0 } };
-    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
-    fetchMock.mockImplementation(async (url: string) => {
+    interceptFetch(async (url: string) => {
       if (url.startsWith("/ui/api/onboarding/signin-landing")) {
         landingAsks += 1;
         if (landingAsks >= 2) return jsonResponse({ state: "done", workspace_count: 1 });
       }
-      return defaultFetch(url);
+      return undefined;
     });
     const routeSet = vi
       .spyOn(m.route, "set")
@@ -421,9 +534,7 @@ describe("the account step on the live page", () => {
   it("the title bar's log-in does nothing while the owed cloud create's verification check runs", () => {
     signIn([ALICE]);
     const page = renderStartPage();
-    pressLast(page.view(), "data-answer", "reporting-yes");
-    pressLast(page.view(), "data-answer", "cloud");
-    pressLast(page.view(), "data-answer", "continue");
+    continueAsSignedInAccount(page);
     expect(startFlow.state.isCloudCreatePending).toBe(true);
     vi.mocked(webLogin.start).mockClear();
 
@@ -437,9 +548,7 @@ describe("the account step on the live page", () => {
     try {
       signIn([ALICE]);
       const page = renderStartPage();
-      pressLast(page.view(), "data-answer", "reporting-yes");
-      pressLast(page.view(), "data-answer", "cloud");
-      pressLast(page.view(), "data-answer", "continue");
+      continueAsSignedInAccount(page);
       await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
 
       pressTitlebarLogIn();

@@ -10,6 +10,10 @@ renders:
   form needs under the window's account (the account itself when it is signed
   in, providers, regions, machine sizes, cloud connections, suggested color),
   plus the ``?retry=<create_attempt_id>`` pre-fill from a pending record.
+  ``?skip_local_probes=1`` leaves out the local-backend probes for a caller
+  that only builds an Imbue Cloud create: ``local_prerequisites`` comes back
+  empty, and ``local_launch_mode`` and Docker's CPU default no longer describe
+  this machine.
 - ``GET /ui/api/create/landing-extras?account=<id>`` -- landing-page facts
   that do not ride the ``workspaces`` channel message (destroy run/failed
   statuses, the window's account's locked state for the sync-unlock banner,
@@ -443,12 +447,13 @@ def _handle_create_form_defaults() -> Response:
     )
     region_options, region_selected = _region_form_context()
     cloud_accounts = tuple(available_cloud_account_options(state.connection_store))
+    is_local_probe_skipped = request.args.get("skip_local_probes", "") == "1"
     # The probe is injected so tests describe a machine rather than run docker;
     # an app built without one (a minimal test app, with no concurrency group
     # to run probes under) reports nothing rather than reaching for docker.
     if state.host_probe is not None:
         host_platform = host_platform_from_system(state.host_probe.platform_system())
-        local_prerequisites = probe_local_prerequisites(state.host_probe)
+        local_prerequisites = () if is_local_probe_skipped else probe_local_prerequisites(state.host_probe)
     else:
         host_platform = host_platform_from_system(platform.system())
         local_prerequisites = ()

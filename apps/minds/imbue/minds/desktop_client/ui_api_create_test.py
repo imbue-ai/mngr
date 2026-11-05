@@ -111,9 +111,9 @@ def test_form_defaults_exclude_connection_only_launch_modes_and_carry_region_con
     assert payload["account"] is None
 
 
-def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can_give(tmp_path: Path) -> None:
-    """The form submits the default it shows as an explicit CPU cap, which the daemon refuses above its CPU count."""
-    two_cpu_docker_host = FakeHostProbe(
+def _two_cpu_docker_host() -> FakeHostProbe:
+    """A Linux machine whose Docker daemon answers, with runc only and two CPUs."""
+    return FakeHostProbe(
         system="Linux",
         executables=frozenset({"docker"}),
         result_by_command={
@@ -122,8 +122,12 @@ def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can
             "docker info --format {{.NCPU}}": CommandProbeResult(returncode=0, stdout="2\n"),
         },
     )
+
+
+def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can_give(tmp_path: Path) -> None:
+    """The form submits the default it shows as an explicit CPU cap, which the daemon refuses above its CPU count."""
     client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, host_probe=two_cpu_docker_host
+        tmp_path, is_authenticated=True, host_probe=_two_cpu_docker_host()
     )
 
     response = client.get("/ui/api/create/form-defaults")
@@ -138,6 +142,42 @@ def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can
     # The other modes are not sized by this machine.
     assert payload["machine_size_defaults_by_launch_mode"]["LIMA"]["cpu_count"] == 2
     assert payload["machine_size_defaults_by_launch_mode"]["MODAL"]["cpu_count"] == 2
+
+
+def test_form_defaults_can_leave_out_the_local_probes_without_changing_the_imbue_cloud_defaults(
+    tmp_path: Path,
+) -> None:
+    docker_host = _two_cpu_docker_host()
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-7713", email="alice@example.com")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path / "session-store", cli),
+        host_probe=docker_host,
+    )
+    probed = json.loads(client.get("/ui/api/create/form-defaults?account=user-7713").get_data(as_text=True))
+    commands_run_by_probed_request = list(docker_host.commands_run)
+
+    unprobed = json.loads(
+        client.get("/ui/api/create/form-defaults?account=user-7713&skip_local_probes=1").get_data(as_text=True)
+    )
+
+    assert commands_run_by_probed_request != []
+    assert docker_host.commands_run == commands_run_by_probed_request
+    assert [entry["key"] for entry in probed["local_prerequisites"]] == ["DOCKER", "RUNSC", "LIMA"]
+    assert unprobed["local_prerequisites"] == []
+    assert unprobed["account"]["email"] == "alice@example.com"
+    for field in (
+        "account",
+        "selected_launch_mode",
+        "git_url",
+        "branch",
+        "selected_backup_provider",
+        "region_selected_by_launch_mode",
+    ):
+        assert unprobed[field] == probed[field], field
 
 
 def test_form_defaults_keep_the_docker_cpu_default_when_the_daemon_is_not_answering(tmp_path: Path) -> None:

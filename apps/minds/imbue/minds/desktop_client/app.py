@@ -148,6 +148,7 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.static_pages import build_error_page_html
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
+from imbue.minds.desktop_client.supertokens_routes import is_email_verified_by_web_login
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
@@ -1845,7 +1846,8 @@ def _handle_account_verification() -> Response:
     """The start flow's email-verification gate for the account named by ``?email=``.
 
     GET asks the connector whether the email is verified (a plain status
-    query the flow polls); POST re-sends the verification email. Both answer
+    query the flow polls), unless a browser sign-in in this app already
+    reported it verified; POST re-sends the verification email. Both answer
     only for an account this install has signed in, so a stranger's address
     cannot be probed or spammed through the local app.
     """
@@ -1862,11 +1864,17 @@ def _handle_account_verification() -> Response:
             content=json.dumps({"sent": is_sent, "email": account}),
             media_type="application/json",
         )
-    try:
-        is_verified = cli.auth_is_email_verified(account)
-    except ImbueCloudCliError as exc:
-        logger.warning("Could not check the email verification for {}: {}", account, exc)
-        return make_response(status_code=502, content=f"Could not check the email verification: {exc}")
+    if is_email_verified_by_web_login(account):
+        # Right after a sign-in the connector check is at its slowest: its mngr
+        # process cold-starts beside the sign-in's own record syncs.
+        logger.debug("Answered the verification check for {} from its sign-in", account)
+        is_verified = True
+    else:
+        try:
+            is_verified = cli.auth_is_email_verified(account)
+        except ImbueCloudCliError as exc:
+            logger.warning("Could not check the email verification for {}: {}", account, exc)
+            return make_response(status_code=502, content=f"Could not check the email verification: {exc}")
     return make_response(
         status_code=200,
         content=json.dumps({"verified": is_verified, "email": account}),

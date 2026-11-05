@@ -148,6 +148,28 @@ def test_auth_login_asks_the_plugin_to_listen_for_the_whole_window() -> None:
     assert caller.recorded_calls[0].timeout == WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
 
 
+@pytest.mark.parametrize(
+    ("plugin_output_extra", "expected_verdict"),
+    [
+        ({"is_email_verified": True}, True),
+        ({"is_email_verified": False}, False),
+        ({"is_email_verified": None}, None),
+        # A plugin older than the field says nothing.
+        ({}, None),
+    ],
+)
+def test_auth_login_carries_the_sign_ins_verification_verdict(
+    plugin_output_extra: dict[str, object], expected_verdict: bool | None
+) -> None:
+    body = json.dumps({"user_id": "u-1", "email": "a@b.com", **plugin_output_extra})
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=body))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    session = cli.auth_login()
+
+    assert session.is_email_verified is expected_verdict
+
+
 def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:
     body = json.dumps({"error": "the message", "error_class": "SomeError"}, indent=2)
     stderr = "2026-07-12 10:00:00 | WARNING | noisy {braced} log line\n" + body + "\ntrailing\n"

@@ -74,9 +74,10 @@ _ACCOUNTS_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL"
 QUOTA_EXCEEDED_ERROR_CLASS: Final[str] = "ImbueCloudQuotaExceededError"
 
 # The plugin's error_class marker for a structured email-verification refusal
-# (``code: email_not_verified``), written by handle_imbue_cloud_errors.
-# Substring-matched like the quota signal.
-_EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL = "ImbueCloudEmailNotVerifiedError"
+# (``code: email_not_verified``), written by handle_imbue_cloud_errors into its
+# JSON stderr body and into ``mngr create --format jsonl``'s error event.
+# Substring-matched here, like the quota signal.
+EMAIL_NOT_VERIFIED_ERROR_CLASS: Final[str] = "ImbueCloudEmailNotVerifiedError"
 
 # The plugin's error_class marker for the connector's structured HTTP 426
 # "client too old" refusal, written by handle_imbue_cloud_errors. Substring-
@@ -266,6 +267,13 @@ class ImbueCloudAuthSession(WireModel):
     email: str
     display_name: str | None = None
     needs_email_verification: bool = False
+    is_email_verified: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the hosted sign-in page reported the address verified as the sign-in finished; "
+            "None when it did not say (an older connector)"
+        ),
+    )
 
 
 class ImbueCloudAuthAccount(WireModel):
@@ -603,7 +611,7 @@ class ImbueCloudCli(MutableModel):
             lease_active_exc.stdout = result.stdout
             lease_active_exc.stderr = result.stderr
             raise lease_active_exc
-        if _EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL in result.stderr:
+        if EMAIL_NOT_VERIFIED_ERROR_CLASS in result.stderr:
             verification_body = _parse_stderr_error_body(result.stderr) or {}
             verification_message = _parse_stderr_error_message(result.stderr)
             verification_exc = ImbueCloudEmailNotVerifiedCliError(

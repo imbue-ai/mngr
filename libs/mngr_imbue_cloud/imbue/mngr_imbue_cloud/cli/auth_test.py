@@ -38,6 +38,7 @@ from imbue.mngr_imbue_cloud.cli._common import resolve_accounts_url
 from imbue.mngr_imbue_cloud.cli.auth import _CallbackCaptureBox
 from imbue.mngr_imbue_cloud.cli.auth import _LoginPageOutcome
 from imbue.mngr_imbue_cloud.cli.auth import _bind_callback_listener
+from imbue.mngr_imbue_cloud.cli.auth import _email_verification_from_callback
 from imbue.mngr_imbue_cloud.cli.auth import _ensure_connector_supports_browser_login
 from imbue.mngr_imbue_cloud.cli.auth import _hold_listener_lease
 from imbue.mngr_imbue_cloud.cli.auth import _login_result_page
@@ -130,6 +131,24 @@ def test_callback_handler_serves_the_verification_reminder_for_an_unverified_ema
     plain = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=1")
     assert "Click the email verification link" not in plain
     assert "You are signed in" in plain
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_verdict"),
+    [
+        ({"email": "alice@example.com", "verified": "1"}, True),
+        ({"email": "Alice@Example.com", "verified": "1"}, True),
+        ({"email": "alice@example.com", "verified": "0"}, False),
+        ({"email": "alice@example.com"}, None),
+        ({"email": "alice@example.com", "verified": "yes"}, None),
+        ({"email": "mallory@example.com", "verified": "1"}, None),
+        ({"verified": "1"}, None),
+    ],
+)
+def test_email_verification_from_callback_speaks_only_for_the_signed_in_address(
+    params: dict[str, str], expected_verdict: bool | None
+) -> None:
+    assert _email_verification_from_callback(params, "alice@example.com") is expected_verdict
 
 
 def test_success_page_without_redirect_says_return_to_terminal() -> None:
@@ -499,10 +518,17 @@ def test_capture_box_reports_pending_when_no_outcome_arrives_in_time() -> None:
     assert _CallbackCaptureBox().wait_for_outcome(0.0) == _LoginPageOutcome.PENDING
 
 
-def _run_login_and_complete_the_callback(connector_url: str, tmp_path: Path, host_dir: Path) -> tuple[Result, str]:
+def _run_login_and_complete_the_callback(
+    connector_url: str,
+    tmp_path: Path,
+    host_dir: Path,
+    extra_callback_params: dict[str, str] | None = None,
+) -> tuple[Result, str]:
     """Run ``auth login`` against ``connector_url`` and play the browser's final redirect.
 
-    Returns the command's result and the text of the page the browser was shown.
+    ``extra_callback_params`` are what the connector appends beside ``code`` and
+    ``state`` (``email`` and ``verified``). Returns the command's result and the
+    text of the page the browser was shown.
     """
     # The command saves the session under the active mngr profile.
     get_or_create_profile_dir(host_dir)
@@ -536,7 +562,8 @@ def _run_login_and_complete_the_callback(connector_url: str, tmp_path: Path, hos
     callback_url = authorize_query["redirect_uri"][0]
     state = authorize_query["state"][0]
 
-    page = _get_page_text(f"{callback_url}?{urllib.parse.urlencode({'code': 'code-8821', 'state': state})}")
+    callback_params = {"code": "code-8821", "state": state, **(extra_callback_params or {})}
+    page = _get_page_text(f"{callback_url}?{urllib.parse.urlencode(callback_params)}")
     login_thread.join(timeout=60.0)
     assert results, "auth login did not finish"
     return results[0], page
@@ -552,6 +579,30 @@ def test_login_page_says_signed_in_only_after_the_code_exchange_succeeds(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["email"] == "device-login-4417@example.com"
     assert "You&#x27;re in!" in page
+
+
+@pytest.mark.parametrize(
+    ("extra_callback_params", "expected_verdict"),
+    [
+        ({"email": "device-login-4417@example.com", "verified": "1"}, True),
+        ({"email": "device-login-4417@example.com", "verified": "0"}, False),
+        # A connector that predates the email/verified parameters says nothing.
+        ({}, None),
+    ],
+)
+def test_login_reports_the_verification_verdict_the_callback_carried(
+    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
+    tmp_path: Path,
+    temp_host_dir: Path,
+    extra_callback_params: dict[str, str],
+    expected_verdict: bool | None,
+) -> None:
+    result, _page = _run_login_and_complete_the_callback(
+        device_login_connector_stub(200)[0], tmp_path, temp_host_dir, extra_callback_params
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["is_email_verified"] is expected_verdict
 
 
 def test_login_page_reports_failure_when_the_connector_refuses_the_code(

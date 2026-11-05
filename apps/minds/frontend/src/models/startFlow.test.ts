@@ -7,6 +7,7 @@ import {
   CHAT_THINK_MS,
   FLOW,
   FLOW_OPTIONS_GAP_MS,
+  FLOW_THINK_MS,
   MANIFESTO_ANSWER,
   NO_WORKSPACES_ACK,
   MANIFESTO_OPENER,
@@ -15,6 +16,7 @@ import {
   REPORTING_DECLINE_LABEL,
   answerStep,
   chooseExistingLogin,
+  cloudCreatePendingAtMs,
   continueAsSaid,
   continueExistingLoginWithoutWorkspaces,
   dismissPendingModal,
@@ -327,6 +329,20 @@ describe("the cloud create", () => {
     const state = settleCloudCreate(owingCreate(), null);
     expect(state.isCloudCreatePending).toBe(false);
     expect(state.entries).toHaveLength(4);
+  });
+
+  it("says it is under way only once the note that owed it has streamed in", () => {
+    const owing = owingCreate();
+    const note = owing.entries.at(-1);
+    expect(note?.kind).toBe("note");
+    const noteText = note?.kind === "note" ? note.text : "";
+    expect(noteText).not.toBe("");
+    // The note's last character lands this long after the render that added it.
+    const noteLandsAtMs = FLOW_THINK_MS + streamDurationMs(noteText);
+    expect(cloudCreatePendingAtMs(owing.entries)).toBeGreaterThan(noteLandsAtMs);
+    // A longer note holds the line back further.
+    const longer = [...owing.entries.slice(0, -1), { kind: "note" as const, text: `${noteText} ${noteText}` }];
+    expect(cloudCreatePendingAtMs(longer)).toBeGreaterThan(cloudCreatePendingAtMs(owing.entries));
   });
 });
 

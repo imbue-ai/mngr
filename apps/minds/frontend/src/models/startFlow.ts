@@ -672,6 +672,26 @@ function openVerificationStepIndex(entries: TranscriptEntry[]): number {
 }
 
 /**
+ * What the agent says while it checks that the account's email is verified,
+ * before the owed cloud create goes out. The check can end in the verification
+ * question instead, so this line does not say the workspace is starting.
+ */
+export const CLOUD_CREATE_CHECKING_TEXT = "Checking your account…";
+/** What the agent says once the cloud create the flow owes is being sent. */
+export const CLOUD_CREATE_STARTING_TEXT = "Starting your workspace…";
+
+/**
+ * When the line saying what the owed cloud create waits on arrives, counted
+ * from the render that owed the create: once the note that render added has
+ * streamed in, so a create that is sent before then never shows it.
+ */
+export function cloudCreatePendingAtMs(entries: TranscriptEntry[]): number {
+  const last = entries[entries.length - 1];
+  const noteMs = last !== undefined && last.kind === "note" ? streamDurationMs(last.text) : 0;
+  return FLOW_THINK_MS + noteMs + FLOW_OPTIONS_GAP_MS;
+}
+
+/**
  * The cloud create was submitted (or refused); either way the flow no longer
  * owes it. A refusal is said as the ack of the re-asked where-to-run question,
  * so the error and the question arrive as one agent turn.

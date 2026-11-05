@@ -179,13 +179,19 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** The create form's options under `accountId` (the window's account), with a retry's prefill when one is named. */
+/**
+ * The create form's options under `accountId` (the window's account), with a retry's prefill when one is named.
+ * `isLocalProbeSkipped` is for a caller that only ever builds an Imbue Cloud create: the local-backend probes
+ * are left out, so `local_prerequisites` is empty and the local fields must not be used.
+ */
 export function fetchCreateFormDefaults(
   retryId: string | null,
   accountId: string,
+  isLocalProbeSkipped = false,
 ): Promise<CreateFormDefaults> {
   const params = new URLSearchParams({ account: accountId });
   if (retryId) params.set("retry", retryId);
+  if (isLocalProbeSkipped) params.set("skip_local_probes", "1");
   return fetchJson<CreateFormDefaults>(
     `/ui/api/create/form-defaults?${params.toString()}`,
   );

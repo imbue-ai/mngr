@@ -72,6 +72,7 @@ from imbue.minds.desktop_client.create_progress_history import create_scope
 from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
+from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
@@ -959,6 +960,12 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # human-formatted error text) to fall back to the slow path. Kept in sync with
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
+
+# The ``error_class`` values of the connector's refusals of the account itself,
+# whose own sentence is all the creating page needs to show.
+_ACCOUNT_REFUSAL_ERROR_CLASSES: Final[frozenset[str]] = frozenset(
+    {QUOTA_EXCEEDED_ERROR_CLASS, EMAIL_NOT_VERIFIED_ERROR_CLASS}
+)
 
 # How long a gated Lima create blocks waiting for the prefetched image before giving up
 # on it and building the workspace in-VM instead. A cold download of the real image
@@ -1902,13 +1909,14 @@ def _mngr_create_failure(
 ) -> MngrCommandError:
     """The error a failed ``mngr create`` surfaces: the subprocess transcript, or just the refusal it was told.
 
-    A quota refusal comes with mngr's own sentence for the person (the waitlist
-    message, "N of M used"), so that sentence is the whole message and the
+    A quota or email-verification refusal comes with the connector's own
+    sentence for the person (the waitlist message, "N of M used", where the
+    verification link went), so that sentence is the whole message and the
     transcript moves to ``output_tail``; every other failure keeps the transcript
     in the message, since nothing shorter names its cause.
     """
     error_message = capture.error_message
-    if capture.error_class == QUOTA_EXCEEDED_ERROR_CLASS and error_message is not None:
+    if capture.error_class in _ACCOUNT_REFUSAL_ERROR_CLASSES and error_message is not None:
         return MngrCommandError(
             error_message,
             error_class=capture.error_class,
@@ -3299,12 +3307,10 @@ class AgentCreator(MutableModel):
             ValueError,
             OSError,
         ) as e:
-            if isinstance(e, MngrCommandError) and e.error_class == QUOTA_EXCEEDED_ERROR_CLASS:
-                # The account's quota (e.g. the waitlist) refused the create: a
-                # correct, deterministic outcome whose sentence the creating page
-                # shows the person, not a fault for error reporting. The mngr
-                # transcript is still in the create log and the FAILED record.
-                logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
+            if isinstance(e, MngrCommandError) and e.error_class in _ACCOUNT_REFUSAL_ERROR_CLASSES:
+                # A refusal of the account (the waitlist, an unverified email) is a
+                # correct outcome the creating page explains, not a fault to report.
+                logger.info("Create attempt {} was refused for the account: {}", create_attempt_id, e)
             elif isinstance(e, GitRefNotFoundError) and not is_default_workspace_template_url(repo_source):
                 # The requested branch or tag does not exist on a remote that
                 # answered: a mistake in the create's input, which the creating

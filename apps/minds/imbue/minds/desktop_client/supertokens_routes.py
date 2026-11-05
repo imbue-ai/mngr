@@ -222,6 +222,8 @@ class _WebLoginFlowStatus(FrozenModel):
     copy-the-link fallback while the flow is running. Once the subprocess
     exits the temp file is deleted and the URL (dead, but still rendered by
     the modal) is carried in ``login_url`` instead.
+    ``is_email_verified`` is the hosted page's verdict on the signed-in
+    address (None when it did not give one).
     """
 
     state: str
@@ -230,6 +232,7 @@ class _WebLoginFlowStatus(FrozenModel):
     user_id: str | None = None
     email: str | None = None
     display_name: str | None = None
+    is_email_verified: bool | None = None
     error: str | None = None
     deadline: float | None = None
 
@@ -275,6 +278,25 @@ def _prune_expired_web_login_flows_locked() -> None:
 
 def _flow_deadline() -> float:
     return time.monotonic() + _WEB_LOGIN_FLOW_TTL_SECONDS
+
+
+def is_email_verified_by_web_login(email: str) -> bool:
+    """Whether the latest browser sign-in this app still tracks for ``email`` reported it verified as it finished.
+
+    A verified address stays verified, so such a verdict answers a
+    verification check without asking the connector again. Only the latest
+    sign-in counts (flows finish in the order they start, since only one runs
+    at a time), so a later one that saw the address unverified overrides it.
+    """
+    wanted = email.casefold()
+    with _web_login_flows_lock:
+        _prune_expired_web_login_flows_locked()
+        finished_verdicts = [
+            status.is_email_verified
+            for status in _web_login_flows.values()
+            if status.state in ("finishing", "done") and status.email is not None and status.email.casefold() == wanted
+        ]
+    return len(finished_verdicts) > 0 and finished_verdicts[-1] is True
 
 
 def _fail_web_login_flow_if_still_running(flow_id: str, login_url: str | None) -> None:
@@ -334,6 +356,7 @@ def _run_web_login_subprocess(
                 user_id=str(result.user_id),
                 email=str(result.email),
                 display_name=result.display_name,
+                is_email_verified=result.is_email_verified,
                 deadline=_flow_deadline(),
             ),
         )
@@ -377,6 +400,7 @@ def _run_web_login_subprocess(
                 user_id=str(result.user_id),
                 email=str(result.email),
                 display_name=result.display_name,
+                is_email_verified=result.is_email_verified,
                 deadline=_flow_deadline(),
             ),
         )

@@ -11,6 +11,7 @@ Feature: Email verification before a cloud create
     Then the flow asks for "alice@example.com" to be verified
     And offers "I verified it" and "Send the email again"
     And no cloud create goes out
+    And the flow does not say the workspace is starting while it waits
 
   @verified-elsewhere
   Scenario: Verifying from the emailed link continues the flow without any press
