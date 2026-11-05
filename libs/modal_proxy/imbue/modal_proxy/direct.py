@@ -35,8 +35,10 @@ import modal.exception
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from loguru import logger
+from modal._utils.async_utils import synchronizer
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
+from modal.volume import AbstractVolumeUploadContextManager
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -340,12 +342,34 @@ def _start_cancellable_call(
     return modal_call(*args, **kwargs, _future=True)  # ty: ignore[invalid-argument-type, invalid-return-type]
 
 
+def _start_cancellable_upload_exit(
+    upload: AbstractContextManager[AbstractVolumeUploadContextManager],
+) -> concurrent.futures.Future[Any]:
+    """Run a batch upload's exit, where the upload actually happens, as a future whose cancellation stops it.
+
+    synchronicity refuses ``_future=True`` on a context manager's exit, so this goes through
+    its private API instead: translate the blocking context manager back to the async one it
+    wraps, then schedule that one's exit on Modal's event loop, as ``_future=True`` would.
+    """
+    async_upload = synchronizer._translate_in(upload)
+    return synchronizer._run_function_sync_future(async_upload.__aexit__(None, None, None), async_upload.__aexit__)
+
+
+# Slowest upload rate a write is allowed before it counts as stalled: a 2 Mbit/s link.
+# Modal reports no progress for an upload, so its deadline has to cover the whole transfer.
+_SLOWEST_UPLOAD_BYTES_PER_SECOND: Final[int] = 256 * 1024
+
+
+def _upload_stall_seconds(attempt_stall_seconds: float, byte_count: int) -> float:
+    return attempt_stall_seconds + byte_count / _SLOWEST_UPLOAD_BYTES_PER_SECOND
+
+
 def _await_attempt(attempt: concurrent.futures.Future[_R], deadline: _AttemptDeadline, call_description: str) -> _R:
     """Wait for one attempt at a Modal call, cancelling it once it has stalled past its deadline."""
     while not concurrent.futures.wait((attempt,), timeout=deadline.seconds_remaining()).done:
         if deadline.seconds_remaining() <= 0.0 and attempt.cancel():
             raise ModalProxyCallTimeoutError(
-                f"Modal made no progress on {call_description} for {deadline.stall_seconds:g}s; cancelled the attempt"
+                f"Modal made no progress on {call_description} for {deadline.stall_seconds:.3g}s; cancelled the attempt"
             )
     return attempt.result()
 
@@ -528,13 +552,16 @@ class DirectVolume(VolumeInterface):
     def get_created_at(self) -> datetime | None:
         return self.created_at
 
+    def _hydrate_within_deadline(self) -> None:
+        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
+        _await_attempt(_start_cancellable_call(self.volume.hydrate), deadline, "hydrate")
+
     @_retry_transient
     @_translate_exceptions
     def get_object_id(self) -> str:
         # from_name hands back an unhydrated handle, so hydrating is what actually
         # asks the server to resolve the name -- and raises NotFoundError if it cannot.
-        deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
-        _await_attempt(_start_cancellable_call(self.volume.hydrate), deadline, "hydrate")
+        self._hydrate_within_deadline()
         return self.volume.object_id
 
     @_retry_transient
@@ -579,9 +606,18 @@ class DirectVolume(VolumeInterface):
     @_retry_transient
     @_translate_exceptions
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        with self.volume.batch_upload(force=True) as batch:
-            for path, file_data in file_contents_by_path.items():
-                batch.put_file(io.BytesIO(file_data), path)
+        # Entering a batch upload hydrates the volume, so hydrating first, under its own
+        # deadline, leaves the exit -- the upload itself -- as the only network step.
+        self._hydrate_within_deadline()
+        upload = self.volume.batch_upload(force=True)
+        batch = upload.__enter__()
+        for path, file_data in file_contents_by_path.items():
+            batch.put_file(io.BytesIO(file_data), path)
+        byte_count = sum(len(file_data) for file_data in file_contents_by_path.values())
+        deadline = _AttemptDeadline(stall_seconds=_upload_stall_seconds(self.attempt_stall_seconds, byte_count))
+        _await_attempt(
+            _start_cancellable_upload_exit(upload), deadline, f"write_files({sorted(file_contents_by_path)!r})"
+        )
 
     @_translate_exceptions
     def reload(self) -> None:

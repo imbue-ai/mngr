@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Coroutine
 from collections.abc import Generator
 from concurrent.futures import Future
 from datetime import datetime
@@ -24,6 +25,7 @@ from grpclib import Status
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal._grpc_client import _STATUS_TO_EXCEPTION
+from modal._utils.async_utils import asyncify
 from modal._utils.grpc_utils import RETRYABLE_GRPC_STATUS_CODES
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
@@ -60,6 +62,7 @@ from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
+from imbue.modal_proxy.direct import _upload_stall_seconds
 from imbue.modal_proxy.direct import build_modal_cli_env
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
@@ -1033,6 +1036,101 @@ def test_read_file_lets_a_transfer_outlast_the_stall_window_while_bytes_keep_arr
 
     assert volume.read_file("/archives/outputs.tar.gz") == b"outputs archive"
     assert [attempt.cancelled() for attempt in fake.attempts] == [False]
+
+
+class _FakeUploadBatch:
+    """Stand-in for the batch ``batch_upload`` yields: ``put_file`` only records what to upload."""
+
+    def __init__(self) -> None:
+        self.contents_by_path: dict[str, bytes] = {}
+
+    def put_file(self, local_file: io.BytesIO, remote_path: str) -> None:
+        self.contents_by_path[remote_path] = local_file.getvalue()
+
+
+class _FakeUpload:
+    """Stand-in for the context manager ``batch_upload`` returns, which uploads in its exit.
+
+    The blocking ``__exit__`` runs ``finish`` in the caller's thread, as Modal's does. ``__aexit__``
+    hands back a coroutine that runs it on Modal's event loop instead. The coroutine is built with
+    Modal's own ``asyncify``, so the test needs no async code of its own.
+    """
+
+    def __init__(self, finish: Callable[[_FakeUploadBatch], None]) -> None:
+        self._finish = finish
+        self._batch = _FakeUploadBatch()
+        self.exit_coroutine: Coroutine[Any, Any, None] | None = None
+
+    def __enter__(self) -> _FakeUploadBatch:
+        return self._batch
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._finish(self._batch)
+
+    def __aexit__(self, *exc_info: object) -> Coroutine[Any, Any, None]:
+        self.exit_coroutine = asyncify(self._finish)(self._batch)
+        return self.exit_coroutine
+
+
+class _FakeUploadingModalVolume:
+    """Stand-in for modal.Volume whose first ``stalled_upload_count`` uploads never finish.
+
+    A stalled upload blocks until the context exits, so on the way out it releases any stalled
+    upload still holding a thread.
+    """
+
+    def __init__(self, *, stalled_upload_count: int) -> None:
+        self._stalled_upload_count = stalled_upload_count
+        self._is_stalled_upload_released = threading.Event()
+        self.uploads: list[_FakeUpload] = []
+        self.committed_contents_by_path: dict[str, bytes] = {}
+
+    def __enter__(self) -> "_FakeUploadingModalVolume":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._is_stalled_upload_released.set()
+
+    def hydrate(self, *, _future: bool) -> Future[Any]:
+        hydrated: Future[Any] = Future()
+        hydrated.set_result(self)
+        return hydrated
+
+    def batch_upload(self, *, force: bool) -> _FakeUpload:
+        is_stalled = len(self.uploads) < self._stalled_upload_count
+        upload = _FakeUpload(self._stall if is_stalled else self._commit)
+        self.uploads.append(upload)
+        return upload
+
+    def _stall(self, batch: _FakeUploadBatch) -> None:
+        self._is_stalled_upload_released.wait()
+
+    def _commit(self, batch: _FakeUploadBatch) -> None:
+        self.committed_contents_by_path.update(batch.contents_by_path)
+
+
+def test_write_files_cancels_an_upload_modal_never_answers_and_reissues_it() -> None:
+    """A stalled upload must be stopped before it is re-issued, not left to commit stale contents later.
+
+    The coroutine of the stalled upload has to be closed while the work it was waiting on is still
+    blocked: an abandoned attempt would still be suspended there.
+    """
+    with _FakeUploadingModalVolume(stalled_upload_count=1) as fake:
+        volume = DirectVolume.model_construct(volume=fake, attempt_stall_seconds=_SHORT_ATTEMPT_STALL_SECONDS)
+
+        volume.write_files({"/hosts/host-1.json": b'{"host_id": "host-1"}'})
+
+        assert fake.committed_contents_by_path == {"/hosts/host-1.json": b'{"host_id": "host-1"}'}
+        assert len(fake.uploads) == 2
+        stalled_exit = fake.uploads[0].exit_coroutine
+        assert stalled_exit is not None
+        assert inspect.getcoroutinestate(stalled_exit) == inspect.CORO_CLOSED
+
+
+def test_an_upload_gets_time_for_its_size_on_top_of_the_stall_window() -> None:
+    """Modal reports no progress for an upload, so its deadline has to cover the whole transfer."""
+    assert _upload_stall_seconds(20.0, byte_count=4096) == pytest.approx(20.0, abs=0.1)
+    assert _upload_stall_seconds(20.0, byte_count=100 * 1024 * 1024) == pytest.approx(420.0)
 
 
 def test_transient_retry_gives_up_on_elapsed_time_not_attempt_count() -> None:
