@@ -414,6 +414,12 @@ GEN2_GUEST_HOST_QUOTA_QGROUP: Final[str] = "1/0"
 GEN2_HOST_ID_CONTAINER_LABEL: Final[str] = "com.imbue.mngr.host-id"
 GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 
+# The host quota group as the data filesystem's sysfs directory names it
+# (``/sys/fs/btrfs/<uuid>/qgroups/1_0``), and the bit of its ``limit_flags``
+# (BTRFS_QGROUP_LIMIT_MAX_RFER) set while it limits what it references.
+GEN2_GUEST_HOST_QUOTA_QGROUP_SYSFS_NAME: Final[str] = GEN2_GUEST_HOST_QUOTA_QGROUP.replace("/", "_")
+GEN2_QGROUP_LIMIT_MAX_REFERENCED_FLAG: Final[int] = 1
+
 # The file, at the root of the agent host's volume, where the VM publishes the
 # container's memory headroom as its memory cgroup sees it, for the earlyoom
 # inside to read at ``/mngr-vol/.host-meminfo`` (``--host-meminfo``): under
@@ -423,6 +429,11 @@ GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 # mirrors the formula of the VM-side publisher in ``guest.py`` and exits under
 # gVisor).
 GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = ".host-meminfo"
+# Beside it, the VM publishes the host quota's limit and usage, for the
+# workspace to read at ``/mngr-vol/.host-diskinfo``: statfs inside the
+# container reports the data filesystem's free space, never the quota, and
+# either one can run out first.
+GEN2_CONTAINER_HOST_DISKINFO_FILE_NAME: Final[str] = ".host-diskinfo"
 
 
 class SliceNetwork(FrozenModel):

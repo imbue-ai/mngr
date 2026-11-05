@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 from inline_snapshot import snapshot
@@ -395,6 +396,7 @@ esac
 
 
 _MIB = 1024 * 1024
+_GIB = 1024 * _MIB
 _CONTAINER_ID = "d0d0" * 16
 
 
@@ -419,19 +421,23 @@ def _write_container_cgroup(cgroup_parent: Path, *, limit: str, usage: int, stat
     (cgroup_dir / "memory.stat").write_text(stat)
 
 
-def _parse_published_meminfo(text: str) -> dict[str, int] | None:
+_MEMINFO_KEYS = frozenset({"MemTotal", "MemAvailable", "Timestamp"})
+_DISKINFO_KEYS = frozenset({"QuotaLimitBytes", "QuotaUsedBytes", "Timestamp"})
+
+
+def _parse_published(text: str, keys: frozenset[str]) -> dict[str, int] | None:
     fields = {line.split()[0].rstrip(":"): int(line.split()[1]) for line in text.splitlines()}
-    return fields if {"MemTotal", "MemAvailable", "Timestamp"} <= fields.keys() else None
+    return fields if keys <= fields.keys() else None
 
 
-def _published_meminfo_or_none(target: Path) -> dict[str, int] | None:
+def _published_or_none(target: Path, keys: frozenset[str]) -> dict[str, int] | None:
     if not target.is_file() or target.is_symlink():
         return None
-    return _parse_published_meminfo(target.read_text())
+    return _parse_published(target.read_text(), keys)
 
 
-def _read_published_meminfo(target: Path, timeout_seconds: float) -> dict[str, int]:
-    fields, _, _ = poll_for_value(lambda: _published_meminfo_or_none(target), timeout_seconds, poll_interval=0.05)
+def _read_published(target: Path, keys: frozenset[str], timeout_seconds: float) -> dict[str, int]:
+    fields, _, _ = poll_for_value(lambda: _published_or_none(target, keys), timeout_seconds, poll_interval=0.05)
     assert fields is not None, f"the publisher wrote no complete {target} within {timeout_seconds}s"
     return fields
 
@@ -455,11 +461,16 @@ def _has_left_the_unchanged_file(target: Path, file_descriptor: int, content: by
 
 
 @contextmanager
-def _running_publisher(tmp_path: Path, cgroup_parent: Path, volume_dir: Path) -> Generator[Path, None, None]:
+def _running_publisher(
+    tmp_path: Path, cgroup_parent: Path, volume_dir: Path, *, btrfs_sysfs_root: Path | None = None
+) -> Generator[Path, None, None]:
     """Run the rendered publisher against one fake container until the block exits, yielding its docker call log.
 
     Its PATH holds only the fake docker, so any other program it tried to start would fail.
+    Without ``btrfs_sysfs_root`` the VM has no btrfs filesystem.
     """
+    if btrfs_sysfs_root is None:
+        btrfs_sysfs_root = tmp_path / "no-btrfs"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(_PUBLISHER_FAKE_DOCKER)
@@ -467,7 +478,7 @@ def _running_publisher(tmp_path: Path, cgroup_parent: Path, volume_dir: Path) ->
     docker_log = tmp_path / "docker-calls.log"
     docker_log.touch()
     script = tmp_path / "publish.pl"
-    script.write_text(render_guest_container_meminfo_publisher_script(str(cgroup_parent)))
+    script.write_text(render_guest_container_meminfo_publisher_script(str(cgroup_parent), str(btrfs_sysfs_root)))
     script.chmod(0o755)
     env = {
         "PATH": str(bin_dir),
@@ -498,7 +509,7 @@ def test_meminfo_publisher_reports_the_cgroup_limit_and_inactive_file_headroom(t
     )
     with _running_publisher(tmp_path, cgroup_parent, volume_dir):
         before = int(time.time())
-        published = _read_published_meminfo(volume_dir / ".host-meminfo", timeout_seconds=10)
+        published = _read_published(volume_dir / ".host-meminfo", _MEMINFO_KEYS, timeout_seconds=10)
         assert published["MemTotal"] == 6415 * 1024
         assert published["MemAvailable"] == (6415 - 6000 + 200) * 1024
         assert before - 1 <= published["Timestamp"] <= int(time.time()) + 1
@@ -521,7 +532,7 @@ def test_meminfo_publisher_never_writes_through_a_symlink_the_container_planted(
     target.symlink_to(vm_dir)
 
     with _running_publisher(tmp_path, cgroup_parent, volume_dir):
-        published = _read_published_meminfo(target, timeout_seconds=10)
+        published = _read_published(target, _MEMINFO_KEYS, timeout_seconds=10)
         # Once its slot files exist the publisher writes them in place, which a
         # file of exactly the published length would accept if the open followed links.
         vm_file_of_published_length = tmp_path / "vm-file-of-published-length"
@@ -549,14 +560,14 @@ def test_meminfo_publisher_replaces_a_fifo_the_container_planted(tmp_path: Path)
     target = volume_dir / ".host-meminfo"
 
     with _running_publisher(tmp_path, cgroup_parent, volume_dir):
-        _read_published_meminfo(target, timeout_seconds=10)
+        _read_published(target, _MEMINFO_KEYS, timeout_seconds=10)
         slots = _slot_files(volume_dir)
         for slot in slots:
             planted = volume_dir / f"planted-fifo-{slot.name}"
             os.mkfifo(planted)
             os.replace(planted, slot)
         assert poll_until(lambda: all(slot.is_file() for slot in slots), timeout=10, poll_interval=0.05)
-        assert _published_meminfo_or_none(target) is not None
+        assert _published_or_none(target, _MEMINFO_KEYS) is not None
 
 
 def test_meminfo_publisher_alternates_between_two_slot_files_it_rewrites_in_place(tmp_path: Path) -> None:
@@ -567,7 +578,7 @@ def test_meminfo_publisher_alternates_between_two_slot_files_it_rewrites_in_plac
     slots = _slot_files(volume_dir)
 
     with _running_publisher(tmp_path, cgroup_parent, volume_dir):
-        _read_published_meminfo(target, timeout_seconds=10)
+        _read_published(target, _MEMINFO_KEYS, timeout_seconds=10)
         assert poll_until(lambda: all(slot.is_file() for slot in slots), timeout=10, poll_interval=0.05)
         # Holding both slots open keeps their inodes from being freed and their
         # numbers handed to a replacement, so only an in-place rewrite of each
@@ -577,7 +588,7 @@ def test_meminfo_publisher_alternates_between_two_slot_files_it_rewrites_in_plac
             _write_container_cgroup(cgroup_parent, limit=str(6415 * _MIB), usage=5000 * _MIB, stat="")
             assert poll_until(
                 lambda: all(
-                    (_parse_published_meminfo(os.pread(slot_file, 4096, 0).decode()) or {}).get("MemAvailable")
+                    (_parse_published(os.pread(slot_file, 4096, 0).decode(), _MEMINFO_KEYS) or {}).get("MemAvailable")
                     == (6415 - 5000) * 1024
                     for slot_file in slot_files
                 ),
@@ -623,7 +634,7 @@ def test_meminfo_publisher_starting_over_never_rewrites_the_slot_the_published_n
                 poll_interval=0.01,
             )
             assert poll_until(
-                lambda: (_published_meminfo_or_none(target) or {}).get("MemTotal") == 6415 * 1024,
+                lambda: (_published_or_none(target, _MEMINFO_KEYS) or {}).get("MemTotal") == 6415 * 1024,
                 timeout=10,
                 poll_interval=0.05,
             )
@@ -648,22 +659,120 @@ def test_meminfo_publisher_replaces_a_leftover_file_of_another_length_whole(tmp_
             timeout=10,
             poll_interval=0.05,
         )
-        published = _read_published_meminfo(target, timeout_seconds=10)
+        published = _read_published(target, _MEMINFO_KEYS, timeout_seconds=10)
 
     assert published["MemTotal"] == 6415 * 1024
 
 
 def test_meminfo_publisher_starts_no_process_between_container_lookups(tmp_path: Path) -> None:
     # It rewrites the file four times a second on every VM, so each rewrite
-    # must cost no process start; only a lookup (every 10 s) runs docker.
+    # must cost no process start; only a lookup (every 10 s) runs docker. The
+    # disk figures come from sysfs, so they start none either.
     cgroup_parent, volume_dir = _limited_container(tmp_path)
+    btrfs_sysfs_root = tmp_path / "btrfs"
+    _write_btrfs_quota(btrfs_sysfs_root, "mngr-data", limit_flags=1, max_referenced=44 * _GIB, referenced=25 * _GIB)
     target = volume_dir / ".host-meminfo"
+    diskinfo = volume_dir / ".host-diskinfo"
 
     # Each file that reappears after a removal is a fresh rewrite. (Distinct
     # inodes would not show it: ext4 hands the replaced file's inode to the next.)
-    with _running_publisher(tmp_path, cgroup_parent, volume_dir) as docker_log:
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir, btrfs_sysfs_root=btrfs_sysfs_root) as docker_log:
         for _ in range(4):
-            _read_published_meminfo(target, timeout_seconds=5)
+            _read_published(target, _MEMINFO_KEYS, timeout_seconds=5)
             target.unlink()
+        for _ in range(2):
+            _read_published(diskinfo, _DISKINFO_KEYS, timeout_seconds=10)
+            diskinfo.unlink()
 
     assert docker_log.read_text().split() == ["ps", "inspect", "volume"]
+
+
+def _write_btrfs_quota(
+    btrfs_sysfs_root: Path,
+    label: str,
+    *,
+    limit_flags: int,
+    max_referenced: int,
+    referenced: int,
+    filesystem_uuid: str | None = None,
+) -> Path:
+    """Write one btrfs filesystem's sysfs label and host quota group (as the kernel shows them); return the group's directory."""
+    filesystem_dir = btrfs_sysfs_root / (filesystem_uuid or uuid4().hex)
+    quota_dir = filesystem_dir / "qgroups" / "1_0"
+    quota_dir.mkdir(parents=True)
+    (filesystem_dir / "label").write_text(f"{label}\n")
+    (quota_dir / "limit_flags").write_text(f"{limit_flags}\n")
+    (quota_dir / "max_referenced").write_text(f"{max_referenced}\n")
+    (quota_dir / "referenced").write_text(f"{referenced}\n")
+    return quota_dir
+
+
+def test_diskinfo_publisher_reports_the_data_filesystem_host_quota(tmp_path: Path) -> None:
+    # Another btrfs filesystem on the VM must not be mistaken for the data disk;
+    # its UUID sorts first, so the publisher's (sorted) glob reaches it first.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    btrfs_sysfs_root = tmp_path / "btrfs"
+    _write_btrfs_quota(
+        btrfs_sysfs_root,
+        "other",
+        limit_flags=1,
+        max_referenced=9 * _GIB,
+        referenced=8 * _GIB,
+        filesystem_uuid="0" * 32,
+    )
+    quota_dir = _write_btrfs_quota(
+        btrfs_sysfs_root,
+        "mngr-data",
+        limit_flags=1,
+        max_referenced=44 * _GIB,
+        referenced=25 * _GIB,
+        filesystem_uuid="f" * 32,
+    )
+    target = volume_dir / ".host-diskinfo"
+
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir, btrfs_sysfs_root=btrfs_sysfs_root):
+        before = int(time.time())
+        published = _read_published(target, _DISKINFO_KEYS, timeout_seconds=10)
+        assert published["QuotaLimitBytes"] == 44 * _GIB
+        assert published["QuotaUsedBytes"] == 25 * _GIB
+        assert before - 1 <= published["Timestamp"] <= int(time.time()) + 1
+
+        # Usage the quota group charges later is published as it changes.
+        (quota_dir / "referenced").write_text(f"{30 * _GIB}\n")
+        assert poll_until(
+            lambda: (_published_or_none(target, _DISKINFO_KEYS) or {}).get("QuotaUsedBytes") == 30 * _GIB,
+            timeout=10,
+            poll_interval=0.05,
+        )
+
+        # A limit of zero bytes still limits: every write fails, so it is published.
+        (quota_dir / "max_referenced").write_text("0\n")
+        assert poll_until(
+            lambda: (_published_or_none(target, _DISKINFO_KEYS) or {}).get("QuotaLimitBytes") == 0,
+            timeout=10,
+            poll_interval=0.05,
+        )
+
+        # A quota group with its limit removed limits nothing, so its file is withdrawn.
+        (quota_dir / "limit_flags").write_text("0\n")
+        assert poll_until(
+            lambda: not any(path.name.startswith(".host-diskinfo") for path in volume_dir.iterdir()),
+            timeout=10,
+            poll_interval=0.05,
+        )
+        # The memory file is unaffected.
+        assert _published_or_none(volume_dir / ".host-meminfo", _MEMINFO_KEYS) is not None
+
+
+def test_diskinfo_publisher_withdraws_a_file_when_the_vm_has_no_quota_group(tmp_path: Path) -> None:
+    # A file left by an earlier run must not outlive the quota it described.
+    cgroup_parent, volume_dir = _limited_container(tmp_path)
+    btrfs_sysfs_root = tmp_path / "btrfs"
+    (btrfs_sysfs_root / uuid4().hex).mkdir(parents=True)
+    (next(btrfs_sysfs_root.iterdir()) / "label").write_text("mngr-data\n")
+    leftover = volume_dir / ".host-diskinfo"
+    leftover.write_text(f"QuotaLimitBytes: {1:20d}\nQuotaUsedBytes: {1:20d}\nTimestamp: {1:15d}\n")
+
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir, btrfs_sysfs_root=btrfs_sysfs_root):
+        assert poll_until(lambda: not leftover.exists(), timeout=10, poll_interval=0.05)
+        _read_published(volume_dir / ".host-meminfo", _MEMINFO_KEYS, timeout_seconds=10)

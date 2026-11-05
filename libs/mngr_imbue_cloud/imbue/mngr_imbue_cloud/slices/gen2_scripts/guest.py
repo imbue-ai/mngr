@@ -6,6 +6,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_DISKINFO_FILE_NAME
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_CONTAINERD_CONTENT_SUBVOLUME
@@ -15,7 +16,9 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_DATA_FS
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_DATA_MOUNT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_DOCKER_DATA_ROOT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_HOST_QUOTA_QGROUP
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_HOST_QUOTA_QGROUP_SYSFS_NAME
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_HOST_ID_CONTAINER_LABEL
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_QGROUP_LIMIT_MAX_REFERENCED_FLAG
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DATA_DISK_SYSTEM_RESERVE_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PRINCIPAL_VM
@@ -28,7 +31,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import ssh_ca_trust_files
 # qemu-img-resized) disk, and the agent host container's memory cap follows the
 # VM's own RAM; being every-boot units, a restore or an in-place resize applies
 # the new size on boot with no cloud-init involvement. A long-running service
-# publishes the container's memory headroom into its volume.
+# publishes the container's memory and disk headroom into its volume.
 GUEST_GROW_DATA_FS_UNIT_NAME: Final[str] = "mngr-grow-data-fs.service"
 GUEST_CONTAINER_MEMORY_UNIT_NAME: Final[str] = "mngr-reconcile-container-memory.service"
 GUEST_CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-publish-container-meminfo.service"
@@ -50,6 +53,10 @@ _MINDS_AUTOSTART_UNIT_NAME: Final[str] = "minds-autostart.service"
 _MEMINFO_PUBLISH_INTERVAL_SECONDS: Final[str] = "0.25"
 # How many rewrites apart the publisher looks the containers up again.
 _MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY: Final[int] = 40
+# How many memory rewrites apart it rewrites the disk file: disk usage moves slowly.
+_DISKINFO_PUBLISH_ROUNDS_PER_REWRITE: Final[int] = 8
+# Where the kernel exposes each btrfs filesystem, keyed by its UUID.
+GUEST_BTRFS_SYSFS_ROOT: Final[str] = "/sys/fs/btrfs"
 
 
 _MEMINFO_PUBLISHER_BODY: Final[str] = r"""
@@ -67,7 +74,8 @@ sub docker_output {
     return $output;
 }
 
-# [cgroup directory, published file] for each running agent host container.
+# [cgroup directory, published meminfo, published diskinfo] for each running
+# agent host container.
 sub discover {
     my @targets;
     my $ids = docker_output('ps', '-q', '--no-trunc', '--filter', "label=$host_id_label") // return ();
@@ -80,9 +88,21 @@ sub discover {
         next unless defined $volume_name && $volume_name ne '';
         my $volume_dir = docker_output('volume', 'inspect', '--format', '{{.Options.device}}', $volume_name);
         next unless defined $volume_dir && $volume_dir ne '' && -d $volume_dir;
-        push @targets, ["$cgroup_parent/docker-$container_id.scope", "$volume_dir/$file_name"];
+        push @targets, ["$cgroup_parent/docker-$container_id.scope", "$volume_dir/$file_name", "$volume_dir/$diskinfo_file_name"];
     }
     return @targets;
+}
+
+# The sysfs directory of the host quota group on the data filesystem, or undef
+# when the VM has no such filesystem or it carries no quota group.
+sub find_host_quota_dir {
+    for my $label_file (glob("$btrfs_sysfs_root/*/label")) {
+        my $label = read_first_line($label_file) // next;
+        next unless $label eq $data_fs_label;
+        my $quota_dir = substr($label_file, 0, -length('/label')) . "/qgroups/$host_quota_sysfs_name";
+        return -d $quota_dir ? $quota_dir : undef;
+    }
+    return undef;
 }
 
 sub read_first_line {
@@ -158,12 +178,17 @@ sub publish_through_slot {
     unlink $link;
 }
 
-sub publish {
+sub withdraw {
+    my ($target_file) = @_;
+    unlink $target_file, "$target_file.slot0", "$target_file.slot1";
+}
+
+sub publish_memory {
     my ($cgroup_dir, $target_file) = @_;
     # A container can stop, and its cgroup vanish, between any two reads.
     my $limit = read_first_line("$cgroup_dir/memory.max") // return;
     if ($limit eq 'max') {
-        unlink $target_file, "$target_file.slot0", "$target_file.slot1";
+        withdraw($target_file);
         return;
     }
     return unless $limit =~ /^\d+$/;
@@ -190,10 +215,41 @@ sub publish {
     );
 }
 
+# The quota covers everything the VM's agent host writes, so every container
+# gets the same figures. A quota group with no limit on what it references
+# limits nothing, so it gets no file either.
+sub publish_disk {
+    my ($quota_dir, $target_file) = @_;
+    if (!defined $quota_dir) {
+        withdraw($target_file);
+        return;
+    }
+    my $flags = read_first_line("$quota_dir/limit_flags") // return;
+    my $limit = read_first_line("$quota_dir/max_referenced") // return;
+    my $used = read_first_line("$quota_dir/referenced") // return;
+    return unless $flags =~ /^\d+$/ && $limit =~ /^\d+$/ && $used =~ /^\d+$/;
+    if (!($flags & $limit_max_referenced_flag)) {
+        withdraw($target_file);
+        return;
+    }
+    publish_through_slot(
+        $target_file,
+        sprintf("QuotaLimitBytes: %20d\nQuotaUsedBytes: %20d\nTimestamp: %15d\n", $limit, $used, time),
+    );
+}
+
 my @targets;
+my $quota_dir;
 for (my $round = 0; ; $round++) {
-    @targets = discover() if $round % $rounds_per_discovery == 0;
-    publish(@$_) for @targets;
+    if ($round % $rounds_per_discovery == 0) {
+        @targets = discover();
+        $quota_dir = find_host_quota_dir();
+    }
+    for my $target (@targets) {
+        my ($cgroup_dir, $meminfo_file, $diskinfo_file) = @$target;
+        publish_memory($cgroup_dir, $meminfo_file);
+        publish_disk($quota_dir, $diskinfo_file) if $round % $rounds_per_disk_publish == 0;
+    }
     select(undef, undef, undef, $interval_seconds);
 }
 """
@@ -326,8 +382,8 @@ WantedBy=multi-user.target
 
 
 @pure
-def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
-    """The in-guest loop publishing each agent host container's memory headroom into its volume.
+def render_guest_container_meminfo_publisher_script(cgroup_parent: str, btrfs_sysfs_root: str) -> str:
+    """The in-guest loop publishing each agent host container's memory and disk headroom into its volume.
 
     Under gVisor the container's own /proc/meminfo cannot see the memory the
     runtime is charged, so an earlyoom inside run with ``--host-meminfo``
@@ -343,6 +399,13 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
     sees only the two. Each container's volume directory is its named volume's bind
     device, which exists whether or not the container runs; a container
     without a limit gets no file.
+
+    The disk file holds the limit and usage of the host quota group, read from
+    the data filesystem's sysfs directory under ``btrfs_sysfs_root``. statfs in
+    the container sees only the filesystem's free space, and which of the two
+    runs out first depends on how much of the disk btrfs holds for metadata,
+    so the workspace needs both. A VM whose data filesystem has no limited
+    quota group publishes no disk file.
     """
     header = f"""\
 #!/usr/bin/perl
@@ -358,8 +421,14 @@ my $cgroup_parent = '{cgroup_parent}';
 my $host_id_label = '{GEN2_HOST_ID_CONTAINER_LABEL}';
 my $volume_mount_path = '{GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH}';
 my $file_name = '{GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME}';
+my $diskinfo_file_name = '{GEN2_CONTAINER_HOST_DISKINFO_FILE_NAME}';
+my $btrfs_sysfs_root = '{btrfs_sysfs_root}';
+my $data_fs_label = '{GEN2_GUEST_DATA_FS_LABEL}';
+my $host_quota_sysfs_name = '{GEN2_GUEST_HOST_QUOTA_QGROUP_SYSFS_NAME}';
+my $limit_max_referenced_flag = {GEN2_QGROUP_LIMIT_MAX_REFERENCED_FLAG};
 my $interval_seconds = {_MEMINFO_PUBLISH_INTERVAL_SECONDS};
 my $rounds_per_discovery = {_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY};
+my $rounds_per_disk_publish = {_DISKINFO_PUBLISH_ROUNDS_PER_REWRITE};
 """
     return header + _MEMINFO_PUBLISHER_BODY
 
@@ -369,7 +438,7 @@ def render_guest_container_meminfo_publisher_unit() -> str:
     """The systemd unit keeping the container-meminfo publisher running."""
     return f"""\
 [Unit]
-Description=mngr: publish the agent host container's memory headroom into its volume
+Description=mngr: publish the agent host container's memory and disk headroom into its volume
 After=docker.service
 Wants=docker.service
 
@@ -409,7 +478,9 @@ def guest_container_memory_files() -> tuple[GuestManagedFile, ...]:
         GuestManagedFile(
             path=_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH,
             permissions="0755",
-            content=render_guest_container_meminfo_publisher_script(_GUEST_DOCKER_CGROUP_PARENT),
+            content=render_guest_container_meminfo_publisher_script(
+                _GUEST_DOCKER_CGROUP_PARENT, GUEST_BTRFS_SYSFS_ROOT
+            ),
         ),
         GuestManagedFile(
             path=f"{_GUEST_SYSTEMD_UNIT_DIR}/{GUEST_CONTAINER_MEMINFO_UNIT_NAME}",
