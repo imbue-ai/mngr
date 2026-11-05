@@ -1,0 +1,1 @@
+New shared pytest marker `harness_internals(harness)` marks a release test that asserts an internal of a harness CLI that mngr reads, such as a transcript record, hook payload, TUI string or launch flag. Select one CLI's tests by keyword, e.g. `-m "release and harness_internals(harness='claude')"`.

@@ -129,6 +129,8 @@ _SHARED_MARKERS: Final[list[str]] = [
     " coordinate (see the behaviors skill); partial= notes what the test does not cover",
     "smoke: marks a test that runs after a deploy or release against the published artifact and the"
     " deployed production environment; never collected by any other test selection",
+    "harness_internals(harness): marks a release test that asserts an internal of the harness CLI"
+    " that mngr reads, such as a transcript record, hook payload, TUI string or launch flag",
 ]
 
 # Additional markers registered by projects via register_marker().

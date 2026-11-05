@@ -142,7 +142,7 @@ is the only thing that runs them.
   in-job), and `test_aws_workspace_release.py` (skips without AWS opt-in) run.
 
 `.github/workflows/release-tests.yml` (`workflow_dispatch`, and called by the mngr
-release pipeline in `publish.yml`) -- the *mngr* release suite only. Both jobs
+release pipeline in `publish.yml`) -- the *mngr* release suite only. Its jobs
 exclude the whole `apps/minds` tree by path (`--ignore apps/minds`); all Imbue
 Studio release tests run from `test-minds-release` above:
 
@@ -150,6 +150,8 @@ Studio release tests run from `test-minds-release` above:
   `--ignore apps/minds`.
 - **`test-mngr-release`** -- the `release` suite with `--ignore apps/minds`,
   matrixed `[ubuntu, macos] x group 1..12` (pytest-split).
+- **`test-claude-internals-latest`** -- `release and harness_internals(harness='claude') and not flaky`
+  against the latest Claude Code instead of the pin, on `[ubuntu, macos]`.
 
 `.github/workflows/minds-smoke.yml`: the smoke workflow -- validates the
 published artifact against the deployed production environment after a deploy of

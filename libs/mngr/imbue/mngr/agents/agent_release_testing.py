@@ -25,7 +25,7 @@ ends the turn before the result settles, so a single forced-tool turn carries no
 observation -- see its profile), and reporting per-turn token usage is gated by
 ``asserts_usage`` since not every CLI exposes it.
 
-These tests are not run in CI (release-marked); run a profile's test manually with the
+These tests do not run per PR (release-marked); run a profile's test manually with the
 real binary present, e.g.::
 
     uv run pytest -m release -p no:xdist --no-cov \\
@@ -195,7 +195,7 @@ class AgentReleaseProfile(abc.ABC):
         Default: the ``active`` marker is absent. A harness whose lifecycle is read live rather
         than from a marker (codex reads the daemon's ``thread/status``) overrides this.
         """
-        return not _marker_path(host_dir).exists()
+        return not marker_path(host_dir).exists()
 
     def is_reporting_running(self, host_dir: Path) -> bool:
         """Whether the agent is reporting RUNNING (a turn in flight).
@@ -203,17 +203,17 @@ class AgentReleaseProfile(abc.ABC):
         Default: the ``active`` marker exists. Overridden by a harness whose RUNNING signal is
         read live (codex: a turn in flight is ``thread/status`` ``active``).
         """
-        return _marker_path(host_dir).exists()
+        return marker_path(host_dir).exists()
 
 
-def _agent_state_dir(host_dir: Path) -> Path:
+def agent_state_dir(host_dir: Path) -> Path:
     candidates = [path for path in (host_dir / "agents").glob("*") if path.is_dir()]
     assert len(candidates) == 1, f"expected exactly one agent state dir under {host_dir}/agents, found {candidates}"
     return candidates[0]
 
 
-def _marker_path(host_dir: Path) -> Path:
-    return _agent_state_dir(host_dir) / "active"
+def marker_path(host_dir: Path) -> Path:
+    return agent_state_dir(host_dir) / "active"
 
 
 def _read_common_records_in_state_dir(state_dir: Path, subdir: str) -> list[dict[str, Any]]:
@@ -223,34 +223,34 @@ def _read_common_records_in_state_dir(state_dir: Path, subdir: str) -> list[dict
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
-    return _read_common_records_in_state_dir(_agent_state_dir(host_dir), subdir)
+def read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
+    return _read_common_records_in_state_dir(agent_state_dir(host_dir), subdir)
 
 
 # Predicates over the current common-transcript records (ATIF-shaped: a `step` record per
 # turn, discriminated by its ATIF `source`, with tool results streamed as `observation`
 # records). Module-level (the call sites adapt them to poll_until's no-arg condition with a
 # small lambda).
-def _is_step_from(record: dict[str, Any], source: str) -> bool:
+def is_step_from(record: Mapping[str, Any], source: str) -> bool:
     return record["type"] == "step" and record.get("source") == source
 
 
-def _step_message(record: dict[str, Any]) -> str:
+def step_message(record: Mapping[str, Any]) -> str:
     return str(record.get("message", ""))
 
 
-def _seed_turn_captured(records: list[dict[str, Any]], secret: str, forces_tool_call: bool) -> bool:
-    has_user_secret = any(_is_step_from(r, "user") and secret in _step_message(r) for r in records)
-    has_agent = any(_is_step_from(r, "agent") for r in records)
+def _seed_turn_captured(records: Sequence[Mapping[str, Any]], secret: str, forces_tool_call: bool) -> bool:
+    has_user_secret = any(is_step_from(r, "user") and secret in step_message(r) for r in records)
+    has_agent = any(is_step_from(r, "agent") for r in records)
     has_tool = (not forces_tool_call) or any(r["type"] == "observation" for r in records)
     return has_user_secret and has_agent and has_tool
 
 
-def _agent_recalled_secret(records: list[dict[str, Any]], secret: str) -> bool:
-    return any(_is_step_from(r, "agent") and secret in _step_message(r) for r in records)
+def _agent_recalled_secret(records: Sequence[Mapping[str, Any]], secret: str) -> bool:
+    return any(is_step_from(r, "agent") and secret in step_message(r) for r in records)
 
 
-def _wait_for_records(
+def wait_for_records(
     host_dir: Path,
     subdir: str,
     predicate: Callable[[list[dict[str, Any]]], bool],
@@ -260,9 +260,9 @@ def _wait_for_records(
 ) -> list[dict[str, Any]]:
     """Poll the common transcript until ``predicate`` holds; return the records (or fail)."""
     found = poll_until(
-        condition=lambda: predicate(_read_common_records(host_dir, subdir)), timeout=timeout, poll_interval=2.0
+        condition=lambda: predicate(read_common_records(host_dir, subdir)), timeout=timeout, poll_interval=2.0
     )
-    records = _read_common_records(host_dir, subdir)
+    records = read_common_records(host_dir, subdir)
     if not found:
         raise AssertionError(
             f"{description} within {timeout}s. Last transcript:\n{json.dumps(records, indent=2)[:4000]}"
@@ -270,7 +270,7 @@ def _wait_for_records(
     return records
 
 
-def _assert_records_conform(records: list[dict[str, Any]]) -> None:
+def _assert_records_conform(records: Sequence[Mapping[str, Any]]) -> None:
     for record in records:
         error = validate_common_transcript_record(record)
         assert error is None, f"emitted record does not match the canonical schema ({error}): {record}"
@@ -384,7 +384,7 @@ def _adopt_preserved_and_recall(
             adopt_ctx, "message", adopt_name, "--message", profile.recall_prompt(), timeout=_MESSAGE_TIMEOUT_SECONDS
         )
         assert recall.returncode == 0, f"adopt recall message failed:\n{recall.stdout}\n{recall.stderr}"
-        _wait_for_records(
+        wait_for_records(
             host_dir,
             subdir,
             lambda records: _agent_recalled_secret(records, secret),
@@ -443,7 +443,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
 
         # 3. The seed turn must be captured: a user step carries the secret, plus a reply
         #    (and an observation record when the agent forces a tool call).
-        records = _wait_for_records(
+        records = wait_for_records(
             host_dir,
             subdir,
             lambda records: _seed_turn_captured(records, secret, profile.forces_tool_call),
@@ -462,14 +462,14 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         assert not repeated_event_ids, f"event_ids must be unique; repeated: {repeated_event_ids}"
         if profile.forces_tool_call:
             assert any(
-                c.get("function_name") for r in records if _is_step_from(r, "agent") for c in r.get("tool_calls") or []
+                c.get("function_name") for r in records if is_step_from(r, "agent") for c in r.get("tool_calls") or []
             ), f"expected a tool call on an agent step: {records}"
             assert any(r["type"] == "observation" for r in records), records
         if profile.asserts_usage:
             # One agent step suffices: claude omits ``metrics`` entirely on lines that report no
             # usage, and pi can emit a cost-only metrics block, so the counters are not universal.
             metric_keys = {"prompt_tokens", "completion_tokens", "cached_tokens"}
-            assert any(_is_step_from(r, "agent") and metric_keys <= set(r.get("metrics") or {}) for r in records), (
+            assert any(is_step_from(r, "agent") and metric_keys <= set(r.get("metrics") or {}) for r in records), (
                 records
             )
 
@@ -484,7 +484,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             ctx, "message", agent_name, "--message", profile.recall_prompt(), timeout=_MESSAGE_TIMEOUT_SECONDS
         )
         assert recall.returncode == 0, f"recall message failed:\n{recall.stdout}\n{recall.stderr}"
-        post = _wait_for_records(
+        post = wait_for_records(
             host_dir,
             subdir,
             lambda records: _agent_recalled_secret(records, secret),
@@ -494,7 +494,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
 
         # 7. History survived the restart: the pre-restart seed user step is still present
         #    (guards the opencode rebuild-on-idle raw-seeding; trivially holds for append-only emitters).
-        assert any(_is_step_from(r, "user") and secret in _step_message(r) for r in post), (
+        assert any(is_step_from(r, "user") and secret in step_message(r) for r in post), (
             "pre-restart turn was lost from the common transcript after stop/start"
         )
         _assert_records_conform(post)
@@ -556,24 +556,24 @@ def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str)
     return _read_common_records_in_state_dir(agent_state_dir_by_name(host_dir, agent_name), subdir)
 
 
-def _user_steps_containing(records: list[dict[str, Any]], token: str) -> list[dict[str, Any]]:
-    return [r for r in records if _is_step_from(r, "user") and token in _step_message(r)]
+def _user_steps_containing(records: Sequence[Mapping[str, Any]], token: str) -> list[Mapping[str, Any]]:
+    return [r for r in records if is_step_from(r, "user") and token in step_message(r)]
 
 
-def _count_user_steps_containing(records: list[dict[str, Any]], token: str) -> int:
+def count_user_steps_containing(records: Sequence[Mapping[str, Any]], token: str) -> int:
     return len(_user_steps_containing(records, token))
 
 
 def _is_delivered_exactly_once(host_dir: Path, subdir: str, agent_name: str, token: str) -> bool:
     records = _read_common_records_for_agent(host_dir, subdir, agent_name)
-    return _count_user_steps_containing(records, token) == 1
+    return count_user_steps_containing(records, token) == 1
 
 
-def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, description: str) -> None:
-    _wait_for_records(
+def wait_for_user_message(host_dir: Path, subdir: str, token: str, *, description: str) -> None:
+    wait_for_records(
         host_dir,
         subdir,
-        lambda records: _count_user_steps_containing(records, token) >= 1,
+        lambda records: count_user_steps_containing(records, token) >= 1,
         timeout=_RESPONSE_TIMEOUT_SECONDS,
         description=description,
     )
@@ -588,10 +588,10 @@ def _wait_for_delivery(
     user step or injects it into the running turn with no user step (see
     ``count_injected_deliveries``).
     """
-    _wait_for_records(
+    wait_for_records(
         host_dir,
         subdir,
-        lambda records: _count_user_steps_containing(records, token) >= 1
+        lambda records: count_user_steps_containing(records, token) >= 1
         or profile.count_injected_deliveries(host_dir, token) >= 1,
         timeout=_RESPONSE_TIMEOUT_SECONDS,
         description=description,
@@ -624,7 +624,7 @@ def _wait_for_rejection_event(host_dir: Path, message: str) -> None:
     )
 
 
-def _send_expecting_success(
+def send_expecting_success(
     profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str, message: str
 ) -> None:
     result = profile.run_mngr(ctx, "message", agent_name, "--message", message, timeout=_DELIVERY_SEND_TIMEOUT_SECONDS)
@@ -671,18 +671,18 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         # 1. Idle delivery: the agent is WAITING; the send must confirm and the
         #    message must land in the durable transcript.
         idle_token = f"IDLE-{run_id}"
-        _send_expecting_success(
+        send_expecting_success(
             profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK."
         )
-        _wait_for_user_message(host_dir, subdir, idle_token, description="idle-delivery message was not captured")
+        wait_for_user_message(host_dir, subdir, idle_token, description="idle-delivery message was not captured")
 
         # 2. Busy delivery: start a turn, then send again while it (likely) runs.
         #    The TUI queues the input; the send must still confirm (for agents
         #    with acceptance evidence, the instant it is queued) and the message
         #    must eventually be processed.
         busy_token = f"BUSY-{run_id}"
-        _send_expecting_success(profile, ctx, agent_name, MESSAGE_JOURNEY_BUSY_PROMPT)
-        _send_expecting_success(
+        send_expecting_success(profile, ctx, agent_name, MESSAGE_JOURNEY_BUSY_PROMPT)
+        send_expecting_success(
             profile, ctx, agent_name, f"Also remember this exact value: {busy_token}. Reply with just OK."
         )
         _wait_for_delivery(profile, host_dir, subdir, busy_token, description="busy-delivery message was not captured")
@@ -691,7 +691,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         #    the per-agent message lock and confirms before returning).
         rapid_tokens = [f"RAPID-{index}-{run_id}" for index in range(3)]
         for rapid_token in rapid_tokens:
-            _send_expecting_success(
+            send_expecting_success(
                 profile, ctx, agent_name, f"Acknowledge this exact value: {rapid_token}. Reply with just OK."
             )
         for rapid_token in rapid_tokens:
@@ -710,7 +710,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         long_head_token = f"LONGHEAD-{run_id}"
         long_token = f"LONG-{run_id}"
         filler = "The quick brown fox jumps over the lazy dog. " * 220
-        _send_expecting_success(
+        send_expecting_success(
             profile,
             ctx,
             agent_name,
@@ -725,7 +725,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         # 5. Relaxed slash command: TUI-local, so confirmation is best-effort --
         #    but the send must still exit 0.
         if profile.clear_slash_command is not None:
-            _send_expecting_success(profile, ctx, agent_name, profile.clear_slash_command)
+            send_expecting_success(profile, ctx, agent_name, profile.clear_slash_command)
 
         # 6. Unknown slash command: the send still exits 0 (delivery semantics),
         #    and the rejection probe must catch the TUI's structured rejection
@@ -736,13 +736,13 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             assert poll_until(lambda: not profile.is_reporting_running(host_dir), timeout=_RESPONSE_TIMEOUT_SECONDS), (
                 "agent was still running a turn before the unknown slash command"
             )
-            _send_expecting_success(profile, ctx, agent_name, profile.unknown_slash_command)
+            send_expecting_success(profile, ctx, agent_name, profile.unknown_slash_command)
             _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
         # Exactly-once: no token was delivered twice. The engine re-sends Enter,
         # never the text. A queued message the TUI injected into the running turn
         # has no user step at all; one injected delivery counts instead.
-        final_records = _read_common_records(host_dir, subdir)
+        final_records = read_common_records(host_dir, subdir)
         for token in [idle_token, busy_token, *rapid_tokens, long_head_token, long_token]:
             deliveries = _user_steps_containing(final_records, token)
             # The event_ids separate the two causes: one id twice is the transcript
@@ -834,12 +834,12 @@ def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path
                 poll_interval=2.0,
             )
             records = _read_common_records_for_agent(host_dir, subdir, agent_name)
-            delivery_count = _count_user_steps_containing(records, token)
+            delivery_count = count_user_steps_containing(records, token)
             assert found, (
                 f"expected exactly one delivery of {token} to {agent_name}, found {delivery_count}: "
                 f"{json.dumps(records, indent=2)[:2000]}"
             )
-            assert _count_user_steps_containing(records, other_token) == 0, (
+            assert count_user_steps_containing(records, other_token) == 0, (
                 f"agent {agent_name} received the OTHER agent's message {other_token}"
             )
     finally:

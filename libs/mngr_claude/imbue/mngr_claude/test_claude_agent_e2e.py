@@ -35,7 +35,7 @@ only in:
   unambiguous and independent of the encoded-cwd subdir name.
 
 Requires ``claude`` on PATH and ``ANTHROPIC_API_KEY`` in the environment; skipped
-otherwise. Release-marked, so it does not run in CI.
+otherwise. Release-marked, so it does not run per PR.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shlex
 import shutil
 import subprocess
 import sys
@@ -50,18 +51,21 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
-from imbue.mngr.agents.agent_release_testing import _is_step_from
-from imbue.mngr.agents.agent_release_testing import _read_common_records
-from imbue.mngr.agents.agent_release_testing import _send_expecting_success
-from imbue.mngr.agents.agent_release_testing import _wait_for_user_message
+from imbue.mngr.agents.agent_release_testing import agent_state_dir
+from imbue.mngr.agents.agent_release_testing import count_user_steps_containing
+from imbue.mngr.agents.agent_release_testing import is_step_from
+from imbue.mngr.agents.agent_release_testing import read_common_records
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.agents.agent_release_testing import wait_for_user_message
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
@@ -95,6 +99,20 @@ def _init_claude_workspace(path: Path) -> None:
     (path / ".gitignore").write_text(".claude/settings.local.json\n")
     run_git_command(path, "add", ".gitignore")
     run_git_command(path, "commit", "-m", "Add .gitignore")
+
+
+def _is_queue_operation_carrying(record: dict[str, Any], operation: str, token: str) -> bool:
+    """Whether a raw session record is a ``queue-operation`` of ``operation`` whose content carries ``token``."""
+    return (
+        record.get("type") == "queue-operation"
+        and record.get("operation") == operation
+        and token in str(record.get("content", ""))
+    )
+
+
+def _is_stop_hook_summary(record: dict[str, Any]) -> bool:
+    """Whether a raw session record is the ``system``/``stop_hook_summary`` record of a Stop hook pass."""
+    return record.get("type") == "system" and record.get("subtype") == "stop_hook_summary"
 
 
 class _ClaudeReleaseProfile(AgentReleaseProfile):
@@ -133,11 +151,7 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    record.get("type") == "queue-operation"
-                    and record.get("operation") == "remove"
-                    and token in str(record.get("content", ""))
-                ):
+                if _is_queue_operation_carrying(record, "remove", token):
                     count += 1
         return count
 
@@ -261,9 +275,45 @@ def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
     run_concurrent_message_delivery(_ClaudeReleaseProfile(), tmp_path)
 
 
-# Timeouts for the model-picker dialog tests. Create can provision a real claude; the send is a
-# single relaxed slash command whose post-submit dialog check observes for a few seconds.
-_MODEL_PICKER_CREATE_TIMEOUT_SECONDS = 600.0
+# Create can provision a real claude.
+_AGENT_CREATE_TIMEOUT_SECONDS: Final[float] = 600.0
+_AGENT_DESTROY_TIMEOUT_SECONDS: Final[float] = 300.0
+
+
+def _create_haiku_agent(profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> None:
+    create = profile.run_mngr(
+        ctx,
+        "create",
+        agent_name,
+        profile.agent_type,
+        "--no-connect",
+        "--yes",
+        *profile.create_extra_args(ctx),
+        timeout=_AGENT_CREATE_TIMEOUT_SECONDS,
+    )
+    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+
+
+def _destroy_agent_and_tear_down(
+    profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, *, timeout: float
+) -> None:
+    """Force-destroy ``agent_name``, then run ``ctx``'s teardown even if the destroy raises."""
+    try:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=timeout)
+    finally:
+        if ctx.teardown is not None:
+            ctx.teardown()
+
+
+def _drift_note(ctx: AgentReleaseContext, subject: str) -> str:
+    """A failure-message suffix naming the installed claude, e.g. ``(claude version: <version>; a failure here means <subject> drifted)``."""
+    result = subprocess.run(["claude", "--version"], capture_output=True, text=True, env=dict(ctx.env), timeout=60.0)
+    claude_version = result.stdout.strip() or "unknown"
+    return f"(claude version: {claude_version}; a failure here means {subject} drifted)"
+
+
+# Timeouts for the model-picker dialog tests. The send is a single relaxed slash command whose
+# post-submit dialog check observes for a few seconds.
 _MODEL_PICKER_SEND_TIMEOUT_SECONDS = 120.0
 _MODEL_PICKER_DESTROY_TIMEOUT_SECONDS = 150.0
 
@@ -297,23 +347,6 @@ def _setup_ctx_that_answers_dialogs(profile: _ClaudeReleaseProfile, tmp_path: Pa
             f"post_submit_dialog_observe_seconds = {_MODEL_PICKER_OBSERVE_SECONDS}\n"
         )
     return ctx
-
-
-def _create_model_picker_agent(profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext) -> str:
-    """Create a real haiku claude agent from ``ctx`` and return its name."""
-    agent_name = f"claude-modelpicker-{get_short_random_string()}"
-    create = profile.run_mngr(
-        ctx,
-        "create",
-        agent_name,
-        profile.agent_type,
-        "--no-connect",
-        "--yes",
-        *profile.create_extra_args(ctx),
-        timeout=_MODEL_PICKER_CREATE_TIMEOUT_SECONDS,
-    )
-    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-    return agent_name
 
 
 def _capture_agent_pane(ctx: AgentReleaseContext, agent_name: str) -> str:
@@ -356,9 +389,10 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
         pytest.skip(reason)
 
     ctx = _setup_ctx_that_answers_dialogs(profile, tmp_path)
-    agent_name = _create_model_picker_agent(profile, ctx)
+    agent_name = f"claude-modelpicker-{get_short_random_string()}"
     run_id = get_short_random_string()
     try:
+        _create_haiku_agent(profile, ctx, agent_name)
         result = profile.run_mngr(
             ctx, "message", agent_name, "--message", _MODEL_PICKER_COMMAND, timeout=_MODEL_PICKER_SEND_TIMEOUT_SECONDS
         )
@@ -373,32 +407,44 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
         )
         # The agent must still accept and process a normal message -- i.e. it is not wedged on the picker.
         token = f"AFTERMODEL-{run_id}"
-        _send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
-        _wait_for_user_message(
+        send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
+        wait_for_user_message(
             ctx.host_dir,
             profile.common_transcript_subdir,
             token,
             description="message sent after /model was not processed -- the agent may be stuck on the picker",
         )
     finally:
-        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS)
+        _destroy_agent_and_tear_down(profile, ctx, agent_name, timeout=_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS)
 
 
 # Transcript record contract
 
-_CONTRACT_SEND_TIMEOUT_SECONDS = 180.0
-_CONTRACT_RECORD_TIMEOUT_SECONDS = 90.0
+_SESSION_RECORD_TIMEOUT_SECONDS: Final[float] = 90.0
 _CONTRACT_BUSY_ATTEMPTS = 3
 
+# The values Claude Code writes for a message absorbed into a running turn.
+_ABSORBED_MID_TURN_REASON: Final[str] = "absorbed_mid_turn"
+_QUEUED_COMMAND_ATTACHMENT_TYPE: Final[str] = "queued_command"
+_QUEUED_PROMPT_MODE: Final[str] = "prompt"
+# The queued_command origin kinds of a message the user typed; None is an older claude's missing origin.
+_USER_ORIGIN_KINDS: Final[tuple[str | None, ...]] = (None, "human", "auto-continuation")
 
-def _contract_send(
-    profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, message: str, label: str
-) -> None:
-    send = profile.run_mngr(ctx, "message", agent_name, "--message", message, timeout=_CONTRACT_SEND_TIMEOUT_SECONDS)
-    assert send.returncode == 0, f"{label} send failed:\n{send.stdout}\n{send.stderr}"
+# The queue-operation (operation, reason) pairs mngr has decided about.
+_KNOWN_QUEUE_OPERATIONS: Final[frozenset[tuple[str, str | None]]] = frozenset(
+    {
+        ("enqueue", None),
+        ("dequeue", None),
+        ("remove", None),
+        ("remove", _ABSORBED_MID_TURN_REASON),
+        # A background-task notification claude delivers itself; mngr leaves it out of the transcript.
+        ("remove", "delivered_to_agent"),
+        ("popAll", None),
+    }
+)
 
 
-def _contract_read_records(session_file: Path) -> list[dict[str, Any]]:
+def _read_session_records(session_file: Path) -> list[dict[str, Any]]:
     records = []
     for line in session_file.read_text().splitlines():
         try:
@@ -410,19 +456,19 @@ def _contract_read_records(session_file: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _contract_wait_for_record(
+def _wait_for_session_record(
     session_file: Path, predicate: Callable[[dict[str, Any]], bool], *, failure: str
 ) -> dict[str, Any]:
     found: list[dict[str, Any]] = []
 
     def has_match() -> bool:
-        for record in _contract_read_records(session_file):
+        for record in _read_session_records(session_file):
             if predicate(record):
                 found.append(record)
                 return True
         return False
 
-    assert poll_until(has_match, timeout=_CONTRACT_RECORD_TIMEOUT_SECONDS, poll_interval=2.0), failure
+    assert poll_until(has_match, timeout=_SESSION_RECORD_TIMEOUT_SECONDS, poll_interval=2.0), failure
     return found[0]
 
 
@@ -436,7 +482,25 @@ def _contract_message_text(record: dict[str, Any]) -> str:
     return ""
 
 
+def _wait_for_native_session_file(ctx: AgentReleaseContext) -> Path:
+    """Wait for the agent's native session JSONL, named by its claude_session_id marker, and return it.
+
+    Claude writes the file lazily on the first prompt, so call this after a send.
+    """
+    agent_dir = agent_state_dir(ctx.host_dir)
+    session_id = (agent_dir / "claude_session_id").read_text().strip()
+    assert session_id != "", "claude_session_id marker is empty"
+    session_glob = f"{_CLAUDE_PROJECTS_RELPATH}/*/{session_id}.jsonl"
+    assert poll_until(lambda: len(list(agent_dir.glob(session_glob))) == 1, timeout=60.0, poll_interval=2.0), (
+        f"native session JSONL not at <config-dir>/projects/<encoded-cwd>/{session_id}.jsonl "
+        f"{_drift_note(ctx, 'the native session file layout')}; "
+        "consumers: every probe's native-transcript path expression"
+    )
+    return next(agent_dir.glob(session_glob))
+
+
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
@@ -457,52 +521,22 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
     ctx = profile.setup(tmp_path)
     agent_name = f"claude-contract-{get_short_random_string()}"
     run_id = get_short_random_string()
-    version_result = subprocess.run(
-        ["claude", "--version"], capture_output=True, text=True, env=dict(ctx.env), timeout=60.0
-    )
-    claude_version = version_result.stdout.strip() or "unknown"
-    drift = f"(claude version: {claude_version}; a failure here means the record shape drifted)"
+    drift = _drift_note(ctx, "the record shape")
     destroyed = False
 
     try:
-        create = profile.run_mngr(
-            ctx,
-            "create",
-            agent_name,
-            profile.agent_type,
-            "--no-connect",
-            "--yes",
-            *profile.create_extra_args(ctx),
-            timeout=600.0,
-        )
-        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-
-        agent_dirs = list(ctx.host_dir.glob("agents/*"))
-        assert len(agent_dirs) == 1, f"expected exactly one agent dir, found {agent_dirs}"
-        agent_dir = agent_dirs[0]
-        session_id = (agent_dir / "claude_session_id").read_text().strip()
-        assert session_id != "", "claude_session_id marker is empty"
+        _create_haiku_agent(profile, ctx, agent_name)
 
         # Contract 1: an idle prompt lands as {"type":"user","message":{"content":...}}.
         idle_token = f"contract-idle-{run_id}"
-        _contract_send(
-            profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK.", "idle"
+        send_expecting_success(
+            profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK."
         )
 
-        # Contract 5: the native session JSONL lives at
-        # <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl with the file
-        # named by the claude_session_id marker. Every probe's native-path
-        # expression depends on this layout. Claude writes the file lazily on
-        # the first prompt, so this is checked after the idle send, with a poll.
-        session_glob = f"plugin/claude/anthropic/projects/*/{session_id}.jsonl"
-        assert poll_until(lambda: len(list(agent_dir.glob(session_glob))) == 1, timeout=60.0, poll_interval=2.0), (
-            f"native session JSONL not at <config-dir>/projects/<encoded-cwd>/{session_id}.jsonl "
-            f"{drift}; consumers: every probe's native-transcript path expression"
-        )
-        session_files = list(agent_dir.glob(session_glob))
-        assert len(session_files) == 1, f"expected exactly one session JSONL, found {session_files}"
-        session_file = session_files[0]
-        user_record = _contract_wait_for_record(
+        # Contract 5: the native session JSONL is <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl,
+        # named by the claude_session_id marker.
+        session_file = _wait_for_native_session_file(ctx)
+        user_record = _wait_for_session_record(
             session_file,
             lambda r: r.get("type") == "user" and idle_token in _contract_message_text(r),
             failure=f"no user record with message.content carrying the sent text {drift}; "
@@ -514,7 +548,7 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
         )
 
         # Contract 4: the reply lands as {"type":"assistant","message":{"content":...}}.
-        _contract_wait_for_record(
+        _wait_for_session_record(
             session_file,
             lambda r: r.get("type") == "assistant" and _contract_message_text(r) != "",
             failure=f"no assistant record with message.content {drift}; "
@@ -523,11 +557,11 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
 
         # Contract 7: a turn's Stop hook pass lands as
         # {"type":"system","subtype":"stop_hook_summary"} (mngr always installs Stop hooks).
-        _contract_wait_for_record(
+        _wait_for_session_record(
             session_file,
-            lambda r: r.get("type") == "system" and r.get("subtype") == "stop_hook_summary",
+            _is_stop_hook_summary,
             failure=f"no system/stop_hook_summary record after a completed turn {drift}; "
-            "consumer: wait_for_stop_hook.sh queued-prompt check",
+            "consumers: wait_for_stop_hook.sh queued-prompt check, wait_for_stop_hook.sh has_blocked_stop_hook",
         )
 
         # Contract 2: a message sent while a turn runs lands as
@@ -540,24 +574,16 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             # The starter turn must still be running when the next send lands,
             # or nothing enqueues. A bash sleep pins the turn open for a fixed
             # window, independent of model streaming speed.
-            _contract_send(
-                profile,
-                ctx,
-                agent_name,
-                "Use the Bash tool to run exactly: sleep 30. Then reply with just DONE.",
-                "busy-starter",
+            send_expecting_success(
+                profile, ctx, agent_name, "Use the Bash tool to run exactly: sleep 30. Then reply with just DONE."
             )
-            _contract_send(profile, ctx, agent_name, f"Also remember: {busy_token}. Reply with just OK.", "queued")
+            send_expecting_success(profile, ctx, agent_name, f"Also remember: {busy_token}. Reply with just OK.")
 
             def is_enqueue_with_token(record: dict[str, Any], token: str = busy_token) -> bool:
-                return (
-                    record.get("type") == "queue-operation"
-                    and record.get("operation") == "enqueue"
-                    and token in str(record.get("content", ""))
-                )
+                return _is_queue_operation_carrying(record, "enqueue", token)
 
             if poll_until(
-                lambda: any(is_enqueue_with_token(r) for r in _contract_read_records(session_file)),
+                lambda: any(is_enqueue_with_token(r) for r in _read_session_records(session_file)),
                 timeout=30.0,
                 poll_interval=2.0,
             ):
@@ -572,35 +598,33 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
         # or is removed from the queue and injected into the running turn (a
         # queue-operation/remove record carrying the text, no user record).
         # Both are single deliveries; anything else is drift.
-        _contract_wait_for_record(
+        _wait_for_session_record(
             session_file,
             lambda r: (r.get("type") == "user" and busy_token in _contract_message_text(r))
-            or (
-                r.get("type") == "queue-operation"
-                and r.get("operation") == "remove"
-                and busy_token in str(r.get("content", ""))
-            ),
+            or _is_queue_operation_carrying(r, "remove", busy_token),
             failure=f"queued message neither dequeued as a user record nor removed-and-injected {drift}; "
             "consumers: release-test delivery counting, content probes",
         )
 
-        # Contract 2c: the queue-operation vocabulary itself. A new operation
-        # value means delivery-evidence semantics changed under mngr.
-        known_operations = {"enqueue", "dequeue", "remove", "popAll"}
+        # Contract 2c: the queue-operation vocabulary, as (operation, reason) pairs.
         seen_operations = {
-            str(r.get("operation")) for r in _contract_read_records(session_file) if r.get("type") == "queue-operation"
+            (str(r.get("operation")), r.get("reason"))
+            for r in _read_session_records(session_file)
+            if r.get("type") == "queue-operation"
         }
-        assert seen_operations <= known_operations, (
-            f"unknown queue-operation values {sorted(seen_operations - known_operations)} {drift}; "
+        unknown_operations = seen_operations - _KNOWN_QUEUE_OPERATIONS
+        assert not unknown_operations, (
+            f"unknown queue-operation (operation, reason) pairs {sorted(unknown_operations, key=str)} {drift}; "
             "consumers: accept-evidence probes, release-test delivery counting, "
-            "wait_for_stop_hook.sh queued-prompt check"
+            "wait_for_stop_hook.sh queued-prompt check, common_transcript_convert mid-turn messages, "
+            "stream_transcript.sh interrupt heal's queued-prompt guard"
         )
 
         # Contract 3: an unknown slash command lands as
         # {"type":"system","level":"warning","content":"Unknown command: ..."}.
         typo = f"/mngr-invalid-command-{run_id}"
-        _contract_send(profile, ctx, agent_name, typo, "typo")
-        _contract_wait_for_record(
+        send_expecting_success(profile, ctx, agent_name, typo)
+        _wait_for_session_record(
             session_file,
             lambda r: r.get("type") == "system"
             and r.get("level") == "warning"
@@ -610,24 +634,246 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             "consumer: _REJECTED_COMMAND_JQ_FILTER (rejection probe)",
         )
 
-        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=300.0)
+        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_AGENT_DESTROY_TIMEOUT_SECONDS)
         assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
         destroyed = True
     finally:
         try:
             if not destroyed:
-                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=300.0)
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_AGENT_DESTROY_TIMEOUT_SECONDS)
         finally:
             if ctx.teardown is not None:
                 ctx.teardown()
 
 
+# How long a real haiku turn may take to reach its next observable point.
+_TURN_PROGRESS_TIMEOUT_SECONDS: Final[float] = 180.0
+_STOP_HOOK_FEEDBACK_PREFIX: Final[str] = "Stop hook feedback:"
+
+
+def _held_tool_command(start_marker: Path, release: Path) -> str:
+    """A shell command that touches ``start_marker``, then waits until ``release`` exists.
+
+    claude's Bash tool kills a command after its 2-minute default timeout, so a test creates
+    ``release`` as soon as it has observed what it needs while the command runs.
+    """
+    return f"touch {shlex.quote(str(start_marker))} && until [ -e {shlex.quote(str(release))} ]; do sleep 1; done"
+
+
+def _is_stop_hook_feedback(record: dict[str, Any]) -> bool:
+    """Whether a raw session record is the isMeta user record carrying a blocking Stop hook's feedback."""
+    return (
+        record.get("type") == "user"
+        and record.get("isMeta") is True
+        and str((record.get("message") or {}).get("content")).startswith(_STOP_HOOK_FEEDBACK_PREFIX)
+    )
+
+
+def _wait_for_turn_to_end(profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext, *, failure: str) -> None:
+    assert poll_until(
+        lambda: not profile.is_reporting_running(ctx.host_dir),
+        timeout=_TURN_PROGRESS_TIMEOUT_SECONDS,
+        poll_interval=2.0,
+    ), failure
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_stop_hook_block_keeps_agent_running_through_its_continuation(tmp_path: Path) -> None:
+    """A turn end that another Stop hook blocks leaves the agent RUNNING until the continuation ends.
+
+    Also pins the records wait_for_stop_hook.sh reads to tell a blocked turn end from a finished one.
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    blocked_marker = tmp_path / "turn-end-blocked"
+    continuation_marker = tmp_path / "continuation-running"
+    continuation_release = tmp_path / "continuation-release"
+    feedback = (
+        "Before you stop, use the Bash tool to run exactly: "
+        f"{_held_tool_command(continuation_marker, continuation_release)}. Then reply with just DONE."
+    )
+    hook_relpath = ".claude/block_first_turn_end.sh"
+    (ctx.project_dir / ".claude").mkdir()
+    (ctx.project_dir / hook_relpath).write_text(
+        "cat > /dev/null\n"
+        f"[ -e {shlex.quote(str(blocked_marker))} ] && exit 0\n"
+        f"touch {shlex.quote(str(blocked_marker))}\n"
+        f"echo {shlex.quote(feedback)} >&2\n"
+        "exit 2\n"
+    )
+    hook_command = f'bash "$CLAUDE_PROJECT_DIR/{hook_relpath}"'
+    settings = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": hook_command}]}]}}
+    (ctx.project_dir / ".claude" / "settings.json").write_text(json.dumps(settings))
+    run_git_command(ctx.project_dir, "add", ".claude")
+    run_git_command(ctx.project_dir, "commit", "-m", "Add a Stop hook that blocks the first turn end")
+    agent_name = f"claude-stopblock-{get_short_random_string()}"
+    drift = _drift_note(ctx, "the stop hook records")
+    try:
+        _create_haiku_agent(profile, ctx, agent_name)
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        assert poll_until(continuation_marker.exists, timeout=_TURN_PROGRESS_TIMEOUT_SECONDS, poll_interval=1.0), (
+            f"the blocked turn end never continued into the hook's tool call (the hook blocked: {blocked_marker.exists()})"
+        )
+        is_running_as_continuation_starts = profile.is_reporting_running(ctx.host_dir)
+
+        session_file = _wait_for_native_session_file(ctx)
+        feedback_record = _wait_for_session_record(
+            session_file,
+            _is_stop_hook_feedback,
+            failure=f"the blocked turn end wrote no isMeta user record whose string content starts with "
+            f"{_STOP_HOOK_FEEDBACK_PREFIX!r} {drift}; consumer: wait_for_stop_hook.sh has_blocked_stop_hook",
+        )
+
+        def is_feedback_followed_by_stop_hook_summary() -> bool:
+            records = _read_session_records(session_file)
+            return any(_is_stop_hook_summary(record) for record in records[records.index(feedback_record) + 1 :])
+
+        assert poll_until(
+            is_feedback_followed_by_stop_hook_summary, timeout=_SESSION_RECORD_TIMEOUT_SECONDS, poll_interval=1.0
+        ), (
+            f"no stop_hook_summary follows the block's feedback record {drift}; "
+            "consumer: wait_for_stop_hook.sh has_blocked_stop_hook, which reads the later summary as the turn end"
+        )
+        assert is_running_as_continuation_starts and profile.is_reporting_running(ctx.host_dir), (
+            "the agent reported WAITING while the continuation of a blocked turn end was running; "
+            "consumer: wait_for_stop_hook.sh has_blocked_stop_hook"
+        )
+        continuation_release.touch()
+        _wait_for_turn_to_end(
+            profile,
+            ctx,
+            failure="the agent still reports RUNNING after the continuation ended, so the unblocked turn end read "
+            "as blocked; consumer: wait_for_stop_hook.sh has_blocked_stop_hook",
+        )
+    finally:
+        _destroy_agent_and_tear_down(profile, ctx, agent_name, timeout=_AGENT_DESTROY_TIMEOUT_SECONDS)
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: Path) -> None:
+    """A message sent while a tool call runs reaches the common transcript as exactly one user step.
+
+    Claude Code writes no user line for such a message, so this also pins the queue removal and
+    ``queued_command`` attachment common_transcript_convert reads instead.
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    tool_marker = tmp_path / "mid-turn-tool-running"
+    tool_release = tmp_path / "mid-turn-tool-release"
+    agent_name = f"claude-midturn-{get_short_random_string()}"
+    token = f"MIDTURN-{get_short_random_string()}"
+    drift = _drift_note(ctx, "the mid-turn message records")
+    try:
+        _create_haiku_agent(profile, ctx, agent_name)
+        send_expecting_success(
+            profile,
+            ctx,
+            agent_name,
+            f"Use the Bash tool to run exactly: {_held_tool_command(tool_marker, tool_release)}. "
+            "Then reply with just DONE.",
+        )
+        assert poll_until(tool_marker.exists, timeout=_TURN_PROGRESS_TIMEOUT_SECONDS, poll_interval=1.0), (
+            "the starter turn never ran its Bash command, so no tool call was running for the mid-turn message"
+        )
+        send_expecting_success(
+            profile, ctx, agent_name, f"Also remember this exact value: {token}. Reply with just OK."
+        )
+
+        session_file = _wait_for_native_session_file(ctx)
+        _wait_for_session_record(
+            session_file,
+            lambda r: _is_queue_operation_carrying(r, "enqueue", token),
+            failure=f"the message sent during a tool call wrote no queue-operation/enqueue record carrying it "
+            f"{drift}; consumers: busy-send accept evidence, content probes",
+        )
+        tool_release.touch()
+        removal = _wait_for_session_record(
+            session_file,
+            lambda r: _is_queue_operation_carrying(r, "remove", token),
+            failure=f"the message sent during a tool call was never removed from the queue into the running turn "
+            f"{drift}; consumer: common_transcript_convert mid-turn messages",
+        )
+        command_uuid = removal.get("commandUuid")
+        assert (
+            removal.get("reason") == _ABSORBED_MID_TURN_REASON and isinstance(command_uuid, str) and command_uuid != ""
+        ), (
+            f"the mid-turn removal has reason={removal.get('reason')!r} and commandUuid={command_uuid!r}, not "
+            f"reason {_ABSORBED_MID_TURN_REASON!r} with a commandUuid {drift}; "
+            "consumer: common_transcript_convert._is_absorbed_mid_turn"
+        )
+        assert isinstance(removal.get("timestamp"), str) and removal["timestamp"] != "", (
+            f"the {_ABSORBED_MID_TURN_REASON} removal has no timestamp {drift}; "
+            "consumers: common_transcript_convert._is_absorbed_mid_turn, _mid_turn_user_record"
+        )
+        attachment_record = _wait_for_session_record(
+            session_file,
+            lambda r: r.get("type") == "attachment"
+            and isinstance(r.get("attachment"), dict)
+            and r["attachment"].get("type") == _QUEUED_COMMAND_ATTACHMENT_TYPE
+            and r["attachment"].get("source_uuid") == command_uuid,
+            failure=f"no {_QUEUED_COMMAND_ATTACHMENT_TYPE} attachment has the removal's commandUuid as its source_uuid "
+            f"{drift}; consumer: common_transcript_convert._mid_turn_user_record",
+        )
+        assert isinstance(attachment_record.get("uuid"), str) and attachment_record["uuid"] != "", (
+            f"the {_QUEUED_COMMAND_ATTACHMENT_TYPE} attachment record has no top-level uuid {drift}; "
+            "consumer: common_transcript_convert._mid_turn_user_record"
+        )
+        attachment = attachment_record["attachment"]
+        assert attachment.get("commandMode") == _QUEUED_PROMPT_MODE and token in str(attachment.get("prompt")), (
+            f"the {_QUEUED_COMMAND_ATTACHMENT_TYPE} attachment has commandMode={attachment.get('commandMode')!r} and "
+            f"does not carry the message as its prompt {drift}; consumer: common_transcript_convert._mid_turn_user_record"
+        )
+        origin = attachment.get("origin")
+        origin_kind = origin.get("kind") if isinstance(origin, dict) else None
+        assert not attachment.get("isMeta") and origin_kind in _USER_ORIGIN_KINDS, (
+            f"the {_QUEUED_COMMAND_ATTACHMENT_TYPE} attachment has isMeta={attachment.get('isMeta')!r} and origin kind "
+            f"{origin_kind!r}, not the marks of a message the user typed (no isMeta, an origin kind in "
+            f"{_USER_ORIGIN_KINDS}) {drift}; "
+            "consumer: common_transcript_convert._mid_turn_user_record, which makes any other prompt a system step"
+        )
+        records = _read_session_records(session_file)
+        assert records.index(removal) < records.index(attachment_record), (
+            f"the {_QUEUED_COMMAND_ATTACHMENT_TYPE} attachment is written before its {_ABSORBED_MID_TURN_REASON} "
+            f"removal {drift}; "
+            "consumer: common_transcript_convert._mid_turn_user_record, which needs the removal read first"
+        )
+
+        wait_for_user_message(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            token,
+            description="the mid-turn message never reached the common transcript as a user step",
+        )
+        _wait_for_turn_to_end(profile, ctx, failure="the turn that absorbed the mid-turn message never ended")
+        user_steps = count_user_steps_containing(
+            read_common_records(ctx.host_dir, profile.common_transcript_subdir), token
+        )
+        assert user_steps == 1, f"the mid-turn message reached the common transcript {user_steps} times, not once"
+    finally:
+        _destroy_agent_and_tear_down(profile, ctx, agent_name, timeout=_AGENT_DESTROY_TIMEOUT_SECONDS)
+
+
 # MIND-171: a `!`-prefixed message strands the agent in Claude's shell mode
 
 # The stranded `!` send hangs for the full strict-confirmation window
-# (ClaudeAgent.confirmation_timeout_seconds, ~90s) before it fails, so the send
-# timeout must sit comfortably above it. Create can provision a real claude.
-_BANG_CREATE_TIMEOUT_SECONDS = 600.0
+# (ClaudeAgent.confirmation_timeout_seconds) before it fails, so the send
+# timeout must sit comfortably above it.
 _BANG_SEND_TIMEOUT_SECONDS = 150.0
 _BANG_DESTROY_TIMEOUT_SECONDS = 150.0
 
@@ -726,23 +972,6 @@ class _BangShellModeProfile(_ClaudeReleaseProfile):
         return args
 
 
-def _create_bang_agent(profile: _BangShellModeProfile, ctx: AgentReleaseContext) -> str:
-    """Create a real haiku claude agent from ``ctx`` and return its name."""
-    agent_name = f"claude-bang-{get_short_random_string()}"
-    create = profile.run_mngr(
-        ctx,
-        "create",
-        agent_name,
-        profile.agent_type,
-        "--no-connect",
-        "--yes",
-        *profile.create_extra_args(ctx),
-        timeout=_BANG_CREATE_TIMEOUT_SECONDS,
-    )
-    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-    return agent_name
-
-
 def _wait_for_agent_prompt(ctx: AgentReleaseContext, agent_name: str, *, timeout: float = 60.0) -> str:
     """Poll the agent pane until Claude renders its ``❯`` input prompt; return that pane.
 
@@ -829,13 +1058,14 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
         pytest.skip(reason)
 
     ctx = profile.setup(tmp_path)
-    agent_name = _create_bang_agent(profile, ctx)
+    agent_name = f"claude-bang-{get_short_random_string()}"
     subdir = profile.common_transcript_subdir
     run_id = get_short_random_string()
     try:
+        _create_haiku_agent(profile, ctx, agent_name)
         _wait_for_agent_prompt(ctx, agent_name)
         # Baseline: the freshly-created agent (no seed message) has no conversation turns yet.
-        baseline_records = _read_common_records(ctx.host_dir, subdir)
+        baseline_records = read_common_records(ctx.host_dir, subdir)
 
         # The send's exit code is intentionally not asserted: a fix may legitimately
         # reject `!` quickly rather than deliver it.
@@ -853,14 +1083,14 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
             f"appears in the conversation:\n{pane}"
         )
         # The conversation gains no new turn: the common transcript is unchanged by the bare `!`.
-        assert _read_common_records(ctx.host_dir, subdir) == baseline_records, (
+        assert read_common_records(ctx.host_dir, subdir) == baseline_records, (
             "a bare `!` added a conversation turn: the common transcript changed after delivering `!`"
         )
 
         # The user can still interact: a normal follow-up is delivered and reaches the transcript.
         token = f"AFTERBANG-{run_id}"
-        _send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
-        _wait_for_user_message(
+        send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
+        wait_for_user_message(
             ctx.host_dir,
             subdir,
             token,
@@ -868,15 +1098,13 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
             "the agent is desynced (stranded in shell mode)",
         )
         # The follow-up is the ONLY delivered turn: the bare `!` contributed no user turn of its own.
-        final_records = _read_common_records(ctx.host_dir, subdir)
-        user_turn_count = sum(1 for r in final_records if _is_step_from(r, "user"))
+        final_records = read_common_records(ctx.host_dir, subdir)
+        user_turn_count = sum(1 for r in final_records if is_step_from(r, "user"))
         assert user_turn_count == 1, (
             f"expected exactly one user turn (the follow-up); the bare `!` must add none, got {user_turn_count}"
         )
     finally:
-        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_BANG_DESTROY_TIMEOUT_SECONDS)
-        if ctx.teardown is not None:
-            ctx.teardown()
+        _destroy_agent_and_tear_down(profile, ctx, agent_name, timeout=_BANG_DESTROY_TIMEOUT_SECONDS)
 
 
 @pytest.mark.witnesses("message-delivery.runs-command")
@@ -908,8 +1136,9 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
         pytest.skip(reason)
 
     ctx = profile.setup(tmp_path)
-    agent_name = _create_bang_agent(profile, ctx)
+    agent_name = f"claude-bang-{get_short_random_string()}"
     try:
+        _create_haiku_agent(profile, ctx, agent_name)
         _wait_for_agent_prompt(ctx, agent_name)
 
         # The send's exit code is not asserted; the observable contract is the command's output.
@@ -936,6 +1165,4 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
             f"after a `!echo` command the agent is not ready -- the ❯ input prompt is gone:\n{pane}"
         )
     finally:
-        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_BANG_DESTROY_TIMEOUT_SECONDS)
-        if ctx.teardown is not None:
-            ctx.teardown()
+        _destroy_agent_and_tear_down(profile, ctx, agent_name, timeout=_BANG_DESTROY_TIMEOUT_SECONDS)

@@ -12,7 +12,7 @@ bare session id. Adoption from an mngr-managed agent's own session is covered
 end-to-end by the shared release harness (``test_claude_agent_e2e.py``), which
 preserves a destroyed agent's session and adopts it into a fresh worktree.
 
-These are release tests; release tests do not run in CI. To run manually::
+These are release tests, so they do not run per PR. To run manually::
 
     PYTEST_MAX_DURATION_SECONDS=1500 ANTHROPIC_API_KEY=sk-ant-... \\
         uv run pytest --no-cov --cov-fail-under=0 -n 0 -m release \\
@@ -313,6 +313,7 @@ def _verify_adopted_context(
 
 
 @pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(_PROVISION_TIMEOUT_SECONDS + _VANILLA_CLAUDE_TIMEOUT_SECONDS + _RESPONSE_TIMEOUT_SECONDS + 60)
