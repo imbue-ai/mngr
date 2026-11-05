@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 13 (tracks `CONTRACT_VERSION` in
+Version: 14 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v13)
+## Message inventory (v14)
 
 ### workspace -> embedder
 
@@ -76,7 +76,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. |
 | `minds:open-ai-keys-ack` | `{}` | An Imbue Studio chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
-| `minds:provider-sign-in-ack` | `{ relay }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
+| `minds:provider-sign-in-ack` | `{ relay, reason? }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. `reason` says why not: `port_taken` (something already answers on the callback port), `no_forward_channel`, or `no_browser`. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
 | `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, and never asks for immersive mode. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
@@ -100,7 +100,10 @@ NOT "the desktop app is present". Plain-browser chrome acks too.
 binds a loopback port on the machine the chrome's backend runs on, which is
 also where the browser it opens runs. A chrome that cannot bind the port acks
 with `relay: false` rather than staying silent, so the workspace moves to its
-manual flow at once instead of waiting out its timeout.
+manual flow at once instead of waiting out its timeout. `reason: "port_taken"`
+is the one refusal a retry can clear: the provider's CLI draws its callback
+port at random, so the workspace may start the sign-in again on a fresh port
+before falling back. Any other reason, or none, means this chrome cannot relay.
 
 `permission-resolutions` is a display channel, not a decision channel: it
 flips the workspace's in-chat cards to their verdicts without waiting for the
@@ -290,3 +293,9 @@ payloads -- to the console.
   share button of the multiplayer spec is to send). A chrome from before v13
   drops the nameless message, so that button would do nothing there; a v13
   chrome still takes the named form from an older workspace.
+- **14** -- added the optional `reason` field on `provider-sign-in-ack`
+  (`port_taken`, `no_forward_channel`, `no_browser`), so a workspace can tell a
+  callback port that happens to be taken, which a fresh sign-in on a fresh port
+  may clear, from a chrome that cannot relay at all. A chrome from before v14
+  sends no reason, and the workspace falls back as before; an older workspace
+  ignores it.

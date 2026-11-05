@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "13";
+export const CONTRACT_VERSION = "14";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -148,10 +148,13 @@ export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // does; a workspace on an older template announces nothing, never receives
 // the ask, and the user just lands on the workspace.
 export const FOCUS_CHAT = "minds:focus-chat";
-// embedder -> workspace: ack for PROVIDER_SIGN_IN. Payload: { relay } --
-// true when the embedder is listening for the callback and opened the page,
-// false when it cannot relay (the workspace falls back to its manual flow).
-// With no chrome no ack arrives, which the workspace treats as false.
+// embedder -> workspace: ack for PROVIDER_SIGN_IN. Payload: { relay, reason? }
+// -- `relay` is true when the embedder is listening for the callback and
+// opened the page, false when it cannot relay (the workspace falls back to its
+// manual flow). `reason` says why not: "port_taken" (something already answers
+// on the callback port, so a fresh sign-in on a fresh port may get through),
+// "no_forward_channel", or "no_browser". With no chrome no ack arrives, which
+// the workspace treats as false.
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
@@ -404,7 +407,7 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
   },
   [PROVIDER_SIGN_IN_ACK]: function (data) {
-    return typeof data.relay === 'boolean';
+    return typeof data.relay === 'boolean' && (data.reason === undefined || typeof data.reason === 'string');
   },
   [EMBEDDER_CAPABILITIES]: function (data) {
     if (typeof data.canPopOut !== 'boolean') return false;

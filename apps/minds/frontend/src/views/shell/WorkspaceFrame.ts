@@ -12,6 +12,7 @@ import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
 import {
   armProviderRelay,
+  type ProviderRelayAnswer,
   stopProviderRelay,
 } from "../../models/providerRelay";
 import type { ImmersiveChange } from "./immersive";
@@ -138,8 +139,8 @@ export interface EmbedHandlerDeps {
   navigate: (path: string, params?: Record<string, string>) => void;
   sendAck: (type: string, payload?: Record<string, unknown>) => void;
   bringAppToFront: () => void;
-  /** Arm the desktop relay for a sign-in of the mounted workspace; whether it is relaying. */
-  armProviderRelay: (flowId: string, url: string) => Promise<boolean>;
+  /** Arm the desktop relay for a sign-in of the mounted workspace; whether it is relaying, and why not. */
+  armProviderRelay: (flowId: string, url: string) => Promise<ProviderRelayAnswer>;
   /** Stop the desktop relay for a sign-in of the mounted workspace that has ended. */
   stopProviderRelay: (flowId: string) => void;
   /** The mounted workspace's id, for the ?workspace= an overlay floats
@@ -228,8 +229,8 @@ export function buildEmbedHandlers(
     // goes, so the workspace never waits out its timeout to fall back to manual sign-in.
     const flowId = String(message.flowId);
     const url = String(message.url);
-    void armRelay(flowId, url).then((isRelaying) =>
-      sendAck(contract.PROVIDER_SIGN_IN_ACK, { relay: isRelaying }),
+    void armRelay(flowId, url).then((answer) =>
+      sendAck(contract.PROVIDER_SIGN_IN_ACK, { ...answer }),
     );
   };
   handlers[contract.PROVIDER_SIGN_IN_END] = (message) => {

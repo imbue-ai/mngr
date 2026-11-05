@@ -378,6 +378,22 @@ test('workspace endpoint takes a provider sign-in ack only with a boolean relay'
   assert.deepStrictEqual(seen, [true, false]);
 });
 
+test('workspace endpoint takes a provider sign-in ack reason only as a string or absent', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.PROVIDER_SIGN_IN_ACK]: (msg) => seen.push([msg.relay, msg.reason]) },
+  });
+  const fromParent = (data) => win.deliver({ source: parentWin, origin: 'o', data });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: false, reason: 7 });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: false, reason: null });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: false, reason: 'port_taken' });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: true });
+  assert.deepStrictEqual(seen, [
+    [false, 'port_taken'],
+    [true, undefined],
+  ]);
+});
+
 test('embedder endpoint reads opensLinks and opensCustomSchemeLinks on a readiness announcement only as booleans or absent', () => {
   const frameWin = makeWindowDouble();
   const seen = [];
@@ -507,8 +523,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 13', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '13');
+test('the contract is at version 14', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '14');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {

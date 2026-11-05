@@ -606,7 +606,7 @@ class RelayArmResult(UpperCaseStrEnum):
     ARMED = auto()
     # This workspace's relay for the same sign-in is already listening; the page can be reopened.
     ALREADY_ARMED = auto()
-    # The port is held by another workspace's sign-in or another program; the workspace falls back.
+    # The port is held by another workspace's sign-in or another program; nothing is relayed.
     PORT_UNAVAILABLE = auto()
 
 
@@ -618,10 +618,10 @@ class ProviderRelayRegistry(MutableModel):
     """The relays armed on this machine: at most one per workspace, and one per port.
 
     A workspace's new sign-in replaces its own earlier relay, but never another workspace's that
-    is still waiting: a port another workspace is waiting on stays with it, and the newcomer falls
-    back to a manual sign-in instead. Once that relay's callback has been answered it only answers
-    reloads of its page, so a new sign-in may take its port. That also bounds what a workspace can
-    hold to one loopback port.
+    is still waiting: a port another workspace is waiting on stays with it, and the newcomer is
+    refused it. Once that relay's callback has been answered it only answers reloads of its page,
+    so a new sign-in may take its port. That also bounds what a workspace can hold to one loopback
+    port.
     """
 
     _relay_by_workspace: dict[AgentId, ProviderSignInRelay] = PrivateAttr(default_factory=dict)

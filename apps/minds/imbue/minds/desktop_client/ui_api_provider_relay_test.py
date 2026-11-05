@@ -67,7 +67,7 @@ def test_provider_relay_listens_on_the_callback_port_and_opens_the_page_in_the_c
     finally:
         get_state(app).provider_relay_registry.stop_all()
 
-    assert (status, body) == (200, {"relay": True})
+    assert (status, body) == (200, {"relay": True, "reason": None})
     assert opener.opened() == [(url, "/Applications/Firefox.app")]
     # The relay, not the page, answers on the callback port -- and refuses a forged state.
     assert refused.status_code == 400
@@ -124,8 +124,11 @@ def test_provider_relay_leaves_a_port_another_workspace_is_signing_in_on(tmp_pat
     finally:
         get_state(app).provider_relay_registry.stop_all()
 
-    assert (first_status, first_body) == (200, {"relay": True})
-    assert (second.status_code, json.loads(second.get_data(as_text=True))) == (200, {"relay": False})
+    assert (first_status, first_body) == (200, {"relay": True, "reason": None})
+    assert (second.status_code, json.loads(second.get_data(as_text=True))) == (
+        200,
+        {"relay": False, "reason": "port_taken"},
+    )
     assert opener.opened() == [(url, None)]
 
 
@@ -138,7 +141,7 @@ def test_provider_relay_reports_it_cannot_relay_when_the_callback_port_is_taken(
 
         status, body = _arm(client, _sign_in_url(occupant.getsockname()[1]))
 
-    assert (status, body) == (200, {"relay": False})
+    assert (status, body) == (200, {"relay": False, "reason": "port_taken"})
     assert opener.opened() == []
 
 
@@ -148,7 +151,7 @@ def test_provider_relay_gives_the_port_up_when_no_browser_takes_the_page(tmp_pat
 
     status, body = _arm(client, _sign_in_url(callback_port))
 
-    assert (status, body) == (200, {"relay": False})
+    assert (status, body) == (200, {"relay": False, "reason": "no_browser"})
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", callback_port))
 
@@ -159,7 +162,7 @@ def test_provider_relay_reports_it_cannot_relay_without_the_forward_channel(tmp_
 
     status, body = _arm(client, _sign_in_url(find_free_port()))
 
-    assert (status, body) == (200, {"relay": False})
+    assert (status, body) == (200, {"relay": False, "reason": "no_forward_channel"})
     assert opener.opened() == []
 
 

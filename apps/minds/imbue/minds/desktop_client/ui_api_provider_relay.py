@@ -6,6 +6,7 @@ reach them without a preflight the desktop client never answers.
 """
 
 import json
+from enum import auto
 from typing import Final
 from typing import TypeVar
 
@@ -16,6 +17,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import ValidationError
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.provider_relay import AFTER_CALLBACK_SECONDS
 from imbue.minds.desktop_client.provider_relay import CHAT_SERVICE_NAME
@@ -54,10 +56,20 @@ class UiProviderRelayStopRequest(FrozenModel):
     flow_id: str = Field(pattern=_FLOW_ID_PATTERN, description="The chat app's sign-in flow id")
 
 
+class ProviderRelayRefusalReason(LowerCaseStrEnum):
+    """Why this machine cannot relay a sign-in (the lowercase values are the wire strings)."""
+
+    # Something already answers on the callback port. A fresh run of the CLI draws a fresh port.
+    PORT_TAKEN = auto()
+    NO_FORWARD_CHANNEL = auto()
+    NO_BROWSER = auto()
+
+
 class UiProviderRelayResult(FrozenModel):
     """Whether the relay is listening and the sign-in page was opened."""
 
-    relay: bool = Field(description="False when this machine cannot relay; the workspace falls back to manual sign-in")
+    relay: bool = Field(description="False when this machine cannot relay; `reason` says why")
+    reason: ProviderRelayRefusalReason | None = Field(default=None, description="Why it cannot relay, when it cannot")
 
 
 def _error_response(message: str, status_code: int) -> Response:
@@ -66,12 +78,12 @@ def _error_response(message: str, status_code: int) -> Response:
     )
 
 
-def _result_response(is_relaying: bool) -> Response:
-    return make_response(
-        content=UiProviderRelayResult(relay=is_relaying).model_dump_json(),
-        status_code=200,
-        media_type="application/json",
-    )
+def _result_response(result: UiProviderRelayResult) -> Response:
+    return make_response(content=result.model_dump_json(), status_code=200, media_type="application/json")
+
+
+def _refusal_response(reason: ProviderRelayRefusalReason) -> Response:
+    return _result_response(UiProviderRelayResult(relay=False, reason=reason))
 
 
 class _AppWindowRaiser(FrozenModel):
@@ -116,7 +128,7 @@ def _handle_provider_relay() -> Response:
     state = get_state()
     if state.mngr_forward_port == 0 or not state.mngr_forward_preauth_cookie:
         logger.warning("Cannot relay a provider sign-in: the local forward channel is not configured")
-        return _result_response(is_relaying=False)
+        return _refusal_response(ProviderRelayRefusalReason.NO_FORWARD_CHANNEL)
     chat_service_label = state.backend_resolver.list_service_labels_for_agent(relay_request.workspace_id).get(
         ServiceName(CHAT_SERVICE_NAME), CHAT_SERVICE_NAME
     )
@@ -141,18 +153,21 @@ def _handle_provider_relay() -> Response:
     registry = state.provider_relay_registry
     arm_result = registry.arm(relay)
     if arm_result is RelayArmResult.PORT_UNAVAILABLE:
-        return _result_response(is_relaying=False)
+        logger.info(
+            "Port {} is taken; not relaying the sign-in for workspace {}", callback.port, relay_request.workspace_id
+        )
+        return _refusal_response(ProviderRelayRefusalReason.PORT_TAKEN)
     if not registry.claim_browser_open(relay_request.workspace_id):
-        return _result_response(is_relaying=True)
+        return _result_response(UiProviderRelayResult(relay=True))
     browser_id = state.minds_config.get_sign_in_browser_id() if state.minds_config is not None else None
     if not state.sign_in_browsers.open_sign_in_url(relay_request.url, browser_id):
         logger.warning("No browser took the provider sign-in page; giving the relay up")
         registry.disarm(relay_request.workspace_id, relay_request.flow_id)
-        return _result_response(is_relaying=False)
+        return _refusal_response(ProviderRelayRefusalReason.NO_BROWSER)
     logger.debug(
         "Opened a provider sign-in relayed on port {} for workspace {}", callback.port, relay_request.workspace_id
     )
-    return _result_response(is_relaying=True)
+    return _result_response(UiProviderRelayResult(relay=True))
 
 
 def _handle_provider_relay_stop() -> Response:

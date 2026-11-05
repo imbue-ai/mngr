@@ -3,6 +3,7 @@ import type {
   WorkspaceLinkHandlingReport,
   WorkspaceLinkPromises,
 } from "../../electron-bridge";
+import type { ProviderRelayAnswer } from "../../models/providerRelay";
 import type { PermissionResolutionEntry } from "./WorkspaceFrame";
 import {
   FrameLinkHandling,
@@ -144,7 +145,7 @@ const WORKSPACE_AGENT_ID = "agent-ab12";
 function makeHandlers(
   options: {
     canPopOut?: boolean;
-    isRelaying?: boolean;
+    relayAnswer?: ProviderRelayAnswer;
     opensExternalLinks?: boolean;
     canImmerse?: boolean;
   } = {},
@@ -176,7 +177,7 @@ function makeHandlers(
     },
     armProviderRelay: (flowId, url) => {
       relayArms.push({ flowId, url });
-      return Promise.resolve(options.isRelaying ?? true);
+      return Promise.resolve(options.relayAnswer ?? { relay: true });
     },
     stopProviderRelay: (flowId) => {
       relayStops.push(flowId);
@@ -440,7 +441,9 @@ describe("buildEmbedHandlers", () => {
   });
 
   it("acks a sign-in the desktop cannot relay, so the workspace falls back at once", async () => {
-    const { contract, handlers, sent } = makeHandlers({ isRelaying: false });
+    const { contract, handlers, sent } = makeHandlers({
+      relayAnswer: { relay: false },
+    });
     handlers[contract.PROVIDER_SIGN_IN]({
       url: "https://claude.ai/oauth/authorize",
       flowId: "flow-8d",
@@ -448,6 +451,23 @@ describe("buildEmbedHandlers", () => {
     await Promise.resolve();
     expect(sent).toEqual([
       { type: contract.PROVIDER_SIGN_IN_ACK, payload: { relay: false } },
+    ]);
+  });
+
+  it("acks a refused sign-in with the desktop's reason, so the workspace can tell a taken port", async () => {
+    const { contract, handlers, sent } = makeHandlers({
+      relayAnswer: { relay: false, reason: "port_taken" },
+    });
+    handlers[contract.PROVIDER_SIGN_IN]({
+      url: "https://claude.ai/oauth/authorize",
+      flowId: "flow-3a",
+    });
+    await Promise.resolve();
+    expect(sent).toEqual([
+      {
+        type: contract.PROVIDER_SIGN_IN_ACK,
+        payload: { relay: false, reason: "port_taken" },
+      },
     ]);
   });
 
