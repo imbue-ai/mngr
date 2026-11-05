@@ -7,8 +7,8 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.utils.testing import ExecOnlyParamikoServer
-from imbue.mngr.utils.testing import generate_ssh_keypair_with_paramiko
 from imbue.mngr.utils.testing import in_process_paramiko_sshd
+from imbue.mngr.utils.testing import make_client_and_host_ssh_keys
 from imbue.mngr.utils.testing import make_local_ssh_host_factory
 
 
@@ -22,13 +22,11 @@ def paramiko_ssh_host_factory(
     server, and the server records every command it was asked to run. Needs
     neither an sshd nor an ssh-keygen binary, so it runs wherever the unit tests do.
     """
-    client_key_dir = tmp_path / "client"
-    client_key_dir.mkdir()
-    private_key_path, _public_key_path = generate_ssh_keypair_with_paramiko(client_key_dir)
-    server_key_dir = tmp_path / "server"
-    server_key_dir.mkdir()
-    host_key_path, _host_public_key_path = generate_ssh_keypair_with_paramiko(server_key_dir)
-    with in_process_paramiko_sshd(host_key_path, private_key_path, is_auth_held=False) as (port, server):
+    private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(host_key_path, private_key_path, is_auth_held=False, dropped_connection_count=0) as (
+        port,
+        server,
+    ):
         factory = make_local_ssh_host_factory(
             port, host_key_path, private_key_path, temp_host_dir, temp_mngr_ctx, tmp_path
         )

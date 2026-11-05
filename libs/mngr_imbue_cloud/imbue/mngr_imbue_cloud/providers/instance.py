@@ -33,6 +33,7 @@ from collections.abc import Generator
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import closing
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -161,6 +162,7 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import POOL_HOST_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.primitives import WORKSPACE_PRIMARY_AGENT_LABEL
 from imbue.mngr_imbue_cloud.providers.adoption import BoundEndpoints
+from imbue.mngr_imbue_cloud.providers.adoption import PARAMIKO_CONNECTION_FAILURES
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
@@ -250,6 +252,89 @@ def _read_first_existing_host_record(
     raise MngrError(f"no host record found on leased host {vps_address} at any of: {', '.join(data_json_paths)}")
 
 
+def _open_strict_root_ssh_client(
+    *,
+    address: str,
+    port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    connect_timeout_seconds: float,
+) -> paramiko.SSHClient:
+    """Connect as root, refusing any host key not pinned in ``known_hosts_path``.
+
+    Raises ``MngrError`` when the known_hosts file cannot be loaded, and lets
+    a connect failure (one of ``PARAMIKO_CONNECTION_FAILURES``) through, the client
+    closed, so the caller can decide whether it is worth retrying.
+    """
+    client = paramiko.SSHClient()
+    try:
+        client.load_host_keys(str(known_hosts_path))
+    except OSError as exc:
+        raise MngrError(f"failed to load known_hosts {known_hosts_path}: {exc}") from exc
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(
+            hostname=address,
+            port=port,
+            username="root",
+            key_filename=str(private_key_path),
+            allow_agent=False,
+            look_for_keys=False,
+            timeout=connect_timeout_seconds,
+        )
+    except PARAMIKO_CONNECTION_FAILURES:
+        client.close()
+        raise
+    return client
+
+
+def _connect_to_leased_container(
+    *,
+    vps_address: str,
+    container_ssh_port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    connect_timeout_seconds: float,
+    sshd_wait_timeout_seconds: float,
+) -> paramiko.SSHClient:
+    """Open a strictly host-key-checked root connection to a just-leased container.
+
+    The connector's lease authenticated to this same sshd moments before it
+    answered, so the first attempt is expected to succeed and is not preceded
+    by a readiness probe; only a failed attempt waits for the sshd and tries
+    once more. A refused host key or client key is not a not-yet-ready sshd,
+    so it fails at once. Raises ``MngrError`` when the connect fails for good.
+    """
+    try:
+        return _open_strict_root_ssh_client(
+            address=vps_address,
+            port=container_ssh_port,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            connect_timeout_seconds=connect_timeout_seconds,
+        )
+    except (paramiko.BadHostKeyException, paramiko.AuthenticationException) as exc:
+        raise MngrError(f"SSH connect to leased container {vps_address}:{container_ssh_port} failed: {exc}") from exc
+    except PARAMIKO_CONNECTION_FAILURES as exc:
+        logger.debug(
+            "First SSH connect to leased container {}:{} failed ({}); waiting for its sshd",
+            vps_address,
+            container_ssh_port,
+            exc,
+        )
+    wait_for_sshd(vps_address, container_ssh_port, sshd_wait_timeout_seconds)
+    try:
+        return _open_strict_root_ssh_client(
+            address=vps_address,
+            port=container_ssh_port,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            connect_timeout_seconds=connect_timeout_seconds,
+        )
+    except PARAMIKO_CONNECTION_FAILURES as exc:
+        raise MngrError(f"SSH connect to leased container {vps_address}:{container_ssh_port} failed: {exc}") from exc
+
+
 def _rewrite_container_host_name(
     *,
     vps_address: str,
@@ -290,26 +375,14 @@ def _rewrite_container_host_name(
     ``host_name`` is exactly the bug this exists to prevent, so a silent
     fallback would re-introduce it.
     """
-    client = paramiko.SSHClient()
-    try:
-        client.load_host_keys(str(known_hosts_path))
-    except OSError as exc:
-        raise MngrError(f"failed to load known_hosts {known_hosts_path} for host_name rewrite: {exc}") from exc
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    try:
-        client.connect(
-            hostname=vps_address,
-            port=container_ssh_port,
-            username="root",
-            key_filename=str(private_key_path),
-            allow_agent=False,
-            look_for_keys=False,
-            timeout=connect_timeout_seconds,
-        )
-    except (paramiko.SSHException, OSError) as exc:
-        raise MngrError(
-            f"SSH connect for host_name rewrite on {vps_address}:{container_ssh_port} failed: {exc}"
-        ) from exc
+    client = _connect_to_leased_container(
+        vps_address=vps_address,
+        container_ssh_port=container_ssh_port,
+        private_key_path=private_key_path,
+        known_hosts_path=known_hosts_path,
+        connect_timeout_seconds=connect_timeout_seconds,
+        sshd_wait_timeout_seconds=_SSH_WAIT_TIMEOUT_SECONDS,
+    )
     try:
         sftp = client.open_sftp()
         try:
@@ -1811,7 +1884,11 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             plugin={},
         )
 
-    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
+    def _build_host_object(
+        self,
+        lease: LeasedHostInfo,
+        is_freshly_leased_by_this_process: bool,
+    ) -> ImbueCloudHost:
         """Construct the ``ImbueCloudHost`` for a leased host.
 
         The lease's ``agent_id`` is always carried as ``pre_baked_agent_id``:
@@ -1873,6 +1950,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             pre_baked_agent_id=agent_id,
             lease_db_id=host_db_id,
             host_dir_override=self._load_resolved_host_dir(host_id),
+            is_freshly_leased_by_this_process=is_freshly_leased_by_this_process,
             published_endpoint_source=self,
         )
         self._evict_cached_host(host_id, replacement=host)
@@ -1917,16 +1995,17 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             private_key_path=private_key_path,
             known_hosts_path=target.known_hosts_path,
         )
-        try:
-            ensure_adopted(access, target, is_full_verification=True)
-        except (MngrError, OSError) as exc:
-            logger.warning(
-                "imbue_cloud[{}] adoption of host {} did not complete (continuing on the existing "
-                "trust material; the next app start retries): {}",
-                self.name,
-                host_id,
-                exc,
-            )
+        with closing(access):
+            try:
+                ensure_adopted(access, target, is_full_verification=True)
+            except (MngrError, OSError) as exc:
+                logger.warning(
+                    "imbue_cloud[{}] adoption of host {} did not complete (continuing on the existing "
+                    "trust material; the next app start retries): {}",
+                    self.name,
+                    host_id,
+                    exc,
+                )
 
     def get_host(
         self,
@@ -1949,7 +2028,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             if is_match:
                 host_id = HostId(entry.host_id)
                 if self._is_container_running(host_id):
-                    return self._build_host_object(entry)
+                    return self._build_host_object(entry, is_freshly_leased_by_this_process=False)
                 return self.to_offline_host(host_id)
         # A stopped/stopping/starting workspace has no lease entry but must
         # still resolve (as an offline host) so `mngr start` reaches start_host.
@@ -2164,6 +2243,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         creating_host = CreatePhase.CREATING_HOST.step_id
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
+        lease_started_at = time.monotonic()
         try:
             lease_result = self.client.lease_host(
                 token,
@@ -2179,6 +2259,13 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
                 f"No pool host exactly matches the requested attributes for the fast (adopt) path: {exc}"
             ) from exc
         progress.complete_step(_LEASE_STEP)
+        leased_at = time.monotonic()
+        logger.debug(
+            "imbue_cloud[{}] FAST PATH: leased pool host {} in {:.2f}s",
+            self.name,
+            lease_result.host_id,
+            leased_at - lease_started_at,
+        )
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
@@ -2196,9 +2283,6 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             )
             self._ensure_lease_publishes_declared_ports(lease_result, published_ports)
             self._persist_lease_meta(host_id, lease_result)
-            # Wait for the leased container's sshd to be ready before we hand the
-            # host back to mngr's create pipeline (which SSHes in immediately).
-            wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
             # Pin the baked VM-root + container host keys the connector recorded
             # (strict host-key checking, no trust-on-first-use). Fail closed if the
             # connector did not return them (too old) rather than silently scanning.
@@ -2219,27 +2303,31 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             # chosen workspace name. Try this provider's configured host_dir
             # first, then the other known layouts, so mixed pool generations
             # both lease correctly whichever layout this client is configured for.
-            leased_host_dir = _rewrite_container_host_name(
-                vps_address=lease_result.vps_address,
-                container_ssh_port=lease_result.container_ssh_port,
-                private_key_path=final_private_key,
-                known_hosts_path=known_hosts_path,
-                new_host_name=str(name),
-                data_json_paths=tuple(
-                    f"{candidate}/data.json" for candidate in (str(self.host_dir), *self._fallback_host_dirs())
-                ),
-            )
+            with log_span("Rewriting the host name in the data.json of leased host {}", host_id):
+                leased_host_dir = _rewrite_container_host_name(
+                    vps_address=lease_result.vps_address,
+                    container_ssh_port=lease_result.container_ssh_port,
+                    private_key_path=final_private_key,
+                    known_hosts_path=known_hosts_path,
+                    new_host_name=str(name),
+                    data_json_paths=tuple(
+                        f"{candidate}/data.json" for candidate in (str(self.host_dir), *self._fallback_host_dirs())
+                    ),
+                )
             # Record before building the host: the rewrite just proved which
             # layout this pool host carries, and no discovery pass has run for
             # it yet, so this is the only thing standing between a mismatched
             # client and an adopt path that quietly re-provisions the container.
             self._persist_resolved_host_dir(host_id, leased_host_dir)
-            host = self._build_host_object(self._leased_info_from_result(lease_result))
+            host = self._build_host_object(
+                self._leased_info_from_result(lease_result), is_freshly_leased_by_this_process=True
+            )
         logger.info(
-            "imbue_cloud[{}] FAST PATH: adopted pre-baked agent {} on leased host {}",
+            "imbue_cloud[{}] FAST PATH: adopted pre-baked agent {} on leased host {} {:.2f}s after the lease",
             self.name,
             lease_result.agent_id,
             host_id,
+            time.monotonic() - leased_at,
         )
         return host
 
@@ -2344,7 +2432,9 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             # create hooks fall through to mngr's standard full create +
             # provision (this method's "fresh OVH host" contract) while still
             # minting the services agent at the lease's agent id.
-            host = self._build_host_object(self._leased_info_from_result(lease_result))
+            host = self._build_host_object(
+                self._leased_info_from_result(lease_result), is_freshly_leased_by_this_process=False
+            )
         logger.info(
             "imbue_cloud[{}] SLOW PATH: rebuilt container on leased host {} (lease {}); "
             "mngr will now run full client-side setup",
@@ -2857,7 +2947,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         # path.
         self._adoption_attempted_host_ids.discard(str(host_id))
         invalidate_adoption_verification(self._host_state_dir(host_id))
-        return self._build_host_object(leased)
+        return self._build_host_object(leased, is_freshly_leased_by_this_process=False)
 
     def _start_workspace_and_wait(self, host_id: HostId, workspace: WorkspaceInfo) -> None:
         """Drive a stopped (or still-stopping) workspace to running and wait for it.
@@ -3323,7 +3413,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         # locally-updated lease to avoid an extra round-trip.
         updated_lease = lease.model_copy_update(to_update(lease.field_ref().host_name, str(name)))
         self.reset_caches()
-        return self._build_host_object(updated_lease)
+        return self._build_host_object(updated_lease, is_freshly_leased_by_this_process=False)
 
     # pyinfra connector lookup
 
@@ -3339,7 +3429,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
         leased = self._find_leased(host_id)
         if leased is None:
             raise HostNotFoundError(self.name, host_id)
-        return self._build_host_object(leased).connector.host
+        return self._build_host_object(leased, is_freshly_leased_by_this_process=False).connector.host
 
 
 def _rm_tree(path: Path) -> None:

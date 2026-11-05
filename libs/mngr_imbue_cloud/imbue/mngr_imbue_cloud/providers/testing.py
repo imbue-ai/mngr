@@ -1,6 +1,12 @@
 """Helpers shared by the imbue_cloud provider unit tests."""
 
+import socket
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+
+from loguru import logger
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
@@ -50,3 +56,47 @@ def make_workspace_info(
         memory_units=memory_units,
         disk_gb=disk_gb,
     )
+
+
+def _answer_with_a_banner_then_hang_up_until_stopped(listener: socket.socket, is_stopping: threading.Event) -> None:
+    """Send each connection an SSH banner, then end it before any key exchange, until told to stop."""
+    while not is_stopping.is_set():
+        try:
+            connection, _address = listener.accept()
+        except TimeoutError:
+            continue
+        with connection:
+            connection.settimeout(5.0)
+            try:
+                connection.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+                # Half-close and drain until the client hangs up, so it reads a clean
+                # EOF mid-handshake rather than a connection reset.
+                connection.shutdown(socket.SHUT_WR)
+                while connection.recv(4096):
+                    pass
+            except OSError as e:
+                logger.trace("Banner-only listener connection ended early: {}", e)
+
+
+@contextmanager
+def ssh_listener_that_hangs_up_after_its_banner() -> Generator[int, None, None]:
+    """Yield the port of a localhost listener that sends each connection an SSH banner and then closes it.
+
+    Like an sshd that drops connections during key exchange: a paramiko client
+    connecting to it fails with a bare ``EOFError``.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    is_stopping = threading.Event()
+    accept_thread = threading.Thread(
+        target=_answer_with_a_banner_then_hang_up_until_stopped, args=(listener, is_stopping), daemon=True
+    )
+    accept_thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        is_stopping.set()
+        accept_thread.join(timeout=5.0)
+        listener.close()

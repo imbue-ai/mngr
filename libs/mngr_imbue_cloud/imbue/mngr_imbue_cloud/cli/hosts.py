@@ -8,6 +8,7 @@ These subcommands are listing + release + key-rotation helpers on top of
 that flow.
 """
 
+from contextlib import closing
 from pathlib import Path
 
 import click
@@ -212,27 +213,28 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
     # the verify/heal pass (reconciler reinstall included) must actually run.
     is_already_adopted = load_adoption_marker(host_state_dir) is not None
     invalidate_adoption_verification(host_state_dir)
-    try:
-        ensure_adopted(access, target, is_full_verification=True)
-    except HostKeyDriftError as exc:
-        # This explicit, user-initiated rotate is the recovery the drift error
-        # points at, so proceed instead of dying with it: drift on an endpoint
-        # is only detectable after the VM door was opened against its
-        # user-origin pin, and the rotations below install fresh user-generated
-        # keys through that authenticated channel, pinning them only once each
-        # endpoint provably serves them -- the foreign-served key is
-        # overwritten, never trusted. Passive connects (the provider's
-        # ensure-adopted pass) keep refusing this state.
-        logger.warning("Rotating host {} over a drifted endpoint: {}", lease.host_id, exc)
-    if is_already_adopted:
-        vm_host_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
-        container_host_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.CONTAINER)
-    else:
-        record = load_host_key_record(target.known_hosts_path, host_id)
-        pin_by_port = {pin.port: pin.public_key for pin in (record.pins if record is not None else ())}
-        vm_host_key = pin_by_port.get(lease.ssh_port, "")
-        container_host_key = pin_by_port.get(lease.container_ssh_port, "")
-    new_client_public_key = rotate_client_key(access, target)
+    with closing(access):
+        try:
+            ensure_adopted(access, target, is_full_verification=True)
+        except HostKeyDriftError as exc:
+            # This explicit, user-initiated rotate is the recovery the drift error
+            # points at, so proceed instead of dying with it: drift on an endpoint
+            # is only detectable after the VM door was opened against its
+            # user-origin pin, and the rotations below install fresh user-generated
+            # keys through that authenticated channel, pinning them only once each
+            # endpoint provably serves them -- the foreign-served key is
+            # overwritten, never trusted. Passive connects (the provider's
+            # ensure-adopted pass) keep refusing this state.
+            logger.warning("Rotating host {} over a drifted endpoint: {}", lease.host_id, exc)
+        if is_already_adopted:
+            vm_host_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+            container_host_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.CONTAINER)
+        else:
+            record = load_host_key_record(target.known_hosts_path, host_id)
+            pin_by_port = {pin.port: pin.public_key for pin in (record.pins if record is not None else ())}
+            vm_host_key = pin_by_port.get(lease.ssh_port, "")
+            container_host_key = pin_by_port.get(lease.container_ssh_port, "")
+        new_client_public_key = rotate_client_key(access, target)
     emit_json(
         {
             "host_id": lease.host_id,

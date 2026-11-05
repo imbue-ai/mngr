@@ -1557,6 +1557,18 @@ def generate_ssh_keypair_with_paramiko(base_path: Path) -> tuple[Path, Path]:
     return key_path, public_key_path
 
 
+def make_client_and_host_ssh_keys(tmp_path: Path) -> tuple[Path, Path]:
+    """A client private key and an sshd host private key, each in its own directory under ``tmp_path``.
+
+    Returns (client_private_key_path, host_key_path), the two keys ``in_process_paramiko_sshd`` takes.
+    """
+    (tmp_path / "client").mkdir()
+    (tmp_path / "server").mkdir()
+    client_private_key_path, _client_public_key_path = generate_ssh_keypair_with_paramiko(tmp_path / "client")
+    host_key_path, _host_public_key_path = generate_ssh_keypair_with_paramiko(tmp_path / "server")
+    return client_private_key_path, host_key_path
+
+
 def _sftp_server_path() -> str:
     """Return the platform-appropriate path to the SFTP server binary."""
     if sys.platform == "darwin":
@@ -1728,12 +1740,12 @@ class ExecOnlyParamikoServer(paramiko.ServerInterface):
 
     Stands in for an sshd on machines without one: the SSH protocol is real
     (paramiko on both ends), only the commands run in this process rather than
-    in a login session. Every command it is asked to run is recorded. Like the
-    ``authorized_keys`` of ``local_sshd``, only ``authorized_key`` may log in:
-    the port is open to every local process for as long as the server runs.
-    With ``is_auth_held`` it answers no public-key auth request until
-    ``auth_released`` is set, standing in for an sshd that never answers
-    authentication before the client gives up.
+    in a login session. Every command it is asked to run, and every connection it
+    accepts, is recorded. Like the ``authorized_keys`` of ``local_sshd``, only
+    ``authorized_key`` may log in: the port is open to every local process for
+    as long as the server runs. With ``is_auth_held`` it answers no public-key
+    auth request until ``auth_released`` is set, standing in for an sshd that
+    never answers authentication before the client gives up.
     """
 
     def __init__(self, authorized_key: paramiko.PKey, is_auth_held: bool) -> None:
@@ -1743,6 +1755,7 @@ class ExecOnlyParamikoServer(paramiko.ServerInterface):
         if not is_auth_held:
             self.auth_released.set()
         self.exec_commands: list[str] = []
+        self.accepted_connection_count = 0
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
         self.auth_released.wait()
@@ -1785,12 +1798,20 @@ def _accept_ssh_connections_until_stopped(
     server: ExecOnlyParamikoServer,
     is_stopping: threading.Event,
     transports: list[paramiko.Transport],
+    dropped_connection_count: int,
 ) -> None:
-    """Turn every connection that arrives on ``listener`` into a server transport, until told to stop."""
+    """Turn every connection that arrives on ``listener`` into a server transport, until told to stop.
+
+    The first ``dropped_connection_count`` connections are closed before the SSH handshake instead.
+    """
     while not is_stopping.is_set():
         try:
             client_socket, _address = listener.accept()
         except TimeoutError:
+            continue
+        server.accepted_connection_count += 1
+        if server.accepted_connection_count <= dropped_connection_count:
+            client_socket.close()
             continue
         transport = paramiko.Transport(client_socket)
         transport.add_server_key(host_key)
@@ -1800,7 +1821,7 @@ def _accept_ssh_connections_until_stopped(
 
 @contextmanager
 def in_process_paramiko_sshd(
-    host_key_path: Path, authorized_key_path: Path, is_auth_held: bool
+    host_key_path: Path, authorized_key_path: Path, is_auth_held: bool, dropped_connection_count: int
 ) -> Generator[tuple[int, ExecOnlyParamikoServer], None, None]:
     """Serve SSH on a free localhost port from this process, running exec requests through the local shell.
 
@@ -1808,7 +1829,9 @@ def in_process_paramiko_sshd(
     the server records every command it was asked to run. Only the key at
     ``authorized_key_path`` (a private key file; its public half is what is
     compared) can log in. With ``is_auth_held`` the server answers no auth
-    request until the context exits (see ``ExecOnlyParamikoServer``).
+    request until the context exits (see ``ExecOnlyParamikoServer``). The first
+    ``dropped_connection_count`` connections are closed unanswered, like an sshd
+    that is still starting.
     """
     host_key = paramiko.PKey.from_path(host_key_path)
     server = ExecOnlyParamikoServer(paramiko.PKey.from_path(authorized_key_path), is_auth_held=is_auth_held)
@@ -1821,7 +1844,7 @@ def in_process_paramiko_sshd(
     transports: list[paramiko.Transport] = []
     accept_thread = threading.Thread(
         target=_accept_ssh_connections_until_stopped,
-        args=(listener, host_key, server, is_stopping, transports),
+        args=(listener, host_key, server, is_stopping, transports, dropped_connection_count),
         daemon=True,
     )
     accept_thread.start()

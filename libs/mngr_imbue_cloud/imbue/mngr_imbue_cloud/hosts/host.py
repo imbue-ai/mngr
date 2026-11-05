@@ -32,10 +32,17 @@ Overrides:
   that from disk alone -- the pinned-id full create has by then written a
   ``data.json`` at the pre-baked id -- so ``create_agent_state`` records
   which path it took on the host object.
+- ``lock_cooperatively``, ``read_file``, ``write_file`` and ``start_agents``
+  keep the host env file and the pre-baked agent's ``data.json`` in memory on
+  the host the fast path builds, while the create holds the host lock and
+  until its agents start (see ``is_freshly_leased_by_this_process``).
 """
 
 import json as _json
+from collections.abc import Generator
 from collections.abc import Mapping
+from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -48,6 +55,7 @@ from pydantic import PrivateAttr
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.host import DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -100,6 +108,15 @@ class ImbueCloudHost(Host):
         frozen=True,
         description="Database id of this lease (UUID returned by /hosts/lease).",
     )
+    is_freshly_leased_by_this_process: bool = Field(
+        default=False,
+        frozen=True,
+        description=(
+            "Whether this is the host the fast path built right after this process took its lease. While the "
+            "create holds the host lock, until the host's agents start, it is then the sole writer of the host "
+            "env file and the pre-baked agent's data.json, so those are kept in memory instead of re-read over SSH."
+        ),
+    )
     # The provider, under the one interface this host needs of it beyond the
     # generic ``provider_instance``: the lease record's published endpoints.
     published_endpoint_source: LeasePublishedEndpointsInterface = Field(
@@ -113,6 +130,70 @@ class ImbueCloudHost(Host):
     # provisioning runs the on-disk check alone would mistake the fresh state
     # for the bake's and skip the full provisioning the container still needs.
     _is_agent_created_without_baked_state: bool = PrivateAttr(default=False)
+    _is_host_lock_held: bool = PrivateAttr(default=False)
+    _is_sole_writer_window_over: bool = PrivateAttr(default=False)
+    # The bytes of the sole-writer files as this host last read or wrote them.
+    _sole_writer_content_by_path: dict[Path, bytes] = PrivateAttr(default_factory=dict)
+
+    def _is_sole_writer(self) -> bool:
+        # Relies on every write to these files in this window going through
+        # this host; a step that may write them some other way must end the
+        # window first.
+        return (
+            self.is_freshly_leased_by_this_process and self._is_host_lock_held and not self._is_sole_writer_window_over
+        )
+
+    def _end_sole_writer_window(self) -> None:
+        self._is_sole_writer_window_over = True
+        self._sole_writer_content_by_path.clear()
+
+    @contextmanager
+    def lock_cooperatively(
+        self, timeout_seconds: float | None = DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
+    ) -> Generator[None, None, None]:
+        with super().lock_cooperatively(timeout_seconds=timeout_seconds):
+            self._is_host_lock_held = True
+            try:
+                yield
+            finally:
+                self._is_host_lock_held = False
+                self._end_sole_writer_window()
+
+    def _pre_baked_data_path(self, pre_baked_agent_id: AgentId) -> Path:
+        return get_agent_state_dir_path(self.host_dir, pre_baked_agent_id) / "data.json"
+
+    def _is_sole_writer_file(self, path: Path) -> bool:
+        if path == self.get_host_env_path():
+            return True
+        return self.pre_baked_agent_id is not None and path == self._pre_baked_data_path(self.pre_baked_agent_id)
+
+    def _remember_sole_writer_content(self, path: Path, content: bytes) -> None:
+        if self._is_sole_writer() and self._is_sole_writer_file(path):
+            self._sole_writer_content_by_path[path] = content
+
+    def read_file(self, path: Path) -> bytes:
+        remembered = self._sole_writer_content_by_path.get(path) if self._is_sole_writer() else None
+        if remembered is not None:
+            return remembered
+        content = super().read_file(path)
+        self._remember_sole_writer_content(path, content)
+        return content
+
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
+        self._sole_writer_content_by_path.pop(path, None)
+        super().write_file(path, content, mode=mode, is_atomic=is_atomic)
+        self._remember_sole_writer_content(path, content)
+
+    def start_agents(self, agent_ids: Sequence[AgentId]) -> None:
+        # Starting the pre-baked agent alone, every read of these files during
+        # the start precedes that agent's launch; an agent launched before it
+        # could already be writing them.
+        if list(agent_ids) != [self.pre_baked_agent_id]:
+            self._end_sole_writer_window()
+        try:
+            super().start_agents(agent_ids)
+        finally:
+            self._end_sole_writer_window()
 
     def get_published_endpoints(self) -> list[PublishedEndpoint]:
         """The slice's published ports at its current placement, read from the provider's lease record.
@@ -149,9 +230,8 @@ class ImbueCloudHost(Host):
         """
         if self.pre_baked_agent_id is None:
             return None
-        data_path = get_agent_state_dir_path(self.host_dir, self.pre_baked_agent_id) / "data.json"
         try:
-            return _json.loads(self.read_text_file(data_path))
+            return _json.loads(self.read_text_file(self._pre_baked_data_path(self.pre_baked_agent_id)))
         except FileNotFoundError:
             return None
 
@@ -228,6 +308,7 @@ class ImbueCloudHost(Host):
             # lease's, so the host keeps the agent identity the connector knows
             # it by; the template's create supplies the agent's commands.
             self._is_agent_created_without_baked_state = True
+            self._end_sole_writer_window()
             options_with_id = options.model_copy(update={"agent_id": self.pre_baked_agent_id})
             return super().create_agent_state(
                 work_dir_path,
@@ -291,8 +372,7 @@ class ImbueCloudHost(Host):
         if checked_out_branch_name is not None:
             patched["checked_out_branch_name"] = checked_out_branch_name
 
-        data_path = get_agent_state_dir_path(self.host_dir, self.pre_baked_agent_id) / "data.json"
-        self.write_text_file(data_path, _json.dumps(patched, indent=2))
+        self.write_text_file(self._pre_baked_data_path(self.pre_baked_agent_id), _json.dumps(patched, indent=2))
         return agent
 
     def provision_agent(

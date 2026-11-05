@@ -45,6 +45,7 @@ the install) or already serves the new one (finish by pinning it).
 import base64
 import hashlib
 import shlex
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -59,6 +60,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_result
+from tenacity import stop_after_delay
+from tenacity import wait_chain
+from tenacity import wait_fixed
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -82,7 +90,6 @@ from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.providers.ssh_utils import is_server_presenting_host_key
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.file_utils import atomic_write
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
@@ -128,8 +135,20 @@ _VM_COMMAND_TIMEOUT_SECONDS: Final[float] = 60.0
 _RECONCILER_INSTALL_TIMEOUT_SECONDS: Final[float] = 120.0
 # How long a freshly-installed host key may take to be served (sshd reload).
 _SERVED_KEY_POLL_TIMEOUT_SECONDS: Final[float] = 30.0
+# A reload normally lands well within a second, so the served key is polled
+# quickly at first and slowly after. Each probe is an unauthenticated handshake,
+# which an OpenSSH >= 9.8 sshd charges against the source address
+# (PerSourcePenalties noauth:1s, refusing the address once 15s accrue -- the
+# authenticated connections that follow included). The few fast probes keep
+# that charge far below the threshold, and the slow interval lets it drain.
+_SERVED_KEY_FAST_POLL_COUNT: Final[int] = 5
+_SERVED_KEY_FAST_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 _SERVED_KEY_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 _SSH_CONNECT_TIMEOUT_SECONDS: Final[float] = 30.0
+# What paramiko raises when a connection fails, while connecting or on an open
+# transport. An sshd that closes the connection surfaces as a bare EOFError, not
+# an SSHException.
+PARAMIKO_CONNECTION_FAILURES: Final[tuple[type[Exception], ...]] = (paramiko.SSHException, OSError, EOFError)
 
 
 class AdoptionEndpointKind(UpperCaseStrEnum):
@@ -598,6 +617,33 @@ def _endpoint_pin(known_hosts_path: Path, host_id: HostId, address: str, port: i
     return None
 
 
+_SERVED_KEY_POLL_WAIT: Final[wait_chain] = wait_chain(
+    *(wait_fixed(_SERVED_KEY_FAST_POLL_INTERVAL_SECONDS) for _ in range(_SERVED_KEY_FAST_POLL_COUNT)),
+    wait_fixed(_SERVED_KEY_POLL_INTERVAL_SECONDS),
+)
+
+
+def _is_served_key_missing(is_served: bool) -> bool:
+    return not is_served
+
+
+def _report_served_key_missing(retry_state: RetryCallState) -> bool:
+    return False
+
+
+def _wait_for_endpoint_to_serve_host_key(
+    access: SliceVmAccessInterface, port: int, public_key: str, timeout_seconds: float
+) -> bool:
+    """Probe until the endpoint serves ``public_key`` or the deadline passes; whether it ended up serving it."""
+    retrying = Retrying(
+        retry=retry_if_result(_is_served_key_missing),
+        stop=stop_after_delay(timeout_seconds),
+        wait=_SERVED_KEY_POLL_WAIT,
+        retry_error_callback=_report_served_key_missing,
+    )
+    return retrying(access.is_endpoint_serving_host_key, port, public_key)
+
+
 @pure
 def _endpoint_port(target: SliceAdoptionTarget, kind: AdoptionEndpointKind) -> int:
     """The box-forwarded port of one of the slice's two sshd endpoints."""
@@ -618,13 +664,14 @@ def rotate_endpoint_host_key(
     """Rotate one endpoint's sshd host key to a fresh user-generated key; returns the new public key.
 
     Two-phase and crash-safe: the new keypair is persisted client-side before
-    the host is touched, the install is decided by an unauthenticated probe of
-    which key the endpoint actually serves (so a crash between install and pin
-    is recovered by re-running), and the user-origin pin is written only after
-    the endpoint demonstrably serves the new key.
+    the host is touched, a resumed rotation decides whether to install by an
+    unauthenticated probe of which key the endpoint actually serves (so a crash
+    between install and pin is recovered by re-running), and the user-origin
+    pin is written only after the endpoint demonstrably serves the new key.
     """
     port = _endpoint_port(target, kind)
     pending = load_pending_host_key_rotation(target.host_state_dir, kind)
+    is_resuming = pending is not None
     if pending is None:
         private_key_pem, public_key = generate_ed25519_host_keypair()
         existing_pin = _endpoint_pin(target.known_hosts_path, target.host_id, target.address, port)
@@ -637,8 +684,9 @@ def rotate_endpoint_host_key(
         )
         _save_pending_host_key_rotation(target.host_state_dir, pending)
 
-    # Install unless the endpoint already serves the new key (a resumed run).
-    if not access.is_endpoint_serving_host_key(port, pending.new_public_key):
+    # Install unless a resumed run's endpoint already serves the new key. A key
+    # generated by this call cannot be served yet, so it is not probed for.
+    if not is_resuming or not access.is_endpoint_serving_host_key(port, pending.new_public_key):
         with log_span("Installing rotated {} host key for host {}", kind, target.host_id):
             match kind:
                 case AdoptionEndpointKind.VM:
@@ -647,12 +695,11 @@ def rotate_endpoint_host_key(
                     access.install_container_host_key(pending.new_private_key_pem, pending.new_public_key)
                 case _ as unreachable:
                     assert_never(unreachable)
-        new_public_key = pending.new_public_key
-        if not poll_until(
-            lambda: access.is_endpoint_serving_host_key(port, new_public_key),
-            timeout=_SERVED_KEY_POLL_TIMEOUT_SECONDS,
-            poll_interval=_SERVED_KEY_POLL_INTERVAL_SECONDS,
-        ):
+        with log_span("Waiting for the {} endpoint of host {} to serve its rotated host key", kind, target.host_id):
+            is_new_key_served = _wait_for_endpoint_to_serve_host_key(
+                access, port, pending.new_public_key, _SERVED_KEY_POLL_TIMEOUT_SECONDS
+            )
+        if not is_new_key_served:
             raise AdoptionError(
                 f"endpoint {target.address}:{port} ({kind}) did not serve the rotated host key within "
                 f"{_SERVED_KEY_POLL_TIMEOUT_SECONDS:.0f}s; the previous key and pin are unchanged"
@@ -702,7 +749,9 @@ def _adopt(access: SliceVmAccessInterface, target: SliceAdoptionTarget) -> None:
     channel through which this device already received (or will receive) the
     adopted trust material.
     """
-    reconciler_state = access.read_reconciler_state()
+    started_at = time.monotonic()
+    with log_span("Reading the key reconciler state of host {}", target.host_id):
+        reconciler_state = access.read_reconciler_state()
     if reconciler_state.is_unit_enabled and reconciler_state.desired_authorized_keys is not None:
         logger.debug(
             "Host {} was already adopted by another device (reconciler present); verifying instead of re-adopting",
@@ -712,13 +761,19 @@ def _adopt(access: SliceVmAccessInterface, target: SliceAdoptionTarget) -> None:
         _write_adoption_marker(target.host_state_dir)
         return
     with log_span("Adopting leased slice {}", target.host_id):
-        current_authorized_keys = access.read_vm_root_authorized_keys()
+        with log_span("Reading the VM root authorized_keys of host {}", target.host_id):
+            current_authorized_keys = access.read_vm_root_authorized_keys()
         desired = render_desired_authorized_keys(current_authorized_keys, (target.client_public_key,))
-        access.install_reconciler(desired)
+        with log_span("Installing the key reconciler on host {}", target.host_id):
+            access.install_reconciler(desired)
         rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
         rotate_endpoint_host_key(access, target, AdoptionEndpointKind.CONTAINER)
         _write_adoption_marker(target.host_state_dir)
-    logger.info("Adopted leased slice {} (reconciler installed, both host keys rotated)", target.host_id)
+    logger.info(
+        "Adopted leased slice {} in {:.2f}s (reconciler installed, both host keys rotated)",
+        target.host_id,
+        time.monotonic() - started_at,
+    )
 
 
 def _verify_and_heal(access: SliceVmAccessInterface, target: SliceAdoptionTarget) -> None:
@@ -1105,8 +1160,33 @@ def rotate_client_key(access: SliceVmAccessInterface, target: SliceAdoptionTarge
     return pending.new_public_key
 
 
+def _run_command_on_client(client: paramiko.SSHClient, command: str, timeout_seconds: float) -> CommandResult:
+    """Run ``command`` over an open connection; raises paramiko's or the socket's error when the channel fails."""
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout_seconds)
+    # The connection outlives this command, so a channel left open by a
+    # failed read would keep the remote command attached to it.
+    try:
+        # Send EOF so a command that reads stdin does not wait for input until the channel timeout.
+        stdin.close()
+        # Drain the streams before asking for the exit status: the
+        # reads honor the channel timeout and EOF at command exit,
+        # while recv_exit_status alone blocks with no timeout (and
+        # waiting for exit before reading can deadlock on the channel
+        # window for chatty commands).
+        stdout_text = stdout.read().decode()
+        stderr_text = stderr.read().decode()
+        exit_status = stdout.channel.recv_exit_status()
+    finally:
+        stdout.channel.close()
+    return CommandResult(stdout=stdout_text, stderr=stderr_text, success=exit_status == 0)
+
+
 class ParamikoSliceVmAccess(SliceVmAccessInterface):
-    """Real slice access: every operation runs over the VM-root sshd via paramiko, strictly host-key checked."""
+    """Real slice access over the VM-root sshd via paramiko, strictly host-key checked.
+
+    Commands share one authenticated connection, opened on first use and reopened
+    once it is no longer active; whoever builds the access closes it.
+    """
 
     host_id: HostId = Field(frozen=True, description="The leased host's mngr host id")
     address: str = Field(frozen=True, description="The slice's box address")
@@ -1114,6 +1194,26 @@ class ParamikoSliceVmAccess(SliceVmAccessInterface):
     ssh_user: str = Field(frozen=True, default="root", description="User on the VM-root sshd")
     private_key_path: Path = Field(frozen=True, description="Per-host client private key that opens the VM")
     known_hosts_path: Path = Field(frozen=True, description="Per-host known_hosts file (store-rendered)")
+
+    _command_client: paramiko.SSHClient | None = PrivateAttr(default=None)
+
+    def close(self) -> None:
+        """Close the shared command connection, if one is open."""
+        client = self._command_client
+        self._command_client = None
+        if client is not None:
+            client.close()
+
+    def _get_command_client(self) -> paramiko.SSHClient:
+        client = self._command_client
+        if client is not None:
+            transport = client.get_transport()
+            if transport is not None and transport.is_active():
+                return client
+            client.close()
+        new_client = self._connect(self.vm_port, self.private_key_path)
+        self._command_client = new_client
+        return new_client
 
     def _connect(self, port: int, private_key_path: Path) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
@@ -1132,7 +1232,7 @@ class ParamikoSliceVmAccess(SliceVmAccessInterface):
                 look_for_keys=False,
                 timeout=_SSH_CONNECT_TIMEOUT_SECONDS,
             )
-        except (paramiko.SSHException, OSError) as e:
+        except PARAMIKO_CONNECTION_FAILURES as e:
             client.close()
             raise AdoptionError(f"SSH connect to {self.address}:{port} failed: {e}") from e
         # Keepalives so a silently dead path surfaces as a transport error
@@ -1144,23 +1244,11 @@ class ParamikoSliceVmAccess(SliceVmAccessInterface):
         return client
 
     def _run(self, command: str, timeout_seconds: float) -> CommandResult:
-        client = self._connect(self.vm_port, self.private_key_path)
+        client = self._get_command_client()
         try:
-            try:
-                _stdin, stdout, stderr = client.exec_command(command, timeout=timeout_seconds)
-                # Drain the streams before asking for the exit status: the
-                # reads honor the channel timeout and EOF at command exit,
-                # while recv_exit_status alone blocks with no timeout (and
-                # waiting for exit before reading can deadlock on the channel
-                # window for chatty commands).
-                stdout_text = stdout.read().decode()
-                stderr_text = stderr.read().decode()
-                exit_status = stdout.channel.recv_exit_status()
-            except (paramiko.SSHException, OSError) as e:
-                raise AdoptionError(f"SSH command on {self.address}:{self.vm_port} failed: {e}") from e
-        finally:
-            client.close()
-        return CommandResult(stdout=stdout_text, stderr=stderr_text, success=exit_status == 0)
+            return _run_command_on_client(client, command, timeout_seconds)
+        except PARAMIKO_CONNECTION_FAILURES as e:
+            raise AdoptionError(f"SSH command on {self.address}:{self.vm_port} failed: {e}") from e
 
     def _run_checked(self, command: str, timeout_seconds: float, label: str) -> CommandResult:
         result = self._run(command, timeout_seconds)

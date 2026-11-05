@@ -1,11 +1,14 @@
 import base64
 import json
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from inline_snapshot import snapshot
+from tenacity import RetryCallState
+from tenacity import Retrying
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PortProtocol
@@ -19,13 +22,19 @@ from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.testing import allow_warnings
+from imbue.mngr.utils.testing import build_test_known_hosts_file
+from imbue.mngr.utils.testing import in_process_paramiko_sshd
+from imbue.mngr.utils.testing import make_client_and_host_ssh_keys
 from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
 from imbue.mngr_imbue_cloud.providers.adoption import ADOPTION_SCHEMA_VERSION
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import BoundEndpoints
+from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
+from imbue.mngr_imbue_cloud.providers.adoption import _SERVED_KEY_POLL_WAIT
+from imbue.mngr_imbue_cloud.providers.adoption import _wait_for_endpoint_to_serve_host_key
 from imbue.mngr_imbue_cloud.providers.adoption import bound_endpoints_path
 from imbue.mngr_imbue_cloud.providers.adoption import build_reconciler_install_command
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
@@ -45,6 +54,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
 from imbue.mngr_imbue_cloud.providers.mock_slice_vm_access_test import MockSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
+from imbue.mngr_imbue_cloud.providers.testing import ssh_listener_that_hangs_up_after_its_banner
 
 _ADDRESS = "203.0.113.7"
 _VM_PORT = 22010
@@ -456,6 +466,137 @@ def test_rotation_resume_pins_the_new_key_without_reinstalling(tmp_path: Path) -
     # Only probes ran on the resume; no reinstall happened.
     assert access.served_key_by_port[_VM_PORT] == new_public_key
     assert access.call_count == mutations_before + 1
+
+
+def test_fresh_adoption_makes_only_the_slice_operations_it_needs(tmp_path: Path) -> None:
+    """Every slice operation is a WAN round trip on the create's critical path. A rotation
+    started by this run installs its just-generated key without first probing whether the
+    endpoint serves it (it cannot), so each endpoint costs one install and one probe."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+
+    ensure_adopted(access, target, is_full_verification=True)
+
+    assert access.operations == (
+        "read_reconciler_state",
+        "read_vm_root_authorized_keys",
+        "install_reconciler",
+        "install_vm_host_key",
+        "is_endpoint_serving_host_key",
+        "install_container_host_key",
+        "is_endpoint_serving_host_key",
+    )
+
+
+def test_resumed_rotation_probes_the_endpoint_before_reinstalling(tmp_path: Path) -> None:
+    """A rotation left pending by a crash may have installed its key already, so the
+    resume asks the endpoint first; here the install never landed, so it reinstalls."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    access.operations_until_failure = 0
+    with pytest.raises(AdoptionError):
+        rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+    access.operations_until_failure = None
+    operation_count_before_resume = len(access.operations)
+
+    rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+
+    assert access.operations[operation_count_before_resume:] == (
+        "is_endpoint_serving_host_key",
+        "install_vm_host_key",
+        "is_endpoint_serving_host_key",
+    )
+
+
+def test_rotation_keeps_probing_an_endpoint_that_misses_the_first_probes_after_its_reload(tmp_path: Path) -> None:
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    access.unanswered_probe_count_after_install = 2
+
+    new_public_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+
+    assert _endpoint_pin_map(target)[_VM_PORT] == (new_public_key, HostKeyOrigin.USER)
+    assert access.operations.count("is_endpoint_serving_host_key") == 3
+
+
+def test_served_key_probes_come_quickly_after_an_install_then_slow_down() -> None:
+    retry_state = RetryCallState(retry_object=Retrying(), fn=None, args=(), kwargs={})
+    waits: list[float] = []
+    for probe_number in range(1, 9):
+        retry_state.attempt_number = probe_number
+        waits.append(_SERVED_KEY_POLL_WAIT(retry_state))
+
+    assert waits == [0.2, 0.2, 0.2, 0.2, 0.2, 1.0, 1.0, 1.0]
+
+
+def test_waiting_for_a_served_key_reports_false_once_the_deadline_passes() -> None:
+    access = _make_unadopted_access()
+
+    is_served = _wait_for_endpoint_to_serve_host_key(
+        access, _VM_PORT, "ssh-ed25519 AAAANEVER never-installed-key", timeout_seconds=0.5
+    )
+
+    assert is_served is False
+
+
+def _make_paramiko_slice_vm_access(
+    tmp_path: Path, port: int, client_private_key_path: Path, host_key_path: Path
+) -> ParamikoSliceVmAccess:
+    return ParamikoSliceVmAccess(
+        host_id=HostId(),
+        address="127.0.0.1",
+        vm_port=port,
+        private_key_path=client_private_key_path,
+        known_hosts_path=build_test_known_hosts_file(host_key_path, port, tmp_path / "known_hosts"),
+    )
+
+
+def test_paramiko_slice_vm_access_runs_every_command_over_one_connection(tmp_path: Path) -> None:
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(
+        host_key_path, client_private_key_path, is_auth_held=False, dropped_connection_count=0
+    ) as (port, server):
+        access = _make_paramiko_slice_vm_access(tmp_path, port, client_private_key_path, host_key_path)
+        with closing(access):
+            access.read_reconciler_state()
+            access.read_vm_root_authorized_keys()
+            access.read_reconciler_state()
+
+        assert len(server.exec_commands) == 3
+        assert server.accepted_connection_count == 1
+
+
+def test_paramiko_slice_vm_access_opens_a_new_connection_after_close(tmp_path: Path) -> None:
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(
+        host_key_path, client_private_key_path, is_auth_held=False, dropped_connection_count=0
+    ) as (port, server):
+        access = _make_paramiko_slice_vm_access(tmp_path, port, client_private_key_path, host_key_path)
+        with closing(access):
+            access.read_reconciler_state()
+            access.close()
+            access.read_reconciler_state()
+
+        assert len(server.exec_commands) == 2
+        assert server.accepted_connection_count == 2
+
+
+def test_paramiko_slice_vm_access_reports_an_sshd_that_hangs_up_in_the_handshake_as_an_adoption_error(
+    tmp_path: Path,
+) -> None:
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with ssh_listener_that_hangs_up_after_its_banner() as port:
+        access = _make_paramiko_slice_vm_access(tmp_path, port, client_private_key_path, host_key_path)
+        with closing(access):
+            with pytest.raises(AdoptionError, match="SSH connect"):
+                access.read_reconciler_state()
+            assert access.can_authenticate(port, client_private_key_path) is False
 
 
 def test_rotate_client_key_swaps_local_files_and_retires_the_old_key(tmp_path: Path) -> None:

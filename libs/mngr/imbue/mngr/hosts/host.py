@@ -229,7 +229,7 @@ _HOST_LOCK_GENERATION_FILENAME: Final[str] = "host_lock.generation"
 # Default timeout for callers that want a bounded wait (e.g. gc). ``create`` passes
 # ``None`` to block indefinitely until the lock is acquired; ``start`` uses its own,
 # longer bound (see ``api.find.start_agents_locked``).
-_DEFAULT_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 300.0
+DEFAULT_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 300.0
 
 # Env var that retains a failed host (and keeps its lock held) for debugging.
 _RETAIN_LOCK_FOR_DEBUG_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
@@ -1010,7 +1010,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     @contextmanager
     def lock_cooperatively(
-        self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
+        self, timeout_seconds: float | None = DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
     ) -> Generator[None, None, None]:
         """Hold the host's exclusive, cross-actor lock for the duration of the block.
 

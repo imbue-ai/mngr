@@ -8,6 +8,7 @@ from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import closing
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -21,6 +22,7 @@ from typing import cast
 
 import gevent
 import httpx2
+import paramiko
 import pytest
 from gevent.hub import Hub
 from loguru import logger
@@ -61,6 +63,10 @@ from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.utils.testing import allow_warnings
+from imbue.mngr.utils.testing import build_test_known_hosts_file
+from imbue.mngr.utils.testing import find_free_port
+from imbue.mngr.utils.testing import in_process_paramiko_sshd
+from imbue.mngr.utils.testing import make_client_and_host_ssh_keys
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
@@ -90,12 +96,14 @@ from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.instance import WORKSPACE_HOST_STATE_BY_STATUS
 from imbue.mngr_imbue_cloud.providers.instance import _WorkspaceStartPollState
 from imbue.mngr_imbue_cloud.providers.instance import _advance_workspace_start
+from imbue.mngr_imbue_cloud.providers.instance import _connect_to_leased_container
 from imbue.mngr_imbue_cloud.providers.instance import _read_first_existing_host_record
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
 from imbue.mngr_imbue_cloud.providers.instance import leased_info_from_workspace
 from imbue.mngr_imbue_cloud.providers.instance import should_read_container_ca_trust_from_vm
 from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
 from imbue.mngr_imbue_cloud.providers.testing import make_workspace_info
+from imbue.mngr_imbue_cloud.providers.testing import ssh_listener_that_hangs_up_after_its_banner
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
@@ -509,7 +517,7 @@ class _FakeImbueCloudProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
         self._waited_for.append(leased.vps_address)
 
-    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
+    def _build_host_object(self, lease: LeasedHostInfo, is_freshly_leased_by_this_process: bool) -> ImbueCloudHost:
         assert self._built is not None
         return self._built
 
@@ -2026,6 +2034,114 @@ def test_no_host_record_at_any_candidate_is_an_error() -> None:
         )
 
 
+def _connect_to_local_leased_container(
+    tmp_path: Path,
+    port: int,
+    client_private_key_path: Path,
+    pinned_host_key_path: Path,
+    sshd_wait_timeout_seconds: float,
+) -> paramiko.SSHClient:
+    """Connect to a leased container at ``127.0.0.1:port`` whose known_hosts pins ``pinned_host_key_path``."""
+    return _connect_to_leased_container(
+        vps_address="127.0.0.1",
+        container_ssh_port=port,
+        private_key_path=client_private_key_path,
+        known_hosts_path=build_test_known_hosts_file(pinned_host_key_path, port, tmp_path / "known_hosts"),
+        connect_timeout_seconds=10.0,
+        sshd_wait_timeout_seconds=sshd_wait_timeout_seconds,
+    )
+
+
+def _assert_authenticated_and_close(client: paramiko.SSHClient) -> None:
+    with closing(client):
+        transport = client.get_transport()
+        assert transport is not None and transport.is_authenticated()
+
+
+def test_connecting_to_a_leased_container_opens_one_connection_when_its_sshd_is_up(tmp_path: Path) -> None:
+    """The lease has just reached this sshd, so no readiness handshake precedes the real connect."""
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(
+        host_key_path, client_private_key_path, is_auth_held=False, dropped_connection_count=0
+    ) as (port, server):
+        client = _connect_to_local_leased_container(
+            tmp_path, port, client_private_key_path, host_key_path, sshd_wait_timeout_seconds=10.0
+        )
+        _assert_authenticated_and_close(client)
+
+        assert server.accepted_connection_count == 1
+
+
+def test_connecting_to_a_leased_container_waits_for_its_sshd_and_retries_after_a_failed_connect(
+    tmp_path: Path,
+) -> None:
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(
+        host_key_path, client_private_key_path, is_auth_held=False, dropped_connection_count=1
+    ) as (port, server):
+        client = _connect_to_local_leased_container(
+            tmp_path, port, client_private_key_path, host_key_path, sshd_wait_timeout_seconds=10.0
+        )
+        _assert_authenticated_and_close(client)
+
+        # The dropped first connect, the readiness handshake, then the retried connect.
+        assert server.accepted_connection_count == 3
+
+
+def test_connecting_to_a_leased_container_waits_for_its_sshd_after_a_failed_connect(tmp_path: Path) -> None:
+    """A failed first connect falls back to waiting for the sshd, whose timeout is what surfaces."""
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+
+    with pytest.raises(MngrError, match="SSH server not ready"):
+        _connect_to_local_leased_container(
+            tmp_path, find_free_port(), client_private_key_path, host_key_path, sshd_wait_timeout_seconds=0.3
+        )
+
+
+def test_connecting_to_a_leased_container_waits_for_its_sshd_after_a_connect_cut_off_in_the_handshake(
+    tmp_path: Path,
+) -> None:
+    """paramiko reports an sshd that hangs up during key exchange as a bare EOFError, which is still a failed connect."""
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+
+    with ssh_listener_that_hangs_up_after_its_banner() as port:
+        with pytest.raises(MngrError, match="SSH server not ready"):
+            _connect_to_local_leased_container(
+                tmp_path, port, client_private_key_path, host_key_path, sshd_wait_timeout_seconds=0.3
+            )
+
+
+def test_connecting_to_a_leased_container_that_serves_an_unpinned_host_key_fails_without_retrying(
+    tmp_path: Path,
+) -> None:
+    client_private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    (tmp_path / "other").mkdir()
+    _other_client_key_path, other_host_key_path = make_client_and_host_ssh_keys(tmp_path / "other")
+    with in_process_paramiko_sshd(
+        host_key_path, client_private_key_path, is_auth_held=False, dropped_connection_count=0
+    ) as (port, server):
+        with pytest.raises(MngrError, match="SSH connect to leased container"):
+            _connect_to_local_leased_container(
+                tmp_path, port, client_private_key_path, other_host_key_path, sshd_wait_timeout_seconds=600.0
+            )
+
+        assert server.accepted_connection_count == 1
+
+
+def test_connecting_to_a_leased_container_without_its_known_hosts_fails_without_waiting(tmp_path: Path) -> None:
+    client_private_key_path, _host_key_path = make_client_and_host_ssh_keys(tmp_path)
+
+    with pytest.raises(MngrError, match="failed to load known_hosts"):
+        _connect_to_leased_container(
+            vps_address="127.0.0.1",
+            container_ssh_port=find_free_port(),
+            private_key_path=client_private_key_path,
+            known_hosts_path=tmp_path / "missing_known_hosts",
+            connect_timeout_seconds=10.0,
+            sshd_wait_timeout_seconds=600.0,
+        )
+
+
 def test_leased_info_from_workspace_projects_running_coordinates() -> None:
     workspace = make_workspace_info("running")
 
@@ -2554,7 +2670,7 @@ def test_build_host_object_always_pins_the_lease_agent_id(temp_mngr_ctx: MngrCon
         to_update(_make_lease(host_id).field_ref().container_ssh_port, provider.config.container_ssh_port)
     )
 
-    host = provider._build_host_object(lease)
+    host = provider._build_host_object(lease, is_freshly_leased_by_this_process=False)
 
     assert host.pre_baked_agent_id == AgentId(lease.agent_id)
     assert host.id == host_id

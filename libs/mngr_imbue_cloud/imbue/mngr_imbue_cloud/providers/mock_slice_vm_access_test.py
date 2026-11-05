@@ -18,7 +18,9 @@ class MockSliceVmAccess(SliceVmAccessInterface):
     change which key an endpoint serves, the reconciler asserts the desired file
     onto the live one, and authentication succeeds iff the key's public half is
     in the endpoint's authorized_keys. ``operations_until_failure`` injects a
-    crash after that many mutating operations, for crash-at-each-step tests.
+    crash after that many mutating operations, for crash-at-each-step tests, and
+    ``unanswered_probe_count_after_install`` models an sshd that takes a while to
+    come back from the reload a host-key install triggers.
     """
 
     vm_port: int = Field(description="Port modeling the VM-root sshd endpoint")
@@ -41,36 +43,46 @@ class MockSliceVmAccess(SliceVmAccessInterface):
     operations_until_failure: int | None = Field(
         default=None, description="Raise AdoptionError after this many mutating operations (None: never)"
     )
+    unanswered_probe_count_after_install: int = Field(
+        default=0,
+        description="How many served-key probes of an endpoint fail after a host-key install, while its sshd reloads",
+    )
 
     _mutation_count: int = PrivateAttr(default=0)
-    _call_count: int = PrivateAttr(default=0)
+    _operations: list[str] = PrivateAttr(default_factory=list)
+    _unanswered_probe_count_by_port: dict[int, int] = PrivateAttr(default_factory=dict)
 
     @property
     def call_count(self) -> int:
-        return self._call_count
+        return len(self._operations)
 
-    def _record_call(self) -> None:
-        self._call_count += 1
+    @property
+    def operations(self) -> tuple[str, ...]:
+        """Every operation called so far, in order, by method name."""
+        return tuple(self._operations)
 
-    def _record_mutation(self) -> None:
-        self._record_call()
+    def _record_call(self, operation: str) -> None:
+        self._operations.append(operation)
+
+    def _record_mutation(self, operation: str) -> None:
+        self._record_call(operation)
         self._mutation_count += 1
         if self.operations_until_failure is not None and self._mutation_count > self.operations_until_failure:
             raise AdoptionError("injected crash for testing")
 
     def read_vm_root_authorized_keys(self) -> str | None:
-        self._record_call()
+        self._record_call("read_vm_root_authorized_keys")
         return self.vm_authorized_keys
 
     def install_reconciler(self, desired_authorized_keys: str) -> None:
-        self._record_mutation()
+        self._record_mutation("install_reconciler")
         self.desired_authorized_keys = desired_authorized_keys
         self.vm_authorized_keys = desired_authorized_keys
         self.is_unit_enabled = True
         self.installed_content_hash = expected_reconciler_content_hash()
 
     def read_reconciler_state(self) -> SliceReconcilerState:
-        self._record_call()
+        self._record_call("read_reconciler_state")
         return SliceReconcilerState(
             is_unit_enabled=self.is_unit_enabled,
             desired_authorized_keys=self.desired_authorized_keys,
@@ -80,22 +92,26 @@ class MockSliceVmAccess(SliceVmAccessInterface):
         )
 
     def install_vm_host_key(self, private_key_pem: str, public_key: str) -> None:
-        self._record_mutation()
-        self.served_key_by_port[self.vm_port] = public_key.strip()
+        self._record_mutation("install_vm_host_key")
+        self._serve_installed_host_key(self.vm_port, public_key)
 
     def install_container_host_key(self, private_key_pem: str, public_key: str) -> None:
-        self._record_mutation()
-        self.served_key_by_port[self.container_port] = public_key.strip()
+        self._record_mutation("install_container_host_key")
+        self._serve_installed_host_key(self.container_port, public_key)
+
+    def _serve_installed_host_key(self, port: int, public_key: str) -> None:
+        self.served_key_by_port[port] = public_key.strip()
+        self._unanswered_probe_count_by_port[port] = self.unanswered_probe_count_after_install
 
     def append_container_authorized_key(self, public_key: str) -> None:
-        self._record_mutation()
+        self._record_mutation("append_container_authorized_key")
         lines = [line for line in self.container_authorized_keys.splitlines() if line.strip()]
         if public_key.strip() not in lines:
             lines.append(public_key.strip())
         self.container_authorized_keys = "".join(f"{line}\n" for line in lines)
 
     def remove_container_authorized_key(self, public_key: str) -> None:
-        self._record_mutation()
+        self._record_mutation("remove_container_authorized_key")
         lines = [
             line
             for line in self.container_authorized_keys.splitlines()
@@ -104,11 +120,15 @@ class MockSliceVmAccess(SliceVmAccessInterface):
         self.container_authorized_keys = "".join(f"{line}\n" for line in lines)
 
     def is_endpoint_serving_host_key(self, port: int, public_key: str) -> bool:
-        self._record_call()
+        self._record_call("is_endpoint_serving_host_key")
+        unanswered_probe_count = self._unanswered_probe_count_by_port.get(port, 0)
+        if unanswered_probe_count > 0:
+            self._unanswered_probe_count_by_port[port] = unanswered_probe_count - 1
+            return False
         return self.served_key_by_port.get(port) == public_key.strip()
 
     def can_authenticate(self, port: int, private_key_path: Path) -> bool:
-        self._record_call()
+        self._record_call("can_authenticate")
         if self.is_authentication_always_failing:
             return False
         public_key_path = private_key_path.with_name(private_key_path.name + ".pub")

@@ -1,0 +1,3 @@
+- `DEFAULT_HOST_LOCK_TIMEOUT_SECONDS` (the default wait of `Host.lock_cooperatively`) is now public, so a `Host` subclass that wraps the lock can keep the same default.
+
+- Test helpers only: the in-process SSH server used in tests (`in_process_paramiko_sshd`) now counts the connections it accepts, so a test can check that code reuses one SSH connection instead of opening a new one for each command. It also takes a required `dropped_connection_count`, the number of first connections it closes unanswered, like an sshd that is still starting. A new `make_client_and_host_ssh_keys` helper makes the client key and host key it takes, for tests in any project.
