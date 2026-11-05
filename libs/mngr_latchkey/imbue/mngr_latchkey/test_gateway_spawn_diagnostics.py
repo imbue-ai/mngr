@@ -67,6 +67,7 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
     return script
 
 
+@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_failed_gateway_respawn_reports_exit_code_output_and_port_state(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)

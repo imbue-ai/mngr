@@ -32,6 +32,7 @@ from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote._machine import read_remote_state
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
@@ -51,7 +52,9 @@ from imbue.mngr_latchkey.remote.package import TUNNEL_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.provisioning import _do_extra_hosts_resolve_outer_host
 from imbue.mngr_latchkey.remote.provisioning import _does_container_need_reverse_tunnel
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
@@ -73,8 +76,10 @@ _DEVICE_RECORD = DeviceRecord(
     permissions_override="desktop-override-jwt",
 )
 
-_GRANTED_HERE = '{"rules": [{"slack-api": ["slack-read-all"]}]}'
-_GRANTED_ELSEWHERE = '{"rules": [{"github-rest-api": ["github-read-all"]}]}'
+_GRANTED_HERE = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+_GRANTED_ELSEWHERE = dump_permissions_text(
+    LatchkeyPermissionsConfig(rules=({"github-rest-api": ["github-read-all"]},))
+)
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 
 
@@ -175,7 +180,7 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     config = json.loads(vps.machine_config() or "{}")
     assert config["settings"]["hideBuiltinServices"] == ["notion"]
     assert set(config["registeredServices"]) == set(additional_service_registration_entries())
-    assert vps.machine_permissions() == '{\n  "rules": []\n}'
+    assert vps.machine_permissions() == '{"rules":[]}'
     assert vps.machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
     # The gateway's extension is the package's copy, where the gateway loads it from.
     shipped_extension = vps.latchkey_dir / REMOTE_EXTENSIONS_DIR_NAME / REMOTE_GATEWAY_EXTENSION_FILENAME
@@ -749,7 +754,7 @@ def test_provisioning_seeds_a_machine_with_no_policy_from_the_local_file(tmp_pat
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).machine_permissions() == _GRANTED_HERE
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_GRANTED_HERE)
 
 
 def test_provisioning_seeds_a_machine_holding_only_the_rule_less_default_from_the_local_file(tmp_path: Path) -> None:
@@ -769,7 +774,7 @@ def test_provisioning_seeds_a_machine_holding_only_the_rule_less_default_from_th
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).machine_permissions() == _GRANTED_HERE
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_GRANTED_HERE)
     assert local_path.read_text() == _GRANTED_HERE
 
 
@@ -832,7 +837,7 @@ def test_the_default_seed_is_stamped_with_the_format_this_build_writes(tmp_path:
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).machine_permissions() == '{\n  "rules": []\n}'
+    assert as_vps(outer).machine_permissions() == '{"rules":[]}'
     assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
 
 
@@ -846,7 +851,7 @@ def test_seeding_from_the_local_copy_carries_its_stamp(tmp_path: Path) -> None:
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).machine_permissions() == _GRANTED_HERE
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_GRANTED_HERE)
     assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
 
 

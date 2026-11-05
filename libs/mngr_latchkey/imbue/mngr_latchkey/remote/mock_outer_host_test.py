@@ -85,7 +85,9 @@ from imbue.mngr_latchkey.remote.package import TUNNEL_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import build_remote_package
 from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.testing import extract_deb_data
@@ -850,4 +852,4 @@ def grant_host_permissions(latchkey: Latchkey, host_id: HostId, rules_json: str)
     permissions_path.write_text(rules_json)
 
 
-SLACK_GRANTED = '{"rules": [{"slack-api": ["slack-read-all"]}]}'
+SLACK_GRANTED = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))

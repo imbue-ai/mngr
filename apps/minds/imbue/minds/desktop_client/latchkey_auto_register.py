@@ -1,25 +1,47 @@
-"""Auto-register newly-discovered agents in their host's latchkey permissions file.
+"""Keep each host's latchkey permissions file registering the agents discovery lists on it.
 
 Wires a callback onto :class:`MngrCliBackendResolver` that watches the
-discovery stream for new ``(host_id, agent_id)`` pairs and, for each one
-on a host Imbue Studio manages (i.e. a host whose ``latchkey_permissions.json``
-exists), appends the agent to the ``minds-api-proxy-per-agent-unauthorized``
-``not.anyOf`` allowlist so the gateway's ``minds-api-proxy`` extension
-stops rejecting the agent's ``/api/v1/agents/<agent_id>/...`` calls.
+discovery stream and, for every host Imbue Studio manages (one whose
+``latchkey_permissions.json`` exists), pins the
+``minds-api-proxy-per-agent-unauthorized`` ``not.anyOf`` allowlist to the
+agents the host runs, so the gateway's ``minds-api-proxy`` extension accepts
+each live agent's ``/api/v1/agents/<agent_id>/...`` calls and refuses a
+destroyed one's. Nothing else ever takes an agent out of that list, and a list
+that only grew would make the policy outgrow the one size-capped remote command
+that carries it to the host's machine.
 
-A pair whose host file is not there yet is retried on later resolver changes
-rather than dropped: on a brand-new workspace, discovery beats the file into
+A host is reconciled only when discovery has something new to say about it:
+when its listing differs from the one last reconciled against, or when a newer
+snapshot has been applied while a drop is pending (below). Resolver changes
+fire far more often than that (on every service change, on every
+``notify_change``), and between two snapshots the listing is stale: an agent
+registered by something other than discovery (a permission request's file
+repair, ``mngr latchkey register-agent``) is not in it yet.
+
+Adding is immediate; dropping waits. A listing that includes the host's
+system-services agent is complete (the criterion the resolver's last-good
+topology uses too), and only a complete listing can say an agent is gone; one
+without it (a stopped host, a partial read) only ever adds. Even a complete
+listing can be wrong once, for an agent whose record could not be read that
+cycle, so a registered agent is dropped only when two consecutive complete
+listings, from two different snapshots, both lack it. A dropped agent's calls
+are refused until it is registered again, so a wrong drop would cost a
+workspace a discovery cycle of refused calls, and the second look is what keeps
+a single bad read from costing it that.
+
+A host whose file is not there yet is retried on later resolver changes rather
+than dropped: on a brand-new workspace, discovery beats the file into
 existence.
 
-A registration that changes the host file is also pushed to the host's own
+A reconcile that changes the host file is also pushed to the host's own
 machine, when it has one: a remote workspace's gateway enforces its own copy of
-the policy, and the baseline ``register_agent_for_host`` brings up to date is
-checked there. The push runs off the resolver's callback thread (which must
-stay non-blocking) and is coalesced per host, so a burst of registrations costs
-one round trip that carries the latest snapshot.
+the policy, and the baseline the edit brings up to date is checked there. The
+push runs off the resolver's callback thread (which must stay non-blocking) and
+is coalesced per host, so a burst of changes costs one round trip that carries
+the latest snapshot.
 
 A push for a host whose machine is not provisioned yet is held, not dropped.
-On a brand-new remote workspace the registration beats the provisioning pass
+On a brand-new remote workspace the first reconcile beats the provisioning pass
 that gives the machine its key: the host file lands when ``mngr create``
 returns, the key seconds later, and a push made in between finds no machine to
 carry to. Dropping it would leave the gateway on the deny-all default it was
@@ -34,6 +56,7 @@ real change of its state, which a provisioning pass is not).
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Sequence
 from typing import Final
 
 from loguru import logger
@@ -45,13 +68,19 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import find_host_system_services_agent
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
-from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.agent_setup import list_registered_agent_ids_for_host
+from imbue.mngr_latchkey.agent_setup import set_registered_agents_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -65,14 +94,113 @@ DEFAULT_MACHINE_POLL_INTERVAL_SECONDS: Final[float] = 2.0
 DEFAULT_MACHINE_WATCH_SECONDS: Final[float] = 600.0
 
 
+class _HostListing(FrozenModel):
+    """What one discovery snapshot says about a host: the agents on it, and whether that is all of them."""
+
+    agent_ids: frozenset[AgentId] = Field(description="Every agent the snapshot lists on the host; never empty.")
+    services_agent_id: AgentId | None = Field(
+        description=(
+            "The host's system-services agent when the snapshot lists it, which is when the listing is complete; "
+            "``None`` for a listing that may be missing agents."
+        )
+    )
+
+    @property
+    def is_complete(self) -> bool:
+        return self.services_agent_id is not None
+
+    @property
+    def push_address(self) -> AgentId:
+        """The agent a push of the host's policy is addressed by: any listed one resolves to the host."""
+        return self.services_agent_id if self.services_agent_id is not None else min(self.agent_ids)
+
+
+class _Reconciliation(FrozenModel):
+    """What this computer last pinned a host's registered agents against."""
+
+    listing: frozenset[AgentId] = Field(description="The agents the listing had.")
+    snapshot_count: int = Field(
+        description=(
+            "The resolver's count of applied snapshots when the listing was read, so a later listing is known to "
+            "come from a newer snapshot even when it reads the same."
+        )
+    )
+    absent_registered: frozenset[AgentId] = Field(
+        description="The registered agents the last complete listing lacked, dropped if the next one lacks them too."
+    )
+
+
+class _ReconciliationPlan(FrozenModel):
+    """What one reconcile of a host does to its registered agents, and what it leaves for the next one."""
+
+    target_agent_ids: frozenset[AgentId] = Field(description="The agents the host's file is pinned to.")
+    absent_registered: frozenset[AgentId] = Field(
+        description="The registered agents kept although the listing lacked them, for the next reconcile to judge."
+    )
+
+
+@pure
+def _host_listings(agents: Sequence[DiscoveredAgent]) -> dict[HostId, _HostListing]:
+    agents_by_host: dict[HostId, list[DiscoveredAgent]] = {}
+    for agent in agents:
+        agents_by_host.setdefault(agent.host_id, []).append(agent)
+    listings: dict[HostId, _HostListing] = {}
+    for host_id, host_agents in agents_by_host.items():
+        services_agent = find_host_system_services_agent(host_agents)
+        listings[host_id] = _HostListing(
+            agent_ids=frozenset(agent.agent_id for agent in host_agents),
+            services_agent_id=None if services_agent is None else services_agent.agent_id,
+        )
+    return listings
+
+
+@pure
+def _is_reconcile_due(last: _Reconciliation, listing: _HostListing, snapshot_count: int) -> bool:
+    """Whether discovery has said something new about a host since it was last reconciled.
+
+    A changed listing is new. So is an unchanged one from a newer snapshot,
+    but only while a drop is pending on it: that second look is what the
+    drop waits for, and reading the file on every snapshot otherwise would
+    buy nothing.
+    """
+    if last.listing != listing.agent_ids:
+        return True
+    return bool(last.absent_registered) and snapshot_count > last.snapshot_count
+
+
+@pure
+def _plan_reconciliation(
+    registered: frozenset[AgentId], listing: _HostListing, last: _Reconciliation | None
+) -> _ReconciliationPlan:
+    """Decide the agents a host's file is pinned to, given what is registered and what discovery lists.
+
+    Every listed agent is registered. A registered agent the listing lacks is
+    dropped only when the listing is complete and the previous complete
+    listing lacked it too; otherwise it is kept, and remembered as absent
+    when the listing is complete. A listing that is not complete carries the
+    remembered absences forward, minus any agent it lists again.
+    """
+    previously_absent = frozenset() if last is None else last.absent_registered
+    if not listing.is_complete:
+        return _ReconciliationPlan(
+            target_agent_ids=registered | listing.agent_ids,
+            absent_registered=previously_absent - listing.agent_ids,
+        )
+    absent = registered - listing.agent_ids
+    dropped = absent & previously_absent
+    return _ReconciliationPlan(
+        target_agent_ids=(registered - dropped) | listing.agent_ids,
+        absent_registered=absent - dropped,
+    )
+
+
 class LatchkeyAutoRegister(MutableModel):
-    """Subscribes to ``MngrCliBackendResolver`` and registers newly-seen agents.
+    """Subscribes to ``MngrCliBackendResolver`` and pins each managed host's registered agents to the ones it runs.
 
-    The underlying :func:`register_agent_for_host` is itself idempotent, so the
-    dedup set is purely an optimization -- correctness does not depend on it. It
-    is *not* atomic, though (it reads the host file, appends, and writes back),
-    which is why :meth:`_handle_pair` serializes it under ``_lock``.
-
+    A reconcile reads the host file, decides the new list and writes it back,
+    and change callbacks fire from several threads at once, so every reconcile
+    runs under ``_lock``, listing read included: a reconcile's listing is then
+    at least as new as the one behind any reconcile before it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -114,18 +242,12 @@ class LatchkeyAutoRegister(MutableModel):
         ),
     )
 
-    # ``(host_id, agent_id)`` pairs we have reached a terminal verdict on --
-    # registered, or failed against a permissions file we cannot repair.
-    # Guarded by ``_lock`` because the resolver fires callbacks from its
-    # envelope-consumer thread while tests (and potentially the FastAPI request
-    # thread) may also inspect state for assertions.
-    _processed_pairs: set[tuple[HostId, AgentId]] = PrivateAttr(default_factory=set)
-
-    # Pairs *still* waiting on a host permissions file. Deliberately kept out of
-    # ``_processed_pairs`` so a later resolver change retries them; this set
-    # exists only to keep the deferral off the log after the first time, so a
-    # pair is dropped again once it reaches a terminal verdict.
-    _deferred_pairs: set[tuple[HostId, AgentId]] = PrivateAttr(default_factory=set)
+    # What each host was last reconciled against, so a resolver change that
+    # tells nothing new about a host costs no read of its file. Guarded by ``_lock``.
+    _reconciliation_by_host: dict[HostId, _Reconciliation] = PrivateAttr(default_factory=dict)
+    # Hosts found without a permissions file, so the deferral is logged once per
+    # host rather than on every resolver change. Guarded by ``_lock``.
+    _hosts_awaiting_file: set[HostId] = PrivateAttr(default_factory=set)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     # Hosts whose file changed since their machine last received it, each with an
@@ -166,19 +288,79 @@ class LatchkeyAutoRegister(MutableModel):
         self._stop_event.set()
 
     def _on_change(self) -> None:
-        """Resolver change callback: register any newly-discovered agents, and retry the pushes held for a machine
-        whose watch has ended."""
-        for host_id, agent_id in self._collect_unprocessed_pairs():
-            self._handle_pair(host_id, agent_id)
+        """Resolver change callback: reconcile the hosts discovery said something new about, and retry the pushes
+        held for a machine whose watch has ended."""
+        for host_id, address_agent_id in self._reconcile_hosts():
+            self._schedule_push(host_id, address_agent_id)
         for host_id, agent_id in self._collect_hosts_whose_machine_appeared():
             self._schedule_push(host_id, agent_id)
+
+    def _reconcile_hosts(self) -> list[tuple[HostId, AgentId]]:
+        """Pin the file of every host discovery said something new about; the hosts whose file changed, each with
+        the agent its push is addressed by.
+
+        A destroyed host that still lingers in the snapshot is left alone, since
+        its policy is nobody's to enforce any more. A host without a file is
+        not recorded as reconciled, so it is looked at again on the next
+        resolver change (one ``stat`` each) and reconciled against the listing
+        of the moment its file appears.
+        """
+        pushes: list[tuple[HostId, AgentId]] = []
+        with self._lock:
+            snapshot = self.backend_resolver.get_discovered_agents_snapshot()
+            for host_id, listing in _host_listings(snapshot.agents).items():
+                if self.backend_resolver.get_host_state(host_id) is HostState.DESTROYED:
+                    continue
+                last = self._reconciliation_by_host.get(host_id)
+                if last is not None and not _is_reconcile_due(last, listing, snapshot.snapshot_count):
+                    continue
+                if not permissions_path_for_host(self.latchkey.plugin_data_dir, host_id).is_file():
+                    if host_id not in self._hosts_awaiting_file:
+                        self._hosts_awaiting_file.add(host_id)
+                        logger.debug(
+                            "Deferring the latchkey registration of host {}: no permissions file yet", host_id
+                        )
+                    continue
+                self._hosts_awaiting_file.discard(host_id)
+                if self._reconcile_locked(host_id, listing, last, snapshot.snapshot_count):
+                    pushes.append((host_id, listing.push_address))
+        return pushes
+
+    def _reconcile_locked(
+        self, host_id: HostId, listing: _HostListing, last: _Reconciliation | None, snapshot_count: int
+    ) -> bool:
+        """Pin ``host_id``'s registered agents per :func:`_plan_reconciliation`; whether the file changed.
+
+        A file that cannot be read or written is logged and recorded as
+        reconciled against this listing all the same, so it is tried again
+        when discovery next says something new about the host rather than on
+        every resolver change. Must be called with ``_lock`` held.
+        """
+        try:
+            registered = list_registered_agent_ids_for_host(self.latchkey.plugin_data_dir, host_id)
+            plan = _plan_reconciliation(registered, listing, last)
+            is_file_changed = set_registered_agents_for_host(
+                self.latchkey.plugin_data_dir, host_id, plan.target_agent_ids
+            )
+        except (LatchkeyStoreError, OSError) as e:
+            logger.warning(
+                "Failed to pin the registered agents of host {} to the ones discovery lists: {}", host_id, e
+            )
+            self._reconciliation_by_host[host_id] = _Reconciliation(
+                listing=listing.agent_ids, snapshot_count=snapshot_count, absent_registered=frozenset()
+            )
+            return False
+        self._reconciliation_by_host[host_id] = _Reconciliation(
+            listing=listing.agent_ids, snapshot_count=snapshot_count, absent_registered=plan.absent_registered
+        )
+        return is_file_changed
 
     def _collect_hosts_whose_machine_appeared(self) -> list[tuple[HostId, AgentId]]:
         """The held pushes whose host now has a machine of its own.
 
         One ``stat`` of the host's machine key per held host per resolver
-        change, like the deferred registrations' ``stat`` of the host file --
-        and, like those, paid for as long as the host has no machine: a local
+        change, like a file-less host's ``stat`` of its permissions file --
+        and, like that, paid for as long as the host has no machine: a local
         host never gets one, so its held push is never carried, which is the
         right outcome for a host whose gateway reads the file here. While a
         host's machine watch runs, the watch carries the push instead.
@@ -207,90 +389,6 @@ class LatchkeyAutoRegister(MutableModel):
                 e,
             )
             return True
-
-    def _collect_unprocessed_pairs(self) -> list[tuple[HostId, AgentId]]:
-        """Return discovered ``(host_id, agent_id)`` pairs not yet processed.
-
-        Snapshotted rather than iterated under the lock because
-        :meth:`_handle_pair` takes the same (non-reentrant) lock for the
-        duration of each pair's file work.
-        """
-        discovered = self.backend_resolver.list_discovered_agents()
-        with self._lock:
-            return [
-                (agent.host_id, agent.agent_id)
-                for agent in discovered
-                if (agent.host_id, agent.agent_id) not in self._processed_pairs
-            ]
-
-    def _handle_pair(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Register ``agent_id`` on ``host_id`` if Imbue Studio manages the host.
-
-        Hosts without an existing ``latchkey_permissions.json`` are *deferred*,
-        not dropped. A brand-new workspace reaches discovery before agent
-        creation's ``finalize_host_permissions`` links the file into place, so
-        treating the absence as final would leave the workspace's own agent out
-        of the host's ``minds-api-proxy`` allowlist for the rest of the app's
-        lifetime -- every ``/api/v1/agents/<id>/...`` call from it rejected 403.
-        Retrying settles at the first resolver change after the file appears;
-        agent creation fires one right after linking it. Its cost is one
-        ``stat`` per *resolver change*: besides every provider snapshot and
-        every changed agents snapshot, ``_on_change`` fires on every service
-        change a workspace emits and on the many request paths that call
-        ``notify_change``. A host that genuinely is not managed by Imbue
-        Studio pays that stat forever, since we still refuse to conjure it
-        a file from a discovery event alone. Hence the one-shot deferral log: the
-        stat is cheap, a log line per resolver change is not.
-
-        On infrastructure failure (malformed file, IO error) we log a warning and
-        mark the pair as processed so we do not retry on every subsequent
-        discovery tick -- the operator can recover with ``mngr latchkey
-        register-agent`` once the underlying file issue is resolved.
-
-        ``_lock`` is held for the whole body, including the file work.
-        :func:`register_agent_for_host` reads the host file, appends this agent
-        to the allowlist and writes it back, and change callbacks fire from
-        several threads at once (the envelope consumer plus any request thread
-        calling ``notify_change``). Two threads registering different agents on
-        one host would otherwise interleave that read-modify-write and drop one
-        of them -- permanently, since the loser is marked processed all the same.
-        """
-        permissions_path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        with self._lock:
-            # Two threads can collect the same pair before either finishes it.
-            if (host_id, agent_id) in self._processed_pairs:
-                return
-            if not permissions_path.is_file():
-                is_first_deferral = (host_id, agent_id) not in self._deferred_pairs
-                self._deferred_pairs.add((host_id, agent_id))
-                if is_first_deferral:
-                    logger.debug(
-                        "Deferring latchkey auto-register for agent {} on host {}: no permissions file at {} yet",
-                        agent_id,
-                        host_id,
-                        permissions_path,
-                    )
-                return
-
-            try:
-                is_file_changed = register_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
-            except (LatchkeyStoreError, OSError) as e:
-                logger.warning(
-                    "Failed to auto-register agent {} on host {} in latchkey permissions: {}",
-                    agent_id,
-                    host_id,
-                    e,
-                )
-            else:
-                logger.debug(
-                    "Auto-registered agent {} on host {} in latchkey permissions",
-                    agent_id,
-                    host_id,
-                )
-                if is_file_changed:
-                    self._schedule_push(host_id, agent_id)
-            self._processed_pairs.add((host_id, agent_id))
-            self._deferred_pairs.discard((host_id, agent_id))
 
     def _schedule_push(self, host_id: HostId, agent_id: AgentId) -> None:
         """Mark ``host_id``'s file as changed and make sure a worker will carry it over.
@@ -335,7 +433,7 @@ class LatchkeyAutoRegister(MutableModel):
         """Push ``host_id``'s policy to its machine until no change is left waiting.
 
         Each push reads the canonical file at push time, so the last one to run
-        carries everything registered up to then.
+        carries everything reconciled up to then.
 
         A host with no machine yet keeps its change held rather than pushing
         into nothing: the push would be reported done while the machine, once
@@ -345,11 +443,12 @@ class LatchkeyAutoRegister(MutableModel):
         does (:meth:`_collect_hosts_whose_machine_appeared`).
 
         A machine that will not take a push is logged as an error and not
-        retried here. There is no user waiting on an auto-registration to tell,
-        and the registration does *not* heal itself later: the machine owns the
-        policy, so the next read of it adopts the machine's copy over this one
-        and the registration is lost. Recover with ``mngr latchkey
-        register-agent`` once the machine is reachable again.
+        retried here. There is no user waiting on a reconcile to tell, and the
+        change does *not* heal itself later: the machine owns the policy, so
+        the next read of it adopts the machine's copy over this one and the
+        change is lost, until the next reconcile of the host writes the file
+        again (recover sooner with ``mngr latchkey register-agent`` once the
+        machine is reachable).
         """
         while (agent_id := self._claim_pending_push(host_id)) is not None:
             if not self._has_machine(host_id):
@@ -369,8 +468,8 @@ class LatchkeyAutoRegister(MutableModel):
                 self.push_permissions_to_machine(str(agent_id))
             except MachineOperationError as e:
                 logger.error(
-                    "Failed to push the latchkey permissions of host {} to its machine after registering agent {}; "
-                    "the registration will be lost when the machine is next read: {}",
+                    "Failed to push the latchkey permissions of host {} to its machine (addressed by agent {}); "
+                    "the change to the registered agents will be lost when the machine is next read: {}",
                     host_id,
                     agent_id,
                     e,

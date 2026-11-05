@@ -101,8 +101,10 @@ _SLOW_REMOTE_COMMAND_WARNING_THRESHOLD_SECONDS: Final[float] = 15.0
 
 # A machine command travels as one argument of the remote ``sh -c``, and Linux
 # caps any one argv string at 128 KiB (``MAX_ARG_STRLEN``). The base64 payloads
-# a document embeds are a few KiB each in practice; a command past this size
-# is refused rather than carried by a second, slower code path.
+# a document embeds are a few KiB each in practice, except a policy, which
+# grows with the agents registered on the host and travels without whitespace
+# for that reason (:mod:`imbue.mngr_latchkey.remote._machine_policy`); a command
+# past this size is refused rather than carried by a second, slower code path.
 _MAX_REMOTE_COMMAND_BYTES: Final[int] = 100_000
 
 # Delimits the document heredoc. The document is keys and base64, so it can

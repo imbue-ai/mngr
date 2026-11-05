@@ -59,6 +59,7 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_for_value
@@ -626,13 +627,24 @@ def dump_permissions_text(config: LatchkeyPermissionsConfig) -> str:
     An empty ``schemas`` dict is omitted from the output (detent accepts
     both shapes); ``rules`` is always emitted, even when empty.
     """
+    return config.model_dump_json(indent=2, exclude=_excluded_permissions_fields(config))
+
+
+def dump_compact_permissions_text(config: LatchkeyPermissionsConfig) -> str:
+    """Serialize a permissions config with no whitespace between its tokens, for a wire that charges per byte.
+
+    The same document as :func:`dump_permissions_text`, which is what a copy
+    read back from such a wire is written out as here.
+    """
+    return config.model_dump_json(exclude=_excluded_permissions_fields(config))
+
+
+@pure
+def _excluded_permissions_fields(config: LatchkeyPermissionsConfig) -> set[str]:
     # Pydantic's ``exclude=`` drops the field entirely; we drop ``schemas``
     # when empty so existing on-disk files (and the gateway's own writers)
     # keep emitting the same ``{"rules": ...}`` shape they always have.
-    exclude: set[str] = set()
-    if not config.schemas:
-        exclude.add("schemas")
-    return config.model_dump_json(indent=2, exclude=exclude)
+    return {"schemas"} if not config.schemas else set()
 
 
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
@@ -640,7 +652,7 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
 
     Used by the pre-gateway-startup write paths (deny-all default,
     admin file, per-agent opaque baseline) and by the host-allowed-agent
-    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
+    editors in :mod:`imbue.mngr_latchkey.agent_setup`.
     User-driven per-service grants still go through the gateway's
     ``permissions`` extension instead.
     """
@@ -668,8 +680,9 @@ def load_permissions_from_text(raw: str) -> LatchkeyPermissionsConfig:
 def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
     """Read a permissions config from disk.
 
-    Used by the host-allowed-agent editor (and tests) to read + extend
-    an existing permissions file. The reverse of :func:`save_permissions`:
+    Used by the host-allowed-agent editors in
+    :mod:`imbue.mngr_latchkey.agent_setup` (and tests) to read an existing
+    permissions file before editing it. The reverse of :func:`save_permissions`:
     parses the JSON file via Pydantic, which enforces the documented
     shape (``rules`` is a list of ``{scope: [perm, ...]}`` objects,
     ``schemas`` is an object of JSON values) and silently drops any

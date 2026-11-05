@@ -28,6 +28,7 @@ from imbue.mngr_latchkey.remote._machine import _MAX_REMOTE_COMMAND_BYTES
 from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import apply_remote_state
 from imbue.mngr_latchkey.remote._machine import read_remote_state
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
@@ -48,6 +49,7 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import dump_permissions_text
@@ -56,7 +58,7 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
-_SLACK_ANY = '{"rules": [{"slack-api": ["any"]}]}'
+_SLACK_ANY = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["any"]},)))
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 _CUSTOM_CONFIG = merge_minds_latchkey_config(
     None, {"custom_api_example_com": build_custom_service_registration("api.example.com", "https")}
@@ -109,7 +111,7 @@ def test_the_grant_merges_the_named_account_and_installs_the_policy(tmp_path: Pa
 
     assert vps.machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
     permissions_path = vps.latchkey_dir / PERMISSIONS_CONFIG_FILENAME
-    assert permissions_path.read_text() == _SLACK_ANY
+    assert permissions_path.read_text() == project_policy_for_machine(_SLACK_ANY)
     assert stat.S_IMODE(permissions_path.stat().st_mode) == 0o600
     # Neither the scratch directory nor the rename-in temp file is left behind.
     assert vps.latchkey_dir_entries() == [
@@ -216,7 +218,7 @@ def test_a_permissions_snapshot_needs_no_key_at_all(tmp_path: Path) -> None:
     _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY), failure_description="policy")
 
     permissions_path = vps.latchkey_dir / PERMISSIONS_CONFIG_FILENAME
-    assert permissions_path.read_text() == _SLACK_ANY
+    assert permissions_path.read_text() == project_policy_for_machine(_SLACK_ANY)
     assert stat.S_IMODE(permissions_path.stat().st_mode) == 0o600
     assert vps.latchkey_dir_entries() == [REMOTE_EXTENSIONS_DIR_NAME, PERMISSIONS_CONFIG_FILENAME]
     assert vps.secrets_dir_entries() == []
@@ -367,7 +369,7 @@ def test_the_permissions_and_rules_update_installs_both_files(tmp_path: Path) ->
     rules_path = vps.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME
     assert rules_path.read_text() == _SLACK_ROUTED
     assert stat.S_IMODE(rules_path.stat().st_mode) == 0o600
-    assert vps.machine_permissions() == _SLACK_ANY
+    assert vps.machine_permissions() == project_policy_for_machine(_SLACK_ANY)
     # Neither rename-in temp file is left behind.
     assert vps.latchkey_dir_entries() == [
         REMOTE_EXTENSIONS_DIR_NAME,
@@ -488,7 +490,7 @@ def test_a_grant_costs_one_remote_command(tmp_path: Path) -> None:
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
     assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
-    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
 
 
 def test_a_grant_that_changes_a_route_still_costs_one_remote_command(tmp_path: Path) -> None:
@@ -501,7 +503,7 @@ def test_a_grant_that_changes_a_route_still_costs_one_remote_command(tmp_path: P
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
     assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
-    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
 
 
@@ -607,7 +609,7 @@ def test_a_permissions_snapshot_costs_one_remote_command_and_no_home_probe(tmp_p
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
-    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
 
 
 def test_a_permissions_snapshot_is_run_without_its_command_reaching_the_logs(tmp_path: Path) -> None:
@@ -652,7 +654,7 @@ def test_permissions_and_desktop_egress_rules_cost_one_remote_command_between_th
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
-    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
 
 
@@ -784,7 +786,7 @@ def test_the_stamp_is_installed_beside_the_policy_it_describes(tmp_path: Path) -
         failure_description="policy and stamp",
     )
 
-    assert vps.machine_permissions() == _SLACK_ANY
+    assert vps.machine_permissions() == project_policy_for_machine(_SLACK_ANY)
     assert vps.machine_permissions_format_version() == 1
     stamp_path = vps.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME
     assert stamp_path.read_text() == "1"
@@ -864,7 +866,7 @@ def test_a_grant_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == MACHINE_KEY
     assert as_vps(outer).machine_accounts() == {"slack": ["a@example.com"]}
-    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
 
 
 def test_a_disconnect_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -> None:

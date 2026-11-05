@@ -446,7 +446,7 @@ def test_a_read_seeds_a_machine_that_has_no_policy_of_its_own(tmp_path: Path) ->
 
     MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
 
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
 
 
 def test_a_read_seeds_a_machine_holding_only_the_rule_less_default_from_this_computers_copy(tmp_path: Path) -> None:
@@ -486,7 +486,7 @@ def test_a_seed_carries_this_computers_desktop_egress_rules_when_it_has_them(tmp
 
     fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
 
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
     assert read_host_desktop_egress_rules(data_dir, host_id) == _SLACK_ROUTED
     assert fetched.desktop_egress_rules_json == _SLACK_ROUTED
@@ -556,7 +556,7 @@ def test_migrating_a_machines_older_policy_hands_it_back_with_its_stamp(tmp_path
     assert migrated is not None
     assert rule_keys_of_permissions_json(migrated.permissions_json) == ["slack-api", "migrated-6231"]
     assert migrated.permissions_format_version == 1
-    assert as_vps(outer).machine_permissions() == migrated.permissions_json
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(migrated.permissions_json)
     assert as_vps(outer).machine_permissions_format_version() == 1
     data_dir = plugin_data_dir(latchkey.latchkey_directory)
     assert permissions_path_for_host(data_dir, host_id).read_text() == migrated.permissions_json
@@ -621,7 +621,7 @@ def test_a_seed_carries_this_computers_stamp(tmp_path: Path) -> None:
 
     MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
 
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
     assert len(as_vps(outer).recorded) == 2
 
@@ -670,7 +670,7 @@ def test_permissions_and_desktop_egress_rules_reach_the_machine_without_touching
 
     credentials.set_permissions_and_desktop_egress_rules(SLACK_GRANTED, _SLACK_ROUTED)
 
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -688,7 +688,7 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
     credentials.connect_service_with_permissions("slack", "a@example.com", SLACK_GRANTED)
 
     assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
 
@@ -704,7 +704,7 @@ def test_a_grant_that_changes_a_route_lands_all_three_on_the_machine_in_one_roun
     )
 
     assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -730,7 +730,7 @@ def test_a_permissions_snapshot_reaches_a_machine_that_has_lost_its_key(tmp_path
 
     credentials.set_permissions(SLACK_GRANTED)
 
-    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
     assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) is None
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []

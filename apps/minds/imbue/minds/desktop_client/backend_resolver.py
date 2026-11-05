@@ -82,6 +82,15 @@ class AgentDisplayInfo(FrozenModel):
     )
 
 
+class DiscoveredAgentsSnapshot(FrozenModel):
+    """The agents of one applied discovery snapshot, with the running count that tells it apart from the one before."""
+
+    snapshot_count: int = Field(
+        description="How many agent snapshots had been applied once this one was, this one included."
+    )
+    agents: tuple[DiscoveredAgent, ...] = Field(description="Every agent the snapshot lists.")
+
+
 class ServiceLogParseError(ValueError):
     """Raised when a service log record cannot be parsed."""
 
@@ -816,6 +825,19 @@ def agents_named_by_id(agents: Sequence[DiscoveredAgent], agent_id: AgentId) -> 
     return sorted(members, key=_chat_member_ordinal, reverse=True)
 
 
+@pure
+def find_host_system_services_agent(host_agents: Iterable[DiscoveredAgent]) -> DiscoveredAgent | None:
+    """The ``system-services`` agent among one host's discovered agents, or ``None`` when the listing lacks it.
+
+    Its presence is what makes a host's listing a complete enumeration: a
+    workspace runs it for as long as it exists, so a listing without it is a
+    partial read, or a host that is stopped, and says nothing about which
+    agents the host still has. The readers of a host's discovery listing that
+    need to know whether it is complete decide by this.
+    """
+    return next((agent for agent in host_agents if str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME), None)
+
+
 def _display_info_from_agent(agent: DiscoveredAgent) -> AgentDisplayInfo:
     """Project a ``DiscoveredAgent`` into the display fields the UI reads."""
     return AgentDisplayInfo(
@@ -993,7 +1015,7 @@ class _HostTransitionRetention(FrozenModel):
 # Private attributes that are machinery rather than state the resolver answers
 # from, so changing them never wakes the change callbacks.
 _UNOBSERVED_PRIVATE_ATTRS: Final[frozenset[str]] = frozenset(
-    {"_lock", "_on_change_callbacks", "_logged_malformed_color_agents"}
+    {"_lock", "_on_change_callbacks", "_logged_malformed_color_agents", "_agents_snapshot_count"}
 )
 
 
@@ -1019,6 +1041,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
     )
 
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
+    # How many agent snapshots have been applied, including ones that changed
+    # nothing (and so fired no change callback): a listing read beside a higher
+    # count than an earlier one is from a newer snapshot even when it reads the
+    # same. Unobserved, so applying an unchanged snapshot still wakes nobody.
+    _agents_snapshot_count: int = PrivateAttr(default=0)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     # agent_id_str -> {service_name: registered SVG icon markup}. Parallel to
     # _services_by_agent; untrusted workspace content, sanitized by consumers.
@@ -1195,6 +1222,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         topology_to_write: _LastGoodAgentTopology | None = None
         with self._changing_state():
             self._agents_result = result
+            self._agents_snapshot_count += 1
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             self._sweep_transition_retentions_locked(result)
@@ -1314,7 +1342,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             # Never (re-)record a host observed DESTROYED; the prune below owns removal.
             if host_state_by_host_id.get(host_id_str) is HostState.DESTROYED:
                 continue
-            if not any(str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME for agent in host_agents):
+            if find_host_system_services_agent(host_agents) is None:
                 continue
             new_records = tuple(_to_agent_record(agent) for agent in host_agents)
             if self._last_good_agents_by_host.get(host_id_str) != new_records:
@@ -1612,6 +1640,19 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         with self._lock:
             return self._agents_result.discovered_agents
+
+    def get_discovered_agents_snapshot(self) -> DiscoveredAgentsSnapshot:
+        """The latest discovery snapshot's agents together with the count of snapshots applied so far.
+
+        For a caller that acts on a listing only once a *newer* snapshot has
+        confirmed it: two reads whose counts differ came from two different
+        snapshots, however alike their agents read, which
+        :meth:`list_discovered_agents` alone cannot tell.
+        """
+        with self._lock:
+            return DiscoveredAgentsSnapshot(
+                snapshot_count=self._agents_snapshot_count, agents=self._agents_result.discovered_agents
+            )
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.

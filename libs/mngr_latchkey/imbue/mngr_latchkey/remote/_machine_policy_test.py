@@ -38,8 +38,32 @@ def test_the_machines_copy_drops_the_gate_rule_and_keeps_its_schema() -> None:
     assert json.loads(projected)["schemas"] == json.loads(_BASELINE_JSON)["schemas"]
 
 
-def test_a_policy_without_the_gate_travels_byte_for_byte() -> None:
-    assert project_policy_for_machine(SLACK_GRANTED) == SLACK_GRANTED
+def test_a_policy_without_the_gate_loses_only_its_whitespace() -> None:
+    """The one remote command that carries a policy has a size cap, so the machine's copy is spelled as tightly as JSON allows."""
+    projected = project_policy_for_machine(SLACK_GRANTED)
+
+    assert projected == '{"rules":[{"slack-api":["slack-read-all"]}]}'
+    assert json.loads(projected) == json.loads(SLACK_GRANTED)
+
+
+def test_a_registered_host_policy_travels_far_smaller_than_its_file(tmp_path: Path) -> None:
+    """What the cap is fought over: a host's registered-agent list, which indentation more than doubles."""
+    host_id = HostId.generate()
+    for _ in range(50):
+        register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    policy = permissions_path_for_host(tmp_path, host_id).read_text()
+
+    projected = project_policy_for_machine(policy)
+
+    assert len(projected.encode("utf-8")) < len(policy.encode("utf-8")) * 2 // 3
+    assert restore_policy_from_machine(projected) == policy
+
+
+def test_restoring_the_machines_compact_copy_writes_it_as_this_plugin_writes_a_file() -> None:
+    """A copy adopted from the machine lands here in the shape every other policy file has, gate or no gate."""
+    restored = restore_policy_from_machine('{"rules":[{"slack-api":["any"]}]}')
+
+    assert restored == dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["any"]},)))
 
 
 def test_restoring_the_machines_copy_gives_back_what_was_pushed(tmp_path: Path) -> None:

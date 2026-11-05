@@ -689,12 +689,12 @@ registration that changes the file is also pushed to the workspace's
 machine (see "Grants follow the same ownership" below). Reconciliation only
 *adds permissions to the `latchkey-self` rule*; it never introduces a
 rule, so a baseline addition shaped as a new rule reaches newly-created
-host files only. Auto-registration de-dupes an agent it has already
-registered for the life of the process, so a permission addition lands on
-the first discovery after the app restarts, not mid-run. An agent still
-waiting on its host file is the exception: it is retried on every
-resolver change, so its registration (and the reconciliation that rides
-along) does land mid-run.
+host files only. Auto-registration rewrites a host's file only when
+discovery says something new about the host (see below), so a permission
+addition lands on the first discovery after the app restarts, or on the next
+change to the host's agents, not on an arbitrary resolver change mid-run. A
+host still waiting on its file is the exception: it is looked at on every
+resolver change until the file is there.
 
 Per-agent isolation comes from the latchkey gateway's permissions
 file. The agent baseline grants the whole per-agent path prefix --
@@ -720,6 +720,33 @@ calls as the chat's agent when the chat becomes watched) and the
 folder-sync state read (`GET .../agents/<id>/folder-syncs`, which any agent
 of a workspace may call under its own id) are all covered by the same rule.
 
+The same stream also *unregisters* agents: the allowlist is pinned to the
+agents discovery lists on the host, in one write
+(`imbue.mngr_latchkey.agent_setup.set_registered_agents_for_host`), and the
+pinned file is pushed to the workspace's machine like a registration. Adding
+is immediate; dropping waits. A listing that includes a host's
+`system-services` agent is a complete enumeration of the host (the criterion
+the resolver's last-good topology uses), and only a complete listing can say
+an agent is gone; one without it (a partial read, a stopped host) only ever
+adds. Even a complete listing can be wrong once, for an agent whose record
+could not be read that cycle, so a registered agent is dropped only when two
+consecutive complete listings, from two different discovery snapshots, both
+lack it; a listing that brings it back in between starts the count over, and
+a listing without the services agent in between carries it. A host is looked
+at only when discovery says something new about it (its listing changed, or a
+newer snapshot arrived while a drop is pending), never on the many resolver
+changes discovery did not drive, which is also what protects an agent
+registered outside discovery (a permission request's file repair, `mngr
+latchkey register-agent`) until discovery has twice confirmed it gone. A
+destroyed host that still lingers in discovery is left alone. Without this
+the allowlist only ever grew -- every chat and helper the workspace ever ran
+-- and since the whole policy travels to the machine in one remote command
+capped at 100,000 bytes, a long-lived remote workspace eventually could not
+take a sign-in or a grant at all. Existing workspaces are cleaned up on the
+second complete listing after the app starts, or, for a workspace whose policy
+this computer does not hold yet (it is adopted from the machine on the first
+read), on the second complete listing once the file is there.
+
 The bug-report route (`POST .../agents/<...>/report`) is the one
 exception: it sits in a rule *ahead* of the unauthorized gate, so it
 works for a caller with no per-agent registration at all -- on host files
@@ -737,7 +764,11 @@ enforces its own copy of the host's policy (pushed as a whole snapshot on
 every edit and adopted back on every read, see
 [Per-machine credentials](#per-machine-credentials)), and the copy that
 crosses the wire is the policy minus the
-`minds-api-proxy-per-agent-unauthorized` rule, in both directions
+`minds-api-proxy-per-agent-unauthorized` rule, in both directions, and
+without the whitespace between its JSON tokens on the way out (the whole
+policy has to fit the one remote command that carries it, and the
+registered-agent list is most of it; the copy read back is written here in
+the usual indented form)
 (`libs/mngr_latchkey/imbue/mngr_latchkey/remote/_machine_policy.py`); the
 scope schema, with its registered-agent list, travels with the rest of the
 policy as before. The machine never serves a per-agent route itself: its

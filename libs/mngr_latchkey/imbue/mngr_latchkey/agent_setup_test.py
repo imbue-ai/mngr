@@ -33,10 +33,12 @@ from imbue.mngr_latchkey.agent_setup import _does_hosts_file_name_outer_host
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import fall_back_to_reverse_tunneled_gateway_url
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
+from imbue.mngr_latchkey.agent_setup import list_registered_agent_ids_for_host
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.agent_setup import reconcile_baseline_permissions
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.agent_setup import set_registered_agents_for_host
 from imbue.mngr_latchkey.baseline_permissions import ADDITIONAL_SERVICE_SCHEMAS
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -505,6 +507,10 @@ def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[JsonValue]:
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
 
 
+def _registered_agent_ids_for_host(tmp_path: Path, host_id: HostId) -> list[str]:
+    return [_extract_agent_id_from_anyof_entry(entry) for entry in _allowed_anyof_for_host(tmp_path, host_id)]
+
+
 def test_register_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
     """First call for a host writes the baseline + adds the agent."""
     host_id = HostId.generate()
@@ -528,8 +534,7 @@ def test_register_agent_for_host_rebuilds_a_rule_less_file_from_the_baseline(tmp
 
     assert register_agent_for_host(tmp_path, host_id, agent_id) is True
 
-    any_of = _allowed_anyof_for_host(tmp_path, host_id)
-    assert [_extract_agent_id_from_anyof_entry(entry) for entry in any_of] == [str(agent_id)]
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == [str(agent_id)]
     rebuilt = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
     assert len(rebuilt["rules"]) == len(AGENT_BASELINE_PERMISSIONS.rules)
     assert read_permissions_format_version(tmp_path, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
@@ -554,9 +559,147 @@ def test_register_agent_for_host_accumulates_across_agents(tmp_path: Path) -> No
     register_agent_for_host(tmp_path, host_id, agent_a)
     register_agent_for_host(tmp_path, host_id, agent_b)
     register_agent_for_host(tmp_path, host_id, agent_c)
-    any_of = _allowed_anyof_for_host(tmp_path, host_id)
-    parsed = {_extract_agent_id_from_anyof_entry(e) for e in any_of}
-    assert parsed == {str(agent_a), str(agent_b), str(agent_c)}
+    assert set(_registered_agent_ids_for_host(tmp_path, host_id)) == {str(agent_a), str(agent_b), str(agent_c)}
+
+
+def test_set_keeps_the_registered_agents_it_names_in_order_and_adds_the_rest_after_them(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    gone_a, kept_a, gone_b, kept_b, new_agent = (AgentId.generate() for _ in range(5))
+    for agent_id in (gone_a, kept_a, gone_b, kept_b):
+        register_agent_for_host(tmp_path, host_id, agent_id)
+
+    assert set_registered_agents_for_host(tmp_path, host_id, {kept_b, kept_a, new_agent}) is True
+
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == [str(kept_a), str(kept_b), str(new_agent)]
+
+
+def test_set_leaves_the_file_alone_when_the_list_already_matches(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    agent_a = AgentId.generate()
+    agent_b = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_a)
+    register_agent_for_host(tmp_path, host_id, agent_b)
+    path = permissions_path_for_host(tmp_path, host_id)
+    text_before = path.read_text()
+
+    assert set_registered_agents_for_host(tmp_path, host_id, {agent_b, agent_a}) is False
+
+    assert path.read_text() == text_before
+
+
+def test_set_can_empty_the_list_and_a_registration_fills_it_again(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    returning = AgentId.generate()
+
+    assert set_registered_agents_for_host(tmp_path, host_id, set()) is True
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == []
+    assert register_agent_for_host(tmp_path, host_id, returning) is True
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == [str(returning)]
+
+
+def test_set_preserves_everything_around_the_list(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    path = permissions_path_for_host(tmp_path, host_id)
+    before = json.loads(path.read_text())
+
+    set_registered_agents_for_host(tmp_path, host_id, set())
+
+    after = json.loads(path.read_text())
+    assert after["rules"] == before["rules"]
+    unauthorized = after["schemas"].pop("minds-api-proxy-per-agent-unauthorized")
+    before_unauthorized = before["schemas"].pop("minds-api-proxy-per-agent-unauthorized")
+    assert after["schemas"] == before["schemas"]
+    assert unauthorized["properties"]["path"]["pattern"] == before_unauthorized["properties"]["path"]["pattern"]
+    assert unauthorized["properties"]["path"]["not"]["anyOf"] == []
+
+
+def test_set_creates_a_stamped_baseline_file_for_a_host_without_one(tmp_path: Path) -> None:
+    """Pinning a host that has no file yet starts it from the baseline, exactly as registering its first agent would."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+
+    assert set_registered_agents_for_host(tmp_path, host_id, {agent_id}) is True
+
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == [str(agent_id)]
+    written = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
+    assert len(written["rules"]) == len(AGENT_BASELINE_PERMISSIONS.rules)
+    assert read_permissions_format_version(tmp_path, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
+def test_set_to_an_empty_set_still_gives_a_host_without_a_file_its_stamped_baseline(tmp_path: Path) -> None:
+    """The baseline is written for a fresh host whatever the set, as the first registration writes it; once there, an empty pin costs nothing."""
+    host_id = HostId.generate()
+
+    assert set_registered_agents_for_host(tmp_path, host_id, set()) is True
+
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == []
+    written = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
+    assert len(written["rules"]) == len(AGENT_BASELINE_PERMISSIONS.rules)
+    assert read_permissions_format_version(tmp_path, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
+    assert set_registered_agents_for_host(tmp_path, host_id, set()) is False
+
+
+def test_set_rebuilds_a_rule_less_file_from_the_baseline(tmp_path: Path) -> None:
+    """The deny-all default a machine is seeded with lists nobody and cannot: it is replaced, as a registration replaces it."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    save_permissions(permissions_path_for_host(tmp_path, host_id), LatchkeyPermissionsConfig())
+
+    assert set_registered_agents_for_host(tmp_path, host_id, {agent_id}) is True
+
+    assert _registered_agent_ids_for_host(tmp_path, host_id) == [str(agent_id)]
+    rebuilt = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
+    assert len(rebuilt["rules"]) == len(AGENT_BASELINE_PERMISSIONS.rules)
+
+
+def test_set_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
+        {"pattern": "^/somewhere-else/(.*)$"}
+    ]
+    path.write_text(json.dumps(config))
+
+    with pytest.raises(LatchkeyStoreError, match="hand-edited"):
+        set_registered_agents_for_host(tmp_path, host_id, set())
+
+
+def test_list_reads_back_the_registered_agents(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    agent_a = AgentId.generate()
+    agent_b = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_a)
+    register_agent_for_host(tmp_path, host_id, agent_b)
+
+    assert list_registered_agent_ids_for_host(tmp_path, host_id) == {agent_a, agent_b}
+
+
+def test_list_is_empty_for_a_host_without_a_file_and_for_a_rule_less_file(tmp_path: Path) -> None:
+    missing_host = HostId.generate()
+    rule_less_host = HostId.generate()
+    save_permissions(permissions_path_for_host(tmp_path, rule_less_host), LatchkeyPermissionsConfig())
+
+    assert list_registered_agent_ids_for_host(tmp_path, missing_host) == frozenset()
+    assert list_registered_agent_ids_for_host(tmp_path, rule_less_host) == frozenset()
+    assert not permissions_path_for_host(tmp_path, missing_host).exists()
+
+
+def test_list_raises_on_a_registered_id_that_is_not_an_agent_id(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
+        {"pattern": "^/minds-api-proxy/api/v1/agents/not-an-agent/(.*)$"}
+    ]
+    path.write_text(json.dumps(config))
+
+    with pytest.raises(LatchkeyStoreError, match="not an agent id"):
+        list_registered_agent_ids_for_host(tmp_path, host_id)
 
 
 def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:

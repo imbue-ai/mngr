@@ -741,6 +741,25 @@ def test_update_agents_fires_on_change_only_when_the_snapshot_changes() -> None:
     assert len(changes) == 2
 
 
+def test_every_applied_agents_snapshot_advances_the_count_even_when_nothing_changed() -> None:
+    """The count is how a listing is known to be a newer snapshot's when it reads like the last one's; it wakes nobody."""
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = MngrCliBackendResolver()
+    changes: list[None] = []
+    resolver.add_on_change_callback(lambda: changes.append(None))
+    result = ParsedAgentsResult(agent_ids=(agent,), discovered_agents=(_workspace_agent(host, agent),))
+
+    resolver.update_agents(result)
+    first = resolver.get_discovered_agents_snapshot()
+    resolver.update_agents(result)
+    second = resolver.get_discovered_agents_snapshot()
+
+    assert first.agents == second.agents == (_workspace_agent(host, agent),)
+    assert second.snapshot_count == first.snapshot_count + 1
+    assert len(changes) == 1
+
+
 def test_an_unchanged_snapshot_that_sweeps_an_override_still_fires_on_change() -> None:
     """Dropping an override changes what the resolver answers even when discovery reported nothing new."""
     host = HostId.generate()

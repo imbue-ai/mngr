@@ -14,6 +14,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
@@ -21,6 +22,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
@@ -30,15 +32,20 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 
-def _make_discovered(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+def _make_discovered(host_id: HostId, agent_id: AgentId, agent_name: AgentName | None = None) -> DiscoveredAgent:
     """Build a minimal ``DiscoveredAgent`` for resolver fixtures."""
     return DiscoveredAgent(
         host_id=host_id,
         agent_id=agent_id,
-        agent_name=AgentName(f"agent-{str(agent_id)[:8]}"),
+        agent_name=agent_name if agent_name is not None else AgentName(f"agent-{str(agent_id)[:8]}"),
         provider_name=ProviderInstanceName("docker"),
         certified_data={},
     )
+
+
+def _make_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+    """The system-services agent every workspace runs, whose presence makes a host's listing complete."""
+    return _make_discovered(host_id, agent_id, agent_name=AgentName(SYSTEM_SERVICES_AGENT_NAME))
 
 
 def _push_agents(resolver: MngrCliBackendResolver, *agents: DiscoveredAgent) -> None:
@@ -56,6 +63,18 @@ def _read_allowed_anyof(plugin_data_dir: Path, host_id: HostId) -> list[dict[str
     """Return the ``anyOf`` allow-list for ``host_id`` from its permissions file."""
     config = json.loads(permissions_path_for_host(plugin_data_dir, host_id).read_text())
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
+
+
+def _registered_agent_ids(plugin_data_dir: Path, host_id: HostId) -> set[str]:
+    """The agent ids ``host_id``'s permissions file registers, read back out of their path patterns."""
+    return {
+        entry["pattern"].split("/agents/")[1].split("/")[0] for entry in _read_allowed_anyof(plugin_data_dir, host_id)
+    }
+
+
+def _register_all(latchkey: Latchkey, host_id: HostId, *agent_ids: AgentId) -> None:
+    for agent_id in agent_ids:
+        register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
 
 
 def _provision_machine(latchkey: Latchkey, host_id: HostId) -> None:
@@ -235,9 +254,8 @@ def test_idempotent_across_repeated_resolver_changes(
 ) -> None:
     """Resolver changes that leave the discovered agents alone do not duplicate ``anyOf`` entries.
 
-    ``register_agent_for_host`` is itself idempotent, but this also
-    exercises the in-memory dedup set so we know the steady-state
-    callback no-ops cleanly.
+    Pinning is idempotent, and a host whose listing has not moved is not
+    even read again, so the steady-state callback no-ops cleanly.
     """
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -294,11 +312,11 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
     resolver: MngrCliBackendResolver,
     build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A LatchkeyStoreError is swallowed, and the pair is marked processed.
+    """A LatchkeyStoreError is swallowed, and the host counts as reconciled against that listing.
 
-    The dedup set is updated even on failure so a malformed
-    permissions file does not trigger a write attempt on every
-    subsequent discovery tick.
+    The listing is recorded even on failure so a malformed permissions file
+    does not trigger a write attempt on every subsequent resolver change,
+    only when discovery next says something new about the host.
     """
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -418,7 +436,9 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     _push_agents(resolver, _make_discovered(host_id, first_agent), _make_discovered(host_id, second_agent))
 
     _wait_for_pushes(recorder, 2)
-    assert recorder.pushed_workspace_agent_ids == [str(first_agent), str(second_agent)]
+    assert len(recorder.pushed_workspace_agent_ids) == 2
+    assert recorder.pushed_workspace_agent_ids[0] == str(first_agent)
+    assert recorder.pushed_workspace_agent_ids[1] in {str(first_agent), str(second_agent)}
 
 
 def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it_is(
@@ -564,3 +584,226 @@ def test_a_push_scheduled_while_the_app_shuts_down_is_kept_without_a_worker(
     assert recorder.pushed_workspace_agent_ids == []
     assert auto_register._hosts_awaiting_push == {host_id: agent_id}
     assert host_id not in auto_register._hosts_being_pushed
+
+
+def _report_listing(resolver: MngrCliBackendResolver, *agents: DiscoveredAgent) -> None:
+    """Apply a discovery snapshot and wake the listeners even when it reads like the last one.
+
+    An unchanged agents snapshot fires no change callback by itself; in
+    production the provider snapshot applied beside it does, which is how a
+    second look at the same listing reaches the auto-register.
+    """
+    _push_agents(resolver, *agents)
+    resolver.notify_change()
+
+
+def test_a_single_complete_listing_lacking_an_agent_keeps_it_registered(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """One complete listing can be wrong about one agent (a record that could not be read), so it drops nothing yet."""
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(gone)}
+
+
+def test_an_agent_two_consecutive_complete_listings_lack_is_unregistered(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The second complete listing from a newer snapshot confirms the first: the agent is gone."""
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+
+
+def test_an_agent_a_later_listing_drops_is_unregistered_once_the_listing_after_confirms_it(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    host_id = HostId.generate()
+    services, live, doomed = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services)
+    _push_agents(
+        resolver,
+        _make_services_agent(host_id, services),
+        _make_discovered(host_id, live),
+        _make_discovered(host_id, doomed),
+    )
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(doomed)}
+
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(doomed)}
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+
+
+def test_an_agent_listed_again_before_the_second_look_stays_registered_and_starts_over(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A listing that lacks an agent once and lists it again was the wrong one; the count of looks restarts."""
+    host_id = HostId.generate()
+    services, live, flickering = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, flickering)
+    complete_without = (_make_services_agent(host_id, services), _make_discovered(host_id, live))
+    complete_with = (*complete_without, _make_discovered(host_id, flickering))
+    _push_agents(resolver, *complete_without)
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+
+    _report_listing(resolver, *complete_with)
+    assert str(flickering) in _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+    _report_listing(resolver, *complete_without)
+    assert str(flickering) in _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+    _report_listing(resolver, *complete_without)
+
+    assert str(flickering) not in _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+
+
+def test_a_listing_without_the_services_agent_drops_nothing_and_carries_the_pending_drop(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A partial listing (or a stopped host) proves nothing gone, but does not make the next complete one start over."""
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+
+    _report_listing(resolver, _make_discovered(host_id, live))
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(gone)}
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+
+
+def test_a_resolver_change_without_a_new_snapshot_is_not_a_second_look(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """Resolver changes fire on far more than discovery; only a newer snapshot confirms an absence.
+
+    This is also what protects an agent registered outside discovery (a file
+    repair, the CLI), which no listing has caught up with yet.
+    """
+    host_id = HostId.generate()
+    services, live, gone, registered_by_hand = (AgentId.generate() for _ in range(4))
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, registered_by_hand)
+    resolver.notify_change()
+    resolver.notify_change()
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {
+        str(services),
+        str(live),
+        str(gone),
+        str(registered_by_hand),
+    }
+
+
+def test_pushes_a_pinned_policy_to_the_hosts_machine_addressed_by_its_services_agent(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The machine enforces its own copy, so a dead id stays allowed there until the pinned snapshot reaches it."""
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _provision_machine(latchkey, host_id)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    recorder = _PushRecorder()
+    build_latchkey_auto_register(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+    ).start()
+    assert recorder.pushed_workspace_agent_ids == []
+
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    _wait_for_pushes(recorder, 1)
+    assert recorder.pushed_workspace_agent_ids == [str(services)]
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+
+
+def test_reconciles_a_host_file_that_arrives_after_its_listing_was_seen(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A policy adopted from the machine after discovery listed the host carries every agent it ever registered.
+
+    A listing seen while the host had no file was not reconciled against, so
+    the file is reconciled against it as soon as it is there, and the dead
+    agents it carries go on the next look rather than one later.
+    """
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+    assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).is_file()
+
+    _register_all(latchkey, host_id, services, live, gone)
+    resolver.notify_change()
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(gone)}
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+
+
+def test_leaves_the_registered_agents_of_a_destroyed_host_alone(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A destroyed host lingers in discovery for a while; its policy is nobody's to enforce, so nothing is pushed at it."""
+    host_id = HostId.generate()
+    services, live, gone = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    agents = (_make_services_agent(host_id, services), _make_discovered(host_id, live))
+    destroyed = ParsedAgentsResult(
+        agent_ids=tuple(agent.agent_id for agent in agents),
+        discovered_agents=agents,
+        ssh_info_by_agent_id={},
+        host_state_by_host_id={str(host_id): HostState.DESTROYED},
+    )
+    resolver.update_agents(destroyed)
+
+    _build_local_auto_register(build_latchkey_auto_register, resolver, latchkey).start()
+    resolver.update_agents(destroyed)
+    resolver.notify_change()
+
+    assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live), str(gone)}

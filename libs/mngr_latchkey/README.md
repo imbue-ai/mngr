@@ -82,9 +82,21 @@ mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 # machine owns the policy, and a registration its copy lacks is lost on the
 # next read. The command fails if it cannot be. The machine's copy carries
 # the registered-agent list but not the gate rule itself, which only the
-# desktop gateway runs (the machine forwards every per-agent route there).
+# desktop gateway runs (the machine forwards every per-agent route there),
+# and travels without whitespace: the whole policy has to fit one remote
+# command, and the list is most of it.
 mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
+
+Nothing in this package unregisters an agent on its own. An embedder that
+watches a host pins the list instead:
+`imbue.mngr_latchkey.agent_setup.set_registered_agents_for_host` makes a given
+set exactly the host's registered agents in one write (adding and dropping as
+needed; `list_registered_agent_ids_for_host` reads the set back), and Imbue
+Studio calls it with the agents discovery lists on a workspace, then pushes the
+file the same way a registration is pushed. Without that, a host's list only
+ever grows, and a long-lived workspace ends up with a policy too large for the
+one command that carries every grant and sign-in to its machine.
 
 ## Settings
 

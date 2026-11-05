@@ -40,7 +40,7 @@ def test_an_update_document_carries_only_what_the_update_sets() -> None:
 
     assert document == {
         "fallback_encryption_key": b"key-2213",
-        "permissions_json": b'{"rules": []}',
+        "permissions_json": b'{"rules":[]}',
         "restart_gateway": b"1",
     }
 
@@ -260,7 +260,7 @@ def test_an_update_document_carries_the_data_format_version_as_decimal_text() ->
         RemoteStateUpdate(permissions_json='{"rules": []}', permissions_format_version=PermissionsFormatVersion(2))
     )
 
-    assert document == {"permissions_json": b'{"rules": []}', "permissions_format_version": b"2"}
+    assert document == {"permissions_json": b'{"rules":[]}', "permissions_format_version": b"2"}
 
 
 def test_a_read_of_a_machine_never_stamped_reads_as_format_version_zero(tmp_path: Path) -> None:

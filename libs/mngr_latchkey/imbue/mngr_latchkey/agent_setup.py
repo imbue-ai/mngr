@@ -41,6 +41,8 @@ steps that need a working ``Latchkey``.
 
 import re
 from collections.abc import Mapping
+from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -302,10 +304,11 @@ def register_agent_for_host(
     re-registering an already-listed agent writes only if the baseline
     reconciliation found something to add.
 
-    This is the *only* public way to grant a minds agent access to the
-    Minds API proxy. The matching CLI wrapper is ``mngr latchkey
-    register-agent --host-id ID --agent-id ID``; the desktop client and
-    any other Python caller goes through this function directly.
+    This and :func:`set_registered_agents_for_host` are the only public ways to
+    grant a minds agent access to the Minds API proxy: this one for a caller
+    that knows one agent (the CLI wrapper ``mngr latchkey register-agent
+    --host-id ID --agent-id ID``, a permission request's file repair), the
+    other for one that knows every agent the host runs.
 
     Only this computer's canonical copy is written here. A remote host's
     gateway enforces its own ``permissions.json``, and the baseline this brings
@@ -313,24 +316,124 @@ def register_agent_for_host(
     *there*, so a caller that has a way to reach the machine pushes the file
     over when this returns ``True``.
     """
+    policy = _load_host_policy_for_editing(plugin_data_dir, host_id)
+    if str(agent_id) in policy.registered.agent_ids:
+        # Agent already allowed, but a baseline that moved still has to be
+        # persisted: this is the common path for a host that already exists.
+        if policy.is_baseline_changed:
+            _save_host_policy(plugin_data_dir, host_id, policy, policy.registered.entries)
+        return policy.is_baseline_changed
+    _save_host_policy(
+        plugin_data_dir,
+        host_id,
+        policy,
+        (*policy.registered.entries, _build_allowed_agent_anyof_entry(str(agent_id))),
+    )
+    return True
+
+
+def set_registered_agents_for_host(
+    plugin_data_dir: Path,
+    host_id: HostId,
+    agent_ids: AbstractSet[AgentId],
+    # whether the canonical file was (re)written -- the caller's cue to push it to a
+    # host whose gateway enforces its own copy
+) -> bool:
+    """Make ``agent_ids`` exactly the agents registered for the host (see :func:`register_agent_for_host`).
+
+    One write for however many agents join or leave: the registered agents
+    outside ``agent_ids`` are dropped, the ones in it that were not registered
+    are added (after the ones kept, in id order), and a file whose list already
+    is ``agent_ids`` is rewritten only when the baseline reconciliation found
+    something to add. A host with no file, or one holding no policy, is given a
+    fresh baseline listing ``agent_ids``, as a registration would.
+
+    This is how an embedder that watches a host keeps the list equal to the
+    agents the host runs (Imbue Studio pins it from its discovery stream), and
+    so the only way an agent is ever unregistered: nothing in this package drops
+    one on its own. Left to registrations alone, a host's list only grows, and a
+    long-lived host ends up with a policy too large for the one remote command
+    that carries it to the host's machine. A dropped agent's Minds API calls are
+    rejected until it is registered again.
+
+    Only this computer's canonical copy is written here, as in
+    :func:`register_agent_for_host`: a caller that has a way to reach the host's
+    machine pushes the file over when this returns ``True``.
+
+    Raises:
+        LatchkeyStoreError: when the file cannot be read, or does not carry the
+            registered-agent list in the shape this plugin writes.
+        OSError: when the file cannot be written back.
+    """
+    policy = _load_host_policy_for_editing(plugin_data_dir, host_id)
+    target_ids = {str(agent_id) for agent_id in agent_ids}
+    kept_entries = tuple(
+        entry
+        for entry, registered_id in zip(policy.registered.entries, policy.registered.agent_ids, strict=True)
+        if registered_id in target_ids
+    )
+    added_ids = sorted(target_ids.difference(policy.registered.agent_ids))
+    is_list_changed = len(kept_entries) != len(policy.registered.entries) or bool(added_ids)
+    if not is_list_changed and not policy.is_baseline_changed and not policy.is_host_file_fresh:
+        return False
+    _save_host_policy(
+        plugin_data_dir,
+        host_id,
+        policy,
+        (*kept_entries, *(_build_allowed_agent_anyof_entry(agent_id) for agent_id in added_ids)),
+    )
+    if is_list_changed:
+        logger.debug(
+            "Registered {} and unregistered {} agent(s) for host {}; {} registered now",
+            len(added_ids),
+            len(policy.registered.entries) - len(kept_entries),
+            host_id,
+            len(kept_entries) + len(added_ids),
+        )
+    return True
+
+
+def list_registered_agent_ids_for_host(plugin_data_dir: Path, host_id: HostId) -> frozenset[AgentId]:
+    """The agents registered for the host; none for a host with no permissions file or no policy in it.
+
+    Raises:
+        LatchkeyStoreError: when the file cannot be read, does not carry the
+            registered-agent list in the shape this plugin writes, or lists an
+            id that is not an agent id.
+    """
     path = permissions_path_for_host(plugin_data_dir, host_id)
-    existing_config = load_permissions(path) if path.is_file() else None
-    if existing_config is None or not existing_config.rules:
-        # First agent on this host (or a file holding no policy): start from
-        # the baseline so the gateway-self rules and the minds-api-proxy gate
-        # are present.
-        is_host_file_fresh = True
-        config = AGENT_BASELINE_PERMISSIONS
-    else:
-        is_host_file_fresh = False
-        config = existing_config
+    config = load_permissions(path) if path.is_file() else None
+    if config is None or not config.rules:
+        return frozenset()
+    registered_ids = _read_registered_agents(config, path).agent_ids
+    try:
+        return frozenset(AgentId(registered_id) for registered_id in registered_ids)
+    except ValueError as e:
+        raise LatchkeyStoreError(f"Permissions file {path} registers an id that is not an agent id: {e}") from e
 
-    reconciled = reconcile_baseline_permissions(config)
-    is_baseline_changed = reconciled != config
-    config = reconciled
 
-    schemas: dict[str, JsonValue] = dict(config.schemas)
-    scope_schema = schemas.get(SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
+class _RegisteredAgents(FrozenModel):
+    """The registered-agent list of a host's policy, with the schema objects that enclose it."""
+
+    scope_schema: dict[str, JsonValue] = Field(description="The unauthorized scope's schema, which holds the list.")
+    properties: dict[str, JsonValue] = Field(description="Its ``properties`` object.")
+    path_schema: dict[str, JsonValue] = Field(description="Its ``properties.path`` schema.")
+    not_block: dict[str, JsonValue] = Field(
+        description="The ``not`` block of that schema, whose ``anyOf`` is the list."
+    )
+    entries: tuple[JsonValue, ...] = Field(description="The list's entries as found, one per registered agent.")
+    agent_ids: tuple[str, ...] = Field(description="The agent id each entry registers, in the same order.")
+
+
+@pure
+def _read_registered_agents(config: LatchkeyPermissionsConfig, path: Path) -> _RegisteredAgents:
+    """Find the registered-agent list in ``config``; ``path`` names the file in the error for a malformed one.
+
+    Raises:
+        LatchkeyStoreError: when the list is missing or not in the shape this
+            plugin writes.
+    """
+    scope_schema = config.schemas.get(SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
     # Use ``dict`` (concrete type) rather than ``Mapping`` because
     # ``JsonValue``'s mapping arm is ``dict[str, JsonValue]``
     # specifically; ``isinstance(x, Mapping)`` lets the type checker
@@ -339,7 +442,7 @@ def register_agent_for_host(
     if not isinstance(scope_schema, dict):
         raise LatchkeyStoreError(
             f"Permissions file {path} is missing the "
-            f"{SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} scope schema; cannot extend the allowed-agent list."
+            f"{SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} scope schema; cannot edit the allowed-agent list."
         )
     properties = scope_schema.get("properties")
     if not isinstance(properties, dict):
@@ -365,38 +468,95 @@ def register_agent_for_host(
             f"Permissions file {path}'s {SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} schema is malformed: "
             f"missing or non-list ``properties.path.not.anyOf``."
         )
+    return _RegisteredAgents(
+        scope_schema=scope_schema,
+        properties=properties,
+        path_schema=path_schema,
+        not_block=not_block,
+        entries=tuple(any_of),
+        agent_ids=tuple(_extract_agent_id_from_anyof_entry(entry) for entry in any_of),
+    )
 
-    existing_ids = [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
-    if str(agent_id) in existing_ids:
-        # Agent already allowed, but a baseline that moved still has to be
-        # persisted: this is the common path for a host that already exists.
-        if is_baseline_changed:
-            save_permissions(path, config)
-            if is_host_file_fresh:
-                _stamp_fresh_permissions(plugin_data_dir, host_id)
-        return is_baseline_changed
-    new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
-    schemas[SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED] = {
-        **scope_schema,
-        "properties": {
-            **properties,
-            "path": {
-                **path_schema,
-                "not": {
-                    **not_block,
-                    "anyOf": new_any_of,
+@pure
+def _with_registered_agents(
+    config: LatchkeyPermissionsConfig, registered: _RegisteredAgents, entries: Sequence[JsonValue]
+) -> LatchkeyPermissionsConfig:
+    """``config`` with ``entries`` as its registered-agent list, everything around the list kept as found."""
+    any_of: list[JsonValue] = list(entries)
+    schemas: dict[str, JsonValue] = {
+        **config.schemas,
+        SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: {
+            **registered.scope_schema,
+            "properties": {
+                **registered.properties,
+                "path": {
+                    **registered.path_schema,
+                    "not": {
+                        **registered.not_block,
+                        "anyOf": any_of,
+                    },
                 },
             },
         },
     }
     # Copy-with-update rather than reconstructing from ``rules``/``schemas``:
     # rebuilding by hand silently drops every other field.
-    new_config = config.model_copy_update(to_update(config.field_ref().schemas, schemas))
-    save_permissions(path, new_config)
-    if is_host_file_fresh:
+    return config.model_copy_update(to_update(config.field_ref().schemas, schemas))
+
+
+class _EditableHostPolicy(FrozenModel):
+    """A host's policy as read for an edit of its registered agents: the baseline reconciled, the list located."""
+
+    path: Path = Field(description="The canonical file the policy was read from and is written back to.")
+    config: LatchkeyPermissionsConfig = Field(description="The policy, with the baseline reconciled.")
+    registered: _RegisteredAgents = Field(description="The registered-agent list found in the policy.")
+    is_host_file_fresh: bool = Field(
+        description="Whether the policy is a fresh baseline rather than the file as found; a write then stamps it."
+    )
+    is_baseline_changed: bool = Field(
+        description="Whether reconciling the baseline changed the policy, which alone is reason to write it back."
+    )
+
+
+def _load_host_policy_for_editing(plugin_data_dir: Path, host_id: HostId) -> _EditableHostPolicy:
+    """Read the host's policy for an edit of its registered agents.
+
+    A host with no file, or a file holding no rules (the deny-all default a
+    machine is seeded with before this computer has a policy for it: not a
+    policy, and without the scope schema to list an agent under), starts from
+    the baseline, so the gateway-self rules and the Minds API proxy gate are
+    present.
+
+    Raises:
+        LatchkeyStoreError: when the file cannot be read, or does not carry the
+            registered-agent list in the shape this plugin writes.
+    """
+    path = permissions_path_for_host(plugin_data_dir, host_id)
+    existing_config = load_permissions(path) if path.is_file() else None
+    if existing_config is None or not existing_config.rules:
+        is_host_file_fresh = True
+        config = AGENT_BASELINE_PERMISSIONS
+    else:
+        is_host_file_fresh = False
+        config = existing_config
+    reconciled = reconcile_baseline_permissions(config)
+    return _EditableHostPolicy(
+        path=path,
+        config=reconciled,
+        registered=_read_registered_agents(reconciled, path),
+        is_host_file_fresh=is_host_file_fresh,
+        is_baseline_changed=reconciled != config,
+    )
+
+
+def _save_host_policy(
+    plugin_data_dir: Path, host_id: HostId, policy: _EditableHostPolicy, entries: Sequence[JsonValue]
+) -> None:
+    """Write ``policy`` back with ``entries`` as its registered-agent list, stamping a fresh file as this build's."""
+    save_permissions(policy.path, _with_registered_agents(policy.config, policy.registered, entries))
+    if policy.is_host_file_fresh:
         _stamp_fresh_permissions(plugin_data_dir, host_id)
-    return True
 
 
 def _stamp_fresh_permissions(plugin_data_dir: Path, host_id: HostId) -> None:
