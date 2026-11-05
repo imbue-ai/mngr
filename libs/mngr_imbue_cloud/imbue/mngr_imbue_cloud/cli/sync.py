@@ -134,6 +134,27 @@ def delete_record(record_id: str, account: str | None, connector_url: str | None
     emit_json({"status": "deleted", "record_id": record_id})
 
 
+@records.command(name="retire")
+@click.argument("workspace_id")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def retire_record(workspace_id: str, account: str | None, connector_url: str | None) -> None:
+    """Take one workspace record off the active list without giving up its backups (idempotent).
+
+    A record holding anything to recover is kept as a destroyed tombstone
+    (``status: retired``), restorable through the retention window; an
+    untouched stub is deleted (``status: deleted``). Refused (connector 409
+    ``lease_active``) while the workspace still holds its cloud lease.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    is_kept = client.retire_sync_record_by_workspace(token, workspace_id)
+    emit_json({"status": "retired" if is_kept else "deleted", "workspace_id": workspace_id})
+
+
 @sync.command(name="scrub-secrets")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")

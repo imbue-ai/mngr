@@ -24,11 +24,13 @@ import threading
 import tomllib
 from base64 import b64decode
 from base64 import b64encode
+from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -83,6 +85,8 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
 from imbue.mngr_imbue_cloud.wire_types import SUPPORTED_RECORD_FORMAT
+
+_RemovalResultT = TypeVar("_RemovalResultT")
 
 _RECORDS_DIRNAME = "workspace_records"
 _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
@@ -886,7 +890,50 @@ class WorkspaceRecordStore(MutableModel):
             logger.warning("Queued tombstone for {} (push failed: {})", agent_id, e)
 
     def remove_record_or_raise(self, user_id: str, account_email: str, workspace_id: str) -> None:
-        """Remove a record outright by workspace id (the manual remove-from-list escape hatch)."""
+        """Remove a record outright by workspace id (the reapers' cleanup once its backup is gone)."""
+        self._remove_from_connector_or_raise(
+            user_id, workspace_id, lambda cli: cli.sync_record_delete(account_email, workspace_id)
+        )
+        with self._lock:
+            self._drop_record_unlocked(user_id, workspace_id)
+
+    def retire_record_or_raise(self, user_id: str, account_email: str, workspace_id: str) -> None:
+        """Take a record off the active list without giving up its backups (the remove-from-list control).
+
+        The connector keeps a record holding anything to recover as a destroyed
+        tombstone -- it moves to "recently destroyed", restorable through the
+        retention window -- and deletes only an untouched stub. Refused like a
+        removal while the workspace still holds its cloud lease.
+        """
+        existing, is_tombstone_kept = self._remove_from_connector_or_raise(
+            user_id, workspace_id, lambda cli: cli.sync_record_retire(account_email, workspace_id)
+        )
+        with self._lock:
+            if not is_tombstone_kept or existing is None:
+                self._drop_record_unlocked(user_id, workspace_id)
+                return
+            if existing.state != RECORD_STATE_ACTIVE:
+                # The connector leaves an existing tombstone (and its retention clock) as it is.
+                return
+            # Mirror the connector's tombstone until the next pull replaces it
+            # with the server's own stamp.
+            self._set_record_unlocked(
+                user_id,
+                existing.model_copy_update(
+                    to_update(existing.field_ref().state, RECORD_STATE_DESTROYED),
+                    to_update(
+                        existing.field_ref().destroyed_at,
+                        existing.destroyed_at or datetime.now(timezone.utc).isoformat(),
+                    ),
+                    to_update(existing.field_ref().revision, existing.revision + 1),
+                    to_update(existing.field_ref().is_dirty, False),
+                ),
+            )
+
+    def _remove_from_connector_or_raise(
+        self, user_id: str, workspace_id: str, connector_call: Callable[[ImbueCloudCli], _RemovalResultT]
+    ) -> tuple[ReplicaRecord | None, _RemovalResultT]:
+        """Run a record-removing connector call; returns the local record as it was, plus the call's result."""
         with self._lock:
             self._load_unlocked()
             existing = self._records_by_user_id.get(user_id, {}).get(workspace_id)
@@ -895,13 +942,12 @@ class WorkspaceRecordStore(MutableModel):
         if self.cli is None:
             raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
         try:
-            self.cli.sync_record_delete(account_email, workspace_id)
+            result = connector_call(self.cli)
         except ImbueCloudLeaseActiveCliError as e:
             raise WorkspaceRecordLeaseActiveError(str(e)) from e
         except ImbueCloudCliError as e:
             raise WorkspaceSyncError(f"could not remove the record from the connector: {e}") from e
-        with self._lock:
-            self._drop_record_unlocked(user_id, workspace_id)
+        return existing, result
 
     def pull(self, user_id: str, account_email: str) -> SyncPullOutcome | None:
         """Merge the server's records into the replica (local dirty rows win until pushed).

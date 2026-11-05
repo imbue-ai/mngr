@@ -1273,6 +1273,36 @@ def test_delete_sync_record_by_workspace_uses_the_workspace_keyed_route(
     assert calls == [("DELETE", "/sync/records/by-workspace/agent-1")]
 
 
+@pytest.mark.parametrize(("server_status", "is_kept"), [("retired", True), ("deleted", False)])
+def test_retire_sync_record_by_workspace_asks_for_retirement_and_reports_whether_the_tombstone_was_kept(
+    monkeypatch: pytest.MonkeyPatch, server_status: str, is_kept: bool
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append((request.method, request.url.path))
+        return httpx2.Response(200, json={"status": server_status})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    assert client.retire_sync_record_by_workspace(SecretStr("tok"), "agent-1") is is_kept
+    assert calls == [("POST", "/sync/records/by-workspace/agent-1/retire")]
+
+
+def test_retire_sync_record_by_workspace_raises_instead_of_deleting_against_a_connector_without_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append((request.method, request.url.path))
+        return httpx2.Response(404, json={"detail": "Not Found"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudSyncError):
+        client.retire_sync_record_by_workspace(SecretStr("tok"), "agent-1")
+    assert calls == [("POST", "/sync/records/by-workspace/agent-1/retire")]
+
+
 def test_delete_sync_record_by_workspace_falls_back_via_the_listing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

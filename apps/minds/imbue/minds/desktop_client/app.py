@@ -614,10 +614,12 @@ def _handle_sync_initial_status() -> Response:
 
 
 def _handle_remove_workspace_record() -> Response:
-    """Remove a synced workspace record outright (POST /_chrome/workspaces/remove-record).
+    """Take a synced workspace record off the landing list (POST /_chrome/workspaces/remove-record).
 
-    The manual escape hatch for stale/confusing rows on the landing list.
-    Requires connectivity (the record lives on the connector).
+    The manual escape hatch for stale/confusing rows on the landing list. The
+    record is retired, not deleted: one holding anything to recover moves to
+    "recently destroyed" with its backups restorable through the retention
+    window. Requires connectivity (the record lives on the connector).
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
@@ -647,7 +649,7 @@ def _handle_remove_workspace_record() -> Response:
         if matching is None:
             continue
         try:
-            record_store.remove_record_or_raise(str(account.user_id), str(account.email), matching.agent_id)
+            record_store.retire_record_or_raise(str(account.user_id), str(account.email), matching.agent_id)
         except WorkspaceRecordLeaseActiveError:
             # Tombstone-first: the row is not stale, it is a live machine, and
             # destroying it is the way out.

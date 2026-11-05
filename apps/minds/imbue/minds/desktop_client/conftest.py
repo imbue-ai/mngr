@@ -595,6 +595,30 @@ class FakeImbueCloudCli(ImbueCloudCli):
                 del by_workspace[workspace_id]
                 return
 
+    def sync_record_retire(self, account: str, workspace_id: str) -> bool:
+        # Mirrors the connector's release-style retirement: an untouched stub
+        # is deleted, any other active record becomes a destroyed tombstone.
+        self._check_sync_online("sync records retire")
+        if workspace_id in self.lease_holding_workspace_ids:
+            raise ImbueCloudLeaseActiveCliError("sync records retire: the workspace still holds its cloud lease")
+        by_workspace = self.sync_records_by_email.get(account, {})
+        record = by_workspace.get(workspace_id)
+        if record is None:
+            return False
+        if record.get("state") == "active":
+            is_untouched_stub = (
+                int(str(record.get("revision", 0))) == 1
+                and record.get("encrypted_secrets") is None
+                and record.get("backup_bucket") is None
+            )
+            if is_untouched_stub:
+                del by_workspace[workspace_id]
+                return False
+            record["state"] = "destroyed"
+            record["destroyed_at"] = record.get("destroyed_at") or datetime.now(timezone.utc).isoformat()
+            record["revision"] = int(str(record.get("revision", 0))) + 1
+        return record.get("state") == "destroyed"
+
     def sync_scrub_secrets(self, account: str) -> int:
         self._check_sync_online("sync scrub-secrets")
         scrubbed = 0

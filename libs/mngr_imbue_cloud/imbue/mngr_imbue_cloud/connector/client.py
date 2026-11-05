@@ -2009,6 +2009,24 @@ class ImbueCloudConnectorClient(MutableModel):
             return
         self._check(response, ImbueCloudSyncError)
 
+    def retire_sync_record_by_workspace(self, access_token: SecretStr, workspace_id: str) -> bool:
+        """Retire one workspace record the way a lease release does; returns whether it was kept as a tombstone.
+
+        A record holding anything to recover becomes a tombstone (backups stay
+        restorable through the retention window); an untouched stub is deleted.
+        Refused with 409 ``lease_active`` while the workspace still holds a
+        pool lease. A connector without the route answers 404, which raises:
+        the record is never deleted in its place.
+        """
+        response = self._send(
+            "POST",
+            self._url(f"/sync/records/by-workspace/{workspace_id}/retire"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudSyncError).get("status") == "retired"
+
     def scrub_sync_secrets(self, access_token: SecretStr) -> int:
         """Strip every client-encrypted blob of the account server-side; returns how many records were scrubbed.
 

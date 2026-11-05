@@ -195,22 +195,43 @@ def collect_destroyed_candidates(
 
 
 @pure
-def candidate_bucket_short_name(candidate: ReapCandidate, env_content: str | None) -> str | None:
-    """The short name of the candidate's backup bucket, or None for BYO backends.
+def candidate_bucket_short_names(candidate: ReapCandidate, env_content: str | None) -> tuple[str, ...] | None:
+    """The short names the candidate's backup bucket may have, most likely first; None for BYO backends.
 
-    Resolution order: the record's explicit ``backup_bucket``, then the local
-    canonical env's repository, then the legacy assumption that the bucket is
-    named by the machine's host id (records that predate both sources).
+    A known name is the only candidate: the record's explicit
+    ``backup_bucket``, else the local canonical env's repository. Without
+    either the name is derived, workspace-keyed (the workspace id) first and
+    then machine-keyed (the host id) for grandfathered buckets.
     """
     if candidate.backup_bucket and "--" in candidate.backup_bucket:
-        return candidate.backup_bucket.split("--", 1)[1]
+        return (candidate.backup_bucket.split("--", 1)[1],)
     if env_content is not None:
-        return bucket_short_name_from_env(env_content)
-    return candidate.host_id
+        short_name = bucket_short_name_from_env(env_content)
+        return (short_name,) if short_name is not None else None
+    return tuple(dict.fromkeys((candidate.agent_id, candidate.host_id)))
 
 
 def _is_bucket_not_found_error(error: ImbueCloudCliError) -> bool:
     return _BUCKET_NOT_FOUND_SIGNAL.lower() in f"{error.stderr} {error}".lower()
+
+
+def _destroy_first_existing_bucket(
+    imbue_cloud_cli: ImbueCloudCli, account_email: str, bucket_short_names: tuple[str, ...]
+) -> str | None:
+    """Force-destroy the first of the candidate buckets that exists; returns its name, or None when none does.
+
+    Raises ``ImbueCloudCliError`` for any failure other than a missing bucket,
+    so a reachable bucket is never mistaken for an absent one.
+    """
+    for bucket_short_name in bucket_short_names:
+        try:
+            imbue_cloud_cli.destroy_bucket_force(account_email, bucket_short_name)
+        except ImbueCloudCliError as e:
+            if not _is_bucket_not_found_error(e):
+                raise
+            continue
+        return bucket_short_name
+    return None
 
 
 def list_orphan_env_agent_ids(paths: InstallationPaths, record_store: WorkspaceRecordStore) -> list[AgentId]:
@@ -342,19 +363,18 @@ class BackupReaperManager(MutableModel):
             logger.debug("Backup reaper: skipping {} (export in flight)", candidate.agent_id)
             return False
         env_content = read_canonical_env(self.paths, agent_id)
-        bucket_short_name = candidate_bucket_short_name(candidate, env_content)
-        if bucket_short_name is not None and self.imbue_cloud_cli is not None:
+        bucket_short_names = candidate_bucket_short_names(candidate, env_content)
+        if bucket_short_names is not None and self.imbue_cloud_cli is not None:
             try:
-                self.imbue_cloud_cli.destroy_bucket_force(candidate.account_email, bucket_short_name)
+                _destroy_first_existing_bucket(self.imbue_cloud_cli, candidate.account_email, bucket_short_names)
             except ImbueCloudCliError as e:
-                if not _is_bucket_not_found_error(e):
-                    logger.debug("Backup reaper: bucket destroy for {} failed: {}", candidate.agent_id, e)
-                    append_reaper_event(
-                        self.paths,
-                        "reap_failed",
-                        {"agent_id": candidate.agent_id, "host_id": candidate.host_id, "error": str(e)},
-                    )
-                    return False
+                logger.debug("Backup reaper: bucket destroy for {} failed: {}", candidate.agent_id, e)
+                append_reaper_event(
+                    self.paths,
+                    "reap_failed",
+                    {"agent_id": candidate.agent_id, "host_id": candidate.host_id, "error": str(e)},
+                )
+                return False
         try:
             self.record_store.remove_record_or_raise(candidate.user_id, candidate.account_email, candidate.agent_id)
         except WorkspaceSyncError as e:
@@ -475,17 +495,13 @@ def evict_oldest_reapable_backup(
             logger.debug("Quota eviction: skipping {} (export in flight)", candidate.agent_id)
             continue
         env_content = read_canonical_env(paths, agent_id)
-        bucket_short_name = candidate_bucket_short_name(candidate, env_content)
-        if bucket_short_name is None:
+        bucket_short_names = candidate_bucket_short_names(candidate, env_content)
+        if bucket_short_names is None:
             # BYO backend: destroying it would not free imbue_cloud quota.
             continue
-        try:
-            imbue_cloud_cli.destroy_bucket_force(account_email, bucket_short_name)
-        except ImbueCloudCliError as e:
-            if not _is_bucket_not_found_error(e):
-                raise
-            # Bucket already gone: clean up the leftovers and keep looking
-            # for a candidate that actually frees quota.
+        if _destroy_first_existing_bucket(imbue_cloud_cli, account_email, bucket_short_names) is None:
+            # No bucket under any candidate name: clean up the leftovers and
+            # keep looking for a candidate that actually frees quota.
             manager.reap_candidate(candidate, reason="quota_eviction_leftover")
             continue
         # Bucket destroyed: finish the atomic early-delete (record + env).

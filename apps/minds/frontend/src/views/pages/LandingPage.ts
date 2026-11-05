@@ -62,6 +62,7 @@ import {
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
+  remoteTileEntries,
   removeRecordFailureMessage,
   rowClickActionFor,
 } from "./landing-controls";
@@ -1313,13 +1314,10 @@ export const LandingPage: m.ClosureComponent = () => {
       ).filter(
         (orphan) => !liveEntries.some((entry) => entry.id === orphan.agent_id),
       );
-      // Until discovery re-lists the destroyed host, its still-active record also reads as a remote tile.
-      const remoteEntries = entries.filter(
-        (entry) =>
-          (entry.is_remote ?? false) &&
-          !orphanedFailedDestroys.some(
-            (orphan) => orphan.agent_id === entry.id,
-          ),
+      const remoteEntries = remoteTileEntries(
+        entries,
+        orphanedFailedDestroys.map((orphan) => orphan.agent_id),
+        (agentId) => stores.workspaces.isDestroying(agentId),
       );
       const hasRows =
         liveEntries.length +

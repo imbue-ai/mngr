@@ -9,6 +9,7 @@ import {
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
+  remoteTileEntries,
   removeRecordFailureMessage,
   rowClickActionFor,
 } from "./landing-controls";
@@ -354,5 +355,25 @@ describe("removeRecordFailureMessage", () => {
     expect(removeRecordFailureMessage(null, null)).toBe(
       "Could not remove this workspace from the list (the request failed).",
     );
+  });
+});
+
+describe("remoteTileEntries", () => {
+  const remote = (id: string) => ({ id, is_remote: true });
+
+  it("keeps record-only entries and drops live ones", () => {
+    const entries = [remote("agent-a"), { id: "agent-live", is_remote: false }];
+    expect(remoteTileEntries(entries, [], () => false).map((e) => e.id)).toEqual(["agent-a"]);
+  });
+
+  it("hides the tile of a workspace being destroyed here, so its record cannot be removed mid-destroy", () => {
+    const entries = [remote("agent-a"), remote("agent-destroying")];
+    const isDestroying = (agentId: string) => agentId === "agent-destroying";
+    expect(remoteTileEntries(entries, [], isDestroying).map((e) => e.id)).toEqual(["agent-a"]);
+  });
+
+  it("leaves a failed destroy whose host is gone to its own row", () => {
+    const entries = [remote("agent-a"), remote("agent-orphaned")];
+    expect(remoteTileEntries(entries, ["agent-orphaned"], () => false).map((e) => e.id)).toEqual(["agent-a"]);
   });
 });

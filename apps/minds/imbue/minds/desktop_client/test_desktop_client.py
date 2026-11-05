@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -103,6 +104,7 @@ from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
 from imbue.minds.primitives import CookieSigningKey
@@ -2382,21 +2384,31 @@ def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
     assert client.post("/_chrome/sync-unlock", json={"password": "x"}).status_code == 403
 
 
-def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
+def _client_with_synced_record(
+    tmp_path: Path, host_id: str, is_cloud_row: bool
+) -> tuple[FlaskClient, FakeImbueCloudCli, WorkspaceRecordStore, str]:
+    """An authenticated client whose account has one synced workspace record on ``host_id``; returns its id too."""
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     session_store = get_state(client.application).session_store
-    assert session_store is not None
+    assert session_store is not None and session_store.record_store is not None
     workspace_id = str(AgentId.generate())
     session_store.associate_created_workspace(
         user_id="user-1",
         agent_id=workspace_id,
-        host_id="host-remove-me",
-        display_name="stale",
+        host_id=host_id,
+        display_name="ws",
         color=None,
-        is_cloud_row=False,
+        is_cloud_row=is_cloud_row,
+    )
+    return client, cli, session_store.record_store, workspace_id
+
+
+def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
+    client, cli, record_store, workspace_id = _client_with_synced_record(
+        tmp_path, host_id="host-remove-me", is_cloud_row=False
     )
     assert workspace_id in cli.sync_records_by_email["a@b.com"]
 
@@ -2406,26 +2418,31 @@ def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert workspace_id not in cli.sync_records_by_email["a@b.com"]
-    assert session_store.record_store is not None
-    assert session_store.record_store.list_records("user-1") == []
+    assert record_store.list_records("user-1") == []
+
+
+def test_remove_workspace_record_keeps_a_record_with_restore_secrets_as_a_destroyed_tombstone(tmp_path: Path) -> None:
+    """Removing a row from the list must not throw away the workspace's restore window."""
+    client, cli, record_store, workspace_id = _client_with_synced_record(
+        tmp_path, host_id="host-just-destroyed", is_cloud_row=True
+    )
+    # The server copy carries the workspace's encrypted restore secrets.
+    cli.sync_records_by_email["a@b.com"][workspace_id]["encrypted_secrets"] = "encrypted-restic-env"
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"workspace_id": workspace_id})
+
+    assert response.status_code == 200
+    server_record = cli.sync_records_by_email["a@b.com"][workspace_id]
+    assert server_record["state"] == "destroyed"
+    assert server_record["encrypted_secrets"] == "encrypted-restic-env"
+    [local_record] = record_store.list_records("user-1")
+    assert local_record.state == "destroyed"
 
 
 def test_remove_workspace_record_of_a_leased_cloud_workspace_is_refused_with_a_hint(tmp_path: Path) -> None:
     """The connector's tombstone-first refusal surfaces as a 409 that points at destroy, not a sync error."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
-    _authenticate_client(client, auth_store)
-    session_store = get_state(client.application).session_store
-    assert session_store is not None
-    workspace_id = str(AgentId.generate())
-    session_store.associate_created_workspace(
-        user_id="user-1",
-        agent_id=workspace_id,
-        host_id="host-still-leased",
-        display_name="live",
-        color=None,
-        is_cloud_row=True,
+    client, cli, _record_store, workspace_id = _client_with_synced_record(
+        tmp_path, host_id="host-still-leased", is_cloud_row=True
     )
     cli.lease_holding_workspace_ids.add(workspace_id)
 

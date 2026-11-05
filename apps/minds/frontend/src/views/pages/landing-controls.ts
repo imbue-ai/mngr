@@ -347,3 +347,23 @@ export function backupsControlFor(
     ? { isShown: true, isEnabled: true, tooltip: "Backups" }
     : BACKUPS_HIDDEN;
 }
+
+/**
+ * The record-only entries that get a remote tile. A workspace this device is
+ * destroying (or failed to destroy) keeps an active record until the destroy
+ * finishes and discovery catches up, so it would otherwise read as a remote
+ * tile whose "Remove from this list" control drops its record mid-destroy. A
+ * failed destroy whose host is gone is listed on its own row instead.
+ */
+export function remoteTileEntries<Entry extends Pick<UiWorkspaceEntry, "id" | "is_remote">>(
+  entries: readonly Entry[],
+  orphanedFailedDestroyAgentIds: readonly string[],
+  isDestroying: (agentId: string) => boolean,
+): Entry[] {
+  return entries.filter(
+    (entry) =>
+      (entry.is_remote ?? false) &&
+      !orphanedFailedDestroyAgentIds.includes(entry.id) &&
+      !isDestroying(entry.id),
+  );
+}

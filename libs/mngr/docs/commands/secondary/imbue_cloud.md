@@ -911,6 +911,22 @@ mngr imbue_cloud sync records delete [OPTIONS] RECORD_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud sync records retire
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records retire [OPTIONS] WORKSPACE_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud sync scrub-secrets
 
 **Usage:**

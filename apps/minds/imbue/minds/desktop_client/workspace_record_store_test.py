@@ -1007,6 +1007,33 @@ def test_state_changing_operations_refuse_a_newer_format_record(paths: Installat
     assert [r.state for r in kept] == [RECORD_STATE_ACTIVE]
 
 
+def test_retire_record_leaves_an_existing_tombstone_and_its_retention_clock_alone(paths: InstallationPaths) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = _agent_id()
+    destroyed_at = "2026-01-02T03:04:05+00:00"
+    cli.sync_records_by_email[_EMAIL] = {
+        agent_id: {
+            "host_id": "host-9",
+            "agent_id": agent_id,
+            "provider_kind": "lima",
+            "state": RECORD_STATE_DESTROYED,
+            "destroyed_at": destroyed_at,
+            "encrypted_secrets": "encrypted-restic-env",
+            "revision": 4,
+        }
+    }
+    assert store.pull(user_id, _EMAIL) is not None
+
+    store.retire_record_or_raise(user_id, _EMAIL, agent_id)
+
+    [record] = store.list_records(user_id)
+    assert record.state == RECORD_STATE_DESTROYED
+    assert record.destroyed_at == destroyed_at
+    assert record.revision == 4
+
+
 def test_replica_record_from_wire_defaults_and_carries_record_format() -> None:
     defaulted = replica_record_from_wire({"host_id": "host-1", "agent_id": "a", "revision": 1})
     assert defaulted.record_format == 1

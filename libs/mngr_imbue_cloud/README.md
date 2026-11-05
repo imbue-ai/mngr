@@ -247,10 +247,12 @@ Grants that actually reduce usage are unlimited; only grants that free nothing c
 `mngr imbue_cloud sync ...` is pure transport for the per-account sync features the minds desktop app builds on: workspace records, the password-wrapped key bundle, and per-account documents. The plugin never encrypts, decrypts, or interprets the payloads; every verb emits JSON on stdout (errors are a JSON body on stderr), and the push verbs read their document from stdin or `--input-file`.
 
 ```bash
-# Workspace records: pull all, push one (CAS on revision), delete one.
+# Workspace records: pull all, push one (CAS on revision), delete one, or
+# retire one (kept as a destroyed tombstone when it holds anything to recover).
 mngr imbue_cloud sync records pull
 mngr imbue_cloud sync records push --input-file record.json
 mngr imbue_cloud sync records delete agent-<hex>
+mngr imbue_cloud sync records retire agent-<hex>
 
 # The password-wrapped key bundle.
 mngr imbue_cloud sync bundle pull

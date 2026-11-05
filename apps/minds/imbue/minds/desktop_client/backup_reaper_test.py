@@ -14,7 +14,7 @@ from imbue.minds.desktop_client.backup_reaper import ReapCandidate
 from imbue.minds.desktop_client.backup_reaper import _is_bucket_not_found_error
 from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
 from imbue.minds.desktop_client.backup_reaper import bucket_short_name_from_env
-from imbue.minds.desktop_client.backup_reaper import candidate_bucket_short_name
+from imbue.minds.desktop_client.backup_reaper import candidate_bucket_short_names
 from imbue.minds.desktop_client.backup_reaper import collect_destroyed_candidates
 from imbue.minds.desktop_client.backup_reaper import evict_oldest_reapable_backup
 from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
@@ -50,15 +50,17 @@ class _RecordingReaperCli(FakeImbueCloudCli):
     """FakeImbueCloudCli that records force-destroys and simulates configurable outcomes."""
 
     destroyed_names: list[str] = Field(default_factory=list)
-    missing_bucket_names: set[str] = Field(default_factory=set)
     failing_bucket_names: set[str] = Field(default_factory=set)
+    existing_bucket_names: set[str] | None = Field(
+        default=None, description="When set, only these buckets exist; every other name is missing"
+    )
 
     def destroy_bucket_force(self, account: str, name: str) -> None:
         if name in self.failing_bucket_names:
             error = ImbueCloudCliError("bucket destroy failed")
             error.stderr = '{"error": "CloudflareApiError"}'
             raise error
-        if name in self.missing_bucket_names:
+        if self.existing_bucket_names is not None and name not in self.existing_bucket_names:
             # The shape the real CLI wrapper raises: the plugin's own class name in the
             # stderr JSON, and the connector's wording (quoted) as the message.
             error = ImbueCloudCliError(f"bucket destroy: 'Bucket not found: {name}'")
@@ -129,7 +131,7 @@ def test_user_id_prefix_matches_connector_derivation() -> None:
     assert user_id_prefix_for("12345678-1234-5678-1234-567812345678") == "1234567812345678"
 
 
-def test_candidate_bucket_short_name_resolution_order() -> None:
+def test_candidate_bucket_short_names_resolution_order() -> None:
     def _candidate(backup_bucket: str | None) -> ReapCandidate:
         return ReapCandidate(
             user_id="user-1",
@@ -143,14 +145,14 @@ def test_candidate_bucket_short_name_resolution_order() -> None:
 
     env = _R2_ENV.format(prefix="abc123", host_id="host-from-env")
     # The record's explicit bucket wins over a divergent env.
-    assert candidate_bucket_short_name(_candidate(f"abc123--{_AGENT_OLD}"), env) == _AGENT_OLD
+    assert candidate_bucket_short_names(_candidate(f"abc123--{_AGENT_OLD}"), env) == (_AGENT_OLD,)
     # A bucket name without the owner separator is unusable; fall through to the env.
-    assert candidate_bucket_short_name(_candidate("separatorless-bucket"), env) == "host-from-env"
+    assert candidate_bucket_short_names(_candidate("separatorless-bucket"), env) == ("host-from-env",)
     # No explicit bucket: the env decides, and a BYO env means no bucket at all.
-    assert candidate_bucket_short_name(_candidate(None), env) == "host-from-env"
-    assert candidate_bucket_short_name(_candidate(None), _BYO_ENV) is None
-    # No bucket and no env: legacy records assume the bucket is named by the host id.
-    assert candidate_bucket_short_name(_candidate(None), None) == "host-legacy"
+    assert candidate_bucket_short_names(_candidate(None), env) == ("host-from-env",)
+    assert candidate_bucket_short_names(_candidate(None), _BYO_ENV) is None
+    # No bucket and no env: the name is derived, workspace-keyed first, then the legacy host-keyed one.
+    assert candidate_bucket_short_names(_candidate(None), None) == (_AGENT_OLD, "host-legacy")
 
 
 def test_collect_destroyed_candidates_sorts_oldest_first_and_skips_unstamped(tmp_path: Path) -> None:
@@ -196,7 +198,7 @@ def test_reap_candidate_deletes_bucket_record_and_env(tmp_path: Path) -> None:
 def test_reap_candidate_tolerates_already_missing_bucket(tmp_path: Path) -> None:
     manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-old1", _AGENT_OLD, destroyed_days_ago=40)
-    cli.missing_bucket_names = {"host-old1"}
+    cli.existing_bucket_names = set()
 
     is_reaped = manager.reap_candidate(
         ReapCandidate(
@@ -279,6 +281,7 @@ def test_evict_oldest_reapable_backup_destroys_oldest_first(tmp_path: Path) -> N
     _manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-newer", _AGENT_NEWER, destroyed_days_ago=2)
     _tombstone(record_store, "user-1", "host-older", _AGENT_OLDER, destroyed_days_ago=10)
+    cli.existing_bucket_names = {"host-newer", "host-older"}
 
     is_evicted = evict_oldest_reapable_backup(
         record_store=record_store,
@@ -312,7 +315,7 @@ def test_evict_skips_missing_buckets_and_keeps_looking(tmp_path: Path) -> None:
     _manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-gone01", _AGENT_GONE, destroyed_days_ago=10)
     _tombstone(record_store, "user-1", "host-live01", _AGENT_LIVE, destroyed_days_ago=5)
-    cli.missing_bucket_names = {"host-gone01"}
+    cli.existing_bucket_names = {"host-live01"}
 
     is_evicted = evict_oldest_reapable_backup(
         record_store=record_store,
@@ -329,10 +332,53 @@ def test_evict_skips_missing_buckets_and_keeps_looking(tmp_path: Path) -> None:
     assert [record.host_id for record in record_store.list_records("user-1")] == []
 
 
+def test_evict_destroys_a_workspace_id_named_bucket_when_neither_record_nor_env_names_it(tmp_path: Path) -> None:
+    # Neither the record nor a local env names the bucket: eviction finds it by the workspace id.
+    _manager, cli, record_store = _make_reaper_fixture(tmp_path)
+    _tombstone(record_store, "user-1", "host-older", _AGENT_OLDER, destroyed_days_ago=10)
+    _tombstone(record_store, "user-1", "host-newer", _AGENT_NEWER, destroyed_days_ago=2)
+    cli.existing_bucket_names = {_AGENT_OLDER, _AGENT_NEWER}
+
+    is_evicted = evict_oldest_reapable_backup(
+        record_store=record_store,
+        paths=record_store.paths,
+        imbue_cloud_cli=cli,
+        user_id="user-1",
+        account_email="a@b.com",
+    )
+
+    assert is_evicted is True
+    assert cli.destroyed_names == [_AGENT_OLDER]
+    assert [record.agent_id for record in record_store.list_records("user-1")] == [_AGENT_NEWER]
+
+
+def test_reap_candidate_falls_back_to_the_host_named_bucket(tmp_path: Path) -> None:
+    manager, cli, record_store = _make_reaper_fixture(tmp_path)
+    _tombstone(record_store, "user-1", "host-old1", _AGENT_OLD, destroyed_days_ago=40)
+    cli.existing_bucket_names = {"host-old1"}
+
+    is_reaped = manager.reap_candidate(
+        ReapCandidate(
+            user_id="user-1",
+            account_email="a@b.com",
+            agent_id=_AGENT_OLD,
+            host_id="host-old1",
+            display_name="ws",
+            destroyed_at=datetime.now(timezone.utc) - timedelta(days=40),
+        ),
+        reason="retention_expired",
+    )
+
+    assert is_reaped is True
+    assert cli.destroyed_names == ["host-old1"]
+    assert record_store.list_records("user-1") == []
+
+
 def test_evict_skips_candidates_with_export_in_flight(tmp_path: Path) -> None:
     _manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-older", _AGENT_OLDER, destroyed_days_ago=10)
     _tombstone(record_store, "user-1", "host-newer", _AGENT_NEWER, destroyed_days_ago=2)
+    cli.existing_bucket_names = {"host-older", "host-newer"}
 
     # The oldest candidate's backup is mid-download: eviction must not destroy
     # its bucket out from under the export, so the next-oldest is evicted.

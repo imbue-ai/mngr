@@ -1,0 +1,1 @@
+- New `mngr imbue_cloud sync records retire <workspace-id>` retires a workspace record instead of deleting it: a record holding anything to recover is kept as a destroyed tombstone, and the command reports `status: retired`. Against a connector without retirement it fails rather than deleting the record.

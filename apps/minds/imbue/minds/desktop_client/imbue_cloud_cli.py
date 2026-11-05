@@ -83,10 +83,10 @@ _EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL = "ImbueCloudEmailNotVerifiedError"
 # matched like the quota signal.
 _CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL = "ImbueCloudClientTooOldError"
 
-# The connector's structured code for refusing to hard-delete the record of a
-# workspace that still holds its pool lease (a 409 relayed by the plugin's
-# ``sync records delete``). Substring-matched like the quota signal: the code
-# rides inside the relayed connector body.
+# The connector's structured code for refusing to delete or retire the record
+# of a workspace that still holds its pool lease (a 409 relayed by the plugin's
+# ``sync records delete`` and ``sync records retire``). Substring-matched
+# like the quota signal: the code rides inside the relayed connector body.
 _LEASE_ACTIVE_CODE_SIGNAL = "lease_active"
 
 # The structured code `mngr imbue_cloud users resolve|show` and `contacts add`
@@ -207,7 +207,7 @@ _WEB_LOGIN_INCOMPLETE_REASON_BY_ERROR_CLASS: Final[dict[str, WebLoginIncompleteR
 
 
 class ImbueCloudLeaseActiveCliError(ImbueCloudCliError):
-    """The connector refused to hard-delete a record because its workspace still holds a pool lease.
+    """The connector refused to delete or retire a record because its workspace still holds a pool lease.
 
     Tombstone-first: destroying the workspace is what releases the lease (and
     retires the record), so the remedy is destroy, not remove-from-list.
@@ -1384,6 +1384,19 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-sync-record-delete",
         )
         self._expect_success(result, "sync records delete")
+
+    def sync_record_retire(self, account: str, workspace_id: str) -> bool:
+        """Retire one record by workspace id; returns whether it was kept as a destroyed tombstone.
+
+        Raises ``ImbueCloudLeaseActiveCliError`` when the connector refuses
+        because the workspace still holds its pool lease.
+        """
+        result = self._run(
+            ["sync", "records", "retire", workspace_id, "--account", account],
+            cg_name="imbue-cloud-sync-record-retire",
+        )
+        body = self._expect_success(result, "sync records retire")
+        return isinstance(body, dict) and body.get("status") == "retired"
 
     def sync_scrub_secrets(self, account: str) -> int:
         result = self._run(["sync", "scrub-secrets", "--account", account], cg_name="imbue-cloud-sync-scrub")
