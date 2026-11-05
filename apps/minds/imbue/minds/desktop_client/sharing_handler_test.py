@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifie
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
@@ -632,6 +634,7 @@ def test_publish_workspace_stores_a_document_it_is_given_in_the_same_write_as_sh
     assert len(write_commands) == 1
     assert "share_grants.toml" in write_commands[0]
     assert "data/.secrets/share.env" in write_commands[0]
+    assert write_commands[0].index("share_identities.json") < write_commands[0].index("share_grants.toml")
 
 
 def test_publish_workspace_refuses_a_document_it_is_given_before_creating_a_share() -> None:
@@ -875,6 +878,45 @@ def test_save_grants_overwrites_a_document_nothing_can_parse() -> None:
     assert document["grants"]["workspace"]["emails"] == ["friend@example.com"]
     write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
     assert "share_grants.toml" in write_command
+
+
+def test_save_grants_writes_what_it_knows_of_the_grantees_beside_the_document(tmp_path: Path) -> None:
+    # The document carries ids alone: the shell names a grantee who has not arrived yet from this.
+    cli = _UserShowingCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        identity_by_user_id={
+            "user-gleb": UserIdentityCliInfo(user_id="user-gleb", email="gleb@example.com", display_name=None)
+        },
+    )
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    grants = SharingGrantsDocument(workspace=SharingGrantList(users=("user-gleb",), emails=("friend@example.com",)))
+
+    document = _save_grants_with_cli(
+        "host-" + "d" * 32,
+        "agent-" + "c" * 32,
+        grants,
+        cli,
+        "owner@example.com",
+        service_labels={},
+        identity_cache=IdentityCache(path=tmp_path / "identity_cache.json"),
+    )
+
+    write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
+    expected = render_share_identities_json(
+        {"user-gleb": IdentityRecord(user_id="user-gleb", email="gleb@example.com", display_name=None)}
+    )
+    assert base64.b64encode(expected.encode()).decode("ascii") in write_command
+    assert write_command.index("share_identities.json") < write_command.index("share_grants.toml")
+    assert document["identities"] == {
+        "user-gleb": {
+            "user_id": "user-gleb",
+            "email": "gleb@example.com",
+            "display_name": None,
+            "profile_picture_url": None,
+        }
+    }
 
 
 def test_save_grants_reads_the_connector_before_it_writes() -> None:

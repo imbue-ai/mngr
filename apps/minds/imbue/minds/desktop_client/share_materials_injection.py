@@ -5,7 +5,12 @@ The share-gateway service inside the workspace watches
 stack starts when it appears and stops when it is removed. The grants document
 lives next to it at ``data/.secrets/share_grants.toml`` and is re-read by the
 gateway on every request, so a grants update takes effect immediately without
-restarting anything.
+restarting anything. Beside it, ``data/.secrets/share_identities.json`` holds
+what this desktop knew of each account the document grants (the email and
+display name the grant was resolved from), written whole with every grants
+write: the workspace shell names a granted account that has not arrived yet
+from it (the multiplayer spec, section 4.2), since the document carries ids
+alone. Only this desktop writes it, and nothing inside the workspace does.
 
 Every writer of the grants file inside the container (this desktop's exec
 writes and the gateway's own invite upgrades) holds an exclusive ``flock`` on
@@ -19,8 +24,10 @@ need shell quoting.
 
 import base64
 import binascii
+import json
 import shlex
 import threading
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Final
 
@@ -32,8 +39,10 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
+from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr_imbue_cloud.wire import WireModel
@@ -43,6 +52,9 @@ _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
 # The lock every grants-file writer inside the container takes (the gateway's
 # invite upgrade uses fcntl.flock on the same path).
 _SHARE_GRANTS_LOCK_FILE: Final[str] = "data/.secrets/share_grants.toml.lock"
+_SHARE_IDENTITIES_FILE: Final[str] = "data/.secrets/share_identities.json"
+# The shell refuses any other version.
+SHARE_IDENTITIES_FILE_VERSION: Final[int] = 1
 
 # Where the workspace's share gateway reports how bringing the share stack up
 # is going (see the template's share_gateway/retry_state.py): read by the
@@ -165,6 +177,20 @@ def atomic_write_clause(relative_path: str, content: str, tmp_var: str) -> str:
     )
 
 
+@pure
+def render_share_identities_json(identities: Mapping[str, IdentityRecord]) -> str:
+    """The identities sidecar as the workspace shell reads it: each granted account's email and display name by id."""
+    document = {
+        "version": SHARE_IDENTITIES_FILE_VERSION,
+        "identities": {
+            user_id: {"email": record.email, "display_name": record.display_name}
+            for user_id, record in identities.items()
+        },
+    }
+    # sort_keys orders the ids too, so an unchanged set renders byte-identically.
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
 def _locked_grants_write_clause(grants_toml_text: str) -> str:
     """The grants write, run under the grants-file lock so it never interleaves with the gateway's upgrade.
 
@@ -182,6 +208,9 @@ def provision_share_files_in_agent(
     # None means "share.env only" (a stale-domain repair): the grants document
     # the workspace already holds is left exactly as it is.
     grants_toml_text: str | None,
+    # What this desktop knows of the accounts the document grants (see
+    # ``render_share_identities_json``); it rides a grants write only.
+    identities_json_text: str | None,
     # None means "grants only" (the grants-only update path); the running
     # gateway re-reads grants per request, so share.env is untouched and the
     # tunnel never restarts.
@@ -190,12 +219,20 @@ def provision_share_files_in_agent(
 ) -> None:
     """Write a share's files into the agent in ONE exec round trip.
 
-    Ordering inside the script matters: the grants document lands BEFORE
-    share.env, because the share-gateway brings the whole stack up the moment
-    share.env appears -- the grants must already be in place by then. The
+    Ordering inside the script matters: the identities land before the grants
+    document, which lands BEFORE share.env, because the share-gateway brings
+    the whole stack up the moment share.env appears -- the grants must already
+    be in place by then -- and the shell re-reads the roster when the grants
+    change, by which time the names it falls back to should be there. The
     grants write runs under the grants-file lock (see the module docstring).
     """
+    if identities_json_text is not None and grants_toml_text is None:
+        raise ShareInjectionError(
+            f"Refusing to write share identities into agent {agent_address} without the grants they belong to"
+        )
     clauses: list[str] = []
+    if identities_json_text is not None:
+        clauses.append(atomic_write_clause(_SHARE_IDENTITIES_FILE, identities_json_text, "tmp_identities"))
     if grants_toml_text is not None:
         clauses.append(_locked_grants_write_clause(grants_toml_text))
     if share_env_text is not None:
@@ -321,13 +358,16 @@ def clear_share_publication_from_agent(agent_address: str, mngr_caller: MngrCall
 
 
 def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> bool:
-    """Remove share.env, the gateway's status file, and the grants document; returns whether it succeeded.
+    """Remove share.env, the gateway's status file, the grants document, and the identities beside it; returns
+    whether it succeeded.
 
     For unlinking a workspace from the account that made its grants: nobody is
     left who can answer for them.
     """
     return _remove_share_files_from_agent(
-        agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE, _SHARE_GRANTS_FILE), mngr_caller
+        agent_address,
+        (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE, _SHARE_GRANTS_FILE, _SHARE_IDENTITIES_FILE),
+        mngr_caller,
     )
 
 

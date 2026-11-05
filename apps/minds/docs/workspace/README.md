@@ -96,10 +96,17 @@ email (`emails`, email grants the gateway upgrades to account ids on first
 visit), and by email domain (`email_domains`), per app. Every writer of
 that file inside the container -- the desktop's injection and the gateway's
 email-grant upgrade -- holds a `flock` on `share_grants.toml.lock` around its
-write. The grants document outlives the publication: unpublishing removes
-`share.env` and the gateway's status file and leaves the grants document in
-place, so the next publish admits the same people. Unlinking the workspace
-from its account removes all three files. Services learn who is asking from the
+write. Beside the grants document, and written with every grants write, the
+desktop keeps `data/.secrets/share_identities.json`: the email and display
+name each granted account id was resolved from (`{"version": 1,
+"identities": {"<user_id>": {"email", "display_name"}}}`), which the
+workspace shell's roster falls back to for naming a grantee who has not
+arrived yet, since the grants document holds ids alone. The desktop is its
+only writer. The grants document and the identities beside it outlive the
+publication: unpublishing removes `share.env` and the gateway's status file
+and leaves both in place, so the next publish admits the same people.
+Unlinking the workspace from its account removes all four files. Services
+learn who is asking from the
 `X-Imbue-Identity` header on each request (see the Imbue Studio design
 doc); nothing about the owner is written into the workspace as a file.
 

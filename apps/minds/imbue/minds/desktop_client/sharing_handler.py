@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.share_materials_injection import provision_share
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
@@ -603,6 +604,11 @@ def _publish_workspace_with_cli(
     else:
         grants_to_store = None
     grants_toml = _render_grants_document_toml(grants_to_store) if grants_to_store is not None else None
+    # What the file holds after this publish: what is about to be written, or the one already there.
+    saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
+    user_ids = _granted_user_ids(saved_grants)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    identities_json = render_share_identities_json(identities) if grants_toml is not None else None
 
     # Materials present means the workspace is published already or carries
     # stale ones from a share disabled elsewhere (re-provision). Only this path
@@ -612,7 +618,7 @@ def _publish_workspace_with_cli(
     if existing is not None:
         share = existing
         if grants_toml is not None:
-            _write_grants_document(agent_address, grants_toml, cli)
+            _write_grants_document(agent_address, grants_toml, identities_json, cli)
     else:
         # Local shares with no materials in the workspace pick the relay by
         # measured latency from here (the workspace runs on this machine, so
@@ -631,14 +637,11 @@ def _publish_workspace_with_cli(
             preferred_region=_pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None,
             service_labels=service_labels,
             grants_toml_text=grants_toml,
+            identities_json_text=identities_json,
         )
 
-    # What the file holds now: what was just written, or the one already there.
-    saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
-    user_ids = _granted_user_ids(saved_grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
     is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
     return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
@@ -668,8 +671,11 @@ def _save_grants_with_cli(
     # The connector is read BEFORE the write, and not again: a hiccup after the
     # document landed would otherwise be reported as a failed save.
     share = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
-    _write_grants_document(agent_address, _render_grants_document_toml(saved_grants), cli)
     user_ids = _granted_user_ids(saved_grants)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    _write_grants_document(
+        agent_address, _render_grants_document_toml(saved_grants), render_share_identities_json(identities), cli
+    )
     # The connector's grantee index only describes a live share, so an
     # unpublished workspace's save does not touch it; the next publish mirrors
     # whatever the document holds by then.
@@ -677,13 +683,14 @@ def _save_grants_with_cli(
     if share is not None:
         _publish_grantees(cli, account_email, host_id, user_ids)
         is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
     return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
-def _write_grants_document(agent_address: str, grants_toml: str, cli: ImbueCloudCli) -> None:
+def _write_grants_document(
+    agent_address: str, grants_toml: str, identities_json: str | None, cli: ImbueCloudCli
+) -> None:
     try:
-        provision_share_files_in_agent(agent_address, grants_toml, None, cli.mngr_caller)
+        provision_share_files_in_agent(agent_address, grants_toml, identities_json, None, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
 
@@ -734,6 +741,8 @@ def _create_share_and_write_materials(
     # None leaves the grants document the workspace already holds untouched
     # (a stale-domain repair); otherwise it lands before share.env.
     grants_toml_text: str | None,
+    # The grantees' identities, landing beside the grants document; None whenever that is None.
+    identities_json_text: str | None,
 ) -> ShareCliInfo:
     """Register (or re-register) the share with the connector and inject its materials in one exec.
 
@@ -775,7 +784,9 @@ def _create_share_and_write_materials(
     # Everything lands in one exec, share.env last -- the gateway brings the
     # stack up the moment it appears, so the grants must already be in place.
     try:
-        provision_share_files_in_agent(agent_address, grants_toml_text, share_env_text, cli.mngr_caller)
+        provision_share_files_in_agent(
+            agent_address, grants_toml_text, identities_json_text, share_env_text, cli.mngr_caller
+        )
     except ShareInjectionError as exc:
         raise ShareMaterialsWriteError(str(exc)) from exc
     return share
@@ -824,6 +835,7 @@ def migrate_stale_share(
             preferred_region=None,
             service_labels=service_labels,
             grants_toml_text=None,
+            identities_json_text=None,
         )
     except ShareMaterialsWriteError as exc:
         # The connector no longer flags the share, so the panel's retry (a

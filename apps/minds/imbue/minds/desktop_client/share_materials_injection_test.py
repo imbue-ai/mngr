@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
+from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
@@ -22,6 +23,7 @@ from imbue.minds.desktop_client.share_materials_injection import provision_share
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -130,7 +132,7 @@ def test_provision_writes_all_share_files_in_one_exec() -> None:
     grants_text = "[workspace]\nemails = []\n"
     env_text = "export SHARE_WORKSPACE_DOMAIN=x\n"
 
-    provision_share_files_in_agent(agent_id, grants_text, env_text, caller)
+    provision_share_files_in_agent(agent_id, grants_text, None, env_text, caller)
 
     # One exec carries everything -- this is the whole point (each exec pays a
     # full mngr process + SSH round trip on remote hosts).
@@ -151,12 +153,56 @@ def test_provision_writes_all_share_files_in_one_exec() -> None:
     assert "owner_email" not in command
 
 
+def test_render_share_identities_json_carries_each_grantees_email_and_name_by_id() -> None:
+    rendered = render_share_identities_json(
+        {
+            "user-b": IdentityRecord(user_id="user-b", email=None, display_name="Bea", profile_picture_url="x"),
+            "user-a": IdentityRecord(user_id="user-a", email="al@example.com", display_name=None),
+        }
+    )
+
+    # Ids are sorted so an unchanged set renders byte-identically.
+    assert json.loads(rendered) == {
+        "version": 1,
+        "identities": {
+            "user-a": {"email": "al@example.com", "display_name": None},
+            "user-b": {"email": None, "display_name": "Bea"},
+        },
+    }
+    assert rendered.index("user-a") < rendered.index("user-b")
+
+
+def test_provision_writes_the_identities_before_the_grants_they_belong_to() -> None:
+    caller = RecordingMngrCaller()
+    identities_text = render_share_identities_json({})
+
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", identities_text, "export A=b\n", caller)
+
+    assert len(caller.calls) == 1
+    command = caller.calls[0][2]
+    assert base64.b64encode(identities_text.encode()).decode("ascii") in command
+    assert (
+        command.index("share_identities.json")
+        < command.index("share_grants.toml")
+        < command.index("data/.secrets/share.env")
+    )
+
+
+def test_provision_refuses_identities_without_the_grants_they_belong_to() -> None:
+    caller = RecordingMngrCaller()
+
+    with pytest.raises(ShareInjectionError, match="without the grants"):
+        provision_share_files_in_agent(AgentId(), None, render_share_identities_json({}), "export A=b\n", caller)
+
+    assert caller.calls == []
+
+
 def test_provision_omits_the_grants_document_on_a_share_env_only_write() -> None:
     # A stale-domain repair rewrites share.env and must leave the grants the
     # workspace holds untouched.
     caller = RecordingMngrCaller()
 
-    provision_share_files_in_agent(AgentId(), None, "export A=b\n", caller)
+    provision_share_files_in_agent(AgentId(), None, None, "export A=b\n", caller)
 
     command = caller.calls[0][2]
     assert "data/.secrets/share.env" in command
@@ -167,7 +213,7 @@ def test_provision_refuses_a_write_with_nothing_to_write() -> None:
     caller = RecordingMngrCaller()
 
     with pytest.raises(ShareInjectionError):
-        provision_share_files_in_agent(AgentId(), None, None, caller)
+        provision_share_files_in_agent(AgentId(), None, None, None, caller)
 
     assert caller.calls == []
 
@@ -175,7 +221,7 @@ def test_provision_refuses_a_write_with_nothing_to_write() -> None:
 def test_provision_omits_share_env_on_a_grants_only_update() -> None:
     caller = RecordingMngrCaller()
 
-    provision_share_files_in_agent(AgentId(), "[workspace]\n", None, caller)
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", None, None, caller)
 
     command = caller.calls[0][2]
     assert "share_grants.toml" in command
@@ -186,14 +232,14 @@ def test_provision_raises_on_exec_failure() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="boom"))
 
     with pytest.raises(ShareInjectionError):
-        provision_share_files_in_agent(AgentId(), "[workspace]\n", "export A=b\n", caller)
+        provision_share_files_in_agent(AgentId(), "[workspace]\n", None, "export A=b\n", caller)
 
 
 @_requires_flock
 def test_provision_writes_the_grants_under_the_lock_and_share_env_beside_them(tmp_path: Path) -> None:
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
 
-    provision_share_files_in_agent(AgentId(), "[workspace]\n", "export A=b\n", caller)
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", None, "export A=b\n", caller)
 
     assert (tmp_path / "data" / ".secrets" / "share_grants.toml").read_text() == "[workspace]\n"
     assert (tmp_path / "data" / ".secrets" / "share.env").read_text() == "export A=b\n"
@@ -209,7 +255,7 @@ def test_provision_grants_failure_stops_share_env_from_landing(tmp_path: Path) -
     (tmp_path / "data" / ".secrets").write_text("not a directory")
 
     with pytest.raises(ShareInjectionError):
-        provision_share_files_in_agent(AgentId(), "[workspace]\n", "export A=b\n", caller)
+        provision_share_files_in_agent(AgentId(), "[workspace]\n", None, "export A=b\n", caller)
 
     assert not (tmp_path / "data" / ".secrets" / "share.env").exists()
 
@@ -230,7 +276,7 @@ def test_read_share_grants_round_trips_the_document_through_the_exec_envelope(tm
     grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
     agent_id = AgentId()
-    provision_share_files_in_agent(agent_id, grants_text, None, caller)
+    provision_share_files_in_agent(agent_id, grants_text, None, None, caller)
 
     assert read_share_grants_from_agent(agent_id, caller) == grants_text
 
@@ -294,6 +340,7 @@ def test_clear_share_materials_removes_the_grants_document_too() -> None:
     assert "data/.secrets/share.env" in joined
     assert "data/.state/share_gateway/status.json" in joined
     assert "data/.secrets/share_grants.toml" in joined
+    assert "data/.secrets/share_identities.json" in joined
 
 
 def test_writes_use_a_unique_tmp_name_per_write() -> None:
@@ -301,7 +348,7 @@ def test_writes_use_a_unique_tmp_name_per_write() -> None:
     # bytes; every write clause must mint its tmp name via mktemp instead.
     caller = RecordingMngrCaller()
 
-    provision_share_files_in_agent(AgentId(), "[workspace]\n", "export A=b\n", caller)
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", None, "export A=b\n", caller)
 
     command = caller.calls[0][2]
     assert "mktemp data/.secrets/.share_grants.toml.XXXXXX" in command
@@ -324,7 +371,7 @@ def test_concurrent_grant_writes_never_corrupt_the_file(tmp_path: Path) -> None:
         for _ in range(10):
             try:
                 barrier.wait(timeout=30)
-                provision_share_files_in_agent(agent_id, payload, None, caller)
+                provision_share_files_in_agent(agent_id, payload, None, None, caller)
             except (ShareInjectionError, threading.BrokenBarrierError) as exc:
                 write_errors.append(exc)
                 return
@@ -358,7 +405,7 @@ def test_probe_round_trips_the_full_share_state_in_one_exec(tmp_path: Path) -> N
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
     (tmp_path / "system" / "services" / "share_gateway").mkdir(parents=True)
     grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
-    provision_share_files_in_agent(AgentId(), grants_text, "export A=b\n", caller)
+    provision_share_files_in_agent(AgentId(), grants_text, None, "export A=b\n", caller)
 
     probe = probe_share_state_in_agent(AgentId(), caller)
 
