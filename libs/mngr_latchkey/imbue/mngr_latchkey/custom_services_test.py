@@ -1,17 +1,27 @@
 import json
+import os
 import re
+import stat
 from pathlib import Path
 
 import pytest
 from pydantic import JsonValue
+from pydantic import ValidationError
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import SERVICES_CATALOG_FILENAME
+from imbue.mngr_latchkey.core import build_config_with_custom_services
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
 from imbue.mngr_latchkey.core import custom_service_registration_entries
+from imbue.mngr_latchkey.core import custom_service_registration_entries_of_every_machine
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import overlaid_services_catalog_content
 from imbue.mngr_latchkey.core import read_registered_services
+from imbue.mngr_latchkey.core import remove_custom_service_registration
+from imbue.mngr_latchkey.core import write_custom_service_registration
 from imbue.mngr_latchkey.custom_services import CUSTOM_SERVICE_NAME_PREFIX
 from imbue.mngr_latchkey.custom_services import CustomServiceError
 from imbue.mngr_latchkey.custom_services import DomainWarning
@@ -31,9 +41,11 @@ from imbue.mngr_latchkey.custom_services import validate_credential_instructions
 from imbue.mngr_latchkey.custom_services import validate_domain
 from imbue.mngr_latchkey.custom_services import validate_login_flow
 from imbue.mngr_latchkey.custom_services import validate_scheme
+from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_HEADERS
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_INSTRUCTIONS
 from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_HEADERS
@@ -691,3 +703,187 @@ def test_registration_carries_the_header_under_minds_own_key_and_reads_it_back()
             login_flow_params={"cookieKeys": ["s"]},
             credential_header="X-Api-Key: {token}",
         )
+
+
+# Per-machine registrations: each machine store's config names the custom
+# services registered on that machine, and the desktop's names the union.
+
+
+def _machine_store_with(latchkey_directory: Path, host_id: HostId, registered_services: dict[str, object]) -> Path:
+    store_dir = machine_store_dir(plugin_data_dir(latchkey_directory), host_id)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    _write_config(store_dir, registered_services)
+    return store_dir
+
+
+def test_union_names_the_custom_services_of_every_machine(tmp_path: Path) -> None:
+    _write_config(tmp_path, {"custom_https_local_test": {"baseApiUrl": "https://local.test/"}})
+    _machine_store_with(tmp_path, HostId.generate(), {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}})
+    _machine_store_with(
+        tmp_path,
+        HostId.generate(),
+        {"custom_https_b_test": {"baseApiUrl": "https://b.test/"}, "custom_broken": {}, "acme": {"baseApiUrl": "x"}},
+    )
+
+    union = custom_service_registration_entries_of_every_machine(tmp_path)
+
+    assert set(union) == {"custom_https_local_test", "custom_https_a_test", "custom_https_b_test"}
+
+
+def test_union_prefers_the_desktops_own_entry_for_a_service_two_machines_register(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        {"custom_https_a_test": {"baseApiUrl": "https://a.test/", "mindsCredentialHeader": "X-Api-Key: {token}"}},
+    )
+    _machine_store_with(tmp_path, HostId.generate(), {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}})
+
+    union = custom_service_registration_entries_of_every_machine(tmp_path)
+
+    assert union["custom_https_a_test"] == {
+        "baseApiUrl": "https://a.test/",
+        "mindsCredentialHeader": "X-Api-Key: {token}",
+    }
+
+
+def test_union_ignores_a_machine_store_without_a_config(tmp_path: Path) -> None:
+    _write_config(tmp_path, {})
+    machine_store_dir(plugin_data_dir(tmp_path), HostId.generate()).mkdir(parents=True)
+
+    assert custom_service_registration_entries_of_every_machine(tmp_path) == {}
+
+
+def test_catalog_of_one_machine_names_only_its_own_custom_services(tmp_path: Path) -> None:
+    _write_config(tmp_path, {"custom_https_local_test": {"baseApiUrl": "https://local.test/"}})
+    store_dir = _machine_store_with(
+        tmp_path, HostId.generate(), {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}}
+    )
+
+    machine_catalog = ServicesCatalog(latchkey_directory=store_dir).all_service_names()
+    desktop_catalog = ServicesCatalog(latchkey_directory=tmp_path).all_service_names()
+
+    assert "custom_https_a_test" in machine_catalog
+    assert "custom_https_local_test" not in machine_catalog
+    assert "custom_https_local_test" in desktop_catalog
+    assert "custom_https_a_test" not in desktop_catalog
+
+
+def test_catalog_including_every_machine_names_them_all_and_the_gateway_catalog_agrees(tmp_path: Path) -> None:
+    _write_config(tmp_path, {"custom_https_local_test": {"baseApiUrl": "https://local.test/"}})
+    _machine_store_with(tmp_path, HostId.generate(), {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}})
+
+    every = ServicesCatalog(latchkey_directory=tmp_path, is_including_every_machine=True).all_service_names()
+    materialized = set(json.loads(overlaid_services_catalog_content(tmp_path)))
+
+    assert {"custom_https_local_test", "custom_https_a_test"} <= every
+    assert materialized == every
+
+
+def test_catalog_including_every_machine_is_refused_without_a_directory_to_find_them_under() -> None:
+    with pytest.raises(ValidationError, match="latchkey_directory"):
+        ServicesCatalog(is_including_every_machine=True)
+
+
+def test_machine_store_config_carries_the_desktops_settings_with_the_machines_custom_services() -> None:
+    desktop_config = json.dumps(
+        {
+            "browser": {"source": "system"},
+            "settings": {"keyringServiceName": "minds-desktop"},
+            "registeredServices": {
+                "custom_https_local_test": {"baseApiUrl": "https://local.test/"},
+                "my-gitlab": {"baseApiUrl": "https://gitlab.internal/"},
+            },
+        }
+    )
+
+    built = json.loads(
+        build_config_with_custom_services(desktop_config, {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}})
+    )
+
+    assert built["browser"] == {"source": "system"}
+    assert built["settings"]["keyringServiceName"] == "minds-desktop"
+    assert "notion" in built["settings"]["hideBuiltinServices"]
+    assert set(built["registeredServices"]) == {"my-gitlab", "custom_https_a_test", "claude-ai"}
+
+
+def test_machine_store_config_from_no_desktop_config_is_the_bundled_half_alone() -> None:
+    built = json.loads(build_config_with_custom_services(None, {}))
+    assert set(built) == {"settings", "registeredServices"}
+    assert set(built["registeredServices"]) == {"claude-ai"}
+
+
+def test_machine_store_config_refuses_a_desktop_config_that_is_not_an_object() -> None:
+    with pytest.raises(LatchkeyError, match="JSON object"):
+        build_config_with_custom_services("[]", {})
+
+
+def test_removing_a_registration_drops_only_that_entry(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "browser": {"source": "system"},
+                "settings": {"theme": "dark"},
+                "registeredServices": {
+                    "custom_https_a_test": {"baseApiUrl": "https://a.test/"},
+                    "custom_https_b_test": {"baseApiUrl": "https://b.test/"},
+                },
+            }
+        )
+    )
+
+    remove_custom_service_registration(tmp_path, "custom_https_a_test")
+
+    assert json.loads((tmp_path / "config.json").read_text()) == {
+        "browser": {"source": "system"},
+        "settings": {"theme": "dark"},
+        "registeredServices": {"custom_https_b_test": {"baseApiUrl": "https://b.test/"}},
+    }
+
+
+def test_removing_a_registration_the_config_does_not_name_leaves_the_file_as_it_is(tmp_path: Path) -> None:
+    _write_config(tmp_path, {"custom_https_b_test": {"baseApiUrl": "https://b.test/"}})
+    before = (tmp_path / "config.json").read_text()
+
+    remove_custom_service_registration(tmp_path, "custom_https_a_test")
+    remove_custom_service_registration(tmp_path / "nowhere", "custom_https_a_test")
+
+    assert (tmp_path / "config.json").read_text() == before
+
+
+def test_removing_a_registration_refuses_a_config_that_is_not_an_object(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("[]")
+
+    with pytest.raises(LatchkeyError, match="JSON object"):
+        remove_custom_service_registration(tmp_path, "custom_https_a_test")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root is not held to directory permissions")
+def test_a_registration_edit_that_cannot_be_written_raises_a_latchkey_error(tmp_path: Path) -> None:
+    _write_config(tmp_path, {"custom_https_a_test": {"baseApiUrl": "https://a.test/"}})
+    tmp_path.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        with pytest.raises(LatchkeyError, match="Failed to deregister"):
+            remove_custom_service_registration(tmp_path, "custom_https_a_test")
+        with pytest.raises(LatchkeyError, match="Failed to register"):
+            write_custom_service_registration(tmp_path, "custom_https_b_test", {"baseApiUrl": "https://b.test/"})
+    finally:
+        tmp_path.chmod(stat.S_IRWXU)
+
+
+def test_registering_then_deregistering_through_latchkey_refreshes_the_gateway_catalog(tmp_path: Path) -> None:
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    latchkey = Latchkey(latchkey_directory=latchkey_directory, latchkey_binary="/nonexistent")
+    store_dir = machine_store_dir(plugin_data_dir(latchkey_directory), HostId.generate())
+    store_dir.mkdir(parents=True)
+    materialized_catalog = latchkey_directory / "extensions" / SERVICES_CATALOG_FILENAME
+
+    latchkey.register_custom_service(store_dir, "custom_https_a_test", {"baseApiUrl": "https://a.test/"})
+
+    assert read_registered_services(store_dir)["custom_https_a_test"] == {"baseApiUrl": "https://a.test/"}
+    assert "custom_https_a_test" not in read_registered_services(latchkey_directory)
+    assert "custom_https_a_test" in json.loads(materialized_catalog.read_text())
+
+    latchkey.deregister_custom_service(store_dir, "custom_https_a_test")
+
+    assert "custom_https_a_test" not in read_registered_services(store_dir)
+    assert "custom_https_a_test" not in json.loads(materialized_catalog.read_text())

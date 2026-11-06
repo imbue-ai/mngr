@@ -1,8 +1,11 @@
+import json
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import JsonValue
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -19,6 +22,7 @@ from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
+from imbue.mngr_latchkey.remote._mirror import write_machine_store_config
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -39,18 +43,132 @@ def test_machine_store_is_the_directory_holding_the_hosts_permissions_file(tmp_p
     assert machine_store_dir(data_dir, host_id) == permissions_path_for_host(data_dir, host_id).parent
 
 
-def test_materialize_shares_config_browser_state_key_and_count_stamp_by_relative_symlink(tmp_path: Path) -> None:
+def test_materialize_shares_browser_state_key_and_count_stamp_by_relative_symlink(tmp_path: Path) -> None:
     latchkey_directory, data_dir = _roots(tmp_path)
     host_id = HostId.generate()
 
     store_dir = materialize_machine_store(latchkey_directory, data_dir, host_id)
 
-    for filename in (CONFIG_FILENAME, BROWSER_STATE_FILENAME, ENCRYPTION_KEY_FILENAME, DAILY_COUNT_STAMP_FILENAME):
+    for filename in (BROWSER_STATE_FILENAME, ENCRYPTION_KEY_FILENAME, DAILY_COUNT_STAMP_FILENAME):
         link = store_dir / filename
         assert link.is_symlink()
         # Relative, so the tree survives being moved or copied wholesale.
         assert not os.path.isabs(os.readlink(link))
         assert link.resolve() == (latchkey_directory / filename).resolve()
+
+
+def _desktop_config(latchkey_directory: Path, registered_services: dict[str, object]) -> None:
+    (latchkey_directory / CONFIG_FILENAME).write_text(
+        json.dumps(
+            {
+                "browser": {"executablePath": "/Applications/Chromium.app", "source": "system"},
+                "settings": {"keyringServiceName": "minds-desktop"},
+                "registeredServices": registered_services,
+            }
+        )
+    )
+
+
+def _store_config(store_dir: Path) -> dict[str, Any]:
+    return json.loads((store_dir / CONFIG_FILENAME).read_text())
+
+
+def test_materialize_gives_the_store_a_config_of_its_own_built_from_the_desktops(tmp_path: Path) -> None:
+    """The store's config carries the desktop's settings but not the custom services on the desktop's own machine."""
+    latchkey_directory, data_dir = _roots(tmp_path)
+    _desktop_config(
+        latchkey_directory,
+        {
+            "custom_https_local_test": {"baseApiUrl": "https://local.test/"},
+            "my-gitlab": {"baseApiUrl": "https://gitlab.internal/"},
+        },
+    )
+
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+
+    config_path = store_dir / CONFIG_FILENAME
+    assert config_path.is_file() and not config_path.is_symlink()
+    config = _store_config(store_dir)
+    assert config["browser"] == {"executablePath": "/Applications/Chromium.app", "source": "system"}
+    assert config["settings"]["keyringServiceName"] == "minds-desktop"
+    assert "notion" in config["settings"]["hideBuiltinServices"]
+    registered = config["registeredServices"]
+    assert "custom_https_local_test" not in registered
+    assert registered["my-gitlab"] == {"baseApiUrl": "https://gitlab.internal/"}
+    assert "claude-ai" in registered
+
+
+def test_materialize_keeps_the_stores_own_custom_services_while_following_the_desktops_settings(
+    tmp_path: Path,
+) -> None:
+    latchkey_directory, data_dir = _roots(tmp_path)
+    host_id = HostId.generate()
+    _desktop_config(latchkey_directory, {})
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, host_id)
+    write_machine_store_config(
+        latchkey_directory, store_dir, {"custom_https_example_com": {"baseApiUrl": "https://example.com/"}}
+    )
+    _desktop_config(latchkey_directory, {"custom_https_local_test": {"baseApiUrl": "https://local.test/"}})
+    (latchkey_directory / CONFIG_FILENAME).write_text(
+        (latchkey_directory / CONFIG_FILENAME).read_text().replace("Chromium", "Chrome")
+    )
+
+    materialize_machine_store(latchkey_directory, data_dir, host_id)
+
+    config = _store_config(store_dir)
+    assert config["browser"]["executablePath"] == "/Applications/Chrome.app"
+    assert set(name for name in config["registeredServices"] if name.startswith("custom_")) == {
+        "custom_https_example_com"
+    }
+
+
+def test_materialize_works_without_a_desktop_config_yet(tmp_path: Path) -> None:
+    latchkey_directory, data_dir = _roots(tmp_path)
+
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+
+    assert "claude-ai" in _store_config(store_dir)["registeredServices"]
+
+
+def test_materialize_replaces_a_config_link_from_an_earlier_build_keeping_what_it_resolved_to(tmp_path: Path) -> None:
+    """A store that shared the desktop's config by link starts with the custom services that link named."""
+    latchkey_directory, data_dir = _roots(tmp_path)
+    host_id = HostId.generate()
+    _desktop_config(latchkey_directory, {"custom_https_local_test": {"baseApiUrl": "https://local.test/"}})
+    store_dir = machine_store_dir(data_dir, host_id)
+    store_dir.mkdir(parents=True)
+    (store_dir / CONFIG_FILENAME).symlink_to(os.path.relpath(latchkey_directory / CONFIG_FILENAME, store_dir))
+
+    materialize_machine_store(latchkey_directory, data_dir, host_id)
+
+    config_path = store_dir / CONFIG_FILENAME
+    assert config_path.is_file() and not config_path.is_symlink()
+    assert _store_config(store_dir)["registeredServices"]["custom_https_local_test"] == {
+        "baseApiUrl": "https://local.test/"
+    }
+    assert json.loads((latchkey_directory / CONFIG_FILENAME).read_text())["registeredServices"] == {
+        "custom_https_local_test": {"baseApiUrl": "https://local.test/"}
+    }
+
+
+def test_write_machine_store_config_reports_whether_anything_changed(tmp_path: Path) -> None:
+    latchkey_directory, data_dir = _roots(tmp_path)
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+    entries: dict[str, JsonValue] = {"custom_https_example_com": {"baseApiUrl": "https://example.com/"}}
+
+    assert write_machine_store_config(latchkey_directory, store_dir, entries) is True
+    assert write_machine_store_config(latchkey_directory, store_dir, entries) is False
+    assert write_machine_store_config(latchkey_directory, store_dir, {}) is True
+    assert "custom_https_example_com" not in _store_config(store_dir)["registeredServices"]
+
+
+def test_write_machine_store_config_refuses_a_desktop_config_that_is_not_an_object(tmp_path: Path) -> None:
+    latchkey_directory, data_dir = _roots(tmp_path)
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+    (latchkey_directory / CONFIG_FILENAME).write_text("[]")
+
+    with pytest.raises(LatchkeyStoreError, match="JSON object"):
+        write_machine_store_config(latchkey_directory, store_dir, {})
 
 
 def test_materialize_shares_the_daily_count_stamp_so_the_ping_is_per_user(tmp_path: Path) -> None:
@@ -111,13 +229,13 @@ def test_materialize_repoints_a_link_that_points_elsewhere(tmp_path: Path) -> No
     host_id = HostId.generate()
     store_dir = machine_store_dir(data_dir, host_id)
     store_dir.mkdir(parents=True)
-    stray = tmp_path / "somewhere-else.json"
-    stray.write_text("{}")
-    (store_dir / CONFIG_FILENAME).symlink_to(stray)
+    stray = tmp_path / "somewhere-else.enc"
+    stray.write_text("a stray browser session")
+    (store_dir / BROWSER_STATE_FILENAME).symlink_to(stray)
 
     materialize_machine_store(latchkey_directory, data_dir, host_id)
 
-    assert (store_dir / CONFIG_FILENAME).resolve() == (latchkey_directory / CONFIG_FILENAME).resolve()
+    assert (store_dir / BROWSER_STATE_FILENAME).resolve() == (latchkey_directory / BROWSER_STATE_FILENAME).resolve()
 
 
 def test_materialize_refuses_to_replace_a_regular_file_with_a_shared_link(tmp_path: Path) -> None:

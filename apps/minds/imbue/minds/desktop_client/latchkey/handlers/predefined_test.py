@@ -779,6 +779,7 @@ def test_a_custom_services_registered_header_is_what_the_typed_token_is_stored_u
         set_credentials_example=f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"',
     )
     latchkey.register_custom_service(
+        tmp_path,
         service_name,
         build_custom_service_registration("api.example.com", "https", credential_header="X-Api-Key: {token}"),
     )

@@ -63,6 +63,8 @@ from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogErr
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
+from imbue.mngr_latchkey.custom_services import readable_custom_service_entries
+from imbue.mngr_latchkey.custom_services import without_custom_service_entries
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.devices import build_local_device_env
 from imbue.mngr_latchkey.encryption_key import LATCHKEY_ENCRYPTION_KEY_ENV_VAR
@@ -74,6 +76,7 @@ from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import hosts_dir
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -230,7 +233,10 @@ SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
 # ``hideBuiltinServices`` -- from here, and its ``registeredServices`` block,
 # which is how any gateway learns about a custom (non-builtin) service.
 # :func:`merge_minds_latchkey_config` writes this package's half of both;
-# :func:`read_registered_services` reads the latter back.
+# :func:`read_registered_services` reads the latter back. Every latchkey
+# directory has one of its own: the desktop's, and each machine store's, whose
+# copy carries the custom services registered on *that* machine (see
+# :func:`build_config_with_custom_services`).
 CONFIG_FILENAME: Final[str] = "config.json"
 
 # The desktop and VPS gateways intentionally load disjoint extension sets. The
@@ -776,7 +782,7 @@ def bundled_gateway_extension_content(filename: str) -> str:
     return resource.read_text(encoding="utf-8")
 
 
-def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
+def materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     """Copy this package's bundled gateway extensions into ``LATCHKEY_DIRECTORY/extensions/``.
 
     The upstream ``latchkey gateway`` (>= 2.9.0) auto-loads every
@@ -786,9 +792,11 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     ``.mjs`` files so the extensions can locate them via
     ``import.meta.url``. We rewrite the bundled files unconditionally
     on every spawn so a package upgrade always wins over a stale
-    on-disk copy. The directory is created with ``mode=0o700`` because
-    it shares the same trust boundary as the rest of
-    ``LATCHKEY_DIRECTORY``.
+    on-disk copy, and again whenever a custom service is registered or
+    deregistered anywhere this computer manages, so the catalog the
+    extensions validate against names what the desktop serves. The
+    directory is created with ``mode=0o700`` because it shares the same
+    trust boundary as the rest of ``LATCHKEY_DIRECTORY``.
     """
     extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
     extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -805,31 +813,21 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     return extensions_dir
 
 
-def read_registered_services(latchkey_directory: Path) -> dict[str, JsonValue]:
-    """Return the ``registeredServices`` block of latchkey's ``config.json``.
+def registered_services_from_config_text(config_json: str, source_description: str) -> dict[str, JsonValue]:
+    """Return the ``registeredServices`` block of a latchkey ``config.json``'s text.
 
-    Returns an empty mapping when the file is absent, unreadable, not JSON, or
-    structurally surprising. This is read on the path that renders the
-    permission dialog and the Connectors page, and it shares a file with
-    upstream latchkey (which rewrites it when it discovers a browser), so a
-    transient or hand-inflicted problem here must degrade to "no custom
-    services" rather than taking those surfaces down. A custom service that
-    silently fails to appear is recoverable by the agent asking again; a
-    permissions page that will not load is not.
+    Returns an empty mapping when the text is not JSON, not an object, or has
+    no such block, logging why against ``source_description`` (which file, or
+    which machine, the text came from). The degradation is deliberate: see
+    :func:`read_registered_services`.
     """
-    config_path = latchkey_directory / CONFIG_FILENAME
     try:
-        raw = config_path.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.debug("No latchkey config to read custom services from at {}: {}", config_path, e)
-        return {}
-    try:
-        parsed = json.loads(raw)
+        parsed = json.loads(config_json)
     except json.JSONDecodeError as e:
-        logger.warning("Latchkey config at {} is not valid JSON, so no custom services: {}", config_path, e)
+        logger.warning("Latchkey config of {} is not valid JSON, so no custom services: {}", source_description, e)
         return {}
     if not isinstance(parsed, dict):
-        logger.warning("Latchkey config at {} is not a JSON object, so no custom services", config_path)
+        logger.warning("Latchkey config of {} is not a JSON object, so no custom services", source_description)
         return {}
     registered = parsed.get("registeredServices")
     if not isinstance(registered, dict):
@@ -837,39 +835,186 @@ def read_registered_services(latchkey_directory: Path) -> dict[str, JsonValue]:
     return registered
 
 
-def overlaid_services_catalog_content(latchkey_directory: Path) -> str:
-    """Return ``services.json`` with this install's custom services overlaid on the shipped catalog.
+def read_registered_services(latchkey_directory: Path) -> dict[str, JsonValue]:
+    """Return the ``registeredServices`` block of the ``config.json`` in ``latchkey_directory``.
 
-    The extensions validate a permission request against this file, and the
-    desktop renders its dialogs from the same catalog via
+    The directory is the desktop's own, or a machine store's, whose config
+    carries the custom services registered on that machine. Returns an empty
+    mapping when the file is absent, unreadable, not JSON, or structurally
+    surprising. This is read on the path that renders the permission dialog
+    and the Connectors page, and the desktop's file is shared with upstream
+    latchkey (which rewrites it when it discovers a browser), so a transient
+    or hand-inflicted problem here must degrade to "no custom services" rather
+    than taking those surfaces down. A custom service that silently fails to
+    appear is recoverable by the agent asking again; a permissions page that
+    will not load is not.
+    """
+    config_path = latchkey_directory / CONFIG_FILENAME
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.debug("No latchkey config to read custom services from at {}: {}", config_path, e)
+        return {}
+    return registered_services_from_config_text(raw, str(config_path))
+
+
+def custom_service_registration_entries(latchkey_directory: Path) -> dict[str, JsonValue]:
+    """Return the custom services registered in ``latchkey_directory`` as a ``registeredServices`` block.
+
+    Only the entries :mod:`imbue.mngr_latchkey.custom_services` recognizes --
+    ``custom_``-prefixed, with a readable ``baseApiUrl`` -- so an unusable entry
+    is never propagated onward. For the desktop's directory these are the
+    services registered on this computer's own machine; for a machine store,
+    the ones registered on that machine.
+    """
+    return readable_custom_service_entries(read_registered_services(latchkey_directory))
+
+
+def custom_service_registration_entries_of_every_machine(latchkey_directory: Path) -> dict[str, JsonValue]:
+    """Return every custom service this computer knows a gateway for, as one ``registeredServices`` block.
+
+    The desktop's own registrations, plus those of every machine store under
+    its plugin data directory (the remote machines this computer manages).
+    Two machines registering the same origin derive the same name and the
+    same scope, so the union is well-defined; where their entries differ (a
+    header one machine's token is sent as) the desktop's own wins, and among
+    the machine stores the one later in directory order, which no reader of
+    the union depends on: the union serves the surfaces that name a service
+    as a whole -- the desktop gateway's catalog, which validates the requests
+    remote machines forward to it, and the dialogs' display names -- never
+    anything that stores a credential.
+    """
+    entries: dict[str, JsonValue] = {}
+    machine_stores = hosts_dir(_plugin_data_dir(latchkey_directory))
+    if machine_stores.is_dir():
+        for store_dir in sorted(machine_stores.iterdir()):
+            if (store_dir / CONFIG_FILENAME).is_file():
+                entries.update(custom_service_registration_entries(store_dir))
+    entries.update(custom_service_registration_entries(latchkey_directory))
+    return entries
+
+
+def overlaid_services_catalog_content(latchkey_directory: Path) -> str:
+    """Return ``services.json`` with every custom service this computer knows overlaid on the shipped catalog.
+
+    The desktop gateway's extensions validate a permission request against
+    this file -- including the requests a remote machine's gateway forwards
+    here, which may name a service registered only on that machine -- so the
+    overlay is the union of every machine's registrations
+    (:func:`custom_service_registration_entries_of_every_machine`). The
+    desktop renders its dialogs from the same union via
     :class:`~imbue.mngr_latchkey.services_catalog.ServicesCatalog`, so the two
-    must agree about which services exist. They do it by construction rather
-    than by convention: this is the one place the overlay is applied for the
-    gateway, and the catalog applies the same projection for Python. Neither
-    gateway extension knows custom services exist -- they keep reading one file
-    in one shape.
+    agree about which services exist by construction: this is the one place
+    the overlay is applied for the gateway, and the catalog applies the same
+    projection for Python. Neither gateway extension knows custom services
+    exist -- they keep reading one file in one shape.
 
     A materialized file therefore differs from the package resource of the same
     name whenever the install has custom services. That is the point, but it is
     worth knowing when comparing the two by hand.
     """
     shipped = json.loads(bundled_gateway_extension_content(SERVICES_CATALOG_FILENAME))
-    overlay = custom_service_catalog_payload(read_registered_services(latchkey_directory), frozenset(shipped))
+    overlay = custom_service_catalog_payload(
+        custom_service_registration_entries_of_every_machine(latchkey_directory), frozenset(shipped)
+    )
     shipped.update(overlay)
     return json.dumps(shipped, indent=2) + "\n"
 
 
-def custom_service_registration_entries(latchkey_directory: Path) -> dict[str, JsonValue]:
-    """Return this install's custom services as a ``registeredServices`` block.
+def build_config_with_custom_services(
+    base_config_json: str | None, custom_service_entries: Mapping[str, JsonValue]
+) -> str:
+    """Return ``base_config_json`` with its custom services replaced by ``custom_service_entries``, and this package's half merged in.
 
-    Only the entries :mod:`imbue.mngr_latchkey.custom_services` recognizes --
-    ``custom_``-prefixed, with a readable ``baseApiUrl`` -- so an unusable entry
-    is not propagated onward to a VPS. Used by the remote path, which merges the
-    *desktop's* custom services into a VPS config that holds none of them.
+    Everything else in the base config -- latchkey's own settings, the browser
+    it discovered, a service the user registered by hand -- is kept, and the
+    hidden built-in services and bundled registrations are brought up to date
+    (:func:`merge_minds_latchkey_config`). Two files are built this way:
+
+    * a machine store's ``config.json``, from the desktop's: the desktop's
+      settings with the custom services registered on the mirrored machine in
+      place of the ones on this computer's own (a machine store is a usable
+      ``LATCHKEY_DIRECTORY``, so its config has to carry what the upstream CLI
+      reads there, and the machine's registrations are what make its custom
+      services readable and signable-in through the store);
+    * the snapshot a push installs on a machine, from the config the machine
+      was just read to hold: the machine's own file with its custom-service set
+      edited to what the push means it to be.
+
+    Raises :class:`LatchkeyError` if the base config is not a JSON object.
     """
-    registered = read_registered_services(latchkey_directory)
-    readable = custom_service_catalog_payload(registered)
-    return {name: registered[name] for name in readable}
+    config = _parse_config_object(base_config_json)
+    registered_value = config.get("registeredServices")
+    config["registeredServices"] = without_custom_service_entries(
+        registered_value if isinstance(registered_value, dict) else {}
+    )
+    return merge_minds_latchkey_config(json.dumps(config), custom_service_entries)
+
+
+def write_custom_service_registration(
+    latchkey_directory: Path, service_name: str, registration: Mapping[str, JsonValue]
+) -> None:
+    """Register a custom service in the ``config.json`` of ``latchkey_directory``.
+
+    Read-merge-write, so latchkey's own settings and every other registration
+    survive, and idempotent, so a retry after a failed sign-in re-registers
+    harmlessly. The directory is the desktop's own (registering the service on
+    this computer's machine) or a machine store's (registering it on the
+    machine the store mirrors, ahead of the push that carries it there).
+
+    Raises :class:`LatchkeyError` if the config cannot be read or written.
+    """
+    config_path = latchkey_directory / CONFIG_FILENAME
+    try:
+        existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+        content = merge_minds_latchkey_config(existing, {service_name: dict(registration)})
+        atomic_write(config_path, content)
+    except (OSError, LatchkeyError) as e:
+        raise LatchkeyError(f"Failed to register {service_name} in {config_path}: {e}") from e
+    logger.info("Registered custom latchkey service {} in {}", service_name, latchkey_directory)
+
+
+def remove_custom_service_registration(latchkey_directory: Path, service_name: str) -> None:
+    """Deregister a custom service from the ``config.json`` of ``latchkey_directory``.
+
+    The inverse of :func:`write_custom_service_registration`: the one entry is
+    dropped and everything else in the file is kept as it is. A service the
+    file does not name is already deregistered, so that is not an error.
+
+    Raises :class:`LatchkeyError` if the config cannot be read or written.
+    """
+    config_path = latchkey_directory / CONFIG_FILENAME
+    if not config_path.is_file():
+        return
+    try:
+        config = _parse_config_object(config_path.read_text(encoding="utf-8"))
+        registered_value = config.get("registeredServices")
+        if not isinstance(registered_value, dict) or service_name not in registered_value:
+            return
+        config["registeredServices"] = {
+            name: value for name, value in registered_value.items() if name != service_name
+        }
+        atomic_write(config_path, json.dumps(config, indent=2))
+    except (OSError, LatchkeyError) as e:
+        raise LatchkeyError(f"Failed to deregister {service_name} from {config_path}: {e}") from e
+    logger.info("Deregistered custom latchkey service {} from {}", service_name, latchkey_directory)
+
+
+def _parse_config_object(config_json: str | None) -> dict[str, JsonValue]:
+    """The parsed object of a latchkey ``config.json``'s text; an empty one for no text.
+
+    Raises :class:`LatchkeyError` when the text is not a JSON object, rather
+    than silently discarding whatever it was.
+    """
+    if not config_json:
+        return {}
+    try:
+        loaded = json.loads(config_json)
+    except json.JSONDecodeError as e:
+        raise LatchkeyError(f"config is not valid JSON: {e}") from e
+    if not isinstance(loaded, dict):
+        raise LatchkeyError(f"config must be a JSON object, got {type(loaded).__name__}")
+    return loaded
 
 
 # Maximum length of a condensed latchkey failure detail. Long enough for a real
@@ -1012,12 +1157,10 @@ def merge_minds_latchkey_config(
       registration cannot use them at all, so the registration travels with them.
 
     ``custom_service_entries`` are the user-created services (see
-    :mod:`imbue.mngr_latchkey.custom_services`) to merge in as well. The desktop
-    passes nothing: its custom services already live in the very file being
-    merged, and are preserved by the read-merge below. A VPS config is a
-    *different* file that holds none of them, so the remote path passes the
-    desktop's set explicitly -- a gateway holding a custom service's credentials
-    but not its registration cannot resolve a request to it at all.
+    :mod:`imbue.mngr_latchkey.custom_services`) to merge in as well: the one
+    being registered, or the set a machine store's config is rebuilt with. A
+    caller with none to add passes nothing, and the custom services already in
+    the file are preserved by the read-merge below.
 
     Returns the serialized config text, preserving any other content the input
     config holds: the ``settings`` and ``registeredServices`` blocks are
@@ -1038,16 +1181,7 @@ def merge_minds_latchkey_config(
     than silently discarding it; callers that read from a file add the file's
     path to the surfaced error.
     """
-    if existing_config_json:
-        try:
-            loaded = json.loads(existing_config_json)
-        except json.JSONDecodeError as e:
-            raise LatchkeyError(f"config is not valid JSON: {e}") from e
-        if not isinstance(loaded, dict):
-            raise LatchkeyError(f"config must be a JSON object, got {type(loaded).__name__}")
-        config = loaded
-    else:
-        config = {}
+    config = _parse_config_object(existing_config_json)
     settings_value = config.get("settings")
     settings = settings_value if isinstance(settings_value, dict) else {}
     hidden_value = settings.get("hideBuiltinServices")
@@ -1340,31 +1474,40 @@ class Latchkey(MutableModel):
         with self._lock:
             self._is_initialized = True
 
-    def register_custom_service(self, service_name: str, registration: Mapping[str, JsonValue]) -> None:
-        """Register a user-created custom service in latchkey's ``config.json``.
+    def register_custom_service(
+        self, store_directory: Path, service_name: str, registration: Mapping[str, JsonValue]
+    ) -> None:
+        """Register a user-created custom service on one machine: in the ``config.json`` of its store.
 
         The registration *is* the service: everything else about a custom one --
         its label, its Detent scope, the domain that scope pins -- is derived
         from this entry, so there is no second place to write (see
-        :mod:`imbue.mngr_latchkey.custom_services`).
+        :mod:`imbue.mngr_latchkey.custom_services`). ``store_directory`` is
+        this computer's own latchkey directory for a service on this computer's
+        machine, or a machine store for one on the remote machine it mirrors
+        (see :func:`write_custom_service_registration`).
 
-        Read-merge-write, so latchkey's own settings and every other
-        registration survive, and idempotent, so a retry after a failed sign-in
-        re-registers harmlessly. The gateway's extension catalog is
-        re-materialized afterwards so its view of which services exist matches
-        the desktop's immediately, rather than at the next gateway spawn.
+        The desktop gateway's extension catalog is re-materialized afterwards
+        so its view of which services exist, on any machine, matches the
+        desktop's immediately rather than at the next gateway spawn.
 
         Raises :class:`LatchkeyError` if the config cannot be read or written.
         """
-        config_path = self.latchkey_directory / CONFIG_FILENAME
-        existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
-        try:
-            content = merge_minds_latchkey_config(existing, {service_name: dict(registration)})
-        except LatchkeyError as e:
-            raise LatchkeyError(f"Failed to register {service_name} in {config_path}: {e}") from e
-        atomic_write(config_path, content)
-        logger.info("Registered custom latchkey service {}", service_name)
-        _materialize_bundled_extensions(self.latchkey_directory)
+        write_custom_service_registration(store_directory, service_name, registration)
+        materialize_bundled_extensions(self.latchkey_directory)
+
+    def deregister_custom_service(self, store_directory: Path, service_name: str) -> None:
+        """Deregister a custom service from one machine: the inverse of :meth:`register_custom_service`.
+
+        What signing out of a custom service's last account comes to, so that
+        the next request for its origin registers what that request asks for
+        rather than silently reusing what an earlier one did. The gateway's
+        catalog is re-materialized the same way.
+
+        Raises :class:`LatchkeyError` if the config cannot be read or written.
+        """
+        remove_custom_service_registration(store_directory, service_name)
+        materialize_bundled_extensions(self.latchkey_directory)
 
     def start_gateway(self, concurrency_group: ConcurrencyGroup) -> int:
         """Start the shared gateway and return its bound listen port.
@@ -2417,7 +2560,7 @@ class Latchkey(MutableModel):
         # Drop the bundled gateway extensions into LATCHKEY_DIRECTORY so
         # ``latchkey gateway`` picks them up at startup. Always rewrites
         # so a package upgrade overrides any stale on-disk copy.
-        _materialize_bundled_extensions(self.latchkey_directory)
+        materialize_bundled_extensions(self.latchkey_directory)
 
         # Re-merge minds' state into ``config.json`` before the gateway reads it:
         # the built-in services that would confuse agents stay hidden, and the

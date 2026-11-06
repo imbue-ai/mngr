@@ -280,18 +280,19 @@ def disconnect_account(latchkey: Latchkey, service_name: str, account: str) -> b
 
     Runs ``latchkey auth clear <service> --account <account>`` (the default
     account is addressed with the empty string). Returns ``True`` when the
-    service has no stored accounts left afterwards, so the caller can trigger the
-    "revoke all" cleanup. Raises :class:`PermissionOverviewError` if the clear
-    command fails.
+    store is then seen to hold no account of the service at all -- what lets
+    the caller deregister a custom service its last account just left.
+    Raises :class:`PermissionOverviewError` if the clear command fails.
     """
     is_success, detail = latchkey.auth_clear(service_name, account=account)
     if not is_success:
         raise PermissionOverviewError(f"Could not disconnect account '{account or 'default'}': {detail}")
     remaining_info = latchkey.services_info(service_name, is_offline=True)
     # The clear itself already succeeded, so a follow-up probe that does not
-    # answer reads as "none left": claiming leftover accounts would only
-    # suppress the (idempotent) revoke-all cleanup.
-    return remaining_info is None or len(remaining_info.accounts) == 0
+    # answer is not a failed sign-out; it reads as "accounts may remain",
+    # because the one thing the answer decides -- dropping the service's
+    # registration -- would strand every account the probe could not see.
+    return remaining_info is not None and len(remaining_info.accounts) == 0
 
 
 def parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:

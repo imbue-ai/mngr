@@ -19,7 +19,9 @@ this computer has not seen belongs to another of the user's computers, and is
 adopted rather than deleted. The policy the machine's gateway enforces is read
 back the same way and for the same reason -- another computer may have granted
 something this one has never seen. So are the desktop egress rules its router
-reads.
+reads, and the custom services its config registers: one computer creates a
+connection to an origin on the machine, and the machine is where every other
+computer learns of it.
 
 Every exchange is synchronous and costs a single remote command: the caller
 opens the machine's outer host, does what it came to do, and lets both go.
@@ -28,10 +30,15 @@ happened is a change the machine has taken -- and one that fails is reported
 while there is still a caller to report it to, instead of becoming a
 notification about a click made minutes ago.
 
-The one exception to "one command" is a read that finds the machine's policy in
-a format older than this build writes: the policy is migrated here, once adopted,
-and carried back in a second command (:func:`migrate_permissions_and_push`), so
+Two exchanges cost two commands. A read that finds the machine's policy in a
+format older than this build writes migrates the policy here, once adopted, and
+carries it back in a second command (:func:`migrate_permissions_and_push`), so
 the machine is never left holding a policy this build has read but cannot edit.
+And a push that changes the machine's custom-service set -- a connect of a
+custom service, a disconnect of one's last account -- reads the machine's config
+first, so the snapshot it installs keeps what another computer registered there
+(:meth:`MachineCredentials._config_registering`,
+:meth:`MachineCredentials._config_deregistering`).
 """
 
 from collections.abc import Sequence
@@ -39,6 +46,7 @@ from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import SecretStr
 from pydantic import SkipValidation
 
@@ -47,8 +55,9 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import build_config_with_custom_services
 from imbue.mngr_latchkey.core import custom_service_registration_entries
-from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigration
@@ -64,16 +73,20 @@ from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 # machine store that outside consumers -- notably the Imbue Studio desktop app -- are
 # meant to reach through this module rather than through the private mirror.
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine as latchkey_for_machine
+from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key as stored_machine_encryption_key
 
 # Re-exported (the redundant alias marks it as such): what :meth:`MachineCredentials.refresh` answers with.
 from imbue.mngr_latchkey.remote._transfer import FetchedMachineState as FetchedMachineState
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_credentials
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_custom_services
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
+from imbue.mngr_latchkey.remote._transfer import custom_service_registrations_of_config
+from imbue.mngr_latchkey.remote._transfer import fetch_machine_config
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote._transfer import push_credentials
@@ -159,6 +172,12 @@ class MachineCredentials(FrozenModel):
         (:func:`migrate_permissions_and_push`), so what is returned -- and what
         the machine then holds -- is in the format this build reads.
 
+        The **custom services are the machine's** for the reason the policy
+        is: any of the user's computers may have created a connection to an
+        origin on it, or signed out of one and deregistered it. The set its
+        config registers is adopted into the machine store here (see
+        :func:`~imbue.mngr_latchkey.remote._transfer.adopt_machine_custom_services`).
+
         Raises:
             PermissionsMigrationError: when the machine's policy is in a format
                 newer than this build knows, or cannot be migrated to the one it
@@ -170,6 +189,7 @@ class MachineCredentials(FrozenModel):
         """
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
+        adopt_machine_custom_services(self.latchkey, self.host_id, fetched.custom_service_registrations)
         seeded = self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
         if seeded is None or seeded.desktop_egress_rules_json is None:
             adopt_machine_desktop_egress_rules(
@@ -267,7 +287,7 @@ class MachineCredentials(FrozenModel):
             service_name,
             account,
             self._machine_key(),
-            config_json=self._config_for(service_name),
+            config_json=self._config_registering(service_name),
         )
 
     def connect_service_with_permissions(self, service_name: str, account: str, permissions_json: str) -> None:
@@ -307,7 +327,7 @@ class MachineCredentials(FrozenModel):
             permissions_json,
             self._permissions_format_version(),
             desktop_egress_rules_json,
-            config_json=self._config_for(service_name),
+            config_json=self._config_registering(service_name),
         )
 
     def set_permissions(self, permissions_json: str) -> None:
@@ -335,16 +355,39 @@ class MachineCredentials(FrozenModel):
             self.host, self.host_id, permissions_json, desktop_egress_rules_json, self._permissions_format_version()
         )
 
-    def disconnect_account(self, service_name: str, account: str) -> None:
-        """Clear one account from the machine's own store.
+    def disconnect_account(self, service_name: str, account: str, is_service_deregistered: bool) -> None:
+        """Clear one account from the machine's own store, and deregister its service when asked to.
 
         Clearing the copy here *instead* would leave the credential on the
         machine and the machine's agents still able to use it -- which is the
         opposite of what signing out means -- so this is what a sign-out
         actually does, and the local clear beside it only keeps the scratch pad
         from showing an account the machine no longer has.
+
+        ``is_service_deregistered`` says the account was a custom service's
+        last, so the service goes with it: the machine's config is read, and
+        installed again without the service in the same command as the clear
+        (see :func:`~imbue.mngr_latchkey.remote._transfer.clear_remote_credentials`).
+        The machine store here keeps its own registration of the service: the
+        caller deregisters it from the store afterwards, once the grants that
+        named it are gone, and stripping those grants needs the store's catalog
+        to still name the service.
+
+        Raises:
+            MachineCredentialsError: when ``is_service_deregistered`` names a
+                service that is not a custom one; only custom services are
+                ever deregistered.
+            RemoteGatewayError: when the machine refuses or fails the clear,
+                or its config cannot be read for the deregistration.
         """
-        clear_remote_credentials(self.host, self.host_id, service_name, account, self._machine_key())
+        clear_remote_credentials(
+            self.host,
+            self.host_id,
+            service_name,
+            account,
+            self._machine_key(),
+            config_json=self._config_deregistering(service_name) if is_service_deregistered else None,
+        )
 
     def list_filed_permission_requests(self) -> tuple[FiledPermissionRequest, ...]:
         """The permission requests the machine keeps for the user's desktops (see :mod:`imbue.mngr_latchkey.filed_permission_requests`).
@@ -377,34 +420,93 @@ class MachineCredentials(FrozenModel):
             self.host, request_id, failure_description=f"forget permission request {request_id} on host {self.host_id}"
         )
 
-    def _config_for(self, service_name: str) -> str:
-        """This package's half of the machine's ``config.json``, as the connect of ``service_name`` should leave it.
+    def _config_registering(self, service_name: str) -> str | None:
+        """The config a connect of ``service_name`` installs: the machine's, with a custom service registered; else ``None``.
 
-        A machine's config is its own file, seeded from this computer's when the
-        machine is provisioned and never read back -- and on a machine nothing
-        else writes it: upstream latchkey touches the file only from ``services
-        register`` and from browser discovery, neither of which runs on a VPS.
-        So it travels the way the policy does, as a whole snapshot taken now and
-        installed ahead of the credential, and applying the newest one is always
-        right: a service registered here since the machine was provisioned
-        appears, and one deregistered here disappears. What travels is the
-        projection this package owns -- the hidden built-in services and every
-        registered service, bundled and custom -- never this computer's file
-        itself, whose browser and keyring configuration belong here.
+        The custom services a machine can name are its own: any of the user's
+        computers may have registered one on it since this computer last
+        looked. So the machine's config is read first, here, and the snapshot
+        the connect installs is that file with the one registration added --
+        the registration the approval wrote to the machine store ahead of the
+        sign-in. Once the snapshot is built, the set it carries is adopted into
+        the store, so the store says what the machine is about to -- and a
+        machine config the snapshot cannot be built on leaves the store as it
+        was. A builtin or bundled service needs nothing installed, and nothing
+        read; the bundled registrations reach the machine at provisioning.
 
         Raises:
             MachineCredentialsError: when ``service_name`` is a custom service
-                this computer has no registration for: a gateway cannot route a
-                request to a service its config does not name, so a credential
-                the machine could never use is refused rather than pushed.
+                the machine store has no registration for: a gateway cannot
+                route a request to a service its config does not name, so a
+                credential the machine could never use is refused rather than
+                pushed.
+            RemoteGatewayError: when the machine's config cannot be read.
         """
-        entries = custom_service_registration_entries(self.latchkey.latchkey_directory)
-        if is_custom_service_name(service_name) and service_name not in entries:
+        if not is_custom_service_name(service_name):
+            return None
+        registration = custom_service_registration_entries(self._machine_store_dir()).get(service_name)
+        if registration is None:
             raise MachineCredentialsError(
-                f"Cannot connect {service_name} on host {self.host_id}: this computer's latchkey config has no "
-                "registration for it, so the machine's gateway could not use the credentials"
+                f"Cannot connect {service_name} on host {self.host_id}: the machine store has no registration for "
+                "it, so the machine's gateway could not use the credentials"
             )
-        return merge_minds_latchkey_config(None, entries)
+        machine_config = fetch_machine_config(self.host, self.host_id)
+        entries = {
+            **custom_service_registrations_of_config(machine_config, self.host_id),
+            service_name: registration,
+        }
+        snapshot = self._config_snapshot(machine_config, entries)
+        adopt_machine_custom_services(self.latchkey, self.host_id, entries)
+        return snapshot
+
+    def _config_deregistering(self, service_name: str) -> str:
+        """The config a sign-out of ``service_name``'s last account installs: the machine's, without the service.
+
+        Read from the machine first, like :meth:`_config_registering`, so the
+        services other computers registered on it since stay -- and are
+        adopted into the machine store here. The store's own registration of
+        ``service_name`` is kept through the adoption: the caller still has to
+        strip the grants that name the service, against the store's catalog,
+        before it deregisters the service from the store (see
+        :meth:`disconnect_account`).
+
+        Raises:
+            MachineCredentialsError: when ``service_name`` is not a custom
+                service: a builtin or bundled one is never deregistered, so
+                asking for it is a caller's mistake rather than a no-op.
+            RemoteGatewayError: when the machine's config cannot be read, or
+                the store's cannot be rebuilt.
+        """
+        if not is_custom_service_name(service_name):
+            raise MachineCredentialsError(
+                f"Cannot deregister {service_name} on host {self.host_id}: only a custom service is deregistered "
+                "with its last account"
+            )
+        machine_config = fetch_machine_config(self.host, self.host_id)
+        entries = custom_service_registrations_of_config(machine_config, self.host_id)
+        remaining = {name: entry for name, entry in entries.items() if name != service_name}
+        snapshot = self._config_snapshot(machine_config, remaining)
+        own_registration = custom_service_registration_entries(self._machine_store_dir()).get(service_name)
+        adopt_machine_custom_services(
+            self.latchkey,
+            self.host_id,
+            remaining if own_registration is None else {**remaining, service_name: own_registration},
+        )
+        return snapshot
+
+    def _config_snapshot(self, machine_config: str | None, custom_service_entries: dict[str, JsonValue]) -> str:
+        """The machine's config with its custom-service set made ``custom_service_entries``.
+
+        Raises:
+            RemoteGatewayError: when the machine's config is not a JSON object.
+        """
+        try:
+            return build_config_with_custom_services(machine_config, custom_service_entries)
+        except LatchkeyError as e:
+            raise RemoteGatewayError(f"Failed to build the latchkey config of host {self.host_id}: {e}") from e
+
+    def _machine_store_dir(self) -> Path:
+        return machine_store_dir(plugin_data_dir(self.latchkey.latchkey_directory), self.host_id)
 
     def _machine_key(self) -> SecretStr:
         return _recorded_machine_key(self.latchkey, self.host_id)

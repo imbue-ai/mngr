@@ -212,6 +212,27 @@ def test_disconnect_account_clears_the_named_account(tmp_path: Path) -> None:
     assert latchkey.accounts_by_service["slack"] == ["b@x"]
 
 
+def test_disconnect_account_reports_the_last_account_only_when_the_probe_says_none_remain(tmp_path: Path) -> None:
+    """A probe that does not answer leaves the service's registration alone: it may still have accounts."""
+
+    class _UnansweringProbeLatchkey(FakeAccountsLatchkey):
+        def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
+            del service_name, is_offline
+            return None
+
+    answering = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path, latchkey_binary="/nonexistent", accounts_by_service={"slack": ["a@x", "b@x"]}
+    )
+    unanswering = _UnansweringProbeLatchkey(
+        latchkey_directory=tmp_path, latchkey_binary="/nonexistent", accounts_by_service={"slack": ["a@x"]}
+    )
+
+    assert disconnect_account(answering, "slack", "a@x") is False
+    assert disconnect_account(answering, "slack", "b@x") is True
+    assert disconnect_account(unanswering, "slack", "a@x") is False
+    assert unanswering.cleared_calls == [("slack", "a@x")]
+
+
 def test_disconnect_account_raises_when_clear_fails(tmp_path: Path) -> None:
     class _FailingClearLatchkey(FakeAccountsLatchkey):
         def auth_clear(

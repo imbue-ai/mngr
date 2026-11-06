@@ -82,7 +82,6 @@ from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
 from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.docker_bridge import DockerBridgeAddressError
 from imbue.mngr_latchkey.docker_bridge import resolve_docker_bridge_address
@@ -111,8 +110,10 @@ from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_custom_services
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
+from imbue.mngr_latchkey.remote._transfer import custom_service_registrations_of_config
 from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
@@ -277,11 +278,12 @@ def provision_remote_gateway(
         else None
     )
     seed = _policy_to_seed(latchkey_directory, host_id, state)
+    config_json = _merged_remote_config(host, state)
     update = RemoteStateUpdate(
         is_credential_store_abandoned=key_decision.is_store_abandoned,
         encryption_key=key_decision.key,
         listen_password=listen_password,
-        config_json=_merged_remote_config(host, latchkey_directory, state),
+        config_json=config_json,
         permissions_json=seed.permissions_json if seed is not None else None,
         permissions_format_version=seed.permissions_format_version if seed is not None else None,
         gateway_listen_host=listen_host,
@@ -292,6 +294,7 @@ def provision_remote_gateway(
         apply_remote_state(host, update, failure_description=f"provision the latchkey gateway of host {host_id}")
     if key_decision.is_decided_here:
         _record_machine_encryption_key(latchkey_directory, host_id, key_decision.key)
+    adopt_machine_custom_services(latchkey, host_id, custom_service_registrations_of_config(config_json, host_id))
     if seed is None and state.permissions_json is not None:
         adopt_machine_permissions(latchkey_directory, host_id, state.permissions_json)
         adopt_machine_permissions_format_version(latchkey_directory, host_id, state.permissions_format_version)
@@ -434,26 +437,24 @@ def _does_container_need_reverse_tunnel(host: OuterHostInterface, host_id: HostI
     return False
 
 
-def _merged_remote_config(host: OuterHostInterface, latchkey_directory: Path, state: RemoteMachineState) -> str:
-    """This plugin's hidden services and service registrations, merged into the machine's config.
+def _merged_remote_config(host: OuterHostInterface, state: RemoteMachineState) -> str:
+    """This plugin's hidden services and bundled service registrations, merged into the machine's config.
 
     The same merge the desktop applies to its own config
     (:func:`~imbue.mngr_latchkey.core.merge_minds_latchkey_config`), so an agent
     talking to the VPS-resident gateway sees the same hidden built-in services
-    as one talking to the desktop gateway, and the VPS gateway knows both the
-    bundled additional services and the user-created custom ones this
-    computer's config registers (the machine's holds none of its own). The
-    registration is what makes a custom service's credentials usable: a
-    gateway with no matching registration cannot resolve a request to that
-    service at all, so it would never inject them. Services created later
-    reach the machine as the config snapshot every connect carries (see
-    :meth:`~imbue.mngr_latchkey.remote.credentials.MachineCredentials._config_for`).
-    Any other config latchkey wrote on the machine is preserved. Raises
-    :class:`RemoteGatewayError` if the existing remote config is not a valid
-    JSON object.
+    as one talking to the desktop gateway, and the VPS gateway knows the
+    bundled additional services. The user-created custom services a machine
+    registers are its own and are left as they are: a connection an agent on
+    the machine asked for registers one there, by way of the machine store
+    (see :meth:`~imbue.mngr_latchkey.remote.credentials.MachineCredentials._config_registering`),
+    and the caller adopts the machine's set into that store once the merged
+    config has landed. Any other config latchkey wrote on the machine is
+    preserved. Raises :class:`RemoteGatewayError` if the existing remote
+    config is not a valid JSON object.
     """
     try:
-        return merge_minds_latchkey_config(state.config_json, custom_service_registration_entries(latchkey_directory))
+        return merge_minds_latchkey_config(state.config_json)
     except LatchkeyError as e:
         raise RemoteGatewayError(f"Failed to update the latchkey config on VPS {host.get_name()}: {e}") from e
 

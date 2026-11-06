@@ -7,11 +7,15 @@ on which machine is being asked about, and this module is where that is decided.
 
 A remote host's credentials live in its *machine store*
 (:mod:`imbue.mngr_latchkey.remote._mirror`), a `LATCHKEY_DIRECTORY` of its own
-that shares the desktop's config, browser session and encryption key. Everything
-that reads or writes credentials on a workspace's behalf -- the Permissions tab,
-the Add connection pane, the permission dialog's sign-in -- goes through the
-store this module hands back, so a sign-in for one machine never lands in
-another machine's connectors.
+that shares the desktop's browser session and encryption key and keeps a
+config of its own, naming the custom services registered on that machine.
+Everything that reads or writes credentials on a workspace's behalf -- the
+Permissions tab, the Add connection pane, the permission dialog's sign-in --
+goes through the store this module hands back, so a sign-in for one machine
+never lands in another machine's connectors; and everything that offers or
+connects services on one machine reads the catalog
+:func:`services_catalog_for_machine` derives from that store, so a custom
+service created on one machine is never offered on another.
 
 A machine is recognized by the encryption key recorded for it when its gateway
 was first provisioned. Local hosts never have one, so they resolve to the
@@ -23,6 +27,7 @@ gave before any of this existed.
 
 from loguru import logger
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
@@ -30,6 +35,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote.credentials import latchkey_for_machine
 from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 
@@ -82,3 +88,19 @@ def machine_latchkey_for_workspace(
         )
     logger.trace("Resolving credentials for workspace {} against host {}", workspace_agent_id, host_id)
     return machine_latchkey_for_host(desktop_latchkey, host_id)
+
+
+def services_catalog_for_machine(services_catalog: ServicesCatalog, machine_latchkey: Latchkey) -> ServicesCatalog:
+    """The services one machine can reach: the shipped catalog plus the custom services registered on that machine.
+
+    ``services_catalog`` is the desktop's, which names every custom service on
+    every machine this computer manages; what comes back overlays only the
+    registrations in ``machine_latchkey``'s store -- this computer's own config
+    for a local workspace's machine, the mirror of a remote machine's for its.
+    What the Permissions tab offers and connects, and what a disconnect
+    deregisters, is read from this.
+    """
+    return services_catalog.model_copy_update(
+        to_update(services_catalog.field_ref().latchkey_directory, machine_latchkey.latchkey_directory),
+        to_update(services_catalog.field_ref().is_including_every_machine, False),
+    )

@@ -1012,7 +1012,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         not a latchkey invocation at all -- yields a prompt with no parameters,
         which the dialog renders as a plain error.
         """
-        form = self._manual_credentials_form_for(service_info, latchkey_service_info)
+        form = self._manual_credentials_form_for(machine_latchkey, service_info, latchkey_service_info)
         prompt = form.prompt
         if form.parsed_command is None:
             # Nothing to ask for: the dialog shows the reason and offers no Approve.
@@ -1111,19 +1111,27 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return account
 
     def _manual_credentials_form_for(
-        self, service_info: ServicePermissionInfo, latchkey_service_info: LatchkeyServiceInfo
+        self,
+        machine_latchkey: Latchkey,
+        service_info: ServicePermissionInfo,
+        latchkey_service_info: LatchkeyServiceInfo,
     ) -> ManualCredentialsForm:
-        """The service's credential form, built from what latchkey reports for it."""
+        """The service's credential form, built from what latchkey reports for it on the machine."""
         return _build_manual_credentials_form(
             service_name=service_info.name,
             service_display_name=service_info.display_name,
             set_credentials_example=latchkey_service_info.set_credentials_example,
-            credential_header=self._custom_service_credential_header(service_info.name),
+            credential_header=custom_service_credential_header(
+                read_registered_services(machine_latchkey.latchkey_directory), service_info.name
+            ),
             is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
         )
 
     def _manual_credentials_prompt_for_dialog(
-        self, service_info: ServicePermissionInfo, latchkey_service_info: LatchkeyServiceInfo
+        self,
+        machine_latchkey: Latchkey,
+        service_info: ServicePermissionInfo,
+        latchkey_service_info: LatchkeyServiceInfo,
     ) -> UiManualCredentialsPrompt | None:
         """The credential form the detail payload carries, or ``None`` when the dialog offers none.
 
@@ -1139,9 +1147,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         if latchkey_service_info.is_browser_auth_supported:
             if LATCHKEY_AUTH_OPTION_SET not in latchkey_service_info.auth_options:
                 return None
-            form = self._manual_credentials_form_for(service_info, latchkey_service_info)
+            form = self._manual_credentials_form_for(machine_latchkey, service_info, latchkey_service_info)
             return None if form.parsed_command is None else form.prompt
-        return self._manual_credentials_form_for(service_info, latchkey_service_info).prompt
+        return self._manual_credentials_form_for(machine_latchkey, service_info, latchkey_service_info).prompt
 
     def _account_after_sign_in(
         self,
@@ -1277,7 +1285,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             new_account_value=NEW_ACCOUNT_FORM_VALUE,
             wildcard_permission=WILDCARD_PERMISSION_NAME,
             is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
-            manual_credentials=self._manual_credentials_prompt_for_dialog(service_info, latchkey_service_info),
+            manual_credentials=self._manual_credentials_prompt_for_dialog(
+                machine_latchkey, service_info, latchkey_service_info
+            ),
         )
 
     def apply_grant_request(
@@ -1529,16 +1539,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     workspace_agent_id, service_info.name, granted_account
                 )
             ),
-        )
-
-    def _custom_service_credential_header(self, service_name: str) -> str | None:
-        """The header a custom service's desktop registration sends a pasted token as, or ``None``.
-
-        Read from this computer's registration even for a remote machine, whose
-        registrations are a snapshot of these.
-        """
-        return custom_service_credential_header(
-            read_registered_services(self.latchkey.latchkey_directory), service_name
         )
 
     def _initial_checked_permissions(

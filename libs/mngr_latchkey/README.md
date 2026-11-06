@@ -608,8 +608,9 @@ what it says is about to be shown or acted on, never trusted between times:
     permissions-format-version    the format the policy is in, cached (owned)
     machine_encryption_key        the machine's own key           (owned)
     machine_gateway_password      the machine's own password      (owned)
+    config.json                   the desktop's settings, with the machine's
+                                  own custom services             (owned)
     permissions.json           -> latchkey_permissions.json
-    config.json                -> the desktop's config.json
     browser_state.json.enc     -> the desktop's browser state
     encryption_key             -> the desktop's encryption key
     last-daily-count           -> the desktop's usage-ping stamp
@@ -619,6 +620,21 @@ The last of those is shared for a plainer reason than the rest: it rate-limits
 latchkey's once-a-day usage ping, which is about the user, so an unshared stamp
 would make an ordinary offline read against each machine store ping once a day
 per remote host.
+
+The config is the one file that is neither shared nor simply owned. Upstream
+reads it for the browser this computer signs in with and for the services the
+store can name, so it is rebuilt from the desktop's file -- with this
+computer's own custom services left out and the machine's put in their place
+(`core.build_config_with_custom_services`, applied by
+`_mirror.write_machine_store_config`) -- every time the store is materialized.
+The custom services a machine can name are its own: an approval registers one
+in the machine store's config and the connect that follows carries it to the
+machine, a sign-out of its last account deregisters it in both places, and
+`refresh` adopts the set the machine's config registers, so a second computer
+sees the connections the first one created there and a service either one
+deregistered is gone from both. A build that shared the desktop's config into
+every store by link is migrated the first time such a store is materialized:
+the link is replaced by a file holding what it resolved to.
 
 `imbue.mngr_latchkey.remote._mirror` owns that layout. Two properties are worth
 knowing:
@@ -670,20 +686,26 @@ knowing:
 
 - **A machine store is not a plugin root.** `Latchkey.plugin_data_dir` would
   resolve to a nested `mngr_latchkey/` underneath it, and `initialize()` would
-  rewrite the shared `config.json` through its link, so only the
-  credential/service-introspection subset of `Latchkey` may be pointed at one.
+  merge this package's half of the config into the store's copy as though it
+  were the desktop's, so only the credential/service-introspection subset of
+  `Latchkey` may be pointed at one.
 
 `imbue.mngr_latchkey.remote.credentials` is how a machine is reached.
 `MachineCredentials` is built for the duration of one exchange -- the caller
 opens the machine's outer host, does what it came to do, and lets both go --
-and every method costs a single remote command: `connect_service`,
-`disconnect_account`, `set_permissions`, `connect_service_with_permissions`,
-`set_permissions_and_desktop_egress_rules` and
-`connect_service_with_permissions_and_desktop_egress_rules` push, and `refresh` reads the
-machine's credentials, its policy *and* its [desktop egress
-rules](#the-rules-file) back in one go. Nothing is queued: an exchange either succeeds before its caller
-returns or raises `RemoteGatewayError`, so an embedder (the Imbue Studio desktop app)
-can block a user's click on it and report what the machine said.
+and every method costs a single remote command, except the two that change a
+machine's custom-service set, which read the machine's config first:
+`connect_service` (for a custom service, with the machine's config installed
+again with its registration added, read from the machine store),
+`disconnect_account` (for a custom service's last account, with the config
+installed again without it), `set_permissions`,
+`connect_service_with_permissions`, `set_permissions_and_desktop_egress_rules`
+and `connect_service_with_permissions_and_desktop_egress_rules` push, and
+`refresh` reads the machine's credentials, its policy, its [desktop egress
+rules](#the-rules-file) *and* its custom services back in one go. Nothing is
+queued: an exchange either succeeds before its caller returns or raises
+`RemoteGatewayError`, so an embedder (the Imbue Studio desktop app) can block a
+user's click on it and report what the machine said.
 
 Those scripts never reach the logs. Each one embeds what it is moving -- a
 credential store, the machine's own key, or the policy being applied -- so its text is as sensitive as what it carries, and at a whole
@@ -1346,6 +1368,25 @@ and a VPS one during remote provisioning. It has to: the registration is what
 lets a gateway resolve a request to a custom service at all, so a VPS holding
 the synchronized credentials but not the registration would silently never
 inject them.
+
+The user-created custom services (`imbue.mngr_latchkey.custom_services`) live
+in the same block but belong to one machine each: the desktop's `config.json`
+registers the ones on this computer's own machine, and each remote machine's
+`~/.latchkey/config.json` registers its own, mirrored in its machine store (see
+[Machine stores](#machine-stores)). A push that changes a machine's set reads
+the machine's config first and installs it again with the one entry added or
+removed, so what another of the user's computers registered on the machine
+since this one last looked is kept; only the moment between that read and the
+push is open to a second computer's change. A computer still on a build from
+before this one pushes its own idea of the file instead, so until it upgrades
+its connects can drop what a newer computer registered on the machine (the
+machine's gateway then answers that no service matches, and the next connect
+or approval from the newer computer registers it again). The desktop gateway's
+`services.json` is materialized from the union of every machine's custom
+services (`core.custom_service_registration_entries_of_every_machine`), since
+the requests a remote machine's gateway forwards here name that machine's
+services; `ServicesCatalog(is_including_every_machine=True)` reads the same
+union, while a catalog over one store names that machine's alone.
 
 A typical end-to-end shell flow:
 

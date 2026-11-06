@@ -1,0 +1,7 @@
+Custom connections are now per machine, and removing one's last account deregisters it.
+
+- Approving an agent's `custom-service` request registers the service in the store of the asking workspace's machine (this computer's own latchkey directory for a local workspace, the remote machine's mirror for a remote one), and the registration reaches a remote machine in the same change as the credential and the grant. The same origin requested from a workspace on another machine is created afresh there, with the header its own request asked for, rather than silently reusing a registration made for a different machine.
+
+- Signing out of a custom service's only account from a workspace's Permissions tab deregisters the service from that machine, after stripping the account's grants, so the next request for its origin registers what that request describes (the "wrong first guess at the header format cannot be undone from the UI" bug). A service another account is still connected to stays registered.
+
+- A workspace's Permissions tab lists and offers only the custom services registered on its own machine, and every connector write (toggle, route, connect, revoke, disconnect) checks against that machine's catalog. Opening a remote workspace's tab reads the machine's custom services back with its credentials, so a second computer sees the connections the first one created there and a service either one removed is gone for both. Pending-request titles and brand marks still resolve against every machine's services.

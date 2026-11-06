@@ -10,12 +10,12 @@
 #                                 none (a reboot wiped it)
 #   listen_password               the machine's own gateway password (adopted)
 #   abandon_credential_store      remove the store: nobody present holds its key
+#   clear_service, clear_account  an account to take away from the store
 #   config_json                   the gateway's config.json
 #   credential_bundle             a store to merge into this machine's, with
 #   credential_data_format_version   its format stamp, the one
 #   credential_service            service to take from it and (when present)
 #   credential_account            the one account of that service
-#   clear_service, clear_account  an account to take away from the store
 #   desktop_egress_rules_json     the services the curl router sends out
 #                                 through the desktop
 #   permissions_json              the policy the gateway enforces
@@ -60,6 +60,16 @@ if lk_doc_has abandon_credential_store; then
   rm -f "$LK_CREDENTIALS_STORE"
 fi
 
+# An account is cleared before the config lands: a clear that deregisters a
+# custom service carries a config that no longer names it, and latchkey
+# refuses to clear an account of a service it does not know. A connect's merge
+# comes after the config for the opposite reason (see below); a clear and a
+# merge never travel together.
+if lk_doc_has clear_service; then
+  lk_export_encryption_key
+  latchkey auth clear -y "$(lk_doc_get clear_service)" --account "$(lk_doc_get clear_account)"
+fi
+
 if lk_doc_has config_json; then
   lk_install_file "$LK_CONFIG_FILE" "$(lk_doc_file config_json)"
 fi
@@ -79,10 +89,6 @@ if lk_doc_has credential_bundle; then
     set -- "$@" --account "$(lk_doc_get credential_account)"
   fi
   printf '' | LATCHKEY_DIRECTORY="$_lk_bundle" latchkey auth re-encrypt "$LK_LATCHKEY_DIR" "$@"
-fi
-if lk_doc_has clear_service; then
-  lk_export_encryption_key
-  latchkey auth clear -y "$(lk_doc_get clear_service)" --account "$(lk_doc_get clear_account)"
 fi
 
 # The script can stop between these two files. With the rules first, a

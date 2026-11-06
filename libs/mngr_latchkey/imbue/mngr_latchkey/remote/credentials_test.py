@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 from pydantic import SecretStr
 
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -13,6 +14,9 @@ from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import SERVICES_CATALOG_FILENAME
+from imbue.mngr_latchkey.core import custom_service_registration_entries
+from imbue.mngr_latchkey.core import write_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
@@ -22,6 +26,7 @@ from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
+from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
@@ -160,7 +165,7 @@ def test_disconnecting_an_account_clears_it_on_the_machine(tmp_path: Path) -> No
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"]})
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
 
-    credentials.disconnect_account("slack", "gone@example.com")
+    credentials.disconnect_account("slack", "gone@example.com", is_service_deregistered=False)
 
     assert as_vps(outer).machine_accounts() == {"slack": ["kept@example.com"]}
 
@@ -170,7 +175,7 @@ def test_disconnecting_an_account_is_visible_on_the_next_read(tmp_path: Path) ->
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"]})
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
 
-    credentials.disconnect_account("slack", "gone@example.com")
+    credentials.disconnect_account("slack", "gone@example.com", is_service_deregistered=False)
     credentials.refresh(MIGRATION_CONTEXT)
 
     data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
@@ -183,7 +188,7 @@ def test_disconnecting_the_last_account_leaves_a_machine_holding_nothing(tmp_pat
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["gone@example.com"]})
 
-    credentials.disconnect_account("slack", "gone@example.com")
+    credentials.disconnect_account("slack", "gone@example.com", is_service_deregistered=False)
     fetched = credentials.refresh(MIGRATION_CONTEXT)
 
     assert fetched.credentials is None
@@ -198,7 +203,7 @@ def test_an_operation_on_a_machine_this_computer_never_provisioned_is_refused(tm
     credentials = MachineCredentials(host=outer, latchkey=latchkey, host_id=HostId.generate())
 
     with pytest.raises(MachineCredentialsError, match="never been provisioned"):
-        credentials.disconnect_account("slack", "a@example.com")
+        credentials.disconnect_account("slack", "a@example.com", is_service_deregistered=False)
 
 
 def test_a_read_adopts_what_a_machine_from_an_earlier_build_holds(tmp_path: Path) -> None:
@@ -761,42 +766,218 @@ def _desktop_config(credentials: MachineCredentials, registered_services: dict[s
     )
 
 
-def test_connecting_carries_this_computers_half_of_the_config_with_the_credential(tmp_path: Path) -> None:
-    """A machine's config is seeded at provisioning and never read back, so every connect carries it fresh.
+def _machine_store_of(credentials: MachineCredentials) -> Path:
+    return machine_store_dir(plugin_data_dir(credentials.latchkey.latchkey_directory), credentials.host_id)
 
-    A whole snapshot, like the policy: the hidden built-in services and every
-    registered service, bundled and custom -- but nothing of this computer's
-    own file beyond that, whose browser and keyring settings belong here.
+
+def _machine_store_custom_services(credentials: MachineCredentials) -> dict[str, JsonValue]:
+    return custom_service_registration_entries(_machine_store_of(credentials))
+
+
+def _register_in_machine_store(credentials: MachineCredentials, service_name: str, domain: str) -> None:
+    """Register a custom service on the machine the way an approval does: in its store, ahead of the connect."""
+    write_custom_service_registration(
+        _machine_store_of(credentials), service_name, build_custom_service_registration(domain, "https")
+    )
+
+
+def test_connecting_a_custom_service_reads_the_machines_config_and_installs_it_with_the_registration(
+    tmp_path: Path,
+) -> None:
+    """A custom service is registered on the machine it is connected on, by a snapshot of what the machine holds.
+
+    The machine's config is read first and installed again with the one
+    registration added -- the one the approval wrote to the machine store --
+    ahead of the credential, so the machine's other registrations (another
+    computer's custom service, the bundled ones) and its own settings stay,
+    while nothing of this computer's own file goes: neither its browser and
+    keyring settings nor the custom services registered on this computer's own
+    machine. The machine store ends up naming what the machine now holds.
     """
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
-    _desktop_config(credentials, {"custom_example_com": build_custom_service_registration("example.com", "https")})
+    as_vps(outer).hold_config(
+        '{"settings": {"hideBuiltinServices": ["notion"]}, "registeredServices": '
+        '{"claude-ai": {"baseApiUrl": "https://claude.ai/"}, "custom_https_other_test": {"baseApiUrl": "https://other.test/"}}}'
+    )
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_https_example_com": [""]})
+    _desktop_config(credentials, {"custom_https_local_test": build_custom_service_registration("local.test", "https")})
+    _register_in_machine_store(credentials, "custom_https_example_com", "example.com")
 
-    credentials.connect_service("slack", "a@example.com")
+    credentials.connect_service("custom_https_example_com", "")
 
     machine_config = json.loads(as_vps(outer).machine_config() or "")
     assert set(machine_config) == {"settings", "registeredServices"}
-    assert "notion" in machine_config["settings"]["hideBuiltinServices"]
-    assert "keyringServiceName" not in machine_config["settings"]
-    assert machine_config["registeredServices"]["custom_example_com"] == {"baseApiUrl": "https://example.com/"}
+    assert machine_config["registeredServices"]["custom_https_example_com"] == {"baseApiUrl": "https://example.com/"}
+    assert machine_config["registeredServices"]["custom_https_other_test"] == {"baseApiUrl": "https://other.test/"}
     assert "claude-ai" in machine_config["registeredServices"]
+    assert "custom_https_local_test" not in machine_config["registeredServices"]
+    assert as_vps(outer).machine_accounts() == {"custom_https_example_com": [""]}
+    # One read, then one apply: the window another computer's change could fall into.
+    assert len(as_vps(outer).recorded) == 2
+    assert set(_machine_store_custom_services(credentials)) == {
+        "custom_https_example_com",
+        "custom_https_other_test",
+    }
+
+
+def test_connecting_a_builtin_service_carries_no_config_and_reads_nothing(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).hold_config('{"settings": {"theme": "dark"}}')
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    _desktop_config(credentials, {"custom_https_local_test": build_custom_service_registration("local.test", "https")})
+
+    credentials.connect_service("slack", "a@example.com")
+
+    assert json.loads(as_vps(outer).machine_config() or "") == {"settings": {"theme": "dark"}}
     assert as_vps(outer).machine_accounts() == {"slack": ["a@example.com"]}
     assert len(as_vps(outer).recorded) == 1
 
 
-def test_connecting_a_custom_service_this_computer_has_not_registered_is_refused(tmp_path: Path) -> None:
+def test_connecting_a_custom_service_the_machine_store_has_not_registered_is_refused(tmp_path: Path) -> None:
     # A credential the machine's gateway could never route a request to is
     # worse than no credential: it reads as connected and is silently unusable.
+    # This computer's own registration of the origin does not count: that is a
+    # service on this computer's machine, not on the one being connected.
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_example_com": [""]})
-    _desktop_config(credentials, {})
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_https_example_com": [""]})
+    _desktop_config(
+        credentials, {"custom_https_example_com": build_custom_service_registration("example.com", "https")}
+    )
 
     with pytest.raises(MachineCredentialsError, match="no registration"):
-        credentials.connect_service("custom_example_com", "")
+        credentials.connect_service("custom_https_example_com", "")
 
     assert as_vps(outer).recorded == []
+
+
+def test_connecting_a_custom_service_refuses_a_machine_config_that_is_not_an_object(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).hold_config("[]")
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_https_example_com": [""]})
+    _register_in_machine_store(credentials, "custom_https_example_com", "example.com")
+    _register_in_machine_store(credentials, "custom_https_other_test", "other.test")
+
+    with pytest.raises(RemoteGatewayError, match="JSON object"):
+        credentials.connect_service("custom_https_example_com", "")
+
+    # The read happened; nothing was applied over the file that could not be
+    # built on, and the store still names what it did.
+    assert len(as_vps(outer).recorded) == 1
+    assert as_vps(outer).machine_config() == "[]"
+    assert set(_machine_store_custom_services(credentials)) == {
+        "custom_https_example_com",
+        "custom_https_other_test",
+    }
+
+
+def test_a_read_adopts_the_custom_services_the_machine_registers(tmp_path: Path) -> None:
+    """How a second computer learns which custom services the first one created on a machine."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).hold_config(
+        '{"registeredServices": {"custom_https_example_com": {"baseApiUrl": "https://example.com/", '
+        '"mindsCredentialHeader": "X-Api-Key: {token}"}, "claude-ai": {"baseApiUrl": "https://claude.ai/"}}}'
+    )
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    _desktop_config(credentials, {"custom_https_local_test": build_custom_service_registration("local.test", "https")})
+
+    fetched = credentials.refresh(MIGRATION_CONTEXT)
+
+    expected = {
+        "custom_https_example_com": {
+            "baseApiUrl": "https://example.com/",
+            "mindsCredentialHeader": "X-Api-Key: {token}",
+        }
+    }
+    assert fetched.custom_service_registrations == expected
+    assert _machine_store_custom_services(credentials) == expected
+    # The desktop gateway's catalog names what the machine has, so the
+    # requests its gateway forwards here validate -- alongside what this
+    # computer's own machine has.
+    materialized = json.loads(
+        (credentials.latchkey.latchkey_directory / "extensions" / SERVICES_CATALOG_FILENAME).read_text()
+    )
+    assert {"custom_https_example_com", "custom_https_local_test"} <= set(materialized)
+
+
+def test_a_read_drops_a_custom_service_another_computer_deregistered(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).hold_config('{"registeredServices": {}}')
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    _register_in_machine_store(credentials, "custom_https_example_com", "example.com")
+
+    credentials.refresh(MIGRATION_CONTEXT)
+
+    assert _machine_store_custom_services(credentials) == {}
+
+
+def test_disconnecting_the_last_account_of_a_custom_service_deregisters_it_on_the_machine(tmp_path: Path) -> None:
+    """Signing out of a custom service takes its registration away with its credential: a read, then one apply."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"custom_https_example_com": [""], "slack": ["kept@example.com"]})
+    as_vps(outer).hold_config(
+        '{"registeredServices": {"custom_https_example_com": {"baseApiUrl": "https://example.com/"}, '
+        '"custom_https_other_test": {"baseApiUrl": "https://other.test/"}}}'
+    )
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+
+    credentials.disconnect_account("custom_https_example_com", "", is_service_deregistered=True)
+
+    assert as_vps(outer).machine_accounts() == {"slack": ["kept@example.com"]}
+    registered = json.loads(as_vps(outer).machine_config() or "")["registeredServices"]
+    assert "custom_https_example_com" not in registered
+    assert registered["custom_https_other_test"] == {"baseApiUrl": "https://other.test/"}
+    assert "claude-ai" in registered
+    # One read, then the clear and the config in one apply.
+    assert len(as_vps(outer).recorded) == 2
+    assert set(_machine_store_custom_services(credentials)) == {"custom_https_other_test"}
+
+
+def test_a_deregistering_disconnect_of_a_builtin_service_is_refused_before_the_machine_is_reached(
+    tmp_path: Path,
+) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+
+    with pytest.raises(MachineCredentialsError, match="only a custom service"):
+        credentials.disconnect_account("slack", "gone@example.com", is_service_deregistered=True)
+
+    assert as_vps(outer).recorded == []
+    assert as_vps(outer).machine_accounts() == {"slack": ["gone@example.com"]}
+
+
+def test_a_deregistering_disconnect_leaves_the_machine_stores_own_registration_for_the_caller(
+    tmp_path: Path,
+) -> None:
+    """The store keeps naming the service until the caller has stripped the grants that name it.
+
+    Stripping them goes through the catalog read from the store, which would
+    refuse a service the store no longer names; the caller deregisters the
+    service from the store once they are gone. The machine's other services
+    are still adopted.
+    """
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"custom_https_example_com": [""]})
+    as_vps(outer).hold_config(
+        '{"registeredServices": {"custom_https_example_com": {"baseApiUrl": "https://example.com/"}, '
+        '"custom_https_other_test": {"baseApiUrl": "https://other.test/"}}}'
+    )
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_https_example_com": [""]})
+    _register_in_machine_store(credentials, "custom_https_example_com", "example.com")
+
+    credentials.disconnect_account("custom_https_example_com", "", is_service_deregistered=True)
+
+    assert "custom_https_example_com" not in json.loads(as_vps(outer).machine_config() or "")["registeredServices"]
+    assert set(_machine_store_custom_services(credentials)) == {
+        "custom_https_example_com",
+        "custom_https_other_test",
+    }
 
 
 # The permission requests the machine keeps for the desktops.

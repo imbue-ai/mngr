@@ -60,9 +60,8 @@ from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ANY = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["any"]},)))
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
-_CUSTOM_CONFIG = merge_minds_latchkey_config(
-    None, {"custom_api_example_com": build_custom_service_registration("api.example.com", "https")}
-)
+_CUSTOM_REGISTRATION = build_custom_service_registration("api.example.com", "https")
+_CUSTOM_CONFIG = merge_minds_latchkey_config(None, {"custom_https_api_example_com": _CUSTOM_REGISTRATION})
 
 
 def _merge(bundle: bytes, account: str) -> RemoteCredentialMerge:
@@ -435,6 +434,58 @@ def test_a_connect_installs_the_config_ahead_of_the_credential(tmp_path: Path) -
     assert vps.machine_accounts() == {}
 
 
+def test_a_config_snapshot_replaces_the_machines_file_whole(tmp_path: Path) -> None:
+    """What makes reading the machine first the pusher's job: nothing on the machine is kept that the snapshot lacks."""
+    vps = as_vps(fake_vps(tmp_path))
+    vps.hold_config(
+        '{"settings": {"theme": "dark"}, "registeredServices": '
+        '{"custom_https_other_test": {"baseApiUrl": "https://other.test/"}}}'
+    )
+
+    _apply(vps, RemoteStateUpdate(config_json=_CUSTOM_CONFIG), failure_description="config")
+
+    assert vps.machine_config() == _CUSTOM_CONFIG
+
+
+def test_a_clear_of_a_custom_service_the_machine_no_longer_names_is_refused(tmp_path: Path) -> None:
+    """Why a deregistering disconnect clears before its config lands: latchkey knows no service its config lacks."""
+    vps = as_vps(fake_vps(tmp_path, {"custom_https_api_example_com": [""]}))
+    vps.run_under_key(MACHINE_KEY)
+    vps.hold_config(merge_minds_latchkey_config(None, {}))
+
+    with pytest.raises(RemoteGatewayError, match="Unknown service: custom_https_api_example_com"):
+        clear_remote_credentials(
+            cast(OuterHostInterface, vps),
+            HostId.generate(),
+            "custom_https_api_example_com",
+            "",
+            SecretStr(MACHINE_KEY),
+            config_json=None,
+        )
+
+    assert vps.machine_accounts() == {"custom_https_api_example_com": [""]}
+
+
+def test_a_disconnect_that_deregisters_lands_both_in_one_command(tmp_path: Path) -> None:
+    vps = as_vps(fake_vps(tmp_path, {"custom_https_api_example_com": [""], "slack": ["a@example.com"]}))
+    vps.run_under_key(MACHINE_KEY)
+    vps.hold_config(_CUSTOM_CONFIG)
+    without_the_service = merge_minds_latchkey_config(None, {})
+
+    clear_remote_credentials(
+        cast(OuterHostInterface, vps),
+        HostId.generate(),
+        "custom_https_api_example_com",
+        "",
+        SecretStr(MACHINE_KEY),
+        config_json=without_the_service,
+    )
+
+    assert len(vps.recorded) == 1
+    assert vps.machine_accounts() == {"slack": ["a@example.com"]}
+    assert vps.machine_config() == without_the_service
+
+
 def test_a_connect_without_a_config_leaves_the_machines_alone(tmp_path: Path) -> None:
     vps = as_vps(fake_vps(tmp_path))
     vps.run_under_key(MACHINE_KEY)
@@ -551,14 +602,14 @@ def test_a_connect_carries_its_config_in_the_same_command(tmp_path: Path) -> Non
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
     as_vps(outer).run_under_key(MACHINE_KEY)
-    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"custom_api_example_com": ["me"]})
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"custom_https_api_example_com": ["me"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
 
     push_credentials(
         outer,
         machine_latchkey,
         host_id,
-        "custom_api_example_com",
+        "custom_https_api_example_com",
         "me",
         SecretStr(MACHINE_KEY),
         config_json=_CUSTOM_CONFIG,
@@ -566,7 +617,7 @@ def test_a_connect_carries_its_config_in_the_same_command(tmp_path: Path) -> Non
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).machine_config() == _CUSTOM_CONFIG
-    assert as_vps(outer).machine_accounts() == {"custom_api_example_com": ["me"]}
+    assert as_vps(outer).machine_accounts() == {"custom_https_api_example_com": ["me"]}
 
 
 def test_a_disconnect_costs_one_remote_command(tmp_path: Path) -> None:
@@ -574,7 +625,7 @@ def test_a_disconnect_costs_one_remote_command(tmp_path: Path) -> None:
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"]})
     as_vps(outer).run_under_key(MACHINE_KEY)
 
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY))
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -594,7 +645,7 @@ def test_a_disconnect_is_not_refused_by_a_machine_rekeyed_out_from_under_this_co
     as_vps(outer).hold({"slack": ["gone@example.com", "kept@example.com"]}, key="another-computers-key")
     as_vps(outer).run_under_key("another-computers-key")
 
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY))
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
 
     assert as_vps(outer).machine_accounts() == {"slack": ["kept@example.com"]}
     assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "another-computers-key"
@@ -873,7 +924,7 @@ def test_a_disconnect_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Pa
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
 
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY))
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
 
     assert as_vps(outer).written == []
     assert len(as_vps(outer).recorded) == 1
@@ -972,7 +1023,7 @@ def test_a_read_of_a_machine_whose_last_account_was_disconnected_answers_no_cred
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
     as_vps(outer).run_under_key(MACHINE_KEY)
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY))
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
     fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))

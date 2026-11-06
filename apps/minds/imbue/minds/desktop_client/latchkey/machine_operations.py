@@ -127,19 +127,24 @@ class MachineOperator(MutableModel):
             if machine is not None:
                 machine.connect_service(service_name, account)
 
-    def disconnect_account(self, workspace_agent_id: str, service_name: str, account: str) -> None:
-        """Clear one account of one service from the workspace's machine.
+    def disconnect_account(
+        self, workspace_agent_id: str, service_name: str, account: str, is_service_deregistered: bool
+    ) -> None:
+        """Clear one account of one service from the workspace's machine, deregistering the service when asked to.
 
         The caller has already cleared this computer's copy; this is what takes
         the credential away from the machine itself, whose agents would
-        otherwise keep using it.
+        otherwise keep using it. ``is_service_deregistered`` says the account
+        was a custom service's last, so the machine's gateway stops naming the
+        service in the same change; the caller drops it from the machine store
+        here once the grants that named it are gone.
 
         Raises:
             MachineOperationError: when the machine does not take it.
         """
         with self._machine(workspace_agent_id, disconnect_failure_description(service_name)) as machine:
             if machine is not None:
-                machine.disconnect_account(service_name, account)
+                machine.disconnect_account(service_name, account, is_service_deregistered)
 
     def connect_service_with_permissions(self, workspace_agent_id: str, service_name: str, account: str) -> None:
         """Carry a granted account and the policy that grants it as one change.

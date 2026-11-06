@@ -17,8 +17,9 @@ The machine store is the per-host directory this plugin already owns::
         latchkey_permissions.json     canonical per-host policy      (owned)
         machine_encryption_key        the machine's own key          (owned)
         machine_gateway_password      the machine's own password     (owned)
+        config.json                   the desktop's settings, with the
+                                      machine's own custom services (owned)
         permissions.json           -> latchkey_permissions.json
-        config.json                -> the desktop's config.json
         browser_state.json.enc     -> the desktop's browser state
         encryption_key             -> the desktop's encryption key
         last-daily-count           -> the desktop's usage-ping stamp
@@ -26,6 +27,16 @@ The machine store is the per-host directory this plugin already owns::
 What is *shared* with the desktop is shared by symlink, so there is one copy on
 disk and no reconciliation. The links are relative, so the tree survives being
 moved or copied.
+
+The config is the one file that is neither owned outright nor shared. The
+upstream CLI reads it for the browser this computer signs in with and for the
+services it can name, and the custom services a machine can name are its own:
+registered on it one at a time, by any of the user's computers, and read back
+from it (see :func:`~imbue.mngr_latchkey.remote._transfer.adopt_machine_custom_services`).
+So the store's copy is rebuilt from the desktop's file with the machine's
+custom services in place of this computer's own
+(:func:`~imbue.mngr_latchkey.core.build_config_with_custom_services`), whenever
+either side changes.
 
 Three things are worth knowing:
 
@@ -40,22 +51,28 @@ Three things are worth knowing:
 
 * **A machine store is not a plugin root.** ``Latchkey.plugin_data_dir`` would
   resolve to a *nested* ``mngr_latchkey/`` underneath it, so a machine store
-  must never be handed to :meth:`Latchkey.initialize` (which also rewrites
-  ``config.json`` -- here a symlink into the desktop's). Only the
-  credential/service-introspection subset of :class:`Latchkey` is meaningful
-  against one.
+  must never be handed to :meth:`Latchkey.initialize` (which would merge this
+  package's half of the config into the store's copy as though it were the
+  desktop's). Only the credential/service-introspection subset of
+  :class:`Latchkey` is meaningful against one.
 
-* **Nothing may replace a link with a regular file.** Writes must go *through*
-  the symlinks (``atomic_write_bytes`` resolves them before renaming); a plain
-  write-and-rename would silently fork the shared state.
+* **Nothing may replace a shared link with a regular file.** Writes must go
+  *through* the symlinks (``atomic_write_bytes`` resolves them before
+  renaming); a plain write-and-rename would silently fork the shared state.
+  The one link deliberately replaced is the config's, by
+  :func:`_materialize_config`, because the config is no longer shared: a store
+  from a build that linked it to the desktop's file is migrated to a file of
+  its own holding what the link resolved to.
 """
 
 import os
 import secrets
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
+from pydantic import JsonValue
 from pydantic import SecretStr
 
 from imbue.mngr.primitives import HostId
@@ -66,8 +83,11 @@ from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import DAILY_COUNT_STAMP_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.core import build_config_with_custom_services
+from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.encryption_key import ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -75,15 +95,13 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # Files a machine store shares with the desktop's own latchkey directory, by
 # relative symlink. See the module docstring: the encryption key is what makes
-# the browser state shareable, and the config carries the hidden built-in
-# services and the custom-service registrations every gateway needs. The
-# daily-count stamp is shared because it rate-limits a ping that is about the
-# *user*: left per-directory, an ordinary offline read against each machine
-# store would ping once a day per remote host. Its link may dangle until the
-# first ping -- upstream writes the stamp through it, creating the desktop's
-# copy -- so unlike the encryption key it needs nothing created up front.
+# the browser state shareable. The daily-count stamp is shared because it
+# rate-limits a ping that is about the *user*: left per-directory, an ordinary
+# offline read against each machine store would ping once a day per remote
+# host. Its link may dangle until the first ping -- upstream writes the stamp
+# through it, creating the desktop's copy -- so unlike the encryption key it
+# needs nothing created up front.
 SHARED_WITH_DESKTOP_FILENAMES: Final[tuple[str, ...]] = (
-    CONFIG_FILENAME,
     BROWSER_STATE_FILENAME,
     ENCRYPTION_KEY_FILENAME,
     DAILY_COUNT_STAMP_FILENAME,
@@ -232,12 +250,13 @@ def _write_machine_secret(path: Path, value: str, description: str) -> None:
 def materialize_machine_store(latchkey_directory: Path, data_dir: Path, host_id: HostId) -> Path:
     """Create (or repair) ``host_id``'s machine store and return its directory.
 
-    Idempotent: an already-materialized store is left as it is, and a link that
-    points somewhere else is re-pointed. Materializing does *not* create the
-    credential store -- a machine store with no credentials yet is the ordinary
-    state of a machine nobody has connected anything to -- but it does give the
-    directory a format stamp, so which format a store here would be read as is
-    settled before there is one.
+    Idempotent: an already-materialized store is left as it is, a link that
+    points somewhere else is re-pointed, and the store's config is rebuilt
+    around the custom services it names (see :func:`_materialize_config`).
+    Materializing does *not* create the credential store -- a machine store
+    with no credentials yet is the ordinary state of a machine nobody has
+    connected anything to -- but it does give the directory a format stamp, so
+    which format a store here would be read as is settled before there is one.
 
     The desktop's encryption key is created if it does not exist yet, so the
     link never dangles: a dangling key link would make the upstream CLI mint a
@@ -260,6 +279,7 @@ def materialize_machine_store(latchkey_directory: Path, data_dir: Path, host_id:
 
     for filename in SHARED_WITH_DESKTOP_FILENAMES:
         _link(store_dir / filename, latchkey_directory / filename)
+    _materialize_config(latchkey_directory, store_dir)
     _seed_data_format_stamp(latchkey_directory, store_dir)
     # The upstream CLI reads a directory's policy from ``permissions.json``,
     # while this plugin's canonical per-host file keeps its own name; linking
@@ -273,11 +293,11 @@ def latchkey_for_machine(latchkey: Latchkey, data_dir: Path, host_id: HostId) ->
     """Return a :class:`Latchkey` bound to ``host_id``'s machine store.
 
     The narrow use of a machine store: reading and writing *that machine's*
-    credentials. Never hand the result to :meth:`Latchkey.initialize` or to
-    anything that reads :attr:`Latchkey.plugin_data_dir` -- under a machine store
-    that resolves to a nested ``mngr_latchkey/`` of its own, and initialization
-    would rewrite the ``config.json`` this directory shares with the desktop.
-    Pass the desktop's :class:`Latchkey` for those.
+    credentials, and reading the custom services registered on it. Never hand
+    the result to :meth:`Latchkey.initialize` or to anything that reads
+    :attr:`Latchkey.plugin_data_dir` -- under a machine store that resolves to
+    a nested ``mngr_latchkey/`` of its own. Pass the desktop's
+    :class:`Latchkey` for those.
 
     Raises:
         LatchkeyStoreError: when the machine store cannot be materialized.
@@ -318,6 +338,64 @@ def clear_machine_credentials(store_dir: Path) -> None:
         (store_dir / CREDENTIALS_STORE_FILENAME).unlink(missing_ok=True)
     except OSError as e:
         raise LatchkeyStoreError(f"Failed to clear the credential mirror in {store_dir}: {e}") from e
+
+
+def write_machine_store_config(
+    latchkey_directory: Path, store_dir: Path, custom_service_entries: Mapping[str, JsonValue]
+) -> bool:
+    """Make the machine store's ``config.json`` the desktop's settings plus ``custom_service_entries``.
+
+    What a registration, a deregistration, and an adopt of what the machine
+    holds all come down to (see :func:`~imbue.mngr_latchkey.core.build_config_with_custom_services`).
+    Written only when it differs, so an unchanged set costs nothing; returns
+    whether it was written, which is what tells a caller the catalog the
+    desktop gateway validates against has to be refreshed.
+
+    Raises:
+        LatchkeyStoreError: when the desktop's config is not one the store's
+            can be built from, or the store's cannot be written.
+    """
+    desktop_config_path = latchkey_directory / CONFIG_FILENAME
+    config_path = store_dir / CONFIG_FILENAME
+    try:
+        desktop_config = desktop_config_path.read_text(encoding="utf-8") if desktop_config_path.is_file() else None
+        content = build_config_with_custom_services(desktop_config, custom_service_entries)
+        if config_path.is_file() and config_path.read_text(encoding="utf-8") == content:
+            return False
+        atomic_write(config_path, content)
+    except (OSError, LatchkeyError) as e:
+        raise LatchkeyStoreError(
+            f"Failed to write the latchkey config of the machine store at {store_dir}: {e}"
+        ) from e
+    return True
+
+
+def _materialize_config(latchkey_directory: Path, store_dir: Path) -> None:
+    """Give the machine store a ``config.json`` of its own, kept current with the desktop's settings.
+
+    Rebuilt on every materialization around the custom services the store
+    already names, so a browser or keyring setting that changed in the
+    desktop's file reaches the store, and a service registered on the machine
+    is kept. A store that has none yet starts with none: what the machine
+    holds is adopted on the next read of it.
+
+    CLEANUP: drop the symlink branch once no machine store from a build that
+    shared the desktop's config by link remains. Such a link resolves to the
+    desktop's file, so the store starts with the custom services this computer
+    registered -- which the machine was handed as a snapshot by every connect
+    those builds made, so it is what the machine holds too.
+
+    Raises:
+        LatchkeyStoreError: when the config cannot be built or written.
+    """
+    config_path = store_dir / CONFIG_FILENAME
+    entries = custom_service_registration_entries(store_dir) if config_path.is_file() else {}
+    if config_path.is_symlink():
+        try:
+            config_path.unlink()
+        except OSError as e:
+            raise LatchkeyStoreError(f"Failed to replace the shared config link at {config_path}: {e}") from e
+    write_machine_store_config(latchkey_directory, store_dir, entries)
 
 
 def _seed_data_format_stamp(latchkey_directory: Path, store_dir: Path) -> None:

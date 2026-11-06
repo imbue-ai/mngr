@@ -4,10 +4,12 @@ import json
 from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import SecretStr
 from werkzeug.test import TestResponse
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -24,6 +26,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.handlers.custom_service import CustomServiceGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
+from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
@@ -43,11 +46,14 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.custom_services import DomainWarning
 from imbue.mngr_latchkey.custom_services import LoginFlow
 from imbue.mngr_latchkey.custom_services import Scheme
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
+from imbue.mngr_latchkey.custom_services import registration_credential_header
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -142,7 +148,9 @@ class _Harness:
             login_flow=None if login_url is None else LoginFlow.COOKIE_CAPTURE,
             login_flow_params=None if login_url is None else {"cookieKeys": ["session"]},
         )
-        self.latchkey.register_custom_service(f"custom_{scheme}_{domain.replace('.', '_')}", registration)
+        self.latchkey.register_custom_service(
+            self.latchkey.latchkey_directory, f"custom_{scheme}_{domain.replace('.', '_')}", registration
+        )
 
     def registration(self, service_name: str = _SERVICE_NAME) -> dict[str, object]:
         return json.loads(self.config_path.read_text())["registeredServices"][service_name]
@@ -206,9 +214,14 @@ def _build_authenticated_client(
     return client
 
 
-def _detail(harness: _Harness, event: StreamedPermissionRequest) -> UiCustomServicePermissionDetail:
+def _detail(
+    harness: _Harness, event: StreamedPermissionRequest, backend_resolver: BackendResolverInterface | None = None
+) -> UiCustomServicePermissionDetail:
     payload = harness.handler.build_request_detail_payload(
-        permission_request=event, backend_resolver=StaticBackendResolver(url_by_agent_and_service={})
+        permission_request=event,
+        backend_resolver=(
+            backend_resolver if backend_resolver is not None else StaticBackendResolver(url_by_agent_and_service={})
+        ),
     )
     if not isinstance(payload, UiCustomServicePermissionDetail):
         pytest.fail(f"expected a custom-service detail payload, got {payload!r}")
@@ -484,10 +497,10 @@ def test_a_login_flow_never_asks_for_typed_credentials(tmp_path: Path) -> None:
 
 
 def test_grant_carries_the_connected_account_to_the_workspace_machine(tmp_path: Path) -> None:
-    # The registration stays on this computer (config.json is shared into every
-    # machine store by link); what the machine is handed is the account the
-    # sign-in resolved plus the policy the grant was written into, as one
-    # request -- the same handover a predefined grant makes.
+    # What the machine is handed is the account the sign-in resolved plus the
+    # policy the grant was written into, as one request -- the same handover a
+    # predefined grant makes; the carry reads the registration off the machine
+    # store the approval wrote it to.
     carried: list[tuple[str, str, str]] = []
 
     def record(workspace_agent_id: str, service_name: str, account: str) -> None:
@@ -582,7 +595,9 @@ def test_a_named_header_is_registered_shown_and_used_for_the_typed_token(tmp_pat
 def test_a_second_workspace_sees_and_uses_the_existing_services_header(tmp_path: Path) -> None:
     harness = _Harness(tmp_path)
     harness.latchkey.register_custom_service(
-        _SERVICE_NAME, build_custom_service_registration(_DOMAIN, "https", credential_header="X-Api-Key: {token}")
+        harness.latchkey.latchkey_directory,
+        _SERVICE_NAME,
+        build_custom_service_registration(_DOMAIN, "https", credential_header="X-Api-Key: {token}"),
     )
     # The request guesses a bearer header (none named); the registration's wins.
     event = _make_event(AgentId(), has_login=False)
@@ -600,3 +615,54 @@ def test_the_bearer_default_is_shown_and_a_login_flow_shows_no_header(tmp_path: 
         _detail(harness, _make_event(AgentId(), has_login=False)).credential_header == "Authorization: Bearer {token}"
     )
     assert _detail(harness, _make_event(AgentId(), has_login=True)).credential_header is None
+
+
+def _store_registration(store_dir: Path, service_name: str) -> dict[str, Any]:
+    return json.loads((store_dir / "config.json").read_text())["registeredServices"][service_name]
+
+
+def _give_the_host_a_machine_of_its_own(harness: _Harness) -> Path:
+    """Record a key for the host, which is what makes it a remote machine with a store of its own, and return the store."""
+    store_machine_encryption_key(harness.latchkey.plugin_data_dir, _HOST_ID, SecretStr("machine-key-7d2e"))
+    return machine_latchkey_for_host(harness.latchkey, _HOST_ID).latchkey_directory
+
+
+def test_a_remote_workspaces_service_is_registered_in_its_machines_store(tmp_path: Path) -> None:
+    """A custom service belongs to the machine whose agents use it, so it is registered in that machine's store.
+
+    The desktop's own config -- the services on this computer's machine -- is
+    untouched, and the desktop gateway's catalog, which validates the requests
+    the machine's gateway forwards here, names the new service all the same.
+    """
+    harness = _Harness(tmp_path)
+    store_dir = _give_the_host_a_machine_of_its_own(harness)
+    event = _make_event(AgentId(), has_login=False)
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    assert _grant(client, event.request_id).get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+
+    assert _store_registration(store_dir, _SERVICE_NAME)["baseApiUrl"] == "https://api.example.com/"
+    assert _SERVICE_NAME not in read_registered_services(harness.latchkey.latchkey_directory)
+    materialized = json.loads((harness.latchkey.latchkey_directory / "extensions" / "services.json").read_text())
+    assert _SERVICE_NAME in materialized
+
+
+def test_a_service_on_this_computers_machine_does_not_count_as_registered_for_a_remote_one(tmp_path: Path) -> None:
+    """The same origin on two machines is two services: the remote one is created as its own request describes it."""
+    harness = _Harness(tmp_path)
+    harness.register()
+    store_dir = _give_the_host_a_machine_of_its_own(harness)
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False, header="X-Api-Key: {token}")
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    resolver = FixedHostBackendResolver(
+        url_by_agent_and_service={}, fixed_host_id=_HOST_ID, known_agent_ids=(agent_id,)
+    )
+    detail = _detail(harness, event, resolver)
+    assert detail.is_already_registered is False
+    assert detail.credential_header == "X-Api-Key: {token}"
+
+    assert _grant(client, event.request_id).get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+    assert registration_credential_header(_store_registration(store_dir, _SERVICE_NAME)) == "X-Api-Key: {token}"
+    assert "mindsCredentialHeader" not in harness.registration()

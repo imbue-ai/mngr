@@ -49,13 +49,14 @@ class _RecordingMachine(MachineCredentials):
             permissions_json=None,
             desktop_egress_rules_json=None,
             permissions_format_version=PermissionsFormatVersion(0),
+            custom_service_registrations={},
         )
 
     def connect_service(self, service_name: str, account: str) -> None:
         self._note(f"connect {service_name} {account}")
 
-    def disconnect_account(self, service_name: str, account: str) -> None:
-        self._note(f"disconnect {service_name} {account}")
+    def disconnect_account(self, service_name: str, account: str, is_service_deregistered: bool) -> None:
+        self._note(f"disconnect {service_name} {account}" + (" and deregister" if is_service_deregistered else ""))
 
     def set_permissions(self, permissions_json: str) -> None:
         self._note(f"set_permissions {permissions_json}")
@@ -279,9 +280,17 @@ def test_a_sign_out_clears_the_account_on_the_machine_itself(tmp_path: Path) -> 
     """Clearing only the copy here would leave the machine's agents still able to use the credential."""
     operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True)
 
-    operator.disconnect_account(agent_id, "slack", "a@example.com")
+    operator.disconnect_account(agent_id, "slack", "a@example.com", is_service_deregistered=False)
 
     assert machine.calls == ["disconnect slack a@example.com"]
+
+
+def test_a_sign_out_of_a_custom_services_last_account_deregisters_it_on_the_machine(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True)
+
+    operator.disconnect_account(agent_id, "custom_https_example_com", "me@example.com", is_service_deregistered=True)
+
+    assert machine.calls == ["disconnect custom_https_example_com me@example.com and deregister"]
 
 
 def test_a_read_asks_the_machine_what_it_holds_as_this_install(tmp_path: Path) -> None:

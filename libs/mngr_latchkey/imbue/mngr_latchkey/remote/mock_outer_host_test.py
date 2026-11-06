@@ -651,6 +651,12 @@ _FAKE_LATCHKEY_SOURCE = (
     "            return json.load(handle)\n"
     "    except FileNotFoundError:\n"
     "        return {'accounts': {}, 'key': ''}\n"
+    "def registered_services(directory):\n"
+    "    try:\n"
+    "        with open(os.path.join(directory, 'config.json')) as handle:\n"
+    "            return json.load(handle).get('registeredServices', {})\n"
+    "    except (FileNotFoundError, ValueError):\n"
+    "        return {}\n"
     "def accounts_of(data, name):\n"
     "    return {account: {'credentialType': 'oauth', 'credentialStatus': 'valid'}\n"
     "            for account in data['accounts'].get(name, [])}\n"
@@ -681,6 +687,10 @@ _FAKE_LATCHKEY_SOURCE = (
     "    require_key(data)\n"
     "    rest = [item for item in argv[2:] if item != '-y']\n"
     "    service, account = rest[0], rest[rest.index('--account') + 1]\n"
+    # A registered (custom) service has to be in the directory's config for
+    # the real CLI to know it at all; it refuses the clear in these words.
+    "    if service.startswith('custom_') and service not in registered_services(directory):\n"
+    "        sys.exit('Error: Unknown service: ' + service)\n"
     "    remaining = [entry for entry in data['accounts'].get(service, []) if entry != account]\n"
     "    if remaining:\n"
     "        data['accounts'][service] = remaining\n"

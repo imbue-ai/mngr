@@ -6,12 +6,17 @@ from pydantic import SecretStr
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
+from imbue.minds.desktop_client.latchkey.machine_latchkey import services_catalog_for_machine
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
+from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import write_custom_service_registration
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 
 def _desktop_latchkey(tmp_path: Path) -> FakeAccountsLatchkey:
@@ -59,3 +64,31 @@ def test_a_workspace_whose_host_is_unknown_is_refused_rather_than_answered_from_
 
     with pytest.raises(PermissionOverviewError):
         machine_latchkey_for_workspace(desktop, resolver, str(AgentId()))
+
+
+def test_a_machines_catalog_names_only_the_custom_services_of_its_own_store(tmp_path: Path) -> None:
+    """The shipped half of the catalog is kept; the overlay is the machine store's registrations, not the union."""
+    desktop = _desktop_latchkey(tmp_path)
+    write_custom_service_registration(
+        desktop.latchkey_directory, "custom_https_local_test", build_custom_service_registration("local.test", "https")
+    )
+    host_id = HostId.generate()
+    store_machine_encryption_key(desktop.plugin_data_dir, host_id, SecretStr("machine-key-6a31"))
+    machine = machine_latchkey_for_host(desktop, host_id)
+    write_custom_service_registration(
+        machine.latchkey_directory,
+        "custom_https_remote_test",
+        build_custom_service_registration("remote.test", "https"),
+    )
+    union_catalog = ServicesCatalog(latchkey_directory=desktop.latchkey_directory, is_including_every_machine=True)
+
+    machine_catalog = services_catalog_for_machine(union_catalog, machine)
+    from_override = services_catalog_for_machine(build_permissions_test_catalog(), machine)
+
+    assert {"custom_https_local_test", "custom_https_remote_test"} <= union_catalog.all_service_names()
+    assert machine_catalog.latchkey_directory == machine.latchkey_directory
+    assert machine_catalog.is_including_every_machine is False
+    assert "custom_https_remote_test" in machine_catalog.all_service_names()
+    assert "custom_https_local_test" not in machine_catalog.all_service_names()
+    assert build_permissions_test_catalog().all_service_names() < from_override.all_service_names()
+    assert "custom_https_remote_test" in from_override.all_service_names()

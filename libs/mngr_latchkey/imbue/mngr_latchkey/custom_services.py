@@ -609,3 +609,18 @@ def custom_service_catalog_payload(
             }
         ]
     return payload
+
+
+def readable_custom_service_entries(registered_services: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """The custom services of a ``registeredServices`` block that this module can make sense of.
+
+    What one gateway's config hands another: the ``custom_``-prefixed entries
+    with a readable ``baseApiUrl``, so an unusable entry is never propagated.
+    """
+    readable = custom_service_catalog_payload(registered_services)
+    return {name: registered_services[name] for name in readable}
+
+
+def without_custom_service_entries(registered_services: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """A ``registeredServices`` block with every custom service left out: the builtin and bundled registrations alone."""
+    return {name: value for name, value in registered_services.items() if not is_custom_service_name(name)}

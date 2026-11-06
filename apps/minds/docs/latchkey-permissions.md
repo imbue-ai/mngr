@@ -294,8 +294,10 @@ The dialog is the simplest of the kinds, and deliberately so:
   rejected value re-shows the form with the reason, rather than failing the
   request.
 
-Approving registers the service in Latchkey's own `config.json` unless this
-computer already has it, connects an account on the workspace's machine, and
+Approving registers the service on the workspace's machine -- in the
+`config.json` of that machine's latchkey store, which is this computer's own
+for a local workspace and the mirror of the remote machine's for a remote one
+-- unless that machine already has it, connects an account on the machine, and
 then writes the grant -- the account-scoped rule plus the scope's own
 definition, since a custom scope is not a Detent builtin -- into the agent's
 per-host permissions file through `POST /permissions/rules`, the same write a
@@ -307,13 +309,15 @@ does, so the user can fix the problem and click Approve again and the agent is
 never told it was denied. Denying registers nothing and leaves no trace of the
 proposed service.
 
-A second workspace asking for an origin some earlier one connected is the
-common case, not an error: its own gateway has no service for the origin, so
-`custom-service` is the only request it can make. The dialog then says the
-connection already exists on this computer and names the sign-in of the
-registration this computer has -- the request's `login` counts only for a
+A second workspace on the same machine asking for an origin some earlier one
+connected is the common case, not an error: its own gateway has no service for
+the origin, so `custom-service` is the only request it can make. The dialog
+then says the connection already exists on that machine and names the sign-in
+of the registration the machine has -- the request's `login` counts only for a
 service being created -- and approving connects that workspace to the service
-as it is.
+as it is. A workspace on another machine creates the service afresh there, as
+its own request describes it: the same origin on two machines is two
+connections, each with the header its own request asked for.
 
 What the request may name is deliberately wide: a private network may call
 its services whatever it likes, and the dialog shows exactly which origin is
@@ -349,7 +353,7 @@ absent. The gateway and the desktop hold it to the same rule as `token-capture`'
 refuse `Host`, any `X-Latchkey-*` header, and a `header` sent alongside `login`,
 since a login flow supplies its own credential shape. It rides the service's
 `registeredServices` entry under a key of Imbue Studio's own (`mindsCredentialHeader`),
-so a second workspace asking for the origin sees the registration's header
+so a second workspace on the machine asking for the origin sees the registration's header
 rather than its own guess, and the credential form stores the typed token under
 that header rather than as a bearer. The dialog shows the header behind a
 collapsed "How this will be sent" disclosure, so a user handed an `X-Api-Key`
@@ -385,26 +389,44 @@ request instead. Were one to slip through anyway, the duplicate is inert
 rather than dangerous -- Detent takes the first rule whose scope matches, so
 the second never applies.
 
-Once created, a custom service is an ordinary connection: it appears in the
-Permissions tab and on the Connectors page with its account, and its access can
-be revoked there. Latchkey re-reads its registrations on every request, so the
-new service is usable immediately, with no gateway restart.
+Once created, a custom service is an ordinary connection of its machine: it
+appears in the Permissions tab of every workspace on that machine with its
+account, its access can be revoked there, and it is offered under Add
+connection on that machine and no other. Latchkey re-reads its registrations
+on every request, so the new service is usable immediately, with no gateway
+restart.
 
-A remote workspace's machine keeps its own `config.json`, seeded from this
-computer's when the machine was provisioned and never read back -- so a service
-created afterwards exists only here until something carries it over. Every
-connect does, the way the policy travels: the single script that merges the
-credential into the machine's store first installs this computer's projection of
-that file -- the hidden built-in services and every registered service, bundled
-and custom -- as a whole snapshot, ahead of the credential, because a gateway
-with no entry for a service cannot route a request to it. Nothing else on a
-machine writes that file (upstream latchkey touches it only from `services
-register` and from browser discovery, neither of which runs on a VPS), so the
-newest snapshot is always right, and a service deregistered here disappears from
-the machine on its next connect. The snapshot never includes this computer's own
-browser or keyring settings. A custom service this computer has no registration
-for is refused rather than pushed, since the machine could never use its
-credentials.
+A custom service belongs to the machine it was created on, the way its
+credentials do. A remote workspace's machine keeps its own `config.json`, and
+the service reaches it in the same change that carries the credential and the
+grant: the machine's config is read, and the script that merges the credential
+into the machine's store first installs that config again with the one
+service registered, ahead of the credential, because a gateway with no entry
+for a service cannot route a request to it. Reading the machine first, rather
+than pushing this computer's idea of its config, is what keeps the services
+another of the user's computers created on the machine; the bundled
+registrations and the hidden built-in services reach it at provisioning, which
+also leaves its custom services as they are. A computer still running an
+older Imbue Studio pushes this computer's own registrations instead, so until
+it upgrades its connects can drop a service a newer computer created on the
+machine; reconnecting, or approving the next request for the origin, puts it
+back. Reading is symmetrical: opening
+the workspace's Permissions tab reads the machine's registrations back along
+with its credentials, so a second computer sees the connections the first one
+created there, and one either computer removed is gone for both. This
+computer's own browser and keyring settings never travel. A custom service the
+machine's store has no registration for is refused rather than pushed, since
+the machine could never use its credentials.
+
+**Signing out of a custom service's last account deregisters it** from the
+machine -- its config read and installed again without the service, in the
+same change as the clear -- and from the machine's store here once the
+account's grants have been stripped. A registration nothing is connected to
+would only make the next request for the origin reuse what an earlier one
+asked for -- its header in particular -- however the new request asks to send
+its token; removed, the next approval registers exactly what that request
+describes. A custom service another account is still connected to stays
+registered.
 
 ## Manual credential entry
 
@@ -957,8 +979,10 @@ racing to rotate the same one.
 
 Changes travel as operations, made at the moment the user asks for them:
 connecting a service signs in here (the browser and the shared session are
-here) and then hands the credential to the machine; disconnecting clears it on
-the machine, because that is where it is.
+here) and then hands the credential to the machine, with the registration of a
+custom service ahead of it; disconnecting clears it on the machine, because
+that is where it is, and takes a custom service's registration with its last
+account.
 
 Every change is carried **synchronously**, by the app itself: it loads mngr's
 provider set in-process, opens the workspace's outer host (its VPS) and hands
@@ -990,13 +1014,18 @@ use.
 
 The desktop keeps each remote machine's credentials in that host's *machine
 store* (`~/.minds/latchkey/mngr_latchkey/hosts/<host_id>/`), a
-`LATCHKEY_DIRECTORY` of its own that shares this computer's config, browser
-session and encryption key. Everything the app does on a workspace's behalf --
-listing its connections, signing in, entering credentials, signing out -- goes
-through the store belonging to *that machine*
+`LATCHKEY_DIRECTORY` of its own that shares this computer's browser session and
+encryption key and keeps a config of its own: this computer's settings, with
+the custom services registered on that machine in place of the ones on this
+computer's own. Everything the app does on a workspace's behalf -- listing its
+connections, signing in, entering credentials, signing out -- goes through the
+store belonging to *that machine*
 (`desktop_client/latchkey/machine_latchkey.py` decides which one that is), so a
-sign-in for one machine never turns up in another's connectors. What ships to a
-VPS is re-encrypted with that machine's own key on the way out.
+sign-in for one machine never turns up in another's connectors, and everything
+that offers or connects services on a machine reads the catalog derived from
+that store, so a custom service created on one machine is never offered on
+another. What ships to a VPS is re-encrypted with that machine's own key on the
+way out.
 
 Two consequences the UI makes visible:
 
@@ -1012,7 +1041,8 @@ Two consequences the UI makes visible:
   machine holds its own, so the same account keeps working everywhere else; this
   computer's store is shared by every local machine, so signing out from one of
   those signs out of all of them. The tab says which of the two it is before it
-  asks to confirm.
+  asks to confirm. A custom service whose last account this was is deregistered
+  from the same machine with it.
 
 A workspace whose gateway has not been provisioned yet has no machine of its own
 to speak of, so it is answered from this computer's store until it has one.

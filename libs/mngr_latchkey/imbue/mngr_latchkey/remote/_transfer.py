@@ -9,10 +9,12 @@ machine is re-encrypted with the machine's key here. The desktop's own key
 never leaves this computer.
 
 Everything this computer *pushes* to a machine -- a connect (with the config
-snapshot the credential needs the gateway to have), a disconnect, a permissions
-snapshot (alone, or with a desktop egress rules snapshot), or a permission
-grant (a connect and a snapshot together, with a desktop egress rules snapshot
-when the grant also changes a route) -- is one
+snapshot that registers a custom service the credential needs the gateway to
+have), a disconnect (with the config snapshot that deregisters a custom
+service whose last account it takes away), a permissions snapshot (alone, or
+with a desktop egress rules snapshot), or a permission grant (a connect and a
+snapshot together, with a desktop egress rules snapshot when the grant also
+changes a route) -- is one
 :class:`~imbue.mngr_latchkey.remote._machine.RemoteStateUpdate`
 applied by the machine's ``mngr-latchkey apply-state`` in a single remote
 command, and reading a machine back (:func:`fetch_machine_state`) is one
@@ -28,9 +30,11 @@ the same document, so that costs nothing extra.
 """
 
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -43,6 +47,9 @@ from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.core import materialize_bundled_extensions
+from imbue.mngr_latchkey.core import registered_services_from_config_text
+from imbue.mngr_latchkey.custom_services import readable_custom_service_entries
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -57,6 +64,7 @@ from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._mirror import clear_machine_credentials
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
+from imbue.mngr_latchkey.remote._mirror import write_machine_store_config
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
@@ -85,6 +93,12 @@ class FetchedMachineState(FrozenModel):
     permissions_format_version: PermissionsFormatVersion = Field(
         description="The format the machine's policy is written in; 0 when never stamped."
     )
+    custom_service_registrations: Mapping[str, JsonValue] = Field(
+        description=(
+            "The custom services registered on the machine, as the ``registeredServices`` entries of its config "
+            "that this build can make sense of; empty when it has no config."
+        )
+    )
 
 
 def fetch_machine_state(
@@ -93,7 +107,7 @@ def fetch_machine_state(
     host_id: HostId,
     machine_key: SecretStr,
 ) -> FetchedMachineState:
-    """Read what a machine holds -- its credentials, its policy and its desktop egress rules -- in one round trip.
+    """Read what a machine holds -- its credentials, its policy, its desktop egress rules and its custom services -- in one round trip.
 
     Deliberately does not write anything here: the caller decides what to adopt
     (see :func:`adopt_machine_credentials`), and a read that lands over this
@@ -128,6 +142,35 @@ def fetch_machine_state(
         permissions_json=state.permissions_json,
         desktop_egress_rules_json=state.desktop_egress_rules_json,
         permissions_format_version=state.permissions_format_version,
+        custom_service_registrations=custom_service_registrations_of_config(state.config_json, host_id),
+    )
+
+
+def fetch_machine_config(host: OuterHostInterface, host_id: HostId) -> str | None:
+    """Read the machine's ``config.json`` as it stands, in one round trip; ``None`` when it has none.
+
+    What a push that changes the machine's custom-service set reads first: the
+    snapshot it installs is this file with one entry added or removed, so a
+    service another of the user's computers registered since this computer
+    last looked is kept. The read brings back no credential store, so it needs
+    no key and no re-encryption.
+
+    Raises:
+        RemoteGatewayError: when the machine cannot be read.
+    """
+    with log_span("Reading the latchkey config of host {} from VPS {}", host_id, host.get_name()):
+        state = read_remote_state(
+            host, RemoteStateRequest(), failure_description=f"read the latchkey config of host {host_id}"
+        )
+    return state.config_json
+
+
+def custom_service_registrations_of_config(config_json: str | None, host_id: HostId) -> dict[str, JsonValue]:
+    """The custom services a machine's config registers, as this build reads them; empty for a machine with none."""
+    if config_json is None:
+        return {}
+    return readable_custom_service_entries(
+        registered_services_from_config_text(config_json, f"the machine of host {host_id}")
     )
 
 
@@ -186,6 +229,32 @@ def adopt_machine_credentials(latchkey: Latchkey, host_id: HostId, fetched: Fetc
         clear_machine_credentials(store_dir)
     else:
         write_machine_credentials(store_dir, fetched.credentials, fetched.data_format_version)
+
+
+def adopt_machine_custom_services(
+    latchkey: Latchkey, host_id: HostId, custom_service_registrations: Mapping[str, JsonValue]
+) -> None:
+    """Take the custom services the machine registers as the ones its machine store names.
+
+    How a second computer learns which custom services the first one created
+    on a machine, and how this one learns of a service another computer
+    deregistered. The machine's set is adopted outright, for the reason its
+    policy is (see :func:`adopt_machine_permissions`): any of the user's
+    computers may have registered or deregistered one. When the store's config
+    changes, the desktop gateway's catalog is refreshed with it, so the
+    requests the machine's gateway forwards here validate against the services
+    that machine actually has.
+
+    Raises:
+        RemoteGatewayError: when the store's config cannot be rebuilt.
+    """
+    store_dir = machine_store_dir(plugin_data_dir(latchkey.latchkey_directory), host_id)
+    try:
+        is_changed = write_machine_store_config(latchkey.latchkey_directory, store_dir, custom_service_registrations)
+    except LatchkeyStoreError as e:
+        raise RemoteGatewayError(f"Failed to adopt the custom services of host {host_id}: {e}") from e
+    if is_changed:
+        materialize_bundled_extensions(latchkey.latchkey_directory)
 
 
 def adopt_machine_permissions(latchkey_directory: Path, host_id: HostId, permissions_json: str) -> None:
@@ -308,11 +377,12 @@ def push_credentials(
     account-scoping existed mean -- and there is no other way to say "the
     unnamed default account", which is stored under the empty string.
 
-    ``config_json``, when given, is this package's half of the machine's
-    ``config.json`` as a whole snapshot, installed ahead of the credential: a
-    gateway with no entry for a service cannot route a request to it, so a
-    credential for a service the machine's config does not name would be one
-    it could never use.
+    ``config_json``, when given, is the machine's ``config.json`` as the
+    connect should leave it -- the file the machine was just read to hold, with
+    the custom service the credential belongs to registered -- installed ahead
+    of the credential: a gateway with no entry for a service cannot route a
+    request to it, so a credential for a service the machine's config does not
+    name would be one it could never use.
 
     Raises:
         RemoteGatewayError: when the bundle cannot be built, or the machine
@@ -388,6 +458,9 @@ def clear_remote_credentials(
     service_name: str,
     account: str,
     machine_key: SecretStr,
+    # The machine's ``config.json`` as the clear should leave it, when the account was a custom service's last;
+    # ``None`` leaves the machine's config as it is.
+    config_json: str | None,
 ) -> None:
     """Clear one account of one service from the machine's own credential store, in one round trip.
 
@@ -399,6 +472,12 @@ def clear_remote_credentials(
     re-keyed from another computer would leave a credential the user signed out
     of sitting on it, which is the one outcome a sign-out must not have.
 
+    A custom service whose last account this takes away is deregistered in the
+    same command, by ``config_json`` -- the machine's config as it was just
+    read, without the service -- so the machine's gateway stops naming a
+    service nothing is connected to, and the next request for its origin
+    creates it afresh.
+
     Raises:
         RemoteGatewayError: when the machine refuses or fails the update.
     """
@@ -407,6 +486,7 @@ def clear_remote_credentials(
             host,
             RemoteStateUpdate(
                 fallback_encryption_key=machine_key,
+                config_json=config_json,
                 credential_clear=RemoteCredentialClear(service_name=service_name, account=account),
             ),
             failure_description=f"disconnect {service_name} of host {host_id}",

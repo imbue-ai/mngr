@@ -758,10 +758,13 @@ def build_workspace_permissions_view(
 
     ``latchkey`` is the desktop's, which owns the permission files of every
     machine; ``machine_latchkey`` is the store holding *this* machine's
-    credentials (see
+    credentials and the custom services registered on it (see
     :mod:`imbue.minds.desktop_client.latchkey.machine_latchkey`), which is what
     the connections are read from -- a machine's connectors are the accounts
-    connected for it, not the ones connected on the user's computer.
+    connected for it, not the ones connected on the user's computer -- and
+    ``services_catalog`` is that machine's (:func:`services_catalog_for_machine`),
+    so a custom service created on another machine is neither listed nor
+    offered here.
 
     Reads the workspace host's permissions file once (through the gateway
     extension) and one ``latchkey auth list --offline`` snapshot. A connection
@@ -805,8 +808,8 @@ def build_workspace_permissions_view(
         tuple(service_name for service_name, infos in services_catalog.as_mapping().items() if infos),
     )
     # Read once for the whole pane: a custom service's credential header lives on the
-    # desktop's registration, not in the probe, and the loop below asks for every service.
-    registered_services = read_registered_services(latchkey.latchkey_directory)
+    # machine's registration, not in the probe, and the loop below asks for every service.
+    registered_services = read_registered_services(machine_latchkey.latchkey_directory)
 
     # Each panel carries its position within its own service, so the nav's
     # final sort orders services alphabetically without flattening the account

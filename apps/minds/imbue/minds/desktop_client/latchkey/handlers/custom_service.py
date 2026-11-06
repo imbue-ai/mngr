@@ -6,21 +6,26 @@ has no service for: the agent names the origin, and one Approve *creates* the
 connection if this computer does not have it yet and grants the asking
 workspace access to it.
 
-"If this computer does not have it yet" is the common case, not a corner: a
-second workspace wanting an origin some earlier one connected sees exactly what
-the first did (its own gateway has no service for it), so this is the only
-request it can make. The service is then kept as it is registered here -- the
-request's login is only what the agent guessed -- and approving connects the
-workspace to it.
+"If this computer does not have it yet" means "if the asking workspace's
+machine does not": a custom service is registered on the machine whose agents
+use it, and a second workspace on the same machine wanting an origin some
+earlier one connected sees exactly what the first did (its own gateway has no
+service for it), so this is the only request it can make. The service is then
+kept as it is registered there -- the request's login is only what the agent
+guessed -- and approving connects the workspace to it. A workspace on another
+machine registers the service afresh, as the request describes it.
 
 Approve does three things, in this order:
 
-1. **Register**, by merging the service into latchkey's own ``config.json``,
-   unless it is already there. This has to happen first: a sign-in is executed
-   by the gateway against its own registry, so latchkey cannot log in to a
-   service it has not been told about. (It reads registrations per request, so
-   no restart is involved -- see
-   :data:`imbue.mngr_latchkey.core.LATCHKEY_MIN_VERSION`.)
+1. **Register**, by merging the service into the ``config.json`` of the
+   machine's store (this computer's own latchkey directory for a local
+   workspace, the mirror of the remote machine's for a remote one), unless it
+   is already there. This has to happen first: a sign-in is executed by the
+   gateway against its own registry, so latchkey cannot log in to a service it
+   has not been told about. (It reads registrations per request, so no restart
+   is involved -- see :data:`imbue.mngr_latchkey.core.LATCHKEY_MIN_VERSION`.)
+   For a remote workspace the registration reaches the machine itself in the
+   same change that carries the credential and the grant (step 3).
 2. **Connect an account**, either by the browser sign-in the request described
    (one of latchkey's generic login flows)
    or -- when the request carries no login flow -- by running the service's own
@@ -136,7 +141,7 @@ def _format_denied_message(base_api_url: str) -> str:
 def _sign_in_url(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
     """Where the browser sign-in goes, or ``None`` when credentials have to be typed.
 
-    A service this computer already has keeps its registration, so its sign-in
+    A service the machine already has keeps its registration, so its sign-in
     is what runs and what the dialog names; the request's ``login`` counts only
     for a service being created.
     """
@@ -148,7 +153,7 @@ def _sign_in_url(existing: Mapping[str, JsonValue] | None, payload: CustomServic
 def _credential_header(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
     """The header a pasted token is sent as, or ``None`` when a browser sign-in applies.
 
-    A service this computer already has keeps its registration, header included;
+    A service the machine already has keeps its registration, header included;
     the request's ``header`` counts only for a service being created. A service
     with neither named sends the bearer default.
     """
@@ -225,10 +230,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
     data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
     latchkey: Latchkey = Field(
         description=(
-            "This computer's latchkey. Registration goes through it: ``config.json`` is shared into every "
-            "machine store by symlink, so writing it through a store would replace the link with a copy. "
-            "The sign-in that connects the first account runs against the machine's own store instead "
-            "(see :func:`machine_latchkey_for_host`)."
+            "This computer's latchkey. Registration goes through it, into the store of the asking workspace's "
+            "machine (see :func:`machine_latchkey_for_host`), which is also where the sign-in that connects "
+            "the first account runs; it refreshes the desktop gateway's catalog with what was registered."
         ),
     )
     gateway_client: LatchkeyGatewayClient = Field(
@@ -245,9 +249,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
             "Carries the granted account (workspace agent id, service name, account) and the freshly-edited "
             "per-host policy to the asking agent's own machine, returning once the machine has taken them -- "
             "the same handover the predefined handler makes. The registration the machine also needs travels "
-            "in the same script, ahead of the credential, as this computer's snapshot of the machine's "
-            "config -- its gateway cannot route a request to a service its config does not name. A no-op "
-            "for a workspace whose agents run on this computer."
+            "in the same script, ahead of the credential, read from the machine store it was written to -- "
+            "its gateway cannot route a request to a service its config does not name. A no-op for a "
+            "workspace whose agents run on this computer."
         ),
     )
 
@@ -275,7 +279,10 @@ class CustomServiceGrantHandler(RequestEventHandler):
         ws_name = resolve_workspace_display_name(
             backend_resolver, parsed_agent_id, fallback=permission_request.agent_id
         )
-        existing = self._existing_registration(custom_service_name(payload.domain, payload.scheme))
+        existing = self._existing_registration(
+            self._machine_latchkey_for_dialog(backend_resolver, parsed_agent_id),
+            custom_service_name(payload.domain, payload.scheme),
+        )
         return UiCustomServicePermissionDetail(
             request_id=permission_request.request_id,
             agent_id=permission_request.agent_id,
@@ -320,23 +327,23 @@ class CustomServiceGrantHandler(RequestEventHandler):
             return make_json_error_response(f"This connection cannot be created: {e}", status_code=400)
         service_name = custom_service_name(domain, payload.scheme)
 
-        existing = self._existing_registration(service_name)
-        if existing is None:
-            try:
-                self._register_service(service_name, payload)
-            except LatchkeyError as e:
-                logger.warning("Could not register custom service {}: {}", service_name, e)
-                return make_json_error_response(f"Could not create the connection to {domain}: {e}", status_code=500)
-
-        # Credentials belong to the machine the agent runs on, so the sign-in
-        # (and everything it reads back) happens against that machine's own
-        # store -- never the desktop's, unless the agent runs here. The
-        # registration above is the one thing that stays with the desktop.
+        # The service belongs to the machine the agent runs on, like the
+        # credentials: it is registered in that machine's store, and the
+        # sign-in (and everything it reads back) happens against the same store
+        # -- never the desktop's, unless the agent runs here.
         try:
             machine_latchkey = machine_latchkey_for_host(self.latchkey, host_id)
         except PermissionOverviewError as e:
             logger.warning("Could not open the machine store for host {}: {}", host_id, e)
             return make_json_error_response(f"Could not create the connection to {domain}: {e}", status_code=500)
+
+        existing = self._existing_registration(machine_latchkey, service_name)
+        if existing is None:
+            try:
+                self._register_service(machine_latchkey, service_name, payload)
+            except LatchkeyError as e:
+                logger.warning("Could not register custom service {}: {}", service_name, e)
+                return make_json_error_response(f"Could not create the connection to {domain}: {e}", status_code=500)
 
         if _sign_in_url(existing, payload) is not None:
             account = self._sign_in_with_browser(machine_latchkey, service_name)
@@ -354,7 +361,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
             # gives it a ``setCredentialsExample``), so the first Approve lands
             # here with nothing filled in and comes back with the form.
             typed_values = _parse_typed_credentials(request.form.get("manual_credentials"))
-            credential_header = _credential_header(self._existing_registration(service_name), payload)
+            credential_header = _credential_header(
+                self._existing_registration(machine_latchkey, service_name), payload
+            )
             prompt = self._credential_prompt(
                 machine_latchkey, service_name, domain, credential_header, payload.credential_instructions
             )
@@ -383,7 +392,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
         # A remote workspace's machine is where both halves of the grant count:
         # its gateway injects the credentials its own store holds and checks the
         # agent's next request against its own policy copy. They go over as one
-        # script, config first, then credential, then policy, and the
+        # script, registration first, then credential, then policy, and the
         # grant is reported only once the machine has taken all of it. A
         # machine that will not leaves the request pending for a retry.
         try:
@@ -441,16 +450,37 @@ class CustomServiceGrantHandler(RequestEventHandler):
             media_type="application/json",
         )
 
-    def _existing_registration(self, service_name: str) -> Mapping[str, JsonValue] | None:
-        """This computer's registration of the service, or ``None`` if it has none."""
-        registration = read_registered_services(self.latchkey.latchkey_directory).get(service_name)
+    def _machine_latchkey_for_dialog(self, backend_resolver: BackendResolverInterface, agent_id: AgentId) -> Latchkey:
+        """The store of the asking workspace's machine, or this computer's when the machine cannot be placed.
+
+        The dialog says whether the service already exists where the agent
+        runs; a workspace whose host is unknown or whose store cannot be opened
+        is answered from here, as its accounts are, rather than refused a
+        dialog -- the approval resolves the host for real.
+        """
+        host_id = resolve_workspace_host_id(backend_resolver, str(agent_id))
+        if host_id is None:
+            return self.latchkey
+        try:
+            return machine_latchkey_for_host(self.latchkey, host_id)
+        except PermissionOverviewError as e:
+            logger.warning(
+                "Could not open the machine store for host {}; answering from this computer's: {}", host_id, e
+            )
+            return self.latchkey
+
+    def _existing_registration(self, machine_latchkey: Latchkey, service_name: str) -> Mapping[str, JsonValue] | None:
+        """The machine's registration of the service, as its store holds it, or ``None`` if it has none."""
+        registration = read_registered_services(machine_latchkey.latchkey_directory).get(service_name)
         return registration if isinstance(registration, dict) else None
 
-    def _register_service(self, service_name: str, payload: CustomServiceRequestPayload) -> None:
-        """Merge the service into latchkey's ``config.json``.
+    def _register_service(
+        self, machine_latchkey: Latchkey, service_name: str, payload: CustomServiceRequestPayload
+    ) -> None:
+        """Merge the service into the ``config.json`` of the machine's store.
 
         The merge preserves every registration it does not own, which is what
-        lets `config.json` be the only place a custom service lives.
+        lets the store's `config.json` be the only place a custom service lives.
         """
         login = payload.login
         registration = build_custom_service_registration(
@@ -461,7 +491,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             login_flow_params=None if login is None else login.flow_params,
             credential_header=payload.header,
         )
-        self.latchkey.register_custom_service(service_name, registration)
+        self.latchkey.register_custom_service(machine_latchkey.latchkey_directory, service_name, registration)
 
     def _write_grant(self, host_id: HostId, service_name: str, domain: str, scheme: str, account: str) -> None:
         """Write the account-scoped rule, and the scope it refers to, into the agent's per-host policy.

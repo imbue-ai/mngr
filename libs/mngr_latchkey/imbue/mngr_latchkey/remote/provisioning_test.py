@@ -17,6 +17,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
+from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
 from imbue.mngr_latchkey.devices import DesktopDeviceId
@@ -33,6 +34,7 @@ from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
+from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
@@ -704,11 +706,12 @@ def test_provisioning_preserves_the_machines_existing_config(tmp_path: Path) -> 
     assert set(additional_service_registration_entries()) <= set(config["registeredServices"])
 
 
-def test_provisioning_registers_the_custom_services_this_computer_has(tmp_path: Path) -> None:
-    """A user-created service registered here reaches the machine's config, which holds none of its own.
+def test_provisioning_leaves_the_custom_services_of_this_computers_own_machine_here(tmp_path: Path) -> None:
+    """A custom service is a connection on one machine: the ones registered here are this computer's, not the VPS's.
 
     Only this package's half of the config travels: the browser and keyring
-    settings in this computer's file belong to this computer.
+    settings in this computer's file belong to this computer, and so do the
+    services agents on it asked for.
     """
     latchkey_directory = _latchkey_directory(tmp_path)
     (latchkey_directory / CONFIG_FILENAME).write_text(
@@ -716,7 +719,7 @@ def test_provisioning_registers_the_custom_services_this_computer_has(tmp_path: 
             {
                 "browser": {"executablePath": "/Applications/Chromium.app", "source": "system"},
                 "registeredServices": {
-                    "custom_example_com": build_custom_service_registration("example.com", "https")
+                    "custom_https_example_com": build_custom_service_registration("example.com", "https")
                 },
             }
         )
@@ -726,9 +729,28 @@ def test_provisioning_registers_the_custom_services_this_computer_has(tmp_path: 
     _provision(outer, latchkey_directory, HostId.generate())
 
     config = json.loads(as_vps(outer).machine_config() or "{}")
-    assert config["registeredServices"]["custom_example_com"] == {"baseApiUrl": "https://example.com/"}
+    assert "custom_https_example_com" not in config["registeredServices"]
     assert set(additional_service_registration_entries()) <= set(config["registeredServices"])
     assert "browser" not in config
+
+
+def test_provisioning_adopts_the_custom_services_the_machine_registers(tmp_path: Path) -> None:
+    """A machine another computer created connections on is read for them, like it is for its policy."""
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).hold_config(
+        '{"registeredServices": {"custom_https_example_com": {"baseApiUrl": "https://example.com/"}}}'
+    )
+
+    _provision(outer, latchkey_directory, host_id)
+
+    store_dir = machine_store_dir(plugin_data_dir(latchkey_directory), host_id)
+    assert custom_service_registration_entries(store_dir) == {
+        "custom_https_example_com": {"baseApiUrl": "https://example.com/"}
+    }
+    config = json.loads(as_vps(outer).machine_config() or "{}")
+    assert config["registeredServices"]["custom_https_example_com"] == {"baseApiUrl": "https://example.com/"}
 
 
 def test_provisioning_raises_on_an_invalid_remote_config(tmp_path: Path) -> None:

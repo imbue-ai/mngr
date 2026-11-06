@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
@@ -46,6 +47,10 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import read_registered_services
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
+from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -2018,3 +2023,137 @@ def test_connect_browser_rejects_an_unknown_service(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert latchkey.added_account_calls == []
+
+
+# Custom services: registered on the machine they are connected on, and deregistered with their last account.
+
+_CUSTOM_SERVICE = custom_service_name("api.example.com", "https")
+_OTHER_CUSTOM_SERVICE = custom_service_name("other.example.com", "https")
+_CUSTOM_CREDENTIALS_EXAMPLE = f'latchkey auth set {_CUSTOM_SERVICE} -H "Authorization: Bearer <token>"'
+
+
+def _custom_service_latchkey(tmp_path: Path, accounts: list[str]) -> FakeAccountsLatchkey:
+    """A latchkey with two custom services registered on this computer's machine, ``accounts`` connected to one."""
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path / "latchkey",
+        latchkey_binary="/nonexistent",
+        accounts_by_service={_CUSTOM_SERVICE: accounts},
+        credential_example_by_service={_CUSTOM_SERVICE: _CUSTOM_CREDENTIALS_EXAMPLE},
+    )
+    latchkey.latchkey_directory.mkdir(parents=True, exist_ok=True)
+    for service_name, domain in ((_CUSTOM_SERVICE, "api.example.com"), (_OTHER_CUSTOM_SERVICE, "other.example.com")):
+        latchkey.register_custom_service(
+            latchkey.latchkey_directory, service_name, build_custom_service_registration(domain, "https")
+        )
+    return latchkey
+
+
+def test_connector_disconnect_of_a_custom_services_last_account_deregisters_it(tmp_path: Path) -> None:
+    """Signing out of a custom service's only account takes the service with it.
+
+    Otherwise the next request for its origin would silently reuse the header
+    this registration was created with, however the new request asks to send
+    its token. The service's grants are stripped first, as for any sign-out,
+    and the other custom service on the machine is left as it is.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _custom_service_latchkey(tmp_path, accounts=[""])
+    seed_connector_grant(
+        latchkey.plugin_data_dir,
+        host_id,
+        _CUSTOM_SERVICE,
+        "",
+        ("any",),
+        build_custom_service_scope_schema("api.example.com", "https"),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-disconnect",
+        json={"service_name": _CUSTOM_SERVICE, "account": ""},
+    )
+
+    assert response.status_code == 200
+    assert latchkey.cleared_calls == [(_CUSTOM_SERVICE, "")]
+    assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == ()
+    registered = read_registered_services(latchkey.latchkey_directory)
+    assert _CUSTOM_SERVICE not in registered
+    assert _OTHER_CUSTOM_SERVICE in registered
+    payload = json.loads(response.data)
+    offered = [entry["service_name"] for entry in payload["available_connections"]]
+    assert _CUSTOM_SERVICE not in offered
+    assert _OTHER_CUSTOM_SERVICE in offered
+
+
+def test_connector_disconnect_keeps_a_custom_service_another_account_is_still_connected_to(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _custom_service_latchkey(tmp_path, accounts=["", "second"])
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-disconnect",
+        json={"service_name": _CUSTOM_SERVICE, "account": ""},
+    )
+
+    assert response.status_code == 200
+    assert _CUSTOM_SERVICE in read_registered_services(latchkey.latchkey_directory)
+    assert [entry["account"] for entry in json.loads(response.data)["connections"]] == ["second"]
+
+
+def test_connector_disconnect_of_a_shipped_services_last_account_deregisters_nothing(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _custom_service_latchkey(tmp_path, accounts=[""])
+    latchkey.accounts_by_service["slack"] = [_ACCOUNT]
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-disconnect",
+        json={"service_name": "slack", "account": _ACCOUNT},
+    )
+
+    assert response.status_code == 200
+    assert set(read_registered_services(latchkey.latchkey_directory)) >= {_CUSTOM_SERVICE, _OTHER_CUSTOM_SERVICE}
+
+
+def test_workspace_permissions_offer_only_the_custom_services_of_the_workspaces_own_machine(tmp_path: Path) -> None:
+    """A custom service created on one machine is neither listed nor offered on another.
+
+    A local workspace reads this computer's own registrations; a remote one
+    reads its machine store's, which names the services registered on that
+    machine and none of this computer's.
+    """
+    local_agent_id, remote_agent_id = AgentId(), AgentId()
+    local_host_id, remote_host_id = HostId(), HostId()
+    latchkey = _custom_service_latchkey(tmp_path, accounts=[])
+    store_machine_encryption_key(latchkey.plugin_data_dir, remote_host_id, SecretStr("machine-key-41c0"))
+    remote_store = machine_latchkey_for_host(latchkey, remote_host_id).latchkey_directory
+    remote_service = custom_service_name("remote.example.com", "https")
+    latchkey.register_custom_service(
+        remote_store, remote_service, build_custom_service_registration("remote.example.com", "https")
+    )
+    client = _build_client(
+        tmp_path,
+        latchkey,
+        (local_agent_id, remote_agent_id),
+        local_host_id,
+        host_by_agent={str(remote_agent_id): str(remote_host_id)},
+        machine_operator=_recording_operator(tmp_path, latchkey),
+    )
+
+    local_offered = {
+        entry["service_name"]
+        for entry in json.loads(client.get(f"/ui/api/workspaces/{local_agent_id}/permissions").data)[
+            "available_connections"
+        ]
+    }
+    remote_offered = {
+        entry["service_name"]
+        for entry in json.loads(client.get(f"/ui/api/workspaces/{remote_agent_id}/permissions").data)[
+            "available_connections"
+        ]
+    }
+
+    assert {_CUSTOM_SERVICE, _OTHER_CUSTOM_SERVICE} <= local_offered
+    assert remote_service not in local_offered
+    assert remote_service in remote_offered
+    assert not {_CUSTOM_SERVICE, _OTHER_CUSTOM_SERVICE} & remote_offered

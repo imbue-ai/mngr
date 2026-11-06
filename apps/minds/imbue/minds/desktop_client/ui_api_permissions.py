@@ -9,10 +9,15 @@ the user typed into the pane (the browser-sign-in half of Add connection is the
 settings page's own route). A fifth signs an account out: it clears the stored
 credential of the store this workspace's machine reads, so the account is gone
 for every workspace that reads the same store -- that one alone for a machine
-of its own, every local workspace for this computer's. A sixth sets one
+of its own, every local workspace for this computer's -- and a custom service
+whose last account that was is deregistered from the machine with it. A sixth sets one
 service's desktop egress route: which of the user's desktops a remote
 workspace's requests to it are sent out through, in what order, and whether its
 own machine sends them when none of those will.
+
+The services a pane offers, lists and connects are the ones *its machine* can
+reach: the shipped catalog plus the custom services registered on that machine
+(:func:`services_catalog_for_machine`), never one created on another machine.
 
 Every write posts exactly one flip. The SERVER then recomputes the affected
 rule's COMPLETE permission set from the workspace's current permissions file
@@ -86,7 +91,9 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_latchkey import is_machine_store_of_its_own
+from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
+from imbue.minds.desktop_client.latchkey.machine_latchkey import services_catalog_for_machine
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
@@ -123,6 +130,8 @@ from imbue.minds.desktop_client.ui_models import UiWorkspacePermissions
 from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
 from imbue.mngr_latchkey.devices import DesktopDeviceId
@@ -131,6 +140,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingGrant
 from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
 from imbue.mngr_latchkey.file_sharing import parse_file_sharing_permission
 from imbue.mngr_latchkey.file_sharing import parse_legacy_file_sharing_permission
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -148,6 +158,23 @@ def _find_permission_grant_handler() -> LatchkeyPermissionGrantHandler | None:
         if isinstance(handler, LatchkeyPermissionGrantHandler):
             return handler
     return None
+
+
+def _services_catalog_for_workspace(handler: LatchkeyPermissionGrantHandler, agent_id: str) -> ServicesCatalog:
+    """The services one workspace's machine can reach, which is what every write about its connections checks against.
+
+    A workspace whose host cannot be resolved is answered with the handler's
+    catalog, the union of every machine's custom services: the write that
+    asked refuses such a workspace itself, in its own words, before the
+    catalog decides anything.
+
+    Raises:
+        PermissionOverviewError: when the machine's store cannot be opened.
+    """
+    host_id = resolve_workspace_host_id(get_state().backend_resolver, agent_id)
+    if host_id is None:
+        return handler.services_catalog
+    return services_catalog_for_machine(handler.services_catalog, machine_latchkey_for_host(handler.latchkey, host_id))
 
 
 def _push_permissions_to_machine() -> Callable[[str], None]:
@@ -272,12 +299,13 @@ def _build_permissions_view_or_none(agent_id: str) -> WorkspacePermissionsView |
     if handler is None:
         return None
     try:
+        machine_latchkey = machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id)
         return build_workspace_permissions_view(
             backend_resolver=get_state().backend_resolver,
             gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
+            services_catalog=services_catalog_for_machine(handler.services_catalog, machine_latchkey),
             latchkey=handler.latchkey,
-            machine_latchkey=machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id),
+            machine_latchkey=machine_latchkey,
             workspace_agent_id=agent_id,
             device_id=get_state().device_id,
         )
@@ -494,6 +522,9 @@ def _apply_and_refresh(agent_id: str, apply_toggle: Callable[[], object]) -> Res
     except MachineOperationError as e:
         logger.warning("Could not apply the permission change on the machine of {}: {}", agent_id, e)
         return make_json_error_response(str(e), 502)
+    except LatchkeyError as e:
+        logger.warning("Could not apply the permission change for {} through latchkey: {}", agent_id, e)
+        return make_json_error_response(str(e), 502)
     return json_response(build_permissions_payload(agent_id))
 
 
@@ -548,7 +579,7 @@ def _handle_connector_toggle(agent_id: str) -> Response:
         lambda: apply_connector_toggle(
             backend_resolver=get_state().backend_resolver,
             gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
+            services_catalog=_services_catalog_for_workspace(handler, agent_id),
             latchkey=handler.latchkey,
             workspace_agent_id=agent_id,
             scope=toggle_request.scope,
@@ -611,7 +642,7 @@ def _handle_desktop_egress_route(agent_id: str) -> Response:
         lambda: apply_desktop_egress_route(
             backend_resolver=get_state().backend_resolver,
             gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
+            services_catalog=_services_catalog_for_workspace(handler, agent_id),
             latchkey=handler.latchkey,
             workspace_agent_id=agent_id,
             service_name=route_request.service_name,
@@ -658,9 +689,10 @@ def _connect_credentials_and_carry(
     landed under, so the machine's other accounts of the service stay exactly
     as it holds them.
     """
+    machine_latchkey = machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id)
     account = connect_service_with_credentials(
-        latchkey=machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id),
-        services_catalog=handler.services_catalog,
+        latchkey=machine_latchkey,
+        services_catalog=services_catalog_for_machine(handler.services_catalog, machine_latchkey),
         service_name=connect_request.service_name,
         value_by_parameter_name=connect_request.value_by_parameter_name,
         account_name=connect_request.account_name,
@@ -689,7 +721,7 @@ def _handle_connector_revoke_all(agent_id: str) -> Response:
         lambda: revoke_service_account_for_workspace(
             backend_resolver=get_state().backend_resolver,
             gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
+            services_catalog=_services_catalog_for_workspace(handler, agent_id),
             latchkey=handler.latchkey,
             workspace_agent_id=agent_id,
             service_name=revoke_request.service_name,
@@ -725,6 +757,12 @@ def _handle_connector_disconnect(agent_id: str) -> Response:
     copy is the one its agents use, and this does not answer until it has. A
     machine that refuses the clear fails the whole disconnect, so the account
     is never shown as signed out while the machine can still use it.
+
+    A custom service whose last account this clears is deregistered from the
+    machine as well -- a registration nothing is connected to would only make
+    the next request for its origin reuse what an earlier one asked for -- in
+    the same change as the clear on the machine, and from the machine's store
+    here once the grants that named it are stripped.
     """
     prelude = _write_prelude(agent_id)
     if isinstance(prelude, Response):
@@ -735,16 +773,26 @@ def _handle_connector_disconnect(agent_id: str) -> Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed connector-disconnect body: {}", e)
         return make_json_error_response("service_name and account are required.", 400)
-    if not handler.services_catalog.get(disconnect_request.service_name):
-        return make_json_error_response(f"Unknown service '{disconnect_request.service_name}'.", 400)
     try:
         machine_latchkey = machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id)
-        disconnect_account(machine_latchkey, disconnect_request.service_name, disconnect_request.account)
+    except PermissionOverviewError as e:
+        logger.warning("Could not disconnect from {}: {}", disconnect_request.service_name, e)
+        return make_json_error_response(str(e), 502)
+    services_catalog = services_catalog_for_machine(handler.services_catalog, machine_latchkey)
+    if not services_catalog.get(disconnect_request.service_name):
+        return make_json_error_response(f"Unknown service '{disconnect_request.service_name}'.", 400)
+    try:
+        is_last_account = disconnect_account(
+            machine_latchkey, disconnect_request.service_name, disconnect_request.account
+        )
+        is_service_deregistered = is_last_account and is_custom_service_name(disconnect_request.service_name)
         if is_machine_store_of_its_own(handler.latchkey, machine_latchkey):
             # The credential is also the machine's -- what was just cleared is
             # only this computer's copy of it, and the machine's agents would
             # keep using their own -- so the clear is carried there too.
-            _disconnect_account_on_machine(agent_id, disconnect_request.service_name, disconnect_request.account)
+            _disconnect_account_on_machine(
+                agent_id, disconnect_request.service_name, disconnect_request.account, is_service_deregistered
+            )
     except (PermissionOverviewError, PermissionToggleError, MachineOperationError) as e:
         # The account key is a personal identifier, so the service and
         # latchkey's own detail are all that is logged.
@@ -753,17 +801,39 @@ def _handle_connector_disconnect(agent_id: str) -> Response:
 
     return _apply_and_refresh(
         agent_id,
-        lambda: revoke_service_account_for_workspace(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
-            latchkey=handler.latchkey,
-            workspace_agent_id=agent_id,
-            service_name=disconnect_request.service_name,
-            account=disconnect_request.account,
-            push_permissions_to_machine=_push_permissions_to_machine(),
+        lambda: _revoke_grants_and_deregister(
+            handler, agent_id, machine_latchkey, services_catalog, disconnect_request, is_service_deregistered
         ),
     )
+
+
+def _revoke_grants_and_deregister(
+    handler: LatchkeyPermissionGrantHandler,
+    agent_id: str,
+    machine_latchkey: Latchkey,
+    services_catalog: ServicesCatalog,
+    disconnect_request: UiConnectorDisconnectRequest,
+    is_service_deregistered: bool,
+) -> None:
+    """Strip the signed-out account's grants, then drop a custom service that lost its last account from the machine's store.
+
+    The strip comes first: it needs ``services_catalog`` -- the machine's,
+    read from the same store -- to still name the service.
+    """
+    revoke_service_account_for_workspace(
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        services_catalog=services_catalog,
+        latchkey=handler.latchkey,
+        workspace_agent_id=agent_id,
+        service_name=disconnect_request.service_name,
+        account=disconnect_request.account,
+        push_permissions_to_machine=_push_permissions_to_machine(),
+    )
+    if is_service_deregistered:
+        handler.latchkey.deregister_custom_service(
+            machine_latchkey.latchkey_directory, disconnect_request.service_name
+        )
 
 
 def _handle_shared_path(agent_id: str) -> Response:
@@ -922,12 +992,12 @@ def _handle_connect_browser(agent_id: str) -> Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed connect-browser body: {}", e)
         return make_json_error_response("service_name is required.", 400)
-    if not handler.services_catalog.get(connect_request.service_name):
-        return make_json_error_response(f"Unknown service '{connect_request.service_name}'.", 400)
     try:
         machine_latchkey = machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id)
     except PermissionOverviewError as e:
         return make_json_error_response(str(e), 400)
+    if not services_catalog_for_machine(handler.services_catalog, machine_latchkey).get(connect_request.service_name):
+        return make_json_error_response(f"Unknown service '{connect_request.service_name}'.", 400)
     accounts_before = _stored_accounts(machine_latchkey, connect_request.service_name)
     is_success, detail = machine_latchkey.add_account(connect_request.service_name)
     if not is_success:
@@ -947,8 +1017,13 @@ def _handle_connect_browser(agent_id: str) -> Response:
     return json_response(build_permissions_payload(agent_id))
 
 
-def _disconnect_account_on_machine(agent_id: str, service_name: str, account: str) -> None:
+def _disconnect_account_on_machine(
+    agent_id: str, service_name: str, account: str, is_service_deregistered: bool
+) -> None:
     """Clear one account from a *remote* workspace's own machine, blocking until it is gone.
+
+    ``is_service_deregistered`` takes the service's registration away with it,
+    in the same change (see :meth:`MachineOperator.disconnect_account`).
 
     Raises:
         MachineOperationError: when the machine does not take the clear, which
@@ -957,7 +1032,7 @@ def _disconnect_account_on_machine(agent_id: str, service_name: str, account: st
     """
     operator = get_state().machine_operator
     if operator is not None:
-        operator.disconnect_account(agent_id, service_name, account)
+        operator.disconnect_account(agent_id, service_name, account, is_service_deregistered)
 
 
 def _stored_accounts(machine_latchkey: Latchkey, service_name: str) -> frozenset[str]:

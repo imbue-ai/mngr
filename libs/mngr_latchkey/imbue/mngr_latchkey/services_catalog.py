@@ -57,6 +57,7 @@ from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import Final
+from typing import Self
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -64,16 +65,18 @@ from pydantic import Field
 from pydantic import JsonValue
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_latchkey.account_scopes import list_account_grants
 from imbue.mngr_latchkey.account_scopes import resolved_schema_names
+from imbue.mngr_latchkey.core import custom_service_registration_entries_of_every_machine
 from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Package and filename of the bundled catalog. Kept in sync with the copy
-# ``core._materialize_bundled_extensions`` ships into the gateway's
+# ``core.materialize_bundled_extensions`` ships into the gateway's
 # ``LATCHKEY_DIRECTORY/extensions`` directory at spawn time -- both read
 # the same source file out of this package.
 _EXTENSIONS_PACKAGE: Final[str] = "imbue.mngr_latchkey.extensions"
@@ -100,6 +103,14 @@ class ServiceCatalogError(RuntimeError):
     so this module stays import-light and free of a dependency on
     ``core``; callers that need a package-shaped error should catch this
     and re-raise.
+    """
+
+
+class InvalidServicesCatalogError(ValueError):
+    """Raised when a :class:`ServicesCatalog` is built with fields that cannot answer together.
+
+    A ``ValueError`` subclass so pydantic reports it as a ``ValidationError``
+    at construction, the way :class:`~imbue.mngr_latchkey.desktop_egress.DesktopEgressError` is.
     """
 
 
@@ -323,10 +334,14 @@ class ServicesCatalog(FrozenModel):
     the process while the user keeps creating services: there is no remembered
     answer that could disagree with the file, and so nothing to invalidate.
 
-    Production constructs ``ServicesCatalog()``; the shipped half is read and
-    validated once per process by :func:`_load_bundled_catalog`. Tests pass an
-    explicit ``catalog_override`` -- typically via :meth:`from_catalog_payload`
-    -- to avoid depending on the shipped file.
+    Production constructs one over the desktop's latchkey directory with
+    ``is_including_every_machine=True`` -- the shipped catalog plus the custom
+    services of every machine this computer manages -- and derives a machine's
+    own by rebinding ``latchkey_directory`` to that machine's store with the
+    flag off. The shipped half is read and validated once per process by
+    :func:`_load_bundled_catalog`. Tests pass an explicit ``catalog_override``
+    -- typically via :meth:`from_catalog_payload` -- to avoid depending on the
+    shipped file.
 
     Unlike the previous gateway-backed implementation, there is no fetch
     that can fail at runtime: the catalog is local package data, so a
@@ -342,11 +357,32 @@ class ServicesCatalog(FrozenModel):
         default=None,
         description=(
             "Latchkey directory whose ``config.json`` carries the user-created custom services to "
-            "overlay on the shipped catalog. When None the catalog is the shipped file alone -- which "
-            "is what a surface wants when it means 'the services this build ships' (the onboarding "
-            "carousel) rather than 'the services this install can reach'."
+            "overlay on the shipped catalog: the desktop's own, for the services registered on this "
+            "computer's machine, or a machine store's, for the ones registered on the remote machine it "
+            "mirrors. When None the catalog is the shipped file alone -- which is what a surface wants when "
+            "it means 'the services this build ships' (the onboarding carousel) rather than 'the services "
+            "this machine can reach'."
         ),
     )
+    is_including_every_machine: bool = Field(
+        default=False,
+        description=(
+            "Whether the overlay is the union of the custom services registered on every machine this "
+            "computer manages (its own and each machine store's under ``latchkey_directory``) rather than "
+            "``latchkey_directory``'s alone. What the surfaces that name a service as a whole want -- a "
+            "pending request's display name, whichever machine it is for -- and what the desktop gateway's "
+            "catalog is materialized from; a surface that offers or connects services on one machine wants "
+            "that machine's own. Meaningless without a ``latchkey_directory``, so refused with one of None."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _union_needs_a_directory(self) -> Self:
+        if self.is_including_every_machine and self.latchkey_directory is None:
+            raise InvalidServicesCatalogError(
+                "is_including_every_machine needs a latchkey_directory whose machine stores to include"
+            )
+        return self
 
     def _load(self) -> dict[str, tuple[ServicePermissionInfo, ...]]:
         """Return the catalog keyed by service name, as it is *right now*.
@@ -368,7 +404,11 @@ class ServicesCatalog(FrozenModel):
         catalog = dict(self.catalog_override if self.catalog_override is not None else _load_bundled_catalog())
         if self.latchkey_directory is None:
             return catalog
-        registered = read_registered_services(self.latchkey_directory)
+        registered = (
+            custom_service_registration_entries_of_every_machine(self.latchkey_directory)
+            if self.is_including_every_machine
+            else read_registered_services(self.latchkey_directory)
+        )
         catalog.update(self._custom_service_catalog(registered, frozenset(catalog)))
         return catalog
 

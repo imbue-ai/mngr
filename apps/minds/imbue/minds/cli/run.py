@@ -529,7 +529,9 @@ def run(
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=ServicesCatalog(latchkey_directory=latchkey.latchkey_directory),
+        services_catalog=ServicesCatalog(
+            latchkey_directory=latchkey.latchkey_directory, is_including_every_machine=True
+        ),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,

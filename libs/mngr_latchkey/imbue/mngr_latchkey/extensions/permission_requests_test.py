@@ -280,7 +280,7 @@ def node_extension_as_desktop_client(tmp_path: Path) -> Generator[tuple[str, Pat
 def _staged_extension(tmp_path: Path, extra_services: dict[str, object]) -> Generator[str, None, None]:
     """Run the extension against a copy of its data files, with the catalog doctored.
 
-    Mirrors what ``core._materialize_bundled_extensions`` does in production --
+    Mirrors what ``core.materialize_bundled_extensions`` does in production --
     the extension resolves ``services.json`` next to itself, so overlaying a
     custom service means giving it a different directory to sit in.
     """

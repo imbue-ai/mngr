@@ -1851,6 +1851,7 @@ def test_a_custom_services_own_header_is_what_the_pane_collects_and_stores(tmp_p
         },
     )
     latchkey.register_custom_service(
+        tmp_path,
         service_name,
         build_custom_service_registration("api.example.com", "https", credential_header="X-Api-Key: {token}"),
     )
