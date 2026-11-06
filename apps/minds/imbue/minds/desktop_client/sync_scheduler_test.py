@@ -300,6 +300,7 @@ def test_a_pulled_keybinding_is_materialized_into_the_workspace_snapshot_in_the_
         settings_store=settings_store,
         device_id="device-1",
         hashes_dir=tmp_path / "workspace_profile_hashes",
+        read_plan_name=lambda _email: "free",
     )
     scheduler = WorkspaceSyncScheduler(
         record_store=record_store,
@@ -330,6 +331,7 @@ def test_pass_syncs_workspace_profiles_and_flushes_queued_fact_writes(tmp_path: 
         settings_store=None,
         device_id="device-1",
         hashes_dir=tmp_path / "workspace_profile_hashes",
+        read_plan_name=lambda _email: "free",
     )
     sync_calls: list[bool] = []
     flush_calls: list[bool] = []

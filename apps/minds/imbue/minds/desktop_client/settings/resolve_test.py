@@ -3,8 +3,10 @@ import pytest
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
+from imbue.minds.desktop_client.settings.resolve import is_plan_opted_into_experimental_features
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
+from imbue.minds.desktop_client.settings.resolve import resolve_experimental_features_opt_in
 from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
 from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
 from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
@@ -154,3 +156,19 @@ def test_a_malformed_keybindings_value_raises_instead_of_resolving(bad_value: ob
     context = _context(user_override_by_key={"keybindings": bad_value})
     with pytest.raises(SettingValueError):
         resolve_keybindings(context)
+
+
+@pytest.mark.parametrize("answer", [True, False, None])
+def test_the_experimental_features_answer_is_the_accounts_own(answer: bool | None) -> None:
+    context = SettingsResolutionContext(
+        install=InstallSettings(), account=AccountSettings(experimental_features_opt_in=answer)
+    )
+    assert resolve_experimental_features_opt_in(context) is answer
+
+
+@pytest.mark.parametrize(
+    ("plan_name", "is_opted_in"),
+    [("ally", True), ("explorer", False), ("free", False), ("guest", False), ("", False)],
+)
+def test_only_the_ally_plan_starts_opted_into_experimental_features(plan_name: str, is_opted_in: bool) -> None:
+    assert is_plan_opted_into_experimental_features(plan_name) is is_opted_in

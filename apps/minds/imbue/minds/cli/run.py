@@ -147,6 +147,7 @@ from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_def
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_facts_migration import migrate_per_workspace_facts
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
+from imbue.minds.desktop_client.workspace_profile_writer import read_account_plan_name
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
@@ -876,6 +877,7 @@ def run(
         settings_store=account_settings_store,
         device_id=str(device_id),
         hashes_dir=paths.data_dir / "workspace_profile_hashes",
+        read_plan_name=lambda email: read_account_plan_name(imbue_cloud_cli, email),
     )
 
     # The proxy signs its TLS leaves with the local CA it keeps under this host

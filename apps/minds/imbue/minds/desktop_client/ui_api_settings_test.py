@@ -9,6 +9,7 @@ from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -25,11 +26,15 @@ from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_style_version
 from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
+from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
 from imbue.mngr_latchkey.core import ChromeImportOutcome
 from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.testing import FakeLatchkey
+
+_ACCOUNT_ID = "3df53b67-59bc-4bcb-9219-e267ac80a470"
 
 
 def _build_settings_client(
@@ -295,6 +300,7 @@ def test_each_account_id_reads_and_writes_its_own_record(tmp_path: Path) -> None
         "auto_update_workspaces": False,
         "auto_update_prompt_decision": None,
         "notifications_enabled": True,
+        "experimental_features_opt_in": None,
     }
     assert (for_device["update_window_start_hour"], for_device["update_window_end_hour"]) == DEFAULT_UPDATE_WINDOW
 
@@ -864,3 +870,68 @@ def test_account_notification_preferences_require_authentication(tmp_path: Path)
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
 
     assert client.get("/ui/api/accounts/user-123/notification-preferences").status_code == 401
+
+
+def _client_for_account_on_plan(tmp_path: Path, plan_name: str | None) -> tuple[FlaskClient, AccountSettingsStore]:
+    """An authenticated client with ``_ACCOUNT_ID`` signed in, whose plan reads as ``plan_name``."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_ACCOUNT_ID, email="owner@example.com")
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client, _minds_config, settings_store = _build_settings_client(
+        tmp_path,
+        session_store=session_store,
+        workspace_profile_writer=WorkspaceProfileWriter(
+            mngr_caller=RecordingMngrCaller(),
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            session_store=session_store,
+            settings_store=None,
+            device_id="device-under-test",
+            hashes_dir=tmp_path / "workspace_profile_hashes",
+            read_plan_name=lambda _email: plan_name,
+        ),
+    )
+    return client, settings_store
+
+
+@pytest.mark.parametrize(
+    ("plan_name", "is_enabled"),
+    [("ally", True), ("free", False), (None, False)],
+)
+def test_experimental_features_read_as_the_accounts_plan_until_it_answers(
+    tmp_path: Path, plan_name: str | None, is_enabled: bool
+) -> None:
+    client, _settings_store = _client_for_account_on_plan(tmp_path, plan_name)
+
+    response = client.get(f"/ui/api/settings/{_ACCOUNT_ID}/experimental-features")
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"is_enabled": is_enabled}
+    assert json.loads(client.get(f"/ui/api/settings/{_ACCOUNT_ID}").data)["experimental_features_opt_in"] is None
+
+
+def test_an_experimental_features_answer_beats_the_plan_and_round_trips(tmp_path: Path) -> None:
+    client, settings_store = _client_for_account_on_plan(tmp_path, "ally")
+
+    put = client.put(f"/ui/api/settings/{_ACCOUNT_ID}", json={"experimental_features_opt_in": False})
+
+    assert json.loads(put.data)["experimental_features_opt_in"] is False
+    assert settings_store.read_settings(_ACCOUNT_ID).experimental_features_opt_in is False
+    assert json.loads(client.get(f"/ui/api/settings/{_ACCOUNT_ID}/experimental-features").data) == {
+        "is_enabled": False
+    }
+
+
+def test_the_devices_experimental_features_are_off_until_it_answers(tmp_path: Path) -> None:
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
+
+    assert json.loads(client.get("/ui/api/settings/local/experimental-features").data) == {"is_enabled": False}
+    client.put("/ui/api/settings/local", json={"experimental_features_opt_in": True})
+    assert json.loads(client.get("/ui/api/settings/local/experimental-features").data) == {"is_enabled": True}
+
+
+def test_the_experimental_features_route_requires_authentication_and_an_account_id(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
+    assert client.get("/ui/api/settings/local/experimental-features").status_code == 401
+
+    signed_in, _minds_config, _settings_store = _build_settings_client(tmp_path / "signed-in")
+    assert signed_in.get("/ui/api/settings/not%20an%20id/experimental-features").status_code == 400

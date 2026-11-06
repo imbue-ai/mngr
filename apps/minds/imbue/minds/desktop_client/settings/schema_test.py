@@ -39,6 +39,7 @@ def test_the_account_document_key_names_are_pinned() -> None:
         "auto_update_prompt_decision",
         "notifications_enabled",
         "keybindings",
+        "experimental_features_opt_in",
     }
     assert set(InstallSettings.model_fields) == {
         "settings_format",

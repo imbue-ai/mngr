@@ -64,7 +64,7 @@ export interface SignInBrowserOption {
 }
 
 export type SettingsSection =
-  "notifications" | "display" | "browser-import" | "error-reporting" | "updates" | "sign-ins" | "backups";
+  "notifications" | "display" | "browser-import" | "error-reporting" | "updates" | "sign-ins" | "experimental-features" | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -77,6 +77,11 @@ export const SETTINGS_SECTIONS: {
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
   { name: "sign-ins", label: "Sign-ins", group: "Other" },
+  {
+    name: "experimental-features",
+    label: "Experimental features",
+    group: "Other",
+  },
   { name: "backups", label: "Master password", group: "Other" },
 ];
 
@@ -164,6 +169,10 @@ export class SettingsModel {
   updateWindowError = "";
   autoUpdateError = "";
   isAutoUpdateBusy = false;
+  /** Whether the experimental features checkbox reads as checked; null until the
+   * account's answer, or its plan's default, has loaded. */
+  isExperimentalFeaturesEnabled: boolean | null = null;
+  experimentalFeaturesError = "";
   /** The workspace being put back on Studio's auto-update setting, and why the last one could not be. */
   workspaceResettingId: string | null = null;
   workspaceResetError = "";
@@ -222,6 +231,57 @@ export class SettingsModel {
       applyNotificationPrefs(this.overview.notification_prefs);
     } catch {
       this.isLoadFailed = true;
+    }
+    this.redraw();
+  }
+
+  /** Apart from load(), for two reasons: an account that has not answered needs
+   * its plan, which can be a connector round trip the overview must not wait on;
+   * and load() also reloads while the checkbox is live, when a late answer here
+   * could undo the choice made in the meantime. */
+  async loadExperimentalFeatures(accountId: string): Promise<void> {
+    this.experimentalFeaturesError = "";
+    try {
+      const response = await this.fetchImpl(
+        `/ui/api/settings/${encodeURIComponent(accountId)}/experimental-features`,
+        { credentials: "same-origin" },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = (await response.json()) as { is_enabled: boolean };
+      this.isExperimentalFeaturesEnabled = result.is_enabled;
+    } catch {
+      this.experimentalFeaturesError =
+        "Could not load this setting. Reopen Settings to try again.";
+    }
+    this.redraw();
+  }
+
+  /** Record the account's answer through the account-settings PUT. From here on
+   * it is the account's own and its plan no longer decides. */
+  async setExperimentalFeaturesEnabled(
+    accountId: string,
+    isEnabled: boolean,
+  ): Promise<void> {
+    this.experimentalFeaturesError = "";
+    try {
+      const response = await putAccountSettings(this.fetchImpl, accountId, {
+        experimental_features_opt_in: isEnabled,
+      });
+      if (response.ok) {
+        const result = (await response.json()) as AccountSettings;
+        this.isExperimentalFeaturesEnabled =
+          result.experimental_features_opt_in;
+      } else {
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        this.experimentalFeaturesError =
+          data.error ??
+          `Could not change experimental features (HTTP ${response.status}).`;
+      }
+    } catch {
+      this.experimentalFeaturesError =
+        "Could not change experimental features (network error).";
     }
     this.redraw();
   }

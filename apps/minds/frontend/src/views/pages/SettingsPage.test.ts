@@ -3,9 +3,9 @@
 
 import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import { clearAppContextForTests, getAppContext, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
-import type { SettingsModel } from "../../models/settings";
+import { SettingsModel } from "../../models/settings";
 import { settingsOverview, settle, withMindsNative, withReceiverGuardedGlobalFetch } from "../../testing";
 import { ShellState } from "../shell/shell-state";
 import { SettingsPage } from "./SettingsPage";
@@ -118,6 +118,21 @@ describe("SettingsPage", () => {
         expect(() => shownModel(page)).toThrow("not showing its sections");
       });
     });
+  });
+
+  it("reads the experimental features answer for the window's account when it opens", async () => {
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    vi.spyOn(m.route, "param").mockReturnValue(undefined as unknown as string);
+    const read = vi.spyOn(SettingsModel.prototype, "loadExperimentalFeatures").mockResolvedValue();
+    await withReceiverGuardedGlobalFetch(settingsOverview(), async () => {
+      await withMindsNative({}, async () => {
+        openPage().oninit();
+        await settle();
+      });
+    });
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith(getAppContext().shell.accountId);
   });
 
   it("ignores a section name it does not know", async () => {

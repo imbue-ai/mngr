@@ -40,7 +40,9 @@ export function SettingsPage(): m.Component {
   return {
     oninit(): void {
       selectRequestedSection();
-      void model.load(getAppContext().shell.accountId);
+      const accountId = getAppContext().shell.accountId;
+      void model.load(accountId);
+      void model.loadExperimentalFeatures(accountId);
       // Desktop-only, and independent of the /ui/api settings payload: the
       // update state comes from the Electron main process, not the backend.
       void model.loadUpdateState();

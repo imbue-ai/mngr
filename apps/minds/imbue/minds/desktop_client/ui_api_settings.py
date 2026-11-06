@@ -7,9 +7,10 @@ revokes, connector add/disconnect, plan switch, trim, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
 The account-keyed settings (the update window, the auto-update toggle and its
-one-time offer's answer, the master notifications toggle) are edited through
-one route pair, ``GET``/``PUT /ui/api/settings/<account_id>`` (spec section
-7.3). Each account id reads and writes its own replica of the synced
+one-time offer's answer, the master notifications toggle, the experimental
+features checkbox) are edited through one route pair,
+``GET``/``PUT /ui/api/settings/<account_id>`` (spec section 7.3). Each account
+id reads and writes its own replica of the synced
 ``settings`` document (phase 3A of ``specs/user-profile-state/spec.md``);
 the PUT marks the replica dirty and kicks the sync scheduler, whose next
 pass pushes it. The overview takes the window's account as a query
@@ -55,6 +56,7 @@ from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
+from imbue.minds.desktop_client.settings.resolve import resolve_experimental_features_opt_in
 from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
 from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
 from imbue.minds.desktop_client.settings.resolve import resolve_report_unexpected_errors
@@ -203,6 +205,15 @@ class UiAccountSettings(FrozenModel):
         description="How the one-time auto-update offer was answered; None while it never was"
     )
     notifications_enabled: bool = Field(description="Master notifications toggle")
+    experimental_features_opt_in: bool | None = Field(
+        description="The answer to the experimental features checkbox; None while never chosen, so the plan decides"
+    )
+
+
+class UiExperimentalFeatures(FrozenModel):
+    """Whether experimental features are on for an account: its own answer, else what its plan gives it."""
+
+    is_enabled: bool = Field(description="Whether the experimental features checkbox reads as checked")
 
 
 class UiAccountSettingsWrite(FrozenModel):
@@ -220,6 +231,9 @@ class UiAccountSettingsWrite(FrozenModel):
         default=None, description="How the one-time offer was answered"
     )
     notifications_enabled: bool | None = Field(default=None, description="New master notifications toggle value")
+    experimental_features_opt_in: bool | None = Field(
+        default=None, description="The answer to the experimental features checkbox"
+    )
 
 
 class UiNotificationChannels(FrozenModel):
@@ -639,7 +653,33 @@ def _resolved_account_settings(account_id: str) -> UiAccountSettings:
         auto_update_workspaces=resolve_auto_update_workspaces(context),
         auto_update_prompt_decision=resolve_auto_update_prompt_decision(context),
         notifications_enabled=resolve_notifications_enabled(context),
+        experimental_features_opt_in=resolve_experimental_features_opt_in(context),
     )
+
+
+def _handle_experimental_features(account_id: str) -> Response:
+    """GET /ui/api/settings/<account_id>/experimental-features: what the checkbox reads as.
+
+    Apart from the overview because an account that has not answered needs its plan, which can be a
+    connector round trip. A plan that cannot be read reads as opted out; nothing is stored until the
+    user answers.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    if not is_valid_account_id(account_id):
+        return _error_response("The path must name an account id", 400)
+    context = load_settings_context(get_state().minds_config, get_state().account_settings_store, account_id)
+    answer = resolve_experimental_features_opt_in(context)
+    if answer is not None:
+        return _json_response(UiExperimentalFeatures(is_enabled=answer))
+    account = _signed_in_account_for(account_id)
+    writer = get_state().workspace_profile_writer
+    is_enabled = (
+        account is not None
+        and writer is not None
+        and writer.read_experimental_features_plan_default(str(account.email)) is True
+    )
+    return _json_response(UiExperimentalFeatures(is_enabled=is_enabled))
 
 
 def _handle_account_settings(account_id: str) -> Response:
@@ -881,6 +921,7 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     # named sub-routes below stay reachable; no real account id collides with
     # them (SuperTokens ids are UUIDs, and the device's is "local").
     blueprint.add_url_rule("/api/settings/<account_id>", view_func=_handle_account_settings, methods=["GET", "PUT"])
+    blueprint.add_url_rule("/api/settings/<account_id>/experimental-features", view_func=_handle_experimental_features)
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_style_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])

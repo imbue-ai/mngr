@@ -1,7 +1,8 @@
 // The app-level settings sections: left nav + one panel each for
-// notifications, display, browser sign-ins, error reporting, updates, and the master password. What an
-// agent may reach is not here: credentials and grants belong to one machine
-// each, so they live on that machine's Permissions tab. Port of
+// notifications, display, browser sign-ins, error reporting, updates,
+// experimental features, and the master password. What an agent may reach is
+// not here: credentials and grants belong to one machine each, so they live on
+// that machine's Permissions tab. Port of
 // templates/AppSettingsSections.jinja with the interactivity of
 // static/app_settings.js folded into the SettingsModel; the Updates panel is
 // desktop-only and has no jinja original.
@@ -20,6 +21,7 @@ import {
   DISPLAY_ZOOM_PERCENTS,
 } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
+import { LOCAL_PROFILE_USER_ID } from "../../../models/providers";
 import { BROWSER_IMPORT_SUCCESS_MESSAGE } from "../../../models/browserImport";
 import { browserImportFailureNotice } from "../../components/UnreadableChromeProfileNotice";
 import type { NotificationStyle } from "../../../models/notificationsUi";
@@ -425,6 +427,61 @@ function errorReportingPanel(model: SettingsModel): m.Children {
       { class: "type-helper text-tertiary" },
       "Imbue will never look into your workspaces without your consent.",
     ),
+  ]);
+}
+
+function experimentalFeaturesPanel(model: SettingsModel): m.Children {
+  const accountId = getAppContext().shell.accountId;
+  const isEnabled = model.isExperimentalFeaturesEnabled;
+  return m("section", [
+    m(
+      "h2",
+      { class: "type-heading-lg text-primary mb-2" },
+      "Experimental features",
+    ),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      accountId === LOCAL_PROFILE_USER_ID
+        ? "Applies to this device."
+        : "Applies to your account, on every device you use it on.",
+    ),
+    m(
+      "label",
+      {
+        class:
+          "flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer",
+      },
+      [
+        m("span", [
+          m(
+            "span",
+            { class: "type-body text-primary font-semibold" },
+            "Opt into experimental features",
+          ),
+          m(
+            "span",
+            { class: "block type-helper text-tertiary" },
+            "Your workspaces offer features that are still being tried out, such as bringing in your Claude and " +
+              "ChatGPT chats. They may change or go away.",
+          ),
+        ]),
+        m("input", {
+          type: "checkbox",
+          id: "experimental-features-toggle",
+          class: "mt-1 shrink-0",
+          checked: isEnabled === true,
+          disabled: isEnabled === null,
+          onchange: (event: Event) => {
+            const target = event.target as HTMLInputElement;
+            void model.setExperimentalFeaturesEnabled(accountId, target.checked);
+          },
+        }),
+      ],
+    ),
+    model.experimentalFeaturesError
+      ? m(Notice, { variant: "error" }, model.experimentalFeaturesError)
+      : null,
   ]);
 }
 
@@ -1069,6 +1126,9 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               : null,
             model.activeSection === "updates" ? updatesPanel(model) : null,
             model.activeSection === "sign-ins" ? signInsPanel(model) : null,
+            model.activeSection === "experimental-features"
+              ? experimentalFeaturesPanel(model)
+              : null,
             model.activeSection === "backups"
               ? masterPasswordPanel(model, masterPasswordState)
               : null,

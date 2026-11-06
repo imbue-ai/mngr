@@ -22,11 +22,13 @@ from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.settings.schema import AUTO_UPDATE_PROMPT_DECISION
 from imbue.minds.desktop_client.settings.schema import AUTO_UPDATE_WORKSPACES
 from imbue.minds.desktop_client.settings.schema import AccountSettings
+from imbue.minds.desktop_client.settings.schema import EXPERIMENTAL_FEATURES_OPT_IN
 from imbue.minds.desktop_client.settings.schema import InstallSettings
 from imbue.minds.desktop_client.settings.schema import KEYBINDINGS
 from imbue.minds.desktop_client.settings.schema import NOTIFICATIONS_ENABLED
@@ -38,6 +40,9 @@ from imbue.minds.desktop_client.settings.schema import SettingOverrideKind
 from imbue.minds.desktop_client.settings.schema import UPDATE_WINDOW_END_HOUR
 from imbue.minds.desktop_client.settings.schema import UPDATE_WINDOW_START_HOUR
 from imbue.minds.errors import SettingValueError
+
+# The plans whose accounts start opted into experimental features; anyone can change their own answer.
+EXPERIMENTAL_FEATURES_DEFAULT_PLAN_NAMES: Final[frozenset[str]] = frozenset({"ally"})
 
 
 class SettingsResolutionContext(FrozenModel):
@@ -151,6 +156,18 @@ def resolve_keybindings(context: SettingsResolutionContext) -> dict[str, dict[st
         return _KEYBINDINGS_SHAPE.validate_python(value)
     except ValidationError as e:
         raise SettingValueError(f"The {KEYBINDINGS.key} setting resolved to {value!r}, not chord assignments") from e
+
+
+def resolve_experimental_features_opt_in(context: SettingsResolutionContext) -> bool | None:
+    """The account's answer to the experimental features checkbox; None while it never gave one."""
+    value = resolve_setting(EXPERIMENTAL_FEATURES_OPT_IN, context, context.account.experimental_features_opt_in)
+    return None if value is None else _require_bool(EXPERIMENTAL_FEATURES_OPT_IN.key, value)
+
+
+@pure
+def is_plan_opted_into_experimental_features(plan_name: str) -> bool:
+    """Whether an account on this plan is opted in while it has not answered for itself."""
+    return plan_name in EXPERIMENTAL_FEATURES_DEFAULT_PLAN_NAMES
 
 
 def resolve_sign_in_browser(context: SettingsResolutionContext) -> str | None:

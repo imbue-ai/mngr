@@ -9,7 +9,8 @@
     "written_by"
   ],
   "setting_keys": [
-    "keybindings"
+    "keybindings",
+    "experimental_features_enabled"
   ],
   "chord_modifier_order": [
     "ctrl",

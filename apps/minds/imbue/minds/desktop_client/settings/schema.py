@@ -111,6 +111,10 @@ class AccountSettings(FrozenModel):
             "only assignments that differ from the app's defaults are stored (spec section 10.1)"
         ),
     )
+    experimental_features_opt_in: bool | None = Field(
+        default=None,
+        description="The answer to the experimental features checkbox; None while never chosen, so the plan decides",
+    )
 
 
 # The update window hours are the one declared override in effect: the
@@ -139,6 +143,9 @@ NOTIFICATIONS_ENABLED: Final[SettingDeclaration] = SettingDeclaration(
 KEYBINDINGS: Final[SettingDeclaration] = SettingDeclaration(
     key="keybindings", scope=SettingScope.ACCOUNT, override_kind=SettingOverrideKind.WORKSPACE_PER_USER
 )
+EXPERIMENTAL_FEATURES_OPT_IN: Final[SettingDeclaration] = SettingDeclaration(
+    key="experimental_features_opt_in", scope=SettingScope.ACCOUNT, override_kind=SettingOverrideKind.NONE
+)
 SIGN_IN_BROWSER: Final[SettingDeclaration] = SettingDeclaration(
     key="sign_in_browser", scope=SettingScope.INSTALL, override_kind=SettingOverrideKind.NONE
 )
@@ -156,6 +163,7 @@ SETTING_DECLARATIONS: Final[tuple[SettingDeclaration, ...]] = (
     AUTO_UPDATE_PROMPT_DECISION,
     NOTIFICATIONS_ENABLED,
     KEYBINDINGS,
+    EXPERIMENTAL_FEATURES_OPT_IN,
     SIGN_IN_BROWSER,
     REPORT_UNEXPECTED_ERRORS,
     NOTIFICATION_STYLE,

@@ -2,11 +2,11 @@
 
 The snapshot (``data/.state/profile/account.json``) is the read-only copy of the account-keyed
 settings a workspace's apps consume, written only by a client outside the workspace. It names
-the workspace's account and owner, and carries the owning account's keybindings (the one
-setting a workspace app reads). The desktop writes it on create (right after the welcome chat
-is seeded), on every
-sync pass in which a running workspace's resolved snapshot differs from the one last written
-(a content hash kept per workspace under the install), and on an association change.
+the workspace's account and owner, and carries the owning account's keybindings and whether
+that account has experimental features on (the settings workspace apps read). The desktop
+writes it on create (right after the welcome chat is seeded), on every sync pass in which a
+running workspace's resolved snapshot differs from the one last written (a content hash kept per
+workspace under the install), and on an association change.
 
 The timezone rides the create-time write: the creating client writes
 ``data/.state/user_timezone`` with this device's zone exactly once, when the file does not
@@ -15,6 +15,9 @@ exist (spec section 8.4), and the template's bootstrap applies it at boot.
 
 import hashlib
 import json
+import threading
+import time
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -23,14 +26,20 @@ from typing import Final
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
+from imbue.minds.desktop_client.settings.resolve import is_plan_opted_into_experimental_features
+from imbue.minds.desktop_client.settings.resolve import resolve_experimental_features_opt_in
 from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
 from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.share_materials_injection import atomic_write_clause
@@ -49,15 +58,19 @@ SNAPSHOT_FORMAT: Final[int] = 1
 
 _WRITE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
+# Reading a plan is a connector round trip, so it runs far less often than a sync pass.
+_DEFAULT_PLAN_READ_INTERVAL_SECONDS: Final[float] = 300.0
+
 
 @pure
 def build_profile_snapshot_document(
     account_id: str,
     device_id: str,
     written_at: datetime,
-    # The account's keybinding assignments, the one setting key the template consumes
-    # (workspace_profile_contract.json pins the key cross-repo).
+    # The setting keys the template consumes (workspace_profile_contract.json pins them
+    # cross-repo): the account's keybinding assignments, and whether experimental features are on.
     keybindings: dict[str, dict[str, tuple[str, ...]]],
+    experimental_features_enabled: bool,
 ) -> dict[str, object]:
     """The snapshot document for a workspace owned by ``account_id`` (``local`` when unassociated).
 
@@ -74,6 +87,7 @@ def build_profile_snapshot_document(
             app: {action: list(chords) for action, chords in by_action.items()}
             for app, by_action in keybindings.items()
         },
+        "experimental_features_enabled": experimental_features_enabled,
     }
 
 
@@ -95,6 +109,25 @@ def _timezone_once_clause(timezone_name: str) -> str:
     return f"{{ test -f {USER_TIMEZONE_PATH} || {{ {encoded_write}; }}; }}"
 
 
+def read_account_plan_name(cli: ImbueCloudCli, email: str) -> str | None:
+    """The account's plan name, or None when the connector cannot say."""
+    try:
+        info = cli.get_account_info(email)
+    except ImbueCloudCliError as e:
+        logger.debug("Could not read the plan of {} for the workspace profile: {}", email, e)
+        return None
+    return str(info.get("plan_name") or "") or None
+
+
+class _PlanDefaultRead(FrozenModel):
+    """What one account's plan last gave it, and when its plan was last tried."""
+
+    is_opted_in: bool | None = Field(
+        description="Whether the account's plan opts it into experimental features; None while no read has answered"
+    )
+    tried_at: float = Field(description="When its plan was last tried, on the monotonic clock")
+
+
 class WorkspaceProfileWriter(MutableModel):
     """Writes the profile snapshot (and the create-time timezone) into workspaces over ``mngr exec``."""
 
@@ -107,23 +140,81 @@ class WorkspaceProfileWriter(MutableModel):
     )
     settings_store: AccountSettingsStore | None = Field(
         frozen=True,
-        description="Answers each account's keybindings for the snapshot; None resolves the declared defaults",
+        description=(
+            "Answers each account's keybindings and experimental features answer for the snapshot; "
+            "None resolves the declared defaults"
+        ),
     )
     device_id: str = Field(frozen=True, description="This install's device id, the snapshot's written_by")
     hashes_dir: Path = Field(
         frozen=True, description="Directory holding one <agent_id> file per workspace: the last-written content hash"
     )
+    read_plan_name: Callable[[str], str | None] = Field(
+        frozen=True, description="An account email's plan name; None when the connector cannot say"
+    )
+    plan_read_interval_seconds: float = Field(
+        default=_DEFAULT_PLAN_READ_INTERVAL_SECONDS,
+        frozen=True,
+        description="How long what an account's plan gave it stands before the plan is read again",
+    )
+
+    _plan_default_read_by_email: dict[str, _PlanDefaultRead] = PrivateAttr(default_factory=dict)
+    _plan_read_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def _hash_path(self, agent_id: AgentId) -> Path:
         return self.hashes_dir / str(agent_id)
 
-    def _resolve_snapshot_document(self, agent_id: AgentId) -> dict[str, object]:
+    def read_experimental_features_plan_default(self, email: str) -> bool | None:
+        """Whether the account's plan opts it into experimental features; None when that cannot be said yet.
+
+        A failed read keeps what the plan last gave, so a connector outage never moves it, and counts
+        against the interval like any other, so an outage costs no more reads. The sync pass and the
+        Settings route both call this, so a caller behind a running read waits for its answer.
+        """
+        with self._plan_read_lock:
+            previous = self._plan_default_read_by_email.get(email)
+            now = time.monotonic()
+            if previous is not None and now - previous.tried_at < self.plan_read_interval_seconds:
+                return previous.is_opted_in
+            plan_name = self.read_plan_name(email)
+            if plan_name is not None:
+                is_opted_in = is_plan_opted_into_experimental_features(plan_name)
+            else:
+                is_opted_in = None if previous is None else previous.is_opted_in
+            self._plan_default_read_by_email[email] = _PlanDefaultRead(is_opted_in=is_opted_in, tried_at=now)
+            return is_opted_in
+
+    def _are_experimental_features_enabled(self, agent_id: AgentId) -> bool | None:
+        """Whether the workspace's owning account has experimental features on; None when that cannot be said yet.
+
+        The account's own answer wins, and needs no plan. Without one, a workspace with no owning account
+        is opted out, and one whose owner has no readable account here (signed out on this device, or the
+        account list failed) cannot be read, which is not the same answer.
+        """
+        account_id = get_owning_account_id_for_workspace(
+            session_store=self.session_store, workspace_any_id=str(agent_id)
+        )
+        answer = resolve_experimental_features_opt_in(load_settings_context(None, self.settings_store, account_id))
+        if answer is not None:
+            return answer
+        if self.session_store is None or self.session_store.get_owner_user_id_for_workspace(str(agent_id)) is None:
+            return False
+        account = self.session_store.get_account_for_workspace(str(agent_id))
+        if account is None:
+            return None
+        return self.read_experimental_features_plan_default(str(account.email))
+
+    def _resolve_snapshot_document(self, agent_id: AgentId, experimental_features_enabled: bool) -> dict[str, object]:
         account_id = get_owning_account_id_for_workspace(
             session_store=self.session_store, workspace_any_id=str(agent_id)
         )
         settings_context = load_settings_context(None, self.settings_store, account_id)
         return build_profile_snapshot_document(
-            account_id, self.device_id, datetime.now(timezone.utc), resolve_keybindings(settings_context)
+            account_id,
+            self.device_id,
+            datetime.now(timezone.utc),
+            resolve_keybindings(settings_context),
+            experimental_features_enabled,
         )
 
     def _stored_hash(self, agent_id: AgentId) -> str:
@@ -165,9 +256,10 @@ class WorkspaceProfileWriter(MutableModel):
 
         Best-effort: a workspace the write cannot reach gets its snapshot from the next sync
         pass, and a timezone only if it is created again (an accepted loss -- the old
-        fetch-at-boot path also needed the desktop reachable).
+        fetch-at-boot path also needed the desktop reachable). An owner with no answer of their own
+        whose plan cannot be read yet counts as opted out until a sync pass can read it.
         """
-        document = self._resolve_snapshot_document(agent_id)
+        document = self._resolve_snapshot_document(agent_id, self._are_experimental_features_enabled(agent_id) is True)
         clauses = [atomic_write_clause(WORKSPACE_PROFILE_SNAPSHOT_PATH, json.dumps(document, indent=2), "tmp_profile")]
         if timezone_name:
             clauses.append(_timezone_once_clause(timezone_name))
@@ -178,15 +270,21 @@ class WorkspaceProfileWriter(MutableModel):
 
         A workspace never written to (no stored hash) is written too, which is how workspaces
         created before this build get their first snapshot. A failed write keeps the previous
-        hash and retries next pass.
+        hash and retries next pass. A workspace that already has a snapshot waits while its owner has
+        no answer of their own and their plan cannot be read and never has been, so neither a connector
+        outage nor a session gone from this device turns experimental features off.
         """
         for agent_id, host_state in self.backend_resolver.list_active_workspace_host_states().items():
             # An unknown host state counts as reachable, per the resolver's contract; the
             # exec's --no-start keeps a stopped workspace stopped either way.
             if not is_workspace_readable(host_state):
                 continue
-            document = self._resolve_snapshot_document(agent_id)
-            if profile_snapshot_content_hash(document) == self._stored_hash(agent_id):
+            experimental_features_enabled = self._are_experimental_features_enabled(agent_id)
+            stored_hash = self._stored_hash(agent_id)
+            if experimental_features_enabled is None and stored_hash:
+                continue
+            document = self._resolve_snapshot_document(agent_id, experimental_features_enabled is True)
+            if profile_snapshot_content_hash(document) == stored_hash:
                 continue
             clauses = [
                 atomic_write_clause(WORKSPACE_PROFILE_SNAPSHOT_PATH, json.dumps(document, indent=2), "tmp_profile")

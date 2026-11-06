@@ -114,6 +114,7 @@ from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
+from imbue.minds.desktop_client.testing import decode_written_profile_snapshot
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -2510,23 +2511,30 @@ def test_put_account_keybindings_refuses_a_non_canonical_chord(tmp_path: Path) -
     assert "not a canonical chord" in json.loads(response.data)["error"]
 
 
-def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_snapshot_stale(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    user_id = "44444444-4444-4444-4444-444444444444"
+def _client_with_profile_writer(
+    tmp_path: Path,
+    agent_id: AgentId,
+    user_id: str,
+    caller: RecordingMngrCaller,
+    read_plan_name: Callable[[str], str | None],
+) -> tuple[FlaskClient, WorkspaceProfileWriter, AccountSettingsStore]:
+    """A client on a workspace owned by ``owner@example.com``, whose snapshot was already written once."""
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
     store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
     settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
     hashes_dir = tmp_path / "workspace_profile_hashes"
     hashes_dir.mkdir(parents=True)
-    (hashes_dir / str(agent_id)).write_text("stale-hash")
+    (hashes_dir / str(agent_id)).write_text("hash-of-the-snapshot-it-has")
     profile_writer = WorkspaceProfileWriter(
-        mngr_caller=RecordingMngrCaller(),
+        mngr_caller=caller,
         backend_resolver=resolver,
         session_store=store,
         settings_store=settings_store,
         device_id="device-under-test",
         hashes_dir=hashes_dir,
+        read_plan_name=read_plan_name,
+        plan_read_interval_seconds=0.0,
     )
     client = _build_client(
         tmp_path,
@@ -2535,6 +2543,18 @@ def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_sna
         session_store=store,
         account_settings_store=settings_store,
         workspace_profile_writer=profile_writer,
+    )
+    return client, profile_writer, settings_store
+
+
+def test_put_account_keybindings_applies_to_the_owning_account_and_the_next_pass_rewrites_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    user_id = "44444444-4444-4444-4444-444444444444"
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0))
+    client, profile_writer, settings_store = _client_with_profile_writer(
+        tmp_path, agent_id, user_id, caller, lambda _email: "free"
     )
 
     response = client.put(_account_keybindings_url(agent_id), headers=_auth_header(), json=_KEYBINDINGS_BODY)
@@ -2547,8 +2567,32 @@ def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_sna
     record = settings_store.get_record(user_id, "default")
     assert record is not None and record.is_dirty
     assert settings_store.read_settings(user_id).keybindings == {"chat": {"send-message": ("ctrl+enter",)}}
-    # ...and the workspace's snapshot hash was dropped, so the next sync pass rewrites it.
-    assert not (hashes_dir / str(agent_id)).exists()
+    # ...and the next sync pass carries it into the workspace's snapshot.
+    profile_writer.sync_profiles()
+    assert [decode_written_profile_snapshot(call[2])["keybindings"] for call in caller.calls] == [
+        {"chat": {"send-message": ["ctrl+enter"]}}
+    ]
+
+
+def test_put_account_keybindings_keeps_the_snapshot_until_the_owners_plan_can_be_read(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0))
+    plans: dict[str, str | None] = {"owner@example.com": None}
+    client, profile_writer, _settings_store = _client_with_profile_writer(
+        tmp_path, agent_id, "66666666-6666-6666-6666-666666666666", caller, plans.__getitem__
+    )
+
+    response = client.put(_account_keybindings_url(agent_id), headers=_auth_header(), json=_KEYBINDINGS_BODY)
+    assert response.status_code == 200
+
+    profile_writer.sync_profiles()
+    assert caller.calls == []
+
+    plans["owner@example.com"] = "ally"
+    profile_writer.sync_profiles()
+    (document,) = [decode_written_profile_snapshot(call[2]) for call in caller.calls]
+    assert document["experimental_features_enabled"] is True
+    assert document["keybindings"] == {"chat": {"send-message": ["ctrl+enter"]}}
 
 
 def test_put_account_keybindings_refuses_a_too_new_settings_record(tmp_path: Path) -> None:

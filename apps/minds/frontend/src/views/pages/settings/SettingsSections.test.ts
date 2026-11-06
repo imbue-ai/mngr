@@ -1000,3 +1000,72 @@ describe("the Browser cookies panel", () => {
     });
   });
 });
+
+describe("the Experimental features panel", () => {
+  function panelModel(isEnabled: boolean | null): SettingsModel {
+    const model = new SettingsModel(
+      async () => jsonResponse({}),
+      () => {},
+    );
+    model.overview = settingsOverview();
+    model.selectSection("experimental-features");
+    model.isExperimentalFeaturesEnabled = isEnabled;
+    return model;
+  }
+
+  function checkbox(model: SettingsModel): Record<string, unknown> {
+    const root = renderRoot(SettingsSections, { model });
+    const toggle = byId(root, "experimental-features-toggle");
+    expect(toggle).toBeDefined();
+    return attrsOf(toggle as AnyVnode);
+  }
+
+  it("is listed among the settings sections", () => {
+    expect(SETTINGS_SECTIONS.map((section) => section.label)).toContain(
+      "Experimental features",
+    );
+  });
+
+  it("shows the resolved state", () => {
+    expect(checkbox(panelModel(true))["checked"]).toBe(true);
+    expect(checkbox(panelModel(false))["checked"]).toBe(false);
+  });
+
+  it("says how far the answer reaches, which is only this device without an account", () => {
+    const text = () =>
+      collectText(renderRoot(SettingsSections, { model: panelModel(true) })).join(" ");
+    expect(text()).toContain("on every device you use it on");
+
+    registerAppContext({
+      shell: { accountId: "local" },
+    } as unknown as AppContext);
+    expect(text()).toContain("Applies to this device.");
+    expect(text()).not.toContain("every device");
+  });
+
+  it("cannot be answered until the state has loaded", () => {
+    expect(checkbox(panelModel(null))["disabled"]).toBe(true);
+    expect(checkbox(panelModel(true))["disabled"]).toBe(false);
+  });
+
+  it("says why when the setting could not be read or changed", () => {
+    const model = panelModel(null);
+    model.experimentalFeaturesError = "Could not load this setting.";
+
+    const text = collectText(renderRoot(SettingsSections, { model })).join(" ");
+
+    expect(text).toContain("Could not load this setting.");
+  });
+
+  it("writes the answer for the window's account", () => {
+    const model = panelModel(false);
+    const write = vi
+      .spyOn(model, "setExperimentalFeaturesEnabled")
+      .mockResolvedValue();
+
+    const onchange = checkbox(model)["onchange"] as (event: Event) => void;
+    onchange({ target: { checked: true } } as unknown as Event);
+
+    expect(write).toHaveBeenCalledWith("user-7", true);
+  });
+});

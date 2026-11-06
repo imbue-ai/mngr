@@ -3146,8 +3146,6 @@ def _handle_put_account_keybindings(agent_id: str) -> AccountKeybindingsResponse
             f"(format {settings_store.get_stored_settings_format(owning_account_id)}) and can only be changed there",
             409,
         )
-    if state.workspace_profile_writer is not None:
-        state.workspace_profile_writer.mark_profile_stale(parsed_id)
     if state.sync_scheduler is not None:
         state.sync_scheduler.kick()
     applied = resolve_keybindings(load_settings_context(state.minds_config, settings_store, owning_account_id))

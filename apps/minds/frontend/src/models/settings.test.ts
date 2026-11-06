@@ -848,3 +848,98 @@ describe("SettingsModel display zoom", () => {
     });
   });
 });
+
+describe("SettingsModel experimental features", () => {
+  function modelWith(
+    onWrite: (body: unknown) => Response,
+    isEnabled: boolean = false,
+  ): SettingsModel {
+    return new SettingsModel(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/experimental-features"))
+          return jsonResponse({ is_enabled: isEnabled });
+        if (init?.method === "PUT")
+          return onWrite(JSON.parse(String(init.body)));
+        return jsonResponse(settingsOverview());
+      },
+      () => {},
+    );
+  }
+
+  it("reads what the backend resolved", async () => {
+    const model = modelWith(() => jsonResponse({}), true);
+    expect(model.isExperimentalFeaturesEnabled).toBeNull();
+
+    await model.loadExperimentalFeatures("user-7");
+
+    expect(model.isExperimentalFeaturesEnabled).toBe(true);
+  });
+
+  it("is left alone by a load of the overview, which also runs as a reload", async () => {
+    const urls: string[] = [];
+    const model = new SettingsModel(
+      async (input) => {
+        urls.push(String(input));
+        return jsonResponse(settingsOverview());
+      },
+      () => {},
+    );
+
+    await model.load("user-7");
+
+    expect(model.overview).not.toBeNull();
+    expect(urls.filter((url) => url.endsWith("/experimental-features"))).toEqual([]);
+  });
+
+  it("records the answer the backend confirmed", async () => {
+    const writes: unknown[] = [];
+    const model = modelWith((body) => {
+      writes.push(body);
+      return jsonResponse({ experimental_features_opt_in: false });
+    }, true);
+    await model.loadExperimentalFeatures("user-7");
+
+    await model.setExperimentalFeaturesEnabled("user-7", false);
+
+    expect(writes).toEqual([{ experimental_features_opt_in: false }]);
+    expect(model.isExperimentalFeaturesEnabled).toBe(false);
+  });
+
+  it("keeps the current state and says why when the write is refused", async () => {
+    const model = modelWith(
+      () => jsonResponse({ error: "saved by a newer version" }, 409),
+      true,
+    );
+    await model.loadExperimentalFeatures("user-7");
+
+    await model.setExperimentalFeaturesEnabled("user-7", false);
+
+    expect(model.isExperimentalFeaturesEnabled).toBe(true);
+    expect(model.experimentalFeaturesError).toBe("saved by a newer version");
+  });
+
+  it("keeps the current state and says why when the write cannot reach the backend", async () => {
+    const model = modelWith(() => {
+      throw new Error("offline");
+    }, true);
+    await model.loadExperimentalFeatures("user-7");
+
+    await model.setExperimentalFeaturesEnabled("user-7", false);
+
+    expect(model.isExperimentalFeaturesEnabled).toBe(true);
+    expect(model.experimentalFeaturesError).toContain("network error");
+  });
+
+  it("stays unknown and says so when it cannot load", async () => {
+    const model = new SettingsModel(
+      async () => new Response("", { status: 500 }),
+      () => {},
+    );
+
+    await model.loadExperimentalFeatures("user-7");
+
+    expect(model.isExperimentalFeaturesEnabled).toBeNull();
+    expect(model.experimentalFeaturesError).not.toBe("");
+  });
+});
