@@ -10,8 +10,9 @@ Invocations (each exits 0 with nothing on stdout or stderr, and logs one line to
 
 Both end the turn only while it is the session's recorded turn.
 
-``active`` exists iff ``plugin/grok/turns/`` or ``plugin/grok/subagents/`` holds a file. Every state change runs
-under ``fcntl.flock`` on ``plugin/grok/state.lock``; a recompute that flips ``active`` appends a ``mngr/activity``
+``active`` exists iff ``plugin/grok/turns/`` holds a file or ``plugin/grok/subagents/`` holds one not marked
+``background``; a task a ``Stop`` lists in flight holds a work lease, ``leases/task-<id>``, instead. Every state change
+runs under ``fcntl.flock`` on ``plugin/grok/state.lock``; a recompute that flips ``active`` appends a ``mngr/activity``
 event to ``$MNGR_HOST_DIR/events/mngr/activity/events.jsonl``, and one that removes it writes ``idle_since``.
 
 ``permissions_waiting`` holds the session ids grok asked the user about, one per line (empty when a notification named
@@ -63,7 +64,7 @@ from typing import Optional
 NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
 AUTO_WAKE_TAIL_MARKER: Final[str] = "<auto-wake>"
 PENDING_WAKE_PROMPT_ID_PREFIX: Final[str] = "pending-wake:"
-_SUBAGENT_WAKE_PROMPT_ID_PREFIX: Final[str] = "subagent-completed-"
+SUBAGENT_WAKE_PROMPT_ID_PREFIX: Final[str] = "subagent-completed-"
 _TASK_WAKE_PROMPT_ID_PREFIX: Final[str] = "task-completed-"
 _BACKGROUND_SUBAGENT_MARK: Final[str] = "background"
 _TURN_COMPLETED_FLAG: Final[str] = "--turn-completed"
@@ -137,7 +138,7 @@ def normalized_prompt_tail(prompt: str) -> str:
 
 
 def _is_auto_wake_prompt_id(prompt_id: str) -> bool:
-    return prompt_id.startswith(_TASK_WAKE_PROMPT_ID_PREFIX) or prompt_id.startswith(_SUBAGENT_WAKE_PROMPT_ID_PREFIX)
+    return prompt_id.startswith(_TASK_WAKE_PROMPT_ID_PREFIX) or prompt_id.startswith(SUBAGENT_WAKE_PROMPT_ID_PREFIX)
 
 
 def _utc_timestamp(now: datetime) -> str:
@@ -374,7 +375,7 @@ def _expect_parent_wake(state_dir: Path, parent_id: str, subagent_id: str, is_ba
     if not _is_known_root(state_dir, parent_id):
         return "wake:none-parent-not-a-root"
     parent_prompt_id = _read_first_line(_turn_path(state_dir, parent_id))
-    if parent_prompt_id == _SUBAGENT_WAKE_PROMPT_ID_PREFIX + subagent_id:
+    if parent_prompt_id == SUBAGENT_WAKE_PROMPT_ID_PREFIX + subagent_id:
         return "wake:none-already-woken"
     elif parent_prompt_id is None or parent_prompt_id.startswith(PENDING_WAKE_PROMPT_ID_PREFIX):
         _write_pending_wake_placeholder(state_dir, parent_id, subagent_id)
@@ -520,7 +521,7 @@ def _handle_user_prompt_submit(state_dir: Path, host_dir: str, payload: Mapping[
     is_auto_wake = _is_auto_wake_prompt_id(prompt_id)
     tail = AUTO_WAKE_TAIL_MARKER if is_auto_wake else normalized_prompt_tail(_payload_field_text(payload, "prompt"))
     _write_text_atomically(_turn_path(state_dir, session_id), f"{prompt_id}\n{tail}\n")
-    if prompt_id.startswith(_SUBAGENT_WAKE_PROMPT_ID_PREFIX):
+    if prompt_id.startswith(SUBAGENT_WAKE_PROMPT_ID_PREFIX):
         _remove_file(_pending_wake_path(state_dir, session_id))
     _clear_session_permission_waiting(state_dir, session_id)
     recompute_outcome = _recompute_active_marker(state_dir, host_dir, now)

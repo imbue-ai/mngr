@@ -96,12 +96,13 @@ Each agent runs with its own `GROK_HOME` under `$MNGR_AGENT_STATE_DIR/plugin/gro
 
 ### Lifecycle
 
-mngr's hooks, in the agent's grok home, mark the agent RUNNING from a prompt's submission until grok records that turn's `turn_completed` in its session log, and while any subagent runs. The turn ends there rather than at grok's `Stop` hook, because a blocking `Stop` hook keeps the turn going; the transcripts are flushed before the agent reports WAITING.
+mngr's hooks, in the agent's grok home, mark the agent RUNNING from a prompt's submission until grok records that turn's `turn_completed` in its session log, and while a subagent runs that no end-of-turn `Stop` has listed as background work. The turn ends there rather than at grok's `Stop` hook, because a blocking `Stop` hook keeps the turn going; the transcripts are flushed before the agent reports WAITING or RUNNING_BACKGROUND.
 
+- A turn that ends with a background subagent or background shell still running leaves the agent RUNNING_BACKGROUND rather than WAITING: the turn's `Stop` writes one work lease per task grok lists in flight, which `mngr list` shows as `leases`. A lease ends when a later end-of-turn `Stop` no longer lists its task in flight, when its subagent ends, or when a top-level grok session starts or ends, and otherwise four hours after the last `Stop` that listed it. Once that turn has ended, a permission card such a subagent shows leaves the agent RUNNING_BACKGROUND.
 - A background subagent that finishes keeps the agent RUNNING through grok's follow-up turn for it.
-- A background shell does not keep the agent RUNNING; when it finishes, grok's follow-up turn makes the agent RUNNING again.
+- A background shell that finishes leaves the agent RUNNING_BACKGROUND until grok's follow-up turn for it makes the agent RUNNING.
 - A turn cancelled with Ctrl+C ends at grok's `StopCancelled` hook, which can come before the transcripts are flushed. A turn grok ends without reporting it (such as one cancelled with Ctrl+C before its first reply, whose prompt grok puts back in the input box) ends at grok's idle notification, about a minute later, or, when mngr pressed that Ctrl+C while only one top-level session had a turn running, as soon as mngr has cleared what grok put back (5 seconds after the press when grok first shows the input box empty).
-- `mngr list` shows `waiting_reason`: `PERMISSIONS` while a permission card is open, `END_OF_TURN` otherwise. The batched listings of the Modal and VPS providers show an agent waiting on a permission card as RUNNING.
+- `mngr list` shows `waiting_reason`: `PERMISSIONS` while a permission card is open during a turn, `END_OF_TURN` otherwise. The batched listings of the Modal and VPS providers show an agent waiting on a permission card as RUNNING.
 
 ### Messages and keys
 

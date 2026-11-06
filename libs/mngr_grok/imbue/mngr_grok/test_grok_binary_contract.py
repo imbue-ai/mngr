@@ -86,8 +86,10 @@ from imbue.mngr_grok.resources.grok_hook import ACTIVE_MARKER_FILENAME
 from imbue.mngr_grok.resources.grok_hook import AUTO_WAKE_TAIL_MARKER
 from imbue.mngr_grok.resources.grok_hook import HOOK_EVENT_HANDLERS
 from imbue.mngr_grok.resources.grok_hook import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_grok.resources.grok_hook import SUBAGENT_WAKE_PROMPT_ID_PREFIX
 from imbue.mngr_grok.resources.grok_hook import SUBMISSIONS_LOG_FILENAME
 from imbue.mngr_grok.resources.grok_hook import TURN_DROPPED_FLAG
+from imbue.mngr_grok.resources.grok_hook import WORK_LEASE_NAME_PREFIX
 from imbue.mngr_grok.resources.grok_hook import normalized_prompt_tail
 from imbue.mngr_grok.resources.grok_hook import snake_case_event_name
 from imbue.mngr_grok.resources.testing import read_common_transcript_records
@@ -288,7 +290,7 @@ def _wait_for_idle_after_turn(agent: GrokAgent, prompt_id: str) -> None:
 
 
 def _send_and_wait_for_turn(agent: GrokAgent, message: str) -> str:
-    """Send `message`, wait for its turn to end and the agent to report WAITING, and return its promptId."""
+    """Send `message`, wait for its turn to end and the active marker to clear, and return its promptId."""
     agent.send_message(message)
     prompt_id = _find_submitted_prompt_id(agent, message)
     _wait_for_idle_after_turn(agent, prompt_id)
@@ -324,6 +326,12 @@ def _turn_end_log_fragment(session_id: str, prompt_id: str) -> str:
 def _turn_dropped_log_fragment(session_id: str, prompt_id: str) -> str:
     """The part of the hook log line the handler writes when mngr ends a turn grok dropped at mngr's Ctrl+C."""
     return f"event={TURN_DROPPED_FLAG} session={session_id} prompt={prompt_id} turn:end"
+
+
+def _hook_outcomes_of_turn(hook_log: str, session_id: str, prompt_id: str) -> list[str]:
+    """What the handler logged for each hook run of one turn, in order, e.g. `turn:start active:on`."""
+    turn_fields = f" session={session_id} prompt={prompt_id} "
+    return [line.split(turn_fields, 1)[1] for line in hook_log.splitlines() if turn_fields in line]
 
 
 def _wait_for_hook_log_containing(agent: GrokAgent, fragment: str) -> str:
@@ -1132,7 +1140,7 @@ def test_an_auto_wake_turn_writes_turn_completed_under_its_task_completed_prompt
 @pytest.mark.release
 @pytest.mark.harness_internals(harness="grok")
 @pytest.mark.tmux
-def test_a_background_subagent_keeps_the_agent_active_from_its_spawn_to_its_wake_turn(
+def test_a_background_subagent_holds_the_agent_running_background_until_it_ends_then_running_through_its_wake_turn(
     pinned_grok_binary: Path,
     grok_stub_server: GrokStubModelServer,
     hermetic_stub_grok_config: GrokAgentConfig,
@@ -1146,18 +1154,38 @@ def test_a_background_subagent_keeps_the_agent_active_from_its_spawn_to_its_wake
         hermetic_stub_grok_config,
         tmp_path / "project",
     ) as agent:
-        agent.send_message(
-            f"{BACKGROUND_SUBAGENT_TRIGGER} please delegate in the background {get_short_random_string()}"
+        spawn_prompt_id = _send_and_wait_for_turn(
+            agent, f"{BACKGROUND_SUBAGENT_TRIGGER} please delegate in the background {get_short_random_string()}"
         )
-        wake_completion = _wait_for_completed_wake_turn(agent, "subagent-completed-")
+        probe_while_subagent_runs = agent.probe_lifecycle()
+        wake_completion = _wait_for_completed_wake_turn(agent, SUBAGENT_WAKE_PROMPT_ID_PREFIX)
         wake_prompt_id = str(wake_completion["prompt_id"])
         root_session_id = _agent_session_id(agent)
         hook_log = _wait_for_hook_log_containing(agent, _turn_end_log_fragment(root_session_id, wake_prompt_id))
+        probe_after_wake_turn = agent.probe_lifecycle()
 
+    subagent_id = wake_prompt_id.removeprefix(SUBAGENT_WAKE_PROMPT_ID_PREFIX)
+    subagent_lease_name = WORK_LEASE_NAME_PREFIX + subagent_id
+    failure_context = (
+        f"pinned grok {read_pinned_grok_version()}; grok_hook.py's _handle_stop leases the backgroundTasks of the "
+        f"spawning turn's Stop, which must run before its turn_completed. Hook log:\n{hook_log}"
+    )
+    assert _hook_outcomes_of_turn(hook_log, root_session_id, spawn_prompt_id) == [
+        "turn:start active:on",
+        "stop subagents-pruned=0 subagents-marked-background=1 leases=1",
+        "turn:end active:off",
+    ], failure_context
+    assert (probe_while_subagent_runs.state, [lease.name for lease in probe_while_subagent_runs.leases]) == (
+        AgentLifecycleState.RUNNING_BACKGROUND,
+        [subagent_lease_name],
+    ), failure_context
     assert wake_completion["stop_reason"] == "end_turn"
-    assert hook_log.count(" active:on") == 1
-    (active_off_line,) = [line for line in hook_log.splitlines() if " active:off" in line]
-    assert _turn_end_log_fragment(root_session_id, wake_prompt_id) in active_off_line
+    (_, wake_marker_on_line) = [line for line in hook_log.splitlines() if " active:on" in line]
+    assert f"event=session_end session={subagent_id} " in wake_marker_on_line
+    assert wake_marker_on_line.endswith(" subagent:end wake:placeholder active:on")
+    (_, wake_marker_off_line) = [line for line in hook_log.splitlines() if " active:off" in line]
+    assert _turn_end_log_fragment(root_session_id, wake_prompt_id) in wake_marker_off_line
+    assert (probe_after_wake_turn.state, probe_after_wake_turn.leases) == (AgentLifecycleState.WAITING, ())
 
 
 @pytest.mark.release
@@ -1247,7 +1275,7 @@ def test_ctrl_c_cancels_a_turn_without_asking_and_leaves_a_running_background_su
             update.get("sessionUpdate") == "subagent_finished" for update in _read_all_session_updates(agent)
         )
         turn_ends = _select_turn_completions(_read_all_session_updates(agent), prompt_id)
-        wake_completion = _wait_for_completed_wake_turn(agent, "subagent-completed-")
+        wake_completion = _wait_for_completed_wake_turn(agent, SUBAGENT_WAKE_PROMPT_ID_PREFIX)
 
     assert is_subagent_running_at_cancel
     assert [turn_end["stop_reason"] for turn_end in turn_ends] == ["cancelled"]
