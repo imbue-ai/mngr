@@ -1,4 +1,4 @@
-"""Shared in-memory file reader for tests of host file reads (imported explicitly, defines no tests)."""
+"""Shared host file readers for tests of host file reads and listings (imported explicitly, defines no tests)."""
 
 import threading
 from datetime import datetime
@@ -8,6 +8,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.interfaces.data_types import FileTailRead
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
 
@@ -50,3 +51,51 @@ class InMemoryHostFileReader(HostFileReadInterface):
 
     def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
         return []
+
+
+class _DelegatingHostFileReader(HostFileReadInterface):
+    """Passes every call on to another reader; subclasses override the calls they change."""
+
+    inner: HostFileReadInterface = Field(description="The reader every call is passed on to")
+
+    def read_file(self, path: Path) -> bytes:
+        return self.inner.read_file(path)
+
+    def read_file_tail_from_offset(
+        self, path: Path, start_byte: int, max_byte_count: int | None = None
+    ) -> FileTailRead:
+        return self.inner.read_file_tail_from_offset(path, start_byte, max_byte_count)
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        return self.inner.read_text_file(path, encoding)
+
+    def path_exists(self, path: Path) -> bool:
+        return self.inner.path_exists(path)
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        return self.inner.get_file_mtime(path)
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        return self.inner.list_directory(path, recursive=recursive)
+
+
+class ListingRecordingHostFileReader(_DelegatingHostFileReader):
+    """Reads through another reader while recording every directory listing asked of it."""
+
+    listing_requests: list[tuple[Path, bool]] = Field(
+        default_factory=list, description="The (path, recursive) of each list_directory call, in order"
+    )
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        self.listing_requests.append((path, recursive))
+        return self.inner.list_directory(path, recursive=recursive)
+
+
+class FileListingAsItselfHostFileReader(_DelegatingHostFileReader):
+    """Reads through a reader of the local filesystem, but lists a file path as that one file, as a Modal volume does."""
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        if path.is_file():
+            stat = path.stat()
+            return [VolumeFile(path=str(path), file_type=FileType.FILE, mtime=int(stat.st_mtime), size=stat.st_size)]
+        return self.inner.list_directory(path, recursive=recursive)

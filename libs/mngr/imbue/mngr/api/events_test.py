@@ -14,6 +14,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.agents.mock_host_file_read_test import FileListingAsItselfHostFileReader
+from imbue.mngr.agents.mock_host_file_read_test import ListingRecordingHostFileReader
 from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
@@ -31,6 +33,7 @@ from imbue.mngr.api.events import _build_event_sources_from_listing
 from imbue.mngr.api.events import _check_for_new_archived_events
 from imbue.mngr.api.events import _consume_event_queue
 from imbue.mngr.api.events import _create_source_mismatch_warning
+from imbue.mngr.api.events import _discover_filtered_event_sources
 from imbue.mngr.api.events import _emit_event_once
 from imbue.mngr.api.events import _emit_history
 from imbue.mngr.api.events import _handle_online_offline_transition
@@ -726,6 +729,243 @@ def test_filter_sources_by_name_exact_match_not_prefix() -> None:
     result = filter_sources_by_name(sources, ["logs"])
     assert len(result) == 1
     assert result[0].source_path == "logs"
+
+
+def _write_event_line(events_file: Path, event_id: str, timestamp: str, source: str) -> None:
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    events_file.write_text(json.dumps({"timestamp": timestamp, "event_id": event_id, "source": source}) + "\n")
+
+
+def _write_event_source_tree(events_dir: Path) -> None:
+    """Lay out one source of each shape discovery tells apart, plus an events file just outside the tree."""
+    _write_event_line(events_dir / "events.jsonl", "root-1", "2026-01-04T00:00:00Z", "")
+    _write_event_line(events_dir / "messages" / "events.jsonl", "messages-1", "2026-01-05T00:00:00Z", "messages")
+    _write_event_line(
+        events_dir / "logs" / "mngr" / "events.jsonl", "logs-mngr-1", "2026-01-06T00:00:00Z", "logs/mngr"
+    )
+    # The newer segment is written first, so the order reported comes from the names, not the listing.
+    _write_event_line(
+        events_dir / "services" / "events.jsonl.20260102000000000000", "services-2", "2026-01-02T00:00:00Z", "services"
+    )
+    _write_event_line(
+        events_dir / "services" / "events.jsonl.20260101000000000000", "services-1", "2026-01-01T00:00:00Z", "services"
+    )
+    _write_event_line(events_dir / "services" / "events.jsonl", "services-3", "2026-01-03T00:00:00Z", "services")
+    _write_event_line(
+        events_dir / "archived" / "events.jsonl.20251201000000000000", "archived-1", "2025-12-01T00:00:00Z", "archived"
+    )
+    _write_event_line(events_dir.parent / "outside" / "events.jsonl", "outside-1", "2026-01-07T00:00:00Z", "outside")
+
+
+def _make_listing_recording_target(
+    local_provider, events_dir: Path
+) -> tuple[EventsTarget, ListingRecordingHostFileReader]:
+    target = _make_local_host_target(local_provider, events_dir)
+    assert target.host is not None
+    reader = ListingRecordingHostFileReader(inner=target.host)
+    return EventsTarget(host=reader, events_path=events_dir, display_name=target.display_name), reader
+
+
+@pytest.mark.parametrize(
+    ("source_filters", "expected_event_ids", "expected_listing_requests"),
+    [
+        (("services",), ["services-1", "services-2", "services-3"], {("services", False)}),
+        (
+            (),
+            ["archived-1", "services-1", "services-2", "services-3", "root-1", "messages-1", "logs-mngr-1"],
+            {("", True)},
+        ),
+    ],
+    ids=["named", "unnamed"],
+)
+def test_stream_all_events_lists_only_the_named_source_directories_or_else_the_whole_tree(
+    tmp_path: Path,
+    local_provider,
+    source_filters: tuple[str, ...],
+    expected_event_ids: list[str],
+    expected_listing_requests: set[tuple[str, bool]],
+) -> None:
+    events_dir = tmp_path / "events"
+    _write_event_source_tree(events_dir)
+    target, reader = _make_listing_recording_target(local_provider, events_dir)
+    captured: list[str] = []
+
+    stream_all_events(
+        target=target,
+        on_event=lambda e: captured.append(e.event_id),
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        tail_count=None,
+        head_count=None,
+        is_follow=False,
+        source_filters=source_filters,
+    )
+
+    assert captured == expected_event_ids
+    assert set(reader.listing_requests) == {
+        (events_dir / relative_dir, is_recursive) for relative_dir, is_recursive in expected_listing_requests
+    }
+
+
+@pytest.mark.parametrize(
+    "source_filters",
+    [
+        (),
+        ("services",),
+        ("logs/mngr",),
+        ("",),
+        ("messages", "logs/mngr", "services"),
+        ("archived",),
+        ("missing",),
+        ("logs",),
+        ("services/",),
+        ("./services",),
+        ("services", "services"),
+        ("services", "services/", "./services", "", "."),
+        ("../outside",),
+        ("services/../../outside",),
+        ("services/events.jsonl",),
+        ("messages/events.jsonl/x",),
+    ],
+)
+@pytest.mark.parametrize("is_host_offline", [False, True], ids=["online", "offline-volume"])
+def test_discover_filtered_event_sources_finds_what_filtering_the_whole_tree_finds(
+    tmp_path: Path,
+    local_provider,
+    temp_mngr_ctx: MngrContext,
+    source_filters: tuple[str, ...],
+    is_host_offline: bool,
+) -> None:
+    if is_host_offline:
+        host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+        events_dir = host.host_dir / "events"
+        target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+    else:
+        events_dir = tmp_path / "events"
+        target = _make_local_host_target(local_provider, events_dir)
+    _write_event_source_tree(events_dir)
+
+    expected = filter_sources_by_name(discover_event_sources(target), source_filters)
+
+    assert _discover_filtered_event_sources(target, source_filters) == expected
+
+
+def test_discover_filtered_event_sources_reports_each_named_source_with_its_rotated_files_oldest_first(
+    tmp_path: Path, local_provider
+) -> None:
+    events_dir = tmp_path / "events"
+    _write_event_source_tree(events_dir)
+    target = _make_local_host_target(local_provider, events_dir)
+
+    assert _discover_filtered_event_sources(target, ["services", "archived", "missing"]) == [
+        EventSourceInfo(
+            source_path="archived",
+            rotated_files=("events.jsonl.20251201000000000000",),
+            is_current_file_present=False,
+        ),
+        EventSourceInfo(
+            source_path="services",
+            rotated_files=("events.jsonl.20260101000000000000", "events.jsonl.20260102000000000000"),
+            is_current_file_present=True,
+        ),
+    ]
+
+
+def test_discover_filtered_event_sources_reports_a_named_file_of_a_named_source_once(
+    tmp_path: Path, local_provider
+) -> None:
+    """A host that lists a file path as that file (a Modal volume) must not double the file in its source."""
+    events_dir = tmp_path / "events"
+    _write_event_source_tree(events_dir)
+    local_target = _make_local_host_target(local_provider, events_dir)
+    assert local_target.host is not None
+    target = EventsTarget(
+        host=FileListingAsItselfHostFileReader(inner=local_target.host),
+        events_path=events_dir,
+        display_name=local_target.display_name,
+    )
+
+    sources = _discover_filtered_event_sources(target, ["services", "services/events.jsonl.20260101000000000000"])
+
+    assert sources == filter_sources_by_name(discover_event_sources(target), ["services"])
+
+
+def test_discover_filtered_event_sources_never_lists_a_name_no_source_can_have(tmp_path: Path, local_provider) -> None:
+    """Only names spelled as discovery reports a source path are listed: no other name can match a source."""
+    events_dir = tmp_path / "events"
+    _write_event_source_tree(events_dir)
+    target, reader = _make_listing_recording_target(local_provider, events_dir)
+
+    sources = _discover_filtered_event_sources(
+        target,
+        [
+            "../outside",
+            "services/../../outside",
+            str(events_dir.parent / "outside"),
+            "services/",
+            "./services",
+            "logs//mngr",
+            ".",
+            "services",
+            "",
+        ],
+    )
+
+    assert [source.source_path for source in sources] == ["", "services"]
+    assert sorted(reader.listing_requests) == [(events_dir, False), (events_dir / "services", False)]
+
+
+def test_discover_filtered_event_sources_reads_named_sources_off_an_offline_volume_backed_host(
+    local_provider,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    events_dir = host.host_dir / "events"
+    _write_event_source_tree(events_dir)
+    target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+
+    sources = _discover_filtered_event_sources(target, ["", "logs/mngr", "missing"])
+
+    assert [(s.source_path, s.rotated_files, s.is_current_file_present) for s in sources] == [
+        ("", (), True),
+        ("logs/mngr", (), True),
+    ]
+
+
+def test_follow_rescan_picks_up_a_named_source_created_after_the_follow_started(
+    tmp_path: Path, local_provider
+) -> None:
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    target_holder = [_make_local_host_target(local_provider, events_dir)]
+    state = _AllEventsStreamState(is_online=True)
+    emitted: list[str] = []
+
+    def rescan() -> None:
+        _rescan_and_start_new_tail_threads(
+            target_holder=target_holder,
+            state=state,
+            event_queue=queue_mod.Queue(),
+            on_event=lambda event: emitted.append(event.event_id),
+            cel_include_filters=[],
+            cel_exclude_filters=[],
+            stop_event=threading.Event(),
+            online_event=threading.Event(),
+            read_failure_event=threading.Event(),
+            tail_threads=[],
+            offset_dir_path=None,
+            watch_group=DirectoryWatchGroup(),
+            source_filters=["services"],
+        )
+
+    rescan()
+    assert emitted == []
+
+    _write_event_line(events_dir / "services" / "events.jsonl", "services-late", "2026-01-08T00:00:00Z", "services")
+    rescan()
+
+    assert emitted == ["services-late"]
+    assert state.known_source_paths == {"services"}
 
 
 def _history_event_ids(events_dir: Path, local_provider) -> list[str]:

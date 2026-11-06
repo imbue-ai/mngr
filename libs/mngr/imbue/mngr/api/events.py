@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from typing import Final
 from uuid import uuid4
@@ -703,12 +704,52 @@ def discover_event_sources(target: EventsTarget) -> list[EventSourceInfo]:
     rotated variants (``events.jsonl.<timestamp>``), and groups the matches by
     their directory relative to ``events_path``.
     """
+    host, events_path = _get_readable_host_and_events_path(target)
+    with log_span("Discovering event sources for {}", target.display_name):
+        entries = host.list_directory(events_path, recursive=True)
+        return _build_event_sources_from_listing(entries, events_path)
+
+
+def _get_readable_host_and_events_path(target: EventsTarget) -> tuple[HostFileReadInterface, Path]:
     if target.host is None or target.events_path is None:
         raise MngrError(f"Cannot discover event sources for {target.display_name}: no readable host available")
+    return target.host, target.events_path
 
-    with log_span("Discovering event sources for {}", target.display_name):
-        entries = target.host.list_directory(target.events_path, recursive=True)
-        return _build_event_sources_from_listing(entries, target.events_path)
+
+@pure
+def _is_spelled_as_a_source_path(name: str) -> bool:
+    """Whether ``name`` is spelled the way discovery reports source paths, so a source can match it exactly.
+
+    Source paths are normalized and relative to the events directory, with the
+    root source as the empty string, so names like 'services/', './services',
+    '.', '../outside' or an absolute path can never match one.
+    """
+    if name == "":
+        return True
+    path = PurePosixPath(name)
+    return str(path) == name and name != "." and not path.is_absolute() and ".." not in path.parts
+
+
+def _discover_filtered_event_sources(target: EventsTarget, source_filters: Sequence[str]) -> list[EventSourceInfo]:
+    """Find the event sources named in ``source_filters``, or every source when none is named.
+
+    A named source is found by listing only its own directory instead of walking
+    the whole events tree: on a remote host every directory listed costs network
+    round trips (SFTP, or volume API calls for a stopped host).
+    """
+    if not source_filters:
+        return discover_event_sources(target)
+    host, events_path = _get_readable_host_and_events_path(target)
+    listed_dirs = sorted({events_path / name for name in source_filters if _is_spelled_as_a_source_path(name)})
+    with log_span(
+        "Discovering event sources in [{}] for {}", ", ".join(str(d) for d in listed_dirs), target.display_name
+    ):
+        # A Modal volume lists a file path as that file, so naming 'services/events.jsonl' lists a
+        # file that also belongs to 'services': keep each entry once, and only the exact names.
+        entry_by_path = {entry.path: entry for source_dir in listed_dirs for entry in host.list_directory(source_dir)}
+        return filter_sources_by_name(
+            _build_event_sources_from_listing(list(entry_by_path.values()), events_path), source_filters
+        )
 
 
 @pure
@@ -734,7 +775,7 @@ def _build_event_sources_from_listing(
     entries: Sequence[VolumeFile],
     events_path: Path,
 ) -> list[EventSourceInfo]:
-    """Group a recursive directory listing into EventSourceInfo objects.
+    """Group directory listing entries into EventSourceInfo objects.
 
     Keeps only regular files named ``events.jsonl`` or a rotated variant, and
     groups them by their parent directory relative to ``events_path`` (the
@@ -844,7 +885,7 @@ def _discover_and_register_sources(
     source_filters: Sequence[str],
 ) -> list[EventSourceInfo]:
     """Discover the target's event sources, keeping the requested ones, and record them as known."""
-    sources = filter_sources_by_name(discover_event_sources(target), source_filters)
+    sources = _discover_filtered_event_sources(target, source_filters)
     for source in sources:
         state.known_source_paths.add(source.source_path)
         state.known_rotated_files[source.source_path] = set(source.rotated_files)
@@ -1153,7 +1194,7 @@ def _check_for_new_archived_events(
     the caller applies the CEL filters.
     """
     try:
-        current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
+        current_sources = _discover_filtered_event_sources(target, source_filters)
     except (MngrError, OSError) as e:
         logger.trace("Failed to re-scan for rotated files: {}", e)
         return
@@ -1652,7 +1693,7 @@ def _rescan_and_start_new_tail_threads(
     """Re-scan for new event source directories, emit their history as it is read, and start tail threads for them."""
     target = target_holder[0]
     try:
-        current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
+        current_sources = _discover_filtered_event_sources(target, source_filters)
     except (MngrError, OSError) as e:
         logger.trace("Failed to re-scan event sources: {}", e)
         return
