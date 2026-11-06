@@ -121,7 +121,7 @@ mngr create my-agent@.modal -b volume=my-data:/data
 mngr create my-agent@.modal -b volume=cache:/cache -b volume=results:/results
 ```
 
-The volume is created automatically if it does not already exist. Data written to the mount path is persisted on the volume and available the next time a sandbox mounts the same volume.
+The volume is created automatically if it does not already exist, as a v2 Modal Volume, which has no limit on how many files it holds (a v1 volume stops at 500,000); a volume that already exists is mounted at whatever version it was created with. Data written to the mount path is persisted on the volume and available the next time a sandbox mounts the same volume.
 
 ## Snapshots
 

@@ -1,0 +1,1 @@
+A `-b volume=NAME:/path` volume that does not exist yet is created as a v2 Modal Volume, which has no limit on how many files it holds; a v1 volume stops at 500,000 files and then fails every write with "No space left on device" while plenty of space is free. A volume that already exists is mounted at the version it has, since Modal refuses to open a volume at any other.

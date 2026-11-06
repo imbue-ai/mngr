@@ -296,6 +296,12 @@ def _parse_volume_spec(spec: str) -> tuple[str, str]:
     return (parts[0].strip(), parts[1].strip())
 
 
+# The filesystem version a `-b volume=` volume is created with when it does not exist yet: a v1
+# volume holds at most 500,000 files, a v2 volume has no file limit. Modal refuses to open a volume
+# at any version but its own, so a volume that already exists is opened without one.
+MOUNTED_VOLUME_FS_VERSION: Final[int] = 2
+
+
 def _build_modal_volumes(
     volume_specs: tuple[tuple[str, str], ...],
     environment_name: str,
@@ -305,12 +311,30 @@ def _build_modal_volumes(
     volumes: dict[str, VolumeInterface] = {}
     for volume_name, mount_path in volume_specs:
         with log_span("Ensuring volume: {} at {}", volume_name, mount_path):
-            volumes[mount_path] = modal_interface.volume_from_name(
-                volume_name,
-                create_if_missing=True,
-                environment_name=environment_name,
-            )
+            volumes[mount_path] = _ensure_mounted_volume(volume_name, environment_name, modal_interface)
     return volumes
+
+
+def _ensure_mounted_volume(
+    volume_name: str, environment_name: str, modal_interface: ModalInterface
+) -> VolumeInterface:
+    """The named volume as it exists, or a new one at MOUNTED_VOLUME_FS_VERSION."""
+    try:
+        volume = modal_interface.volume_from_name(
+            volume_name, create_if_missing=False, environment_name=environment_name
+        )
+        # `volume_from_name` returns a lazy reference; resolving its id is what fails for a volume
+        # that does not exist.
+        volume.get_object_id()
+        return volume
+    except ModalProxyNotFoundError:
+        logger.debug("Volume {} does not exist; creating it at v{}", volume_name, MOUNTED_VOLUME_FS_VERSION)
+        return modal_interface.volume_from_name(
+            volume_name,
+            create_if_missing=True,
+            environment_name=environment_name,
+            version=MOUNTED_VOLUME_FS_VERSION,
+        )
 
 
 def build_sandbox_tags(

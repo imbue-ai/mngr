@@ -76,6 +76,7 @@ from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
 from imbue.mngr_modal.instance import HostRecord
+from imbue.mngr_modal.instance import MOUNTED_VOLUME_FS_VERSION
 from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.instance import SandboxConfig
@@ -430,6 +431,27 @@ class _CustomVolumeModalInterface(FakeModalInterface):
         )
         assert isinstance(volume, FakeVolume)
         return self.volume_class(root_dir=volume.root_dir, volume_name=volume.get_name())
+
+
+class _VersionRecordingModalInterface(FakeModalInterface):
+    """Fake Modal that records the version every volume lookup asked for, in call order."""
+
+    requested_versions: list[tuple[str, bool, int | None]] = Field(
+        default_factory=list, description="(name, create_if_missing, version) of every volume_from_name call"
+    )
+
+    def volume_from_name(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+        version: int | None = None,
+    ) -> VolumeInterface:
+        self.requested_versions.append((name, create_if_missing, version))
+        return super().volume_from_name(
+            name, create_if_missing=create_if_missing, environment_name=environment_name, version=version
+        )
 
 
 def _make_provider_with_volume_class(
@@ -2918,6 +2940,24 @@ def test_build_modal_volumes(
     )
     assert "/mnt/data" in volumes
     assert "/mnt/other" in volumes
+
+
+def test_build_modal_volumes_creates_a_missing_volume_at_v2_and_opens_an_existing_one_without_a_version(
+    tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    root = tmp_path / "modal_testing"
+    root.mkdir()
+    modal_interface = _VersionRecordingModalInterface(root_dir=root, concurrency_group=cg)
+    modal_interface.volume_from_name("old-vol", create_if_missing=True, environment_name="env")
+    modal_interface.requested_versions.clear()
+
+    _build_modal_volumes((("old-vol", "/mnt/old"), ("new-vol", "/mnt/new")), "env", modal_interface)
+
+    assert modal_interface.requested_versions == [
+        ("old-vol", False, None),
+        ("new-vol", False, None),
+        ("new-vol", True, MOUNTED_VOLUME_FS_VERSION),
+    ]
 
 
 # _build_modal_secrets_from_env Tests
