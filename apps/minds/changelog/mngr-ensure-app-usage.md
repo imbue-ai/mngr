@@ -1,0 +1,1 @@
+`docs/deploy/next_deploy.md`: the app-usage floors item names the renamed `user_app_*` and `any_app_*` signals and the separate floor of the input signals, and a new item clears the old `app_*` signal rows from any dev or staging lake that aggregated before the rename.
