@@ -1,0 +1,45 @@
+[48;5;237m  [38;5;231mtool calls, each with a description: [38;5;153mecho a[38;5;231m, [38;5;153mecho b[38;5;231m, and [38;5;153mpython3 -c "import time; time.sleep(30)"; echo c[38;5;231m. Say [39m       
+  [38;5;231mnothing else.[39m                                                                                                         
+
+[38;5;231m[49m⏺[39m Checking the cache next.
+
+  [38;5;246mRan [1m3[0m[38;5;246m shell commands [39m                                                                                                 
+
+[38;5;231m⏺[39m All three commands ran in parallel and finished: they printed [38;5;153ma[39m, [38;5;153mb[39m and [38;5;153mc[39m.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 43s · done 7:59 AM
+[39m                       
+[38;5;246m[48;5;237m❯ [38;5;231mNew task. Write exactly one sentence: "Looking inside the cache now." Then make four Bash tool calls ONE AT A TIME [39m   
+  [38;5;231m(each in its own message, waiting for each result), each with a description: [38;5;153mecho a[38;5;231m, [38;5;153mecho b[38;5;231m, [38;5;153mecho c[38;5;231m, then [38;5;153mpython3 -c [39m 
+  [38;5;153m"import time; time.sleep(25)"; echo d[38;5;231m. Say nothing else.[39m                                                              
+
+[38;5;231m[49m⏺[39m Looking inside the cache now.
+
+  [38;5;246mRan [1m4[0m[38;5;246m shell commands [39m                                                                                                 
+
+[38;5;231m⏺[39m All four commands ran one at a time and printed [38;5;153ma[39m, [38;5;153mb[39m, [38;5;153mc[39m and [38;5;153md[39m.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 47s · done 8:00 AM
+[39m                       
+[38;5;246m[48;5;237m❯ [38;5;231mNew task. Write exactly one sentence: "Looking at what is using the disk." Then make three Bash tool calls one at a [39m  
+  [38;5;231mtime, each with a description: [38;5;153mecho a[38;5;231m, [38;5;153mecho b[38;5;231m, [38;5;153mecho c[38;5;231m. Then use the Agent tool (a subagent) with description "Look [39m   
+  [38;5;231minside the large cache" and have it run the Bash command [38;5;153mpython3 -c "import time; time.sleep(20)"[38;5;231m and report back. [39m   
+  [38;5;231mSay nothing else.[39m                                                                                                     
+
+[38;5;231m[49m⏺[39m Looking at what is using the disk.                                                                                    
+
+  [38;5;246mRan [1m3[0m[38;5;246m shell commands [39m                                                                                                 
+
+[38;5;114m⏺[39m [1mAgent[0m(Look inside the large cache)
+[38;5;246m  ⎿  [39mBackgrounded agent[38;5;246m (↓ to manage · ctrl+o to expand)
+
+[38;5;174m✢[39m [38;5;216mBoogieing…[38;5;174m [38;5;246m(21s · ↓[39m [38;5;246m300 tokens)
+  ⎿  Tip: Use Plan Mode to prepare for a complex request before making changes. Press shift+tab twice to enable.[39m        
+                                                                                [38;5;114m✔ Update installed · /restart to apply
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m                                                                                                                      
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · esc to interrupt · ↓ to manage[39m                                        
+
+[1m  ⏺ main[0m                                                                                                                
+[38;5;246m  ◯ general-purpose[39m  [38;5;246mLook inside the large cache[39m                                                                    [38;5;246m1s

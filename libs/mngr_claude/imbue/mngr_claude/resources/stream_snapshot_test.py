@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import imbue.mngr_claude.resources as resources_package
 from imbue.mngr_claude.resources import stream_snapshot
 
@@ -179,6 +181,50 @@ def test_extract_keeps_assistant_text_containing_running() -> None:
         "A short tale.",
         "Running water flowed past the old mill all night.",
     ]
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        # The reply, the gray "Ran 3 shell commands" its tool calls collapsed into, a subagent
+        # call, and the background-agents list ("● main") under the input box.
+        pytest.param("stream_reply_above_ran_tool_group.txt", id="finished_tool_group_summary"),
+        # A tool group starting under the reply while its gray marker is blinked off, before the
+        # tool output connector has drawn.
+        pytest.param("stream_reply_above_blinking_tool_marker.txt", id="blinked_off_tool_marker"),
+    ],
+)
+def test_extract_stops_at_claude_status_line_under_reply(fixture_name: str) -> None:
+    """Real captures in which a gray status line sits right under the reply."""
+    result = stream_snapshot.extract_message_region(_read_fixture(fixture_name))
+    assert result is not None
+    lines, has_marker = result
+    assert has_marker is True
+    assert [stream_snapshot.strip_ansi(line).strip() for line in lines] == ["Looking at what is using the disk."]
+
+
+def test_indented_default_color_marker_is_not_an_assistant_block() -> None:
+    assert not stream_snapshot._marker_prefix_is_assistant("\x1b[1m  ● main\x1b[0m")
+
+
+def test_a_background_color_does_not_make_a_gray_marker_an_assistant_block() -> None:
+    assert not stream_snapshot._marker_prefix_is_assistant("\x1b[38;5;246;48;5;97m● Running 1 shell command")
+
+
+def test_status_gray_starts_on_a_blank_or_a_glyph() -> None:
+    assert stream_snapshot._starts_in_status_gray("  \x1b[38;5;246mRan \x1b[1m3\x1b[0m shell commands")
+    assert stream_snapshot._starts_in_status_gray("\x1b[38;5;246m \x1b[39m Running 1 shell command…")
+    assert stream_snapshot._starts_in_status_gray("  \x1b]8;;file:///tmp/a\x07\x1b[38;5;246mRead 1 file\x1b]8;;\x07")
+    assert stream_snapshot._starts_in_status_gray("  \x1b[38;5;246;48;5;33mRan 3 shell commands")
+    assert stream_snapshot._starts_in_status_gray("  \x1b[38;5;246;48;2;0;97;37mRan 3 shell commands")
+    assert not stream_snapshot._starts_in_status_gray("  \x1b[38;5;231mRan out of ideas, so I stopped.")
+    assert not stream_snapshot._starts_in_status_gray("  \x1b[32m# check the cache\x1b[39m")
+    assert not stream_snapshot._starts_in_status_gray("  plain prose with no color")
+
+
+def test_extract_markerless_does_not_start_at_a_status_line() -> None:
+    pane = "  \x1b[38;5;246mRan 3 shell commands\x1b[39m\n  more text below it\n\n────────\n❯ \n"
+    assert stream_snapshot.extract_message_region(pane) is None
 
 
 def test_compute_overlap() -> None:
