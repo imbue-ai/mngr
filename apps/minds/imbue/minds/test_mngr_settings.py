@@ -62,6 +62,8 @@ from imbue.minds.desktop_client.connections.primitives import provider_instance_
 from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index
 from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_or_none
+from imbue.minds.desktop_client.error_notifications import ACCOUNT_SIGNED_OUT_TITLE
+from imbue.minds.desktop_client.error_notifications import AccountSignedOutReporter
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
@@ -69,6 +71,8 @@ from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_ag
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import SESSION_EXPIRED_ERROR_TYPE_NAMES
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
+from imbue.minds.desktop_client.testing import make_notification_feed_for_test
 from imbue.minds.mngr_settings.profile_paths import ensure_active_profile_dir
 from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
@@ -549,6 +553,10 @@ def test_sync_pass_signs_out_an_account_whose_refresh_the_connector_refuses(
     scheduler, cli, settings_path, is_provider_gone_at_wake = _scheduler_with_expired_session(
         tmp_path, monkeypatch, AuthRefreshOutcome.SESSION_DEAD
     )
+    dispatcher = RecordingNotificationDispatcher(is_electron=True)
+    scheduler.on_account_signed_out = AccountSignedOutReporter(
+        notification_feed=make_notification_feed_for_test(dispatcher=dispatcher, is_main_window_focused=False),
+    )
 
     scheduler.run_one_pass()
 
@@ -556,6 +564,10 @@ def test_sync_pass_signs_out_an_account_whose_refresh_the_connector_refuses(
     assert cli.signed_out_accounts == [_EMAIL]
     assert imbue_cloud_provider_name_for_user(_USER_ID) not in _parsed(settings_path)["providers"]
     assert is_provider_gone_at_wake == [True]
+    # The user hears of it: one banner naming the account, landing on the accounts page.
+    assert [(request.title, request.subtitle, request.url) for request in dispatcher.dispatched] == [
+        (_EMAIL, ACCOUNT_SIGNED_OUT_TITLE, f"/accounts?account={_USER_ID}")
+    ]
 
 
 @pytest.mark.parametrize("is_create_on_the_account", [True, False])
@@ -603,6 +615,10 @@ def test_sync_pass_keeps_an_account_whose_refresh_did_not_prove_the_session_dead
     scheduler, cli, settings_path, is_provider_gone_at_wake = _scheduler_with_expired_session(
         tmp_path, monkeypatch, outcome
     )
+    dispatcher = RecordingNotificationDispatcher(is_electron=True)
+    scheduler.on_account_signed_out = AccountSignedOutReporter(
+        notification_feed=make_notification_feed_for_test(dispatcher=dispatcher, is_main_window_focused=False),
+    )
 
     scheduler.run_one_pass()
     # The refresh is not retried on every pass while the errored snapshot lingers.
@@ -610,6 +626,7 @@ def test_sync_pass_keeps_an_account_whose_refresh_did_not_prove_the_session_dead
 
     assert cli.refreshed_accounts == [_EMAIL]
     assert cli.signed_out_accounts == []
+    assert dispatcher.dispatched == []
     assert is_provider_gone_at_wake == []
     assert imbue_cloud_provider_name_for_user(_USER_ID) in _parsed(settings_path)["providers"]
 

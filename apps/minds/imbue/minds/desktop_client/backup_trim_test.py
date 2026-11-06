@@ -17,12 +17,11 @@ from imbue.minds.desktop_client.backup_trim import run_backup_trim
 from imbue.minds.desktop_client.backup_trim import select_snapshot_ids_to_forget
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
-from imbue.minds.desktop_client.minds_config import NotificationStyle
-from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
+from imbue.minds.desktop_client.testing import make_notification_feed_for_test
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_for_value
@@ -183,17 +182,6 @@ def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupT
     return finished
 
 
-def _make_feed() -> NotificationFeed:
-    return NotificationFeed(
-        notification_dispatcher=None,
-        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
-            is_enabled=True, style=NotificationStyle.BOTH
-        ),
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
-    )
-
-
 def _wait_for_system_events(feed: NotificationFeed) -> list[tuple[str, str, str]]:
     """The trim thread flips the status to its terminal state BEFORE it notifies, so a run
     that has stopped running has not necessarily appended its event yet. Returns
@@ -214,7 +202,7 @@ def _wait_for_system_events(feed: NotificationFeed) -> list[tuple[str, str, str]
 
 def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: Path) -> None:
     manager = BackupTrimManager()
-    feed = _make_feed()
+    feed = make_notification_feed_for_test(dispatcher=None, is_main_window_focused=False)
     cli = make_fake_imbue_cloud_cli()
     cli.storage_recheck_results = [{"is_over_quota": False, "usage_bytes": 10, "limit_bytes": 100}]
     started = manager.start_trim(
@@ -252,7 +240,7 @@ def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) 
 def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> None:
     """A typed CLI failure lands as a failed status plus the failure notification."""
     manager = BackupTrimManager()
-    feed = _make_feed()
+    feed = make_notification_feed_for_test(dispatcher=None, is_main_window_focused=False)
     # No fake recheck results configured -> the CLI raises ImbueCloudCliError.
     manager._run(
         user_id="user-1",

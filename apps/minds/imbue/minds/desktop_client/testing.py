@@ -79,8 +79,11 @@ from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestP
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestResponseEvent
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
+from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
@@ -845,6 +848,20 @@ class RecordingNotificationDispatcher(NotificationDispatcher):
     @property
     def read_chat_agent_ids(self) -> list[str]:
         return self._read_chat_agent_ids
+
+
+def make_notification_feed_for_test(
+    dispatcher: NotificationDispatcher | None,
+    is_main_window_focused: bool,
+) -> NotificationFeed:
+    """A feed with notifications on in the "both" style, dispatching through ``dispatcher``."""
+    preferences = NotificationDispatchPreferences(is_enabled=True, style=NotificationStyle.BOTH)
+    return NotificationFeed(
+        notification_dispatcher=dispatcher,
+        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: preferences,
+        is_main_window_focused=lambda: is_main_window_focused,
+        is_screen_locked=lambda: False,
+    )
 
 
 class ChatInWorkspaceResolver(StaticBackendResolver):

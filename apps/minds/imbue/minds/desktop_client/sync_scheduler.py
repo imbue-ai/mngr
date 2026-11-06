@@ -204,6 +204,13 @@ class WorkspaceSyncScheduler(MutableModel):
         frozen=True,
         description="Invoked with a user id whose refresh the connector refused (the local signout)",
     )
+    on_account_signed_out: Callable[[str, str], None] | None = Field(
+        default=None,
+        description=(
+            "Told the user id and email of each account the pass signed out for a dead session, after the "
+            "signout, so the user hears of it; wired post-construction, once the notification feed exists"
+        ),
+    )
     _last_session_refresh_at_by_user_id: dict[str, float] = PrivateAttr(default_factory=dict)
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -377,6 +384,8 @@ class WorkspaceSyncScheduler(MutableModel):
                     )
                     if self.on_account_session_dead is not None:
                         self.on_account_session_dead(user_id)
+                    if self.on_account_signed_out is not None:
+                        self.on_account_signed_out(user_id, account_email)
                     # A re-signin within the cooldown starts a fresh session,
                     # which deserves its own refresh on the next auth error.
                     self._last_session_refresh_at_by_user_id.pop(user_id, None)

@@ -436,6 +436,11 @@ describe("notification clicks across desktop windows", () => {
     [agentMessage("msg", { chat_agent_id: "" }), "/workspace/agent-aa11"],
     [entry("req"), "/workspace/agent-aa11?review=req-req"],
     [systemEvent("sys"), "/workspace/agent-aa11/backups"],
+    // An event that names its route opens there, not on the backups page.
+    [
+      systemEvent("sys", { link_path: "/workspace/agent-aa11" }),
+      "/workspace/agent-aa11",
+    ],
   ])(
     "opens the existing window without navigating this one",
     async (notification, route) => {

@@ -565,7 +565,7 @@ export class NotificationsUiController {
           ? `${base}?review=${encodeURIComponent(entry.request_id)}`
           : entry.kind === "agent_message"
             ? agentMessageRoute(base, entry)
-            : `${base}/backups`;
+            : entry.link_path || `${base}/backups`;
       const routed = electronBridge.openNotificationInExistingWindow(
         route,
         entry,

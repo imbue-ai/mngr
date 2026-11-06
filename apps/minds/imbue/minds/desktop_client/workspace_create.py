@@ -27,13 +27,13 @@ from imbue.minds.desktop_client.connections.data_types import ConnectionAvailabi
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
+from imbue.minds.desktop_client.error_notifications import build_workspace_system_event_card
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
-from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import MODAL_PROVIDER_KEY
@@ -50,7 +50,6 @@ from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import BackupProvider
@@ -418,21 +417,18 @@ class WebAccessEnabler(MutableModel):
     def _notify_sharing_not_enabled(self, agent_id: AgentId, detail: str, link_path: str) -> None:
         if self.notification_feed is None:
             return
-        workspace_name = self.backend_resolver.get_workspace_name(agent_id) or str(agent_id)[:8]
-        accent = self.backend_resolver.get_workspace_color(agent_id) or DEFAULT_WORKSPACE_COLOR
         remedy = (
             "Review your shared workspaces to free a slot, then turn sharing on from the workspace's Share panel."
             if link_path
             else "Turn sharing on from the workspace's Share panel to try again."
         )
         self.notification_feed.append_system_event(
-            SystemEventCard(
+            build_workspace_system_event_card(
+                agent_id=agent_id,
                 title="Sharing was not enabled",
                 body=f"{detail.rstrip('.')}. {remedy}",
-                workspace_agent_id=str(agent_id),
-                workspace_name=workspace_name,
-                workspace_accent=accent,
                 link_path=link_path,
+                backend_resolver=self.backend_resolver,
             )
         )
 

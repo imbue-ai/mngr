@@ -87,6 +87,10 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import SleepTracker
+from imbue.minds.desktop_client.error_notifications import AccountSignedOutReporter
+from imbue.minds.desktop_client.error_notifications import ErrorNotificationGate
+from imbue.minds.desktop_client.error_notifications import WorkspaceRecoveryFailureReporter
+from imbue.minds.desktop_client.error_notifications import build_workspace_system_event_card
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
@@ -116,7 +120,6 @@ from imbue.minds.desktop_client.minds_config import effective_auto_update
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
-from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.provider_display import connection_backend_label_for_name
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
@@ -2964,6 +2967,18 @@ def create_desktop_client(
         agent_creator.report_backup_setup_failure = _BackupSetupFailureReporter(
             notification_feed=notification_feed, backend_resolver=backend_resolver
         )
+    # Error states that would go unseen while no window is in front: each
+    # reporter turns an edge an existing detector fires into a feed entry.
+    if sync_scheduler is not None:
+        sync_scheduler.on_account_signed_out = AccountSignedOutReporter(notification_feed=notification_feed)
+    if system_interface_health_tracker is not None:
+        system_interface_health_tracker.add_on_change_callback(
+            WorkspaceRecoveryFailureReporter(
+                notification_feed=notification_feed,
+                backend_resolver=backend_resolver,
+                gate=ErrorNotificationGate(),
+            )
+        )
 
     # Folder syncs shell out to long-lived ``mngr pair`` subprocesses, which
     # the root concurrency group owns; without one there is nowhere to run
@@ -3289,15 +3304,13 @@ class _BackupSetupFailureReporter(FrozenModel):
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the workspace's display")
 
     def __call__(self, agent_id: AgentId, detail: str) -> None:
-        workspace_name = self.backend_resolver.get_workspace_name(agent_id) or str(agent_id)[:8]
-        accent = self.backend_resolver.get_workspace_color(agent_id) or DEFAULT_WORKSPACE_COLOR
         self.notification_feed.append_system_event(
-            SystemEventCard(
+            build_workspace_system_event_card(
+                agent_id=agent_id,
                 title="Backup setup failed",
                 body=detail,
-                workspace_agent_id=str(agent_id),
-                workspace_name=workspace_name,
-                workspace_accent=accent,
+                link_path="",
+                backend_resolver=self.backend_resolver,
             )
         )
 

@@ -18,13 +18,11 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.minds_config import NotificationStyle
-from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
-from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
+from imbue.minds.desktop_client.testing import make_notification_feed_for_test
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.workspace_create import WebAccessEnabler
@@ -225,14 +223,7 @@ def test_web_access_enabler_swallows_sharing_failures_and_tells_the_user(tmp_pat
     recording_cli = _RecordingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     store, cli = _store_with_associated_workspace(tmp_path, cli=recording_cli, is_cloud_row=True)
     assert isinstance(cli, _RecordingCreateShareCli)
-    feed = NotificationFeed(
-        notification_dispatcher=None,
-        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
-            is_enabled=True, style=NotificationStyle.BOTH
-        ),
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
-    )
+    feed = make_notification_feed_for_test(dispatcher=None, is_main_window_focused=False)
     enabler = WebAccessEnabler(
         cli=cli,
         session_store=store,
@@ -275,14 +266,7 @@ def test_web_access_enabler_points_a_quota_refusal_at_the_shared_workspaces_page
         ),
     )
     store, cli = _store_with_associated_workspace(tmp_path, cli=quota_refusing_cli, is_cloud_row=True)
-    feed = NotificationFeed(
-        notification_dispatcher=None,
-        get_dispatch_preferences=lambda _account_id, _workspace_agent_id: NotificationDispatchPreferences(
-            is_enabled=True, style=NotificationStyle.BOTH
-        ),
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
-    )
+    feed = make_notification_feed_for_test(dispatcher=None, is_main_window_focused=False)
     enabler = WebAccessEnabler(
         cli=cli,
         session_store=store,
