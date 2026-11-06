@@ -110,8 +110,9 @@ def test_modal_refuses_a_command_for_a_sandbox_it_has_ended(real_modal_provider:
     )
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-633 and MIND-351 are open: teardown's sandbox terminate or volume
+# delete can block past the test's timeout, or Modal can refuse the CI identity
+# access to resources it just created.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -250,8 +251,7 @@ def test_destroy_host_stops_sandbox_and_delete_host_removes_record(
         real_modal_provider.destroy_host(host)
 
 
-# Flaky while MIND-290 and MIND-477 are open: a teardown Modal call can stall past
-# the test's timeout, or a storage 503 can outlast the retry budget.
+# Flaky while MIND-477 is open: a Modal storage 503 can outlast the retry budget.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -264,8 +264,8 @@ def test_get_host_resources(real_modal_provider: ModalProviderInstance) -> None:
         assert resources.memory_gb >= 0.5
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-633 and MIND-477 are open: teardown's sandbox terminate can block
+# past the test's timeout, or a Modal 503 can outlast the retry budget.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -294,8 +294,9 @@ def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> No
         assert len(tags) == 2
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-351 and MIND-296 are open: Modal can refuse the CI identity access
+# to resources it just created, or a process in the fresh sandbox can be killed
+# with exit 137.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
@@ -340,8 +341,9 @@ def test_list_snapshots_returns_initial_snapshot(initial_snapshot_provider: Moda
         assert snapshots[0].name == "initial"
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-633 and MIND-351 are open: teardown's sandbox terminate or volume
+# delete can block past the test's timeout, or Modal can refuse the CI identity
+# access to resources it just created.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -361,9 +363,6 @@ def test_delete_snapshot(real_modal_provider: ModalProviderInstance) -> None:
         assert len(real_modal_provider.list_snapshots(host)) == 0
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
-@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_delete_nonexistent_snapshot_raises_error(real_modal_provider: ModalProviderInstance) -> None:
@@ -619,8 +618,9 @@ def test_restart_after_graceful_stop_without_initial_snapshot(
             pass
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-351 and MIND-296 are open: Modal can refuse the CI identity access
+# to resources it just created, or a process in the fresh sandbox can be killed
+# with exit 137.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -720,8 +720,8 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
         assert "blocked" in result.stdout
 
 
-# Flaky while MIND-290 is open: a Modal call in host setup or teardown has no
-# deadline of its own and can stall past the test's timeout.
+# Flaky while MIND-634 is open: the new sandbox's liveness probe can hang with no
+# deadline of its own.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
