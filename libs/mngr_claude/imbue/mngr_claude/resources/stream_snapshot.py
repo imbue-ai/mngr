@@ -77,6 +77,10 @@ _TOOL_OUTPUT_CONNECTOR: str = "⎿"
 # 256-color foreground code Claude uses for inline code spans.
 _INLINE_CODE_COLOR: int = 153
 
+# 256-color foreground code Claude draws its own status lines in (see
+# _starts_in_status_gray).
+_STATUS_GRAY_COLOR: int = 246
+
 # When stitching a marker-less (scrolled) region onto the accumulated body, the
 # body's last few rows are volatile because Claude re-wraps the currently-streaming
 # row. Tolerate dropping up to this many trailing body rows when searching for the
@@ -133,6 +137,36 @@ def _has_code_color(text: str) -> bool:
 # Assistant-marker detection
 
 
+def _foreground_of(params: list[int]) -> int | None:
+    """The foreground a flattened list of SGR codes leaves set.
+
+    None is the terminal default, 30-37 and 90-97 a basic color, 1000 + N the
+    256-color N, and -1 a truecolor.
+    """
+    foreground: int | None = None
+    index = 0
+    while index < len(params):
+        code = params[index]
+        if code == 0 or code == 39:
+            foreground = None
+        elif code in (38, 48, 58) and index + 2 < len(params) and params[index + 1] == 5:
+            # Background (48) and underline (58) colors take the same operands as a foreground.
+            if code == 38:
+                foreground = 1000 + params[index + 2]
+            index += 2
+        elif code in (38, 48, 58) and index + 4 < len(params) and params[index + 1] == 2:
+            if code == 38:
+                foreground = -1
+            index += 4
+        elif 30 <= code <= 37 or 90 <= code <= 97:
+            foreground = code
+        else:
+            # Other SGR codes (bold, italic, background, etc.) do not change fg.
+            pass
+        index += 1
+    return foreground
+
+
 def _is_achromatic_marker_color(params: list[int]) -> bool:
     """Decide whether an SGR foreground state denotes the default text color.
 
@@ -145,26 +179,7 @@ def _is_achromatic_marker_color(params: list[int]) -> bool:
     ``params`` is the flattened list of SGR codes active up to and including the
     marker glyph.
     """
-    # Track the most recently set foreground; None means terminal default.
-    foreground: int | None = None
-    index = 0
-    while index < len(params):
-        code = params[index]
-        if code == 0 or code == 39:
-            foreground = None
-        elif code == 38 and index + 2 < len(params) and params[index + 1] == 5:
-            foreground = 1000 + params[index + 2]
-            index += 2
-        elif code == 38 and index + 4 < len(params) and params[index + 1] == 2:
-            index += 4
-            foreground = -1
-        elif 30 <= code <= 37 or 90 <= code <= 97:
-            foreground = code
-        else:
-            # Other SGR codes (bold, italic, background, etc.) do not change fg.
-            pass
-        index += 1
-
+    foreground = _foreground_of(params)
     if foreground is None:
         return True
     # Basic white / black (normal and bright).
@@ -178,13 +193,17 @@ def _is_achromatic_marker_color(params: list[int]) -> bool:
 
 
 def _marker_prefix_is_assistant(line: str) -> bool:
-    """True if ``line`` begins (after ANSI) with an assistant-text marker glyph."""
+    """True if ``line`` begins (after ANSI) with an assistant-text marker glyph.
+
+    An assistant block's marker sits in the first column. The same glyph indented
+    is something else in the default color, such as the "● main" row of the
+    background-agents list under the input box.
+    """
     marker_index = _find_marker(line)
     if marker_index == -1:
         return False
     prefix = line[:marker_index]
-    # The marker must be the first visible character on the line.
-    if strip_ansi(prefix).strip() != "":
+    if strip_ansi(prefix) != "":
         return False
     return _is_achromatic_marker_color(_iter_sgr_params(prefix))
 
@@ -195,6 +214,30 @@ def _line_is_any_marker(line: str) -> bool:
     if marker_index == -1:
         return False
     return strip_ansi(line[:marker_index]).strip() == ""
+
+
+def _starts_in_status_gray(line: str) -> bool:
+    """True if a leading blank or the first glyph of the line is in Claude's status gray.
+
+    Claude draws its own status lines in mid-gray: a finished tool group's summary
+    ("Ran 3 shell commands"), a tool call's output, and a tool marker blinked off,
+    which leaves a gray blank cell where the marker sits. Assistant prose never
+    starts in it (code comments are colored, quote bars dim).
+    """
+    params: list[int] = []
+    index = 0
+    while index < len(line):
+        match = _ANSI_RE.match(line, index)
+        if match is not None:
+            params.extend(_iter_sgr_params(match.group(0)))
+            index = match.end()
+            continue
+        if _foreground_of(params) == 1000 + _STATUS_GRAY_COLOR:
+            return True
+        if not line[index].isspace():
+            return False
+        index += 1
+    return False
 
 
 # Block extraction
@@ -274,6 +317,10 @@ def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker
     - a new marker line (the next tool-call/status block), or
     - a non-empty line that is not two-space indented (a column-0 footer such as
       the input-box border), or
+    - a line drawn in the status gray (see ``_starts_in_status_gray``): the
+      summary a finished tool group collapses into ("Ran 3 shell commands"),
+      which sits under the message with no marker of its own, or a tool marker
+      blinked off, or
     - a ``⎿`` tool-output connector (see below).
 
     ``strip_first_marker`` controls whether the first line is treated as a marker
@@ -283,7 +330,8 @@ def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker
     marker line ("● Running 1 shell command…") normally ends the region via the
     marker check, but the grey ``●`` flashes off, and while off the line looks like
     an indented continuation ("  Running 1 shell command…"). We do not match that
-    spinner text (it may be only partially rendered); instead we key off the ``⎿``
+    spinner text (it may be only partially rendered). In a full-color capture the
+    blinked-off marker's gray cell ends the region; failing that, we key off the ``⎿``
     tool-output connector beneath it: when seen, the message ended at the tool
     marker line above (which we may already have appended), so that line is dropped
     and the tool block is never captured as assistant text. While the marker is
@@ -319,6 +367,8 @@ def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker
             if region:
                 region.pop()
             break
+        if _starts_in_status_gray(line):
+            break
         region.append(_deindent_continuation(line))
 
     while region and region[-1] == "":
@@ -349,13 +399,13 @@ def extract_message_region(pane_text: str) -> tuple[list[str], bool] | None:
             return _collect_region_lines(lines, index, strip_first_marker=True), True
 
     # No marker visible: take the topmost two-space-indented content region (the
-    # scrolled message tail). Stop scanning at any marker line -- content below a
-    # (tool-call) marker is not assistant prose.
+    # scrolled message tail). Stop scanning at any marker or status line -- content
+    # below a (tool-call) marker is not assistant prose.
     for index, line in enumerate(lines):
         stripped = strip_ansi(line)
         if stripped.strip() == "":
             continue
-        if _line_is_any_marker(line):
+        if _line_is_any_marker(line) or _starts_in_status_gray(line):
             break
         if stripped.startswith("  "):
             region = _collect_region_lines(lines, index, strip_first_marker=False)
