@@ -2434,6 +2434,13 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     assert list(pending_dir.iterdir()) == []
 
 
+_MCP_PARAMS: Final[dict[str, object]] = {
+    "mcpEndpoint": "https://example.com/mcp",
+    "tokenEndpoint": "https://example.com/token",
+    "registrationEndpoint": "https://example.com/register",
+}
+
+
 def _custom_service_body(payload: object, rationale: str = "needs the widget API") -> dict[str, object]:
     # A well-formed payload names a scheme; tests about the rest of the payload
     # get https unless they say otherwise.
@@ -2689,7 +2696,7 @@ def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Pat
         ({"url": "https://example.com/l"}, b"'flow' is required"),
         ({"flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}}, b"'url' is required"),
         ({"url": "https://example.com/l", "flow": "cookie-capture"}, b"'flow_params' is required"),
-        ({"url": "https://example.com/l", "flow": "magic", "flow_params": {}}, b"cookie-capture, token-capture"),
+        ({"url": "https://example.com/l", "flow": "magic", "flow_params": {}}, b"cookie-capture, token-capture, mcp"),
         # Every URL stays on the domain, whichever scheme it uses.
         (
             {"url": "https://evil.test/l", "flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}},
@@ -2756,6 +2763,75 @@ def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Pat
             },
             b"header line",
         ),
+        # The MCP endpoint is where the tokens are used, so it has to be on the
+        # registered origin itself; the authorization server may be a subdomain.
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "https://mcp.example.com/mcp"},
+            },
+            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
+        ),
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "http://example.com/mcp"},
+            },
+            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
+        ),
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "https://example.com:8443/mcp"},
+            },
+            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
+        ),
+        # The OAuth endpoints only have to be URLs here: the desktop checks
+        # them against what the server publishes at approval time.
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "tokenEndpoint": "ftp://example.com/token"},
+            },
+            b"'flow_params.tokenEndpoint' must be an http or https URL",
+        ),
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "registrationEndpoint": "not a url"},
+            },
+            b"'flow_params.registrationEndpoint' is not a valid URL",
+        ),
+        ({"url": "not a url", "flow": "mcp", "flow_params": _MCP_PARAMS}, b"'url' is not a valid URL"),
+        (
+            {"url": "https://example.com/a", "flow": "mcp", "flow_params": {"mcpEndpoint": "https://example.com/mcp"}},
+            b"tokenEndpoint",
+        ),
+        (
+            {"url": "https://example.com/a", "flow": "mcp", "flow_params": {**_MCP_PARAMS, "scopes": ["read", ""]}},
+            b"empty scope",
+        ),
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "issuesRefreshTokens": "no"},
+            },
+            b"issuesRefreshTokens",
+        ),
+        (
+            {
+                "url": "https://example.com/a",
+                "flow": "mcp",
+                "flow_params": {**_MCP_PARAMS, "authorizationEndpoint": "x"},
+            },
+            b"authorizationEndpoint",
+        ),
         # The old field names are refused, not silently ignored.
         (
             {"login_url": "https://example.com/l", "cookie_url": "https://example.com/", "cookie_keys": ["s"]},
@@ -2803,6 +2879,74 @@ def test_post_accepts_a_token_capture_login(node_extension: tuple[str, Path, Pat
             {
                 "domain": "example.com",
                 "login": {"url": "https://app.example.com/auth/login", "flow": "token-capture", "flow_params": params},
+            }
+        ),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["login"]["flow_params"] == params
+
+
+def test_post_accepts_a_sign_in_at_the_parent_domain(node_extension: tuple[str, Path, Path]) -> None:
+    # Otter's layout: the MCP server hangs off the domain that signs it in.
+    base_url, _, _ = node_extension
+    params = {
+        "mcpEndpoint": "https://mcp.otter.ai/mcp",
+        "tokenEndpoint": "https://otter.ai/oauth/token",
+        "registrationEndpoint": "https://otter.ai/oauth/register",
+    }
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "mcp.otter.ai",
+                "login": {"url": "https://otter.ai/oauth2/authorize", "flow": "mcp", "flow_params": params},
+            }
+        ),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["login"]["flow_params"] == params
+
+
+@pytest.mark.parametrize(
+    "login_url",
+    ["https://auth.example.com/login", "https://com/login", "https://notexample.com/login"],
+)
+def test_post_rejects_a_sign_in_off_the_domain_family(node_extension: tuple[str, Path, Path], login_url: str) -> None:
+    # A sibling, a bare top-level domain, and a name that merely ends in the
+    # domain's label are all strangers, however much they resemble a parent.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "mcp.example.com",
+                "login": {"url": login_url, "flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}},
+            }
+        ),
+    )
+    assert status == 400, body
+    assert b"'url' must be on mcp.example.com" in body
+
+
+def test_post_accepts_an_mcp_login(node_extension: tuple[str, Path, Path]) -> None:
+    # The third generic flow: OAuth against an MCP server whose authorization
+    # server lives on another domain entirely (Trello's at Atlassian). Accepted
+    # and stored as sent; the desktop checks the endpoints against the server's
+    # metadata when the user approves.
+    base_url, _, _ = node_extension
+    params = {
+        "mcpEndpoint": "https://mcp.trello.com/mcp",
+        "tokenEndpoint": "https://auth.atlassian.com/oauth/token",
+        "registrationEndpoint": "https://auth.atlassian.com/dcr/register",
+        "scopes": ["read", "write"],
+        "issuesRefreshTokens": False,
+    }
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "mcp.trello.com",
+                "login": {"url": "https://auth.atlassian.com/authorize", "flow": "mcp", "flow_params": params},
             }
         ),
     )

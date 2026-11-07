@@ -64,12 +64,17 @@
  *       letters, digits and hyphens; no scheme, port, path, underscore or
  *       wildcard -- and not the gateway's own address. ``scheme`` is
  *       required; the grant pins it along with the domain. ``login`` is
- *       optional: present, its ``url``, ``flow`` (``cookie-capture`` or
- *       ``token-capture``) and ``flow_params`` are ``latchkey services
+ *       optional: present, its ``url``, ``flow`` (``cookie-capture``,
+ *       ``token-capture`` or ``mcp``) and ``flow_params`` are ``latchkey services
  *       register``'s ``--login-url``, ``--login-flow`` and
  *       ``--login-flow-params`` (that flow's parameters, keyed as latchkey
- *       keys them; unknown keys are refused, and every URL among them must
- *       be on the domain or a subdomain of it, either scheme); absent, the
+ *       keys them; unknown keys are refused, and for the capture flows every
+ *       URL among them must be on the domain, a subdomain or a parent of it,
+ *       either scheme. For ``mcp`` the ``mcpEndpoint``, where the tokens are
+ *       used, must be on the ``scheme://domain`` origin itself, and the OAuth
+ *       endpoints are only checked to be URLs here: the desktop verifies them
+ *       against the metadata that origin publishes when the user approves);
+ *       absent, the
  *       service is registered with a base URL alone and the user supplies a
  *       token through the dialog's credential form. ``header`` is optional and
  *       only meaningful without ``login`` (a login flow supplies its own
@@ -1039,25 +1044,36 @@ function validateCustomServiceDomain(rawDomain) {
 }
 
 /**
- * Whether ``host`` is ``domain`` itself or a subdomain of it.
+ * Whether ``host`` is ``domain`` itself, a subdomain of it, or a parent of it
+ * with at least two labels.
  *
  * Deliberately strict, and worth knowing the tradeoff. Latchkey's cookie flow
  * anticipates a sign-in that *starts* on another host, so a looser rule would be
  * usable -- but the browser destination is then a domain the dialog never named,
  * and a user who clicks Approve expecting a login page is exactly who should not
- * be sent somewhere unexpected. Restricting it to the approved subtree makes
- * what the dialog says and where the browser goes provably the same.
+ * be sent somewhere unexpected. And for the ``mcp`` flow the token endpoint
+ * receives the authorization code, so one run by another party than the
+ * authorization endpoint steals the sign-in outright. Keeping every URL with
+ * the approved party makes what the dialog says and where the credentials go
+ * provably the same.
  *
- * The cost is that a service at ``api.example.com`` whose login lives at
- * ``accounts.example.com`` cannot use the browser flow: the agent must either
- * request ``example.com`` (a broader grant) or request no login at all and let
- * the user paste a token, which still works. Widening this correctly needs a
- * public-suffix list -- "the registrable parent" cannot be had by counting
- * labels, since that would read ``co.uk`` as a parent domain -- so it is left
- * strict rather than approximated.
+ * Parents count as the approved party: a service often signs in at the domain
+ * it hangs off (``mcp.example.com`` at ``example.com``), and whoever runs the
+ * parent delegated the child. The two-label floor keeps a bare top-level
+ * domain out. The cost is that a service at ``api.example.com`` whose login
+ * lives at ``accounts.example.com`` cannot use the browser flow: the agent
+ * must either request ``example.com`` (a broader grant) or request no login at
+ * all and let the user paste a token, which still works. Widening to siblings
+ * correctly needs a public-suffix list -- "the registrable parent" cannot be
+ * had by counting labels, since that would read ``co.uk`` as a shared parent
+ * -- so it is left strict rather than approximated. Mirrored by
+ * ``_is_related_domain`` in custom_services.py.
  */
-function isWithinDomain(host, domain) {
-  return host === domain || host.endsWith(`.${domain}`);
+function isRelatedDomain(host, domain) {
+  if (host === domain || host.endsWith(`.${domain}`)) {
+    return true;
+  }
+  return domain.endsWith(`.${host}`) && host.includes('.');
 }
 
 /**
@@ -1074,13 +1090,12 @@ function validateCustomServiceScheme(rawScheme) {
 }
 
 /**
- * Require ``rawUrl`` to be an http or https URL on ``domain`` or a subdomain of
- * it. ``field`` names it in messages (``url``, ``flow_params.cookieUrl``). The scheme is the user's business -- the
- * dialog names where the browser will go -- so either is accepted; the domain
- * check is what keeps a sign-in, and the credentials it captures, on the
- * service being approved.
+ * Require ``rawUrl`` to be an http or https URL and return it parsed. ``field``
+ * names it in messages (``url``, ``flow_params.cookieUrl``). The scheme is the
+ * user's business -- the dialog names where the browser will go -- so either
+ * is accepted.
  */
-function validateCustomServiceUrl(rawUrl, field, domain) {
+function parseCustomServiceHttpUrl(rawUrl, field) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
     throw new InvalidRequestBodyError(`payload.login.'${field}' is required and must be a non-empty string.`);
   }
@@ -1093,9 +1108,19 @@ function validateCustomServiceUrl(rawUrl, field, domain) {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new InvalidRequestBodyError(`payload.login.'${field}' must be an http or https URL. Got ${rawUrl}.`);
   }
-  if (!isWithinDomain(parsed.hostname.toLowerCase(), domain)) {
+  return parsed;
+}
+
+/**
+ * Require ``rawUrl`` to be an http or https URL on ``domain``, a subdomain or a
+ * parent of it. The domain check is what keeps a sign-in, and the credentials
+ * it captures, with the party being approved.
+ */
+function validateCustomServiceUrl(rawUrl, field, domain) {
+  const parsed = parseCustomServiceHttpUrl(rawUrl, field);
+  if (!isRelatedDomain(parsed.hostname.toLowerCase(), domain)) {
     throw new InvalidRequestBodyError(
-      `payload.login.'${field}' must be on ${domain} or a subdomain of it. Got ${rawUrl}.`,
+      `payload.login.'${field}' must be on ${domain}, a subdomain or a parent domain of it. Got ${rawUrl}.`,
     );
   }
   return rawUrl;
@@ -1187,9 +1212,59 @@ function validateTokenCaptureParams(params, domain) {
   }
 }
 
+/**
+ * Require ``rawUrl`` to be on the origin the service is registered under,
+ * ``scheme://domain``. Stricter than ``validateCustomServiceUrl``: latchkey
+ * only injects a service's credentials into requests that start with its
+ * ``baseApiUrl``, which is always the bare origin here, so a URL on a
+ * subdomain, the other scheme or an explicit port would register a sign-in
+ * whose credentials no request could ever use.
+ */
+function validateCustomServiceOriginUrl(rawUrl, field, domain, scheme) {
+  const parsed = parseCustomServiceHttpUrl(rawUrl, field);
+  if (parsed.protocol !== `${scheme}:` || parsed.hostname.toLowerCase() !== domain || parsed.port !== '') {
+    throw new InvalidRequestBodyError(
+      `payload.login.'${field}' must be on the origin ${scheme}://${domain} itself. Got ${rawUrl}.`,
+    );
+  }
+  return rawUrl;
+}
+
+// The OAuth endpoints are not held to the domain here: the desktop checks them
+// against the authorization server metadata the MCP endpoint's origin publishes
+// at approval time (``mcp_metadata`` in mngr_latchkey), which is what lets a
+// server sign in through an authorization server on another domain, and falls
+// back to the domain rule only for a server that publishes none. The gateway
+// cannot do that walk before the user has even seen the request, so it checks
+// the shape and the one thing it can know: that the MCP endpoint, where the
+// tokens are used, is the approved origin.
+function validateMcpParams(params, domain, scheme) {
+  ensureNoExtraneousFields(
+    'payload.login.flow_params ',
+    ['mcpEndpoint', 'tokenEndpoint', 'registrationEndpoint', 'scopes', 'issuesRefreshTokens'],
+    params,
+  );
+  validateCustomServiceOriginUrl(params.mcpEndpoint, 'flow_params.mcpEndpoint', domain, scheme);
+  parseCustomServiceHttpUrl(params.tokenEndpoint, 'flow_params.tokenEndpoint');
+  parseCustomServiceHttpUrl(params.registrationEndpoint, 'flow_params.registrationEndpoint');
+  if (params.scopes !== undefined) {
+    ensureStringArray('payload.login.flow_params.', 'scopes', params.scopes);
+    if (params.scopes.some((scope) => scope.length === 0)) {
+      throw new InvalidRequestBodyError("payload.login.'flow_params.scopes' must not contain an empty scope.");
+    }
+  }
+  if (params.issuesRefreshTokens !== undefined && typeof params.issuesRefreshTokens !== 'boolean') {
+    throw new InvalidRequestBodyError("payload.login.'flow_params.issuesRefreshTokens' must be a boolean.");
+  }
+}
+
+// Per flow: its parameter validator, and whether its login URL is held to the
+// domain here (the capture flows) or verified by the desktop at approval time
+// against what the MCP server publishes (``mcp``, see ``validateMcpParams``).
 const CUSTOM_SERVICE_LOGIN_FLOWS = new Map([
-  ['cookie-capture', validateCookieCaptureParams],
-  ['token-capture', validateTokenCaptureParams],
+  ['cookie-capture', { validateParams: validateCookieCaptureParams, isLoginUrlHeldToDomain: true }],
+  ['token-capture', { validateParams: validateTokenCaptureParams, isLoginUrlHeldToDomain: true }],
+  ['mcp', { validateParams: validateMcpParams, isLoginUrlHeldToDomain: false }],
 ]);
 
 /**
@@ -1204,7 +1279,7 @@ const CUSTOM_SERVICE_LOGIN_FLOWS = new Map([
  * required -- a flow needs a URL and parameters -- and what passes here is
  * registered exactly as sent.
  */
-function validateCustomServiceLogin(login, domain) {
+function validateCustomServiceLogin(login, domain, scheme) {
   if (login === undefined || login === null) {
     return null;
   }
@@ -1218,13 +1293,18 @@ function validateCustomServiceLogin(login, domain) {
       + `Got ${JSON.stringify(login.flow)}.`,
     );
   }
-  validateCustomServiceUrl(login.url, 'url', domain);
+  const flow = CUSTOM_SERVICE_LOGIN_FLOWS.get(login.flow);
+  if (flow.isLoginUrlHeldToDomain) {
+    validateCustomServiceUrl(login.url, 'url', domain);
+  } else {
+    parseCustomServiceHttpUrl(login.url, 'url');
+  }
   if (typeof login.flow_params !== 'object' || login.flow_params === null || Array.isArray(login.flow_params)) {
     throw new InvalidRequestBodyError(
       `payload.login.'flow_params' is required for the ${login.flow} login flow and must be a JSON object.`,
     );
   }
-  CUSTOM_SERVICE_LOGIN_FLOWS.get(login.flow)(login.flow_params, domain);
+  flow.validateParams(login.flow_params, domain, scheme);
   return { url: login.url, flow: login.flow, flow_params: { ...login.flow_params } };
 }
 
@@ -1245,7 +1325,7 @@ function validateCustomServicePayload(payload) {
   ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login', 'header', 'credential_instructions'], payload);
   const domain = validateCustomServiceDomain(payload.domain);
   const scheme = validateCustomServiceScheme(payload.scheme);
-  const login = validateCustomServiceLogin(payload.login, domain);
+  const login = validateCustomServiceLogin(payload.login, domain, scheme);
   let header = null;
   if (payload.header !== undefined && payload.header !== null) {
     if (login !== null) {

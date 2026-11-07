@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import SecretStr
 from werkzeug.test import TestResponse
 
@@ -116,7 +118,15 @@ class _Harness:
         tmp_path: Path,
         latchkey: _StubLatchkey | None = None,
         carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+        published_metadata: Mapping[str, JsonValue] | None = None,
     ) -> None:
+        self.metadata_reads: list[str] = []
+        documents: Mapping[str, JsonValue] = published_metadata if published_metadata is not None else {}
+
+        def fetch_well_known_json(url: str) -> JsonValue | None:
+            self.metadata_reads.append(url)
+            return documents.get(url)
+
         self.sender = _RecordingMessageSender(
             concurrency_group=ConcurrencyGroup(name="recording-message-sender-unused"), sent_messages=[]
         )
@@ -129,6 +139,7 @@ class _Harness:
             gateway_client=self.gateway,
             mngr_message_sender=self.sender,
             carry_grant_to_machine=carry_grant_to_machine,
+            fetch_well_known_json=fetch_well_known_json,
         )
 
     @property
@@ -615,6 +626,124 @@ def test_the_bearer_default_is_shown_and_a_login_flow_shows_no_header(tmp_path: 
         _detail(harness, _make_event(AgentId(), has_login=False)).credential_header == "Authorization: Bearer {token}"
     )
     assert _detail(harness, _make_event(AgentId(), has_login=True)).credential_header is None
+
+
+# Trello's MCP server delegates to Atlassian's authorization server: a layout
+# only the server's own metadata can vouch for.
+_MCP_DOMAIN = "mcp.trello.com"
+_MCP_SERVICE_NAME = "custom_https_mcp_trello_com"
+_MCP_ENDPOINT = "https://mcp.trello.com/mcp"
+_MCP_AUTHORIZE = "https://auth.atlassian.com/authorize"
+_MCP_TOKEN = "https://auth.atlassian.com/oauth/token"
+_MCP_REGISTER = "https://auth.atlassian.com/dcr/register"
+_MCP_PUBLISHED: Mapping[str, JsonValue] = {
+    "https://mcp.trello.com/.well-known/oauth-protected-resource/mcp": {
+        "authorization_servers": ["https://auth.atlassian.com"]
+    },
+    "https://auth.atlassian.com/.well-known/oauth-authorization-server": {
+        "authorization_endpoint": _MCP_AUTHORIZE,
+        "token_endpoint": _MCP_TOKEN,
+        "registration_endpoint": _MCP_REGISTER,
+    },
+}
+
+
+def _make_mcp_event(
+    agent_id: AgentId,
+    domain: str = _MCP_DOMAIN,
+    mcp_endpoint: str = _MCP_ENDPOINT,
+    login_url: str = _MCP_AUTHORIZE,
+    token_endpoint: str = _MCP_TOKEN,
+    registration_endpoint: str = _MCP_REGISTER,
+) -> StreamedPermissionRequest:
+    return create_custom_service_permission_request(
+        agent_id=str(agent_id),
+        domain=domain,
+        rationale="needs the boards",
+        login=CustomServiceLogin(
+            url=login_url,
+            flow=LoginFlow.MCP,
+            flow_params={
+                "mcpEndpoint": mcp_endpoint,
+                "tokenEndpoint": token_endpoint,
+                "registrationEndpoint": registration_endpoint,
+            },
+        ),
+    )
+
+
+def test_an_mcp_sign_in_the_server_vouches_for_is_registered_and_signed_in(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
+    event = _make_mcp_event(AgentId())
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    assert _grant(client, event.request_id).get_json()["outcome"] == "GRANTED"
+    assert harness.metadata_reads == list(_MCP_PUBLISHED)
+    assert harness.registration(_MCP_SERVICE_NAME)["loginFlow"] == {
+        "name": "mcp",
+        "params": {"mcpEndpoint": _MCP_ENDPOINT, "tokenEndpoint": _MCP_TOKEN, "registrationEndpoint": _MCP_REGISTER},
+    }
+    assert harness.latchkey.sign_in_calls == [_MCP_SERVICE_NAME]
+
+
+def test_an_mcp_sign_in_the_server_contradicts_is_denied_with_what_it_publishes(tmp_path: Path) -> None:
+    # The real sign-in page with a token endpoint of the agent's own: the
+    # authorization code would go to the agent. Nothing the user can do makes
+    # the request right, so it is denied and the agent is told what to ask
+    # for instead.
+    harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
+    agent_id = AgentId()
+    event = _make_mcp_event(agent_id, token_endpoint="https://evil.test/oauth/token")
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    response = _grant(client, event.request_id)
+    assert response.status_code == 200
+    assert response.get_json()["outcome"] == "DENIED"
+    message = response.get_json()["message"]
+    assert "could not be trusted" in message
+    assert _MCP_TOKEN in message
+    assert not harness.config_path.is_file()
+    assert harness.latchkey.sign_in_calls == []
+    assert harness.gateway.deleted_request_ids == (event.request_id,)
+    assert [entry.status for entry in load_response_events(tmp_path)] == ["DENIED"]
+    assert harness.sender.sent_messages == [
+        (str(agent_id), format_resolution_notice(message, event.request_id, RequestStatus.DENIED))
+    ]
+
+
+def test_an_mcp_server_publishing_nothing_gets_the_domain_rule(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    on_domain = _make_mcp_event(
+        AgentId(),
+        domain="mcp.otter.ai",
+        mcp_endpoint="https://mcp.otter.ai/mcp",
+        login_url="https://otter.ai/oauth2/authorize",
+        token_endpoint="https://otter.ai/oauth/token",
+        registration_endpoint="https://otter.ai/oauth/register",
+    )
+    off_domain = _make_mcp_event(AgentId())
+    client = _build_authenticated_client(
+        tmp_path, harness.handler, StaticPendingRequests(pending=(on_domain, off_domain))
+    )
+
+    assert _grant(client, on_domain.request_id).get_json()["outcome"] == "GRANTED"
+    denied = _grant(client, off_domain.request_id).get_json()
+    assert denied["outcome"] == "DENIED"
+    assert "publishes no OAuth metadata" in denied["message"]
+    assert "login_url must be on mcp.trello.com" in denied["message"]
+    assert harness.latchkey.sign_in_calls == ["custom_https_mcp_otter_ai"]
+
+
+def test_an_existing_registration_reads_no_metadata(tmp_path: Path) -> None:
+    # A second workspace's request connects to the service as registered; its
+    # own sign-in is never used, so there is nothing to verify.
+    harness = _Harness(tmp_path)
+    harness.register(_MCP_DOMAIN, login_url="https://mcp.trello.com/login")
+    event = _make_mcp_event(AgentId(), token_endpoint="https://evil.test/oauth/token")
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    assert _grant(client, event.request_id).get_json()["outcome"] == "GRANTED"
+    assert harness.metadata_reads == []
 
 
 def _store_registration(store_dir: Path, service_name: str) -> dict[str, Any]:

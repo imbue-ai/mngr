@@ -333,17 +333,49 @@ credentials sent encrypted and in the clear. The grant pins both the domain and
 the scheme, so it covers exactly the origin the dialog showed.
 
 A browser sign-in is a `login` object described the way `latchkey services
-register` takes it: `url`, `flow` (`cookie-capture` or `token-capture`) and
-`flow_params`, the flow's own parameters keyed as latchkey keys them
-(`cookieKeys`/`cookieUrl`, `tokenUrl`/`tokenField`/`header`); all three are
-required inside it, and the object is omitted for a service with no browser
-sign-in. It is not passed through blind: the gateway and the
+register` takes it: `url`, `flow` (`cookie-capture`, `token-capture` or `mcp`)
+and `flow_params`, the flow's own parameters keyed as latchkey keys them
+(`cookieKeys`/`cookieUrl`; `tokenUrl`/`tokenField`/`header`;
+`mcpEndpoint`/`tokenEndpoint`/`registrationEndpoint`/`scopes`/`issuesRefreshTokens`);
+all three are required inside it, and the object is omitted for a service with
+no browser sign-in. It is not passed through blind: the gateway and the
 desktop both deserialize the parameters against the flow's schema and refuse
-an unknown key, and every URL among them -- the login page, `cookieUrl`,
-`tokenUrl` -- may use either scheme but must be on the approved domain or a
-subdomain of it, so where the browser goes and where the captured credentials
-apply is always what the dialog named. What passes is registered exactly as
-the agent sent it.
+an unknown key. For the capture flows, every URL -- the login page,
+`cookieUrl`, `tokenUrl` -- may use either scheme but must be on the approved
+domain, a subdomain of it, or a parent domain of it (with at least two labels,
+so never a bare top-level domain), so where the browser goes and where the
+captured credentials apply is always the party the dialog named. Parents are
+allowed because a service often signs in at the domain it hangs off; siblings
+(`api.example.com` for `mcp.example.com`) are not, since telling one from an
+unrelated domain would need a public-suffix list. What passes is registered
+exactly as the agent sent it.
+
+The `mcp` flow is held to different rules, because its endpoints mean
+different things. Its `mcpEndpoint`, where the stored tokens are *used*, must
+be on the approved origin itself (same scheme, exactly that host, no port):
+Latchkey only injects a custom service's credentials into requests under its
+base URL, which is always that bare origin, so an endpoint anywhere else would
+be signed in to but never usable. Its OAuth endpoints -- the login `url`, which
+is the authorization endpoint, plus `tokenEndpoint` and `registrationEndpoint`
+-- are not held to any domain, because real MCP servers routinely keep their
+authorization server elsewhere (Trello's is Atlassian's; Supabase's is at
+`api.supabase.com`). They need checking all the same: the token endpoint
+receives the authorization code together with its PKCE verifier, so an agent
+naming the real sign-in page with a token endpoint of its own would be handed
+the user's tokens, and the dialog shows only the login page. So the desktop
+checks them at approval time against what the server publishes
+(`imbue.mngr_latchkey.mcp_metadata`): it reads the MCP endpoint's
+protected-resource metadata (RFC 9728, at `/.well-known/oauth-protected-resource`,
+path-aware form first) for its authorization servers, then each server's
+metadata (RFC 8414 or OpenID Connect discovery) for its endpoints, and the
+request passes only if some published server has exactly the three it names.
+Trust is anchored at the origin the user approves. A server that publishes
+nothing gets the capture flows' domain rule instead. A request the metadata
+contradicts, or that the domain rule refuses, is **denied** at Approve with a
+message naming the published endpoints, since nothing the user can do makes
+it right; the agent asks again with the corrected sign-in. The gateway checks
+only the shape of these three at request time, since it cannot make that walk
+before the user has even seen the request.
 
 A service with no browser sign-in may instead name the header the pasted token
 is sent as: `header`, a header line with `{token}` where the value goes

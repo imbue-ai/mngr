@@ -26,6 +26,13 @@ Approve does three things, in this order:
    is involved -- see :data:`imbue.mngr_latchkey.core.LATCHKEY_MIN_VERSION`.)
    For a remote workspace the registration reaches the machine itself in the
    same change that carries the credential and the grant (step 3).
+   An ``mcp`` sign-in is checked before that against what the MCP server
+   publishes (:mod:`imbue.mngr_latchkey.mcp_metadata`): the token endpoint
+   receives the authorization code, so an agent must not get to name one of
+   its own. A request whose endpoints the server contradicts, or that a server
+   publishing nothing cannot vouch for and the domain rule refuses, is
+   **denied** with a message naming what was published, since nothing the user
+   can do makes it right -- the agent has to ask again.
 2. **Connect an account**, either by the browser sign-in the request described
    (one of latchkey's generic login flows)
    or -- when the request carries no login flow -- by running the service's own
@@ -65,7 +72,9 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
+import httpx2
 from flask import Request
 from flask import Response
 from loguru import logger
@@ -111,6 +120,8 @@ from imbue.mngr_latchkey.credential_commands import parse_credential_command_exa
 from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
 from imbue.mngr_latchkey.custom_services import CustomServiceError
 from imbue.mngr_latchkey.custom_services import DEFAULT_CREDENTIAL_HEADER
+from imbue.mngr_latchkey.custom_services import LoginFlow
+from imbue.mngr_latchkey.custom_services import McpParams
 from imbue.mngr_latchkey.custom_services import base_api_url_for_domain
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
@@ -120,6 +131,11 @@ from imbue.mngr_latchkey.custom_services import domain_warning
 from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import registration_login_url
 from imbue.mngr_latchkey.custom_services import validate_domain
+from imbue.mngr_latchkey.custom_services import validate_mcp_login_on_domain
+from imbue.mngr_latchkey.mcp_metadata import FetchJson
+from imbue.mngr_latchkey.mcp_metadata import McpLoginVerdictKind
+from imbue.mngr_latchkey.mcp_metadata import describe_published_authorization_servers
+from imbue.mngr_latchkey.mcp_metadata import verify_mcp_login
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -136,6 +152,45 @@ def _format_granted_message(base_api_url: str) -> str:
 
 def _format_denied_message(base_api_url: str) -> str:
     return f"Your request to store credentials for {base_api_url} was denied. Nothing was stored."
+
+
+def _format_refused_sign_in_message(base_api_url: str, reason: str) -> str:
+    return (
+        f"Your request to store credentials for {base_api_url} was denied because its sign-in could not be "
+        f"trusted: {reason} Nothing was stored. You can ask again with a corrected sign-in."
+    )
+
+
+# How long one well-known document may take. Two or three are read per
+# approval, in the time between the click and the browser window.
+_WELL_KNOWN_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
+def fetch_well_known_json(url: str) -> JsonValue | None:
+    """Read a well-known metadata document, or ``None`` if there is none to read.
+
+    Redirects are followed: the origin that publishes the document chose where
+    it redirects to, so the destination is as much its word as the document.
+    Anything but a JSON body with a 200 behind it is "no document", which is
+    what the metadata walk treats every failure as.
+    """
+    try:
+        response = httpx2.get(
+            url,
+            timeout=_WELL_KNOWN_TIMEOUT_SECONDS,
+            headers={"Accept": "application/json"},
+            follow_redirects=True,
+        )
+    except httpx2.HTTPError as e:
+        logger.info("Could not read {}: {}", url, e)
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        logger.info("{} did not return JSON", url)
+        return None
 
 
 def _sign_in_url(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
@@ -254,6 +309,13 @@ class CustomServiceGrantHandler(RequestEventHandler):
             "workspace whose agents run on this computer."
         ),
     )
+    fetch_well_known_json: FetchJson = Field(
+        default=fetch_well_known_json,
+        description=(
+            "Reads the OAuth metadata an MCP server and its authorization server publish, for checking an "
+            "``mcp`` sign-in against them before the service is created. Injected so tests can script it."
+        ),
+    )
 
     def handles_request_type(self) -> str:
         return REQUEST_TYPE_CUSTOM_SERVICE
@@ -339,6 +401,14 @@ class CustomServiceGrantHandler(RequestEventHandler):
 
         existing = self._existing_registration(machine_latchkey, service_name)
         if existing is None:
+            refusal = self._untrusted_mcp_sign_in(domain, payload)
+            if refusal is not None:
+                logger.warning("Denying custom-service request {}: {}", request_event_id, refusal)
+                return self._deny(
+                    request_event_id,
+                    parsed_agent_id,
+                    _format_refused_sign_in_message(base_api_url_for_domain(domain, payload.scheme), refusal),
+                )
             try:
                 self._register_service(machine_latchkey, service_name, payload)
             except LatchkeyError as e:
@@ -430,18 +500,20 @@ class CustomServiceGrantHandler(RequestEventHandler):
         payload = permission_request.payload
         if not isinstance(payload, CustomServiceRequestPayload):
             return make_json_error_response("Unsupported request type", status_code=500)
-        request_event_id = permission_request.request_id
-        parsed_agent_id = AgentId(permission_request.agent_id)
-        # Nothing to undo: registration happens on approve, so a denied request
-        # leaves no trace of the proposed service.
-        _drop_gateway_record(self.gateway_client, request_event_id)
+        return self._deny(
+            permission_request.request_id,
+            AgentId(permission_request.agent_id),
+            _format_denied_message(base_api_url_for_domain(payload.domain, payload.scheme)),
+        )
 
-        message = _format_denied_message(base_api_url_for_domain(payload.domain, payload.scheme))
+    def _deny(self, request_event_id: str, agent_id: AgentId, message: str) -> Response:
+        """Record the denial and tell the agent why. Nothing to undo: registration happens on approve."""
+        _drop_gateway_record(self.gateway_client, request_event_id)
         resolve_request(
             self.mngr_message_sender,
             self.data_dir,
             request_event_id=request_event_id,
-            agent_id=parsed_agent_id,
+            agent_id=agent_id,
             status=RequestStatus.DENIED,
             message=message,
         )
@@ -449,6 +521,46 @@ class CustomServiceGrantHandler(RequestEventHandler):
             content=json.dumps({"outcome": "DENIED", "message": message}),
             media_type="application/json",
         )
+
+    def _untrusted_mcp_sign_in(self, domain: str, payload: CustomServiceRequestPayload) -> str | None:
+        """Why an ``mcp`` sign-in about to be registered cannot be trusted, or ``None`` when it can (or there is none).
+
+        The endpoints are checked against the authorization server metadata the
+        MCP endpoint's origin publishes; a server that publishes none gets the
+        domain rule instead, the same assurance the capture flows always have.
+        Only a service being created is checked: an existing registration keeps
+        its own sign-in, and the request's is never used.
+        """
+        login = payload.login
+        if login is None or login.flow is not LoginFlow.MCP:
+            return None
+        params = McpParams.model_validate(login.flow_params)
+        verdict = verify_mcp_login(
+            params.mcp_endpoint,
+            login.url,
+            params.token_endpoint,
+            params.registration_endpoint,
+            self.fetch_well_known_json,
+        )
+        match verdict.kind:
+            case McpLoginVerdictKind.VERIFIED:
+                return None
+            case McpLoginVerdictKind.MISMATCH:
+                return (
+                    f"{params.mcp_endpoint} publishes different OAuth endpoints than the request names. "
+                    f"Published:\n{describe_published_authorization_servers(verdict.published)}"
+                )
+            case McpLoginVerdictKind.UNPUBLISHED:
+                try:
+                    validate_mcp_login_on_domain(domain, login.url, params)
+                except CustomServiceError as e:
+                    return (
+                        f"{params.mcp_endpoint} publishes no OAuth metadata to check the sign-in against, so its "
+                        f"endpoints have to stay with {domain}: {e}"
+                    )
+                return None
+            case unreachable:
+                assert_never(unreachable)
 
     def _machine_latchkey_for_dialog(self, backend_resolver: BackendResolverInterface, agent_id: AgentId) -> Latchkey:
         """The store of the asking workspace's machine, or this computer's when the machine cannot be placed.

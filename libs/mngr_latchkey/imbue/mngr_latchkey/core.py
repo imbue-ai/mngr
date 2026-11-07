@@ -187,9 +187,9 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
 # code strictly needs: the newest release with a hard dependency here is
-# 3.17.0, the first to accept the ``--strict`` flag :meth:`Latchkey.auth_browser_login`
-# always passes.
-LATCHKEY_MIN_VERSION: Final[str] = "3.21.0"
+# 3.22.0, the first to know the ``mcp`` login flow a custom service may
+# register (:class:`imbue.mngr_latchkey.custom_services.LoginFlow`).
+LATCHKEY_MIN_VERSION: Final[str] = "3.22.0"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent

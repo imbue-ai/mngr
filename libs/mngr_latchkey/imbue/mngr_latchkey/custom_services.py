@@ -43,11 +43,13 @@ from enum import StrEnum
 from enum import auto
 from typing import Final
 from typing import assert_never
+from urllib.parse import SplitResult
 from urllib.parse import urlsplit
 
 from loguru import logger
 from pydantic import Field
 from pydantic import JsonValue
+from pydantic import StrictBool
 from pydantic import ValidationError
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
@@ -93,6 +95,7 @@ class LoginFlow(StrEnum):
 
     COOKIE_CAPTURE = "cookie-capture"
     TOKEN_CAPTURE = "token-capture"
+    MCP = "mcp"
 
 
 class CookieCaptureParams(FrozenModel):
@@ -118,6 +121,27 @@ class TokenCaptureParams(FrozenModel):
     header: str | None = Field(
         default=None,
         description="Header to store the token as; must contain '{token}'. Defaults to a bearer Authorization header.",
+    )
+
+
+class McpParams(FrozenModel):
+    """The ``--login-flow-params`` of ``mcp``, keyed as latchkey keys them.
+
+    OAuth with dynamic client registration against an MCP server. The
+    authorization endpoint is not among them: it is the page the browser opens,
+    so it travels as the login URL, as it does for every flow.
+    """
+
+    mcp_endpoint: str = Field(alias="mcpEndpoint", description="URL that JSON-RPC messages are POSTed to.")
+    token_endpoint: str = Field(alias="tokenEndpoint", description="The authorization server's OAuth token endpoint.")
+    registration_endpoint: str = Field(
+        alias="registrationEndpoint", description="The authorization server's dynamic client registration endpoint."
+    )
+    scopes: tuple[str, ...] | None = Field(default=None, description="Scopes to request; defaults to none.")
+    issues_refresh_tokens: StrictBool | None = Field(
+        default=None,
+        alias="issuesRefreshTokens",
+        description="False for a server that issues access tokens only; defaults to true.",
     )
 
 
@@ -346,16 +370,28 @@ def build_custom_service_scope_schema(domain: str, scheme: str) -> dict[str, Jso
     }
 
 
-def _is_within_domain(hostname: str, domain: str) -> bool:
-    return hostname == domain or hostname.endswith(f".{domain}")
+def _is_related_domain(hostname: str, domain: str) -> bool:
+    """Whether ``hostname`` is ``domain`` itself, a subdomain of it, or a parent of it with at least two labels.
+
+    Parents are admitted because a service often signs in at the domain it hangs
+    off (``mcp.example.com`` at ``example.com``), and whoever runs the parent
+    delegated the child, so the parent is no less the approved party than the
+    domain itself. The two-label floor keeps a bare top-level domain out.
+    Siblings (``api.example.com`` for ``mcp.example.com``) are not admitted:
+    telling one from an unrelated domain needs a public-suffix list, since
+    counting labels would read ``co.uk`` as a shared parent. Mirrored by
+    ``isRelatedDomain`` in the gateway extension.
+    """
+    if hostname == domain or hostname.endswith(f".{domain}"):
+        return True
+    return domain.endswith(f".{hostname}") and hostname.count(".") >= 1
 
 
-def _validate_url_on_domain(raw_url: str, field: str, domain: str) -> None:
-    """Require ``raw_url`` to be an http(s) URL on ``domain`` or a subdomain of it.
+def _validate_http_url(raw_url: str, field: str) -> SplitResult:
+    """Require ``raw_url`` to be an http(s) URL with a host, and return it split.
 
     The scheme is the user's business -- the dialog names where the browser
-    will go -- so either is accepted; the domain check is what keeps a sign-in,
-    and the credentials it captures, on the service being approved.
+    will go -- so either is accepted.
     """
     if not raw_url:
         raise CustomServiceError(f"{field} is required and must be a non-empty string.")
@@ -365,8 +401,40 @@ def _validate_url_on_domain(raw_url: str, field: str, domain: str) -> None:
         raise CustomServiceError(f"{field} is not a valid URL: {raw_url!r}.") from None
     if parsed.scheme.lower() not in SCHEMES or parsed.hostname is None:
         raise CustomServiceError(f"{field} must be an http or https URL. Got {raw_url!r}.")
-    if not _is_within_domain(parsed.hostname.lower(), domain):
-        raise CustomServiceError(f"{field} must be on {domain} or a subdomain of it. Got {raw_url!r}.")
+    return parsed
+
+
+def _validate_url_on_domain(raw_url: str, field: str, domain: str) -> None:
+    """Require ``raw_url`` to be an http(s) URL on ``domain``, a subdomain or a parent of it.
+
+    The domain check is what keeps a sign-in, and the credentials it captures,
+    with the party being approved (see :func:`_is_related_domain`).
+    """
+    parsed = _validate_http_url(raw_url, field)
+    if parsed.hostname is None or not _is_related_domain(parsed.hostname.lower(), domain):
+        raise CustomServiceError(
+            f"{field} must be on {domain}, a subdomain or a parent domain of it. Got {raw_url!r}."
+        )
+
+
+def _validate_url_on_origin(raw_url: str, field: str, domain: str, scheme: str) -> None:
+    """Require ``raw_url`` to be on the origin a custom service is registered under, ``scheme://domain``.
+
+    Stricter than :func:`_validate_url_on_domain`: latchkey only injects a
+    service's credentials into requests that start with its ``baseApiUrl``,
+    which :func:`base_api_url_for_domain` always makes the bare origin, so a
+    URL on a subdomain, the other scheme or an explicit port would register a
+    sign-in whose credentials no request could ever use.
+    """
+    parsed = _validate_http_url(raw_url, field)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise CustomServiceError(f"{field} is not a valid URL: {raw_url!r}.") from None
+    if parsed.scheme.lower() != scheme or parsed.hostname != domain or port is not None:
+        raise CustomServiceError(
+            f"{field} must be on the origin {custom_service_label(domain, scheme)} itself. Got {raw_url!r}."
+        )
 
 
 def _validate_cookie_capture_params(params: CookieCaptureParams, domain: str) -> None:
@@ -428,8 +496,32 @@ def _validate_token_capture_params(params: TokenCaptureParams, domain: str) -> N
         validate_credential_header(params.header, "login_flow_params.header")
 
 
+def _validate_mcp_params(params: McpParams, domain: str, scheme: str) -> None:
+    _validate_url_on_origin(params.mcp_endpoint, "login_flow_params.mcpEndpoint", domain, scheme)
+    _validate_http_url(params.token_endpoint, "login_flow_params.tokenEndpoint")
+    _validate_http_url(params.registration_endpoint, "login_flow_params.registrationEndpoint")
+    if params.scopes is not None and any(not scope for scope in params.scopes):
+        raise CustomServiceError("login_flow_params.scopes must not contain an empty scope.")
+
+
+def validate_mcp_login_on_domain(domain: str, login_url: str, params: McpParams) -> None:
+    """Hold an ``mcp`` login flow's OAuth endpoints to the domain rule, as the capture flows' URLs always are.
+
+    The fallback for an MCP server that publishes no authorization server
+    metadata (see :mod:`imbue.mngr_latchkey.mcp_metadata`): with nothing to
+    check the endpoints against, keeping them with the approved party is the
+    one assurance left that the token endpoint is not the agent's own. Only
+    the desktop can tell which case applies, so this runs at approval time,
+    not when the request is made.
+    """
+    _validate_url_on_domain(login_url, "login_url", domain)
+    _validate_url_on_domain(params.token_endpoint, "login_flow_params.tokenEndpoint", domain)
+    _validate_url_on_domain(params.registration_endpoint, "login_flow_params.registrationEndpoint", domain)
+
+
 def validate_login_flow(
     domain: str,
+    scheme: str,
     login_url: str | None,
     login_flow: LoginFlow | None,
     login_flow_params: Mapping[str, JsonValue] | None,
@@ -440,9 +532,15 @@ def validate_login_flow(
     ``--login-flow`` and ``--login-flow-params``, and so do the rules: a flow
     needs a login URL, and each flow has parameters of its own. The parameters
     are deserialized against latchkey's schema for the flow -- an unknown key
-    is a mistake latchkey would carry silently -- and every URL among them has
-    to be on ``domain``, since that is where the captured credentials go. What
-    passes is registered as the agent sent it.
+    is a mistake latchkey would carry silently -- and for the capture flows
+    every URL among them has to be on ``domain``, a subdomain or a parent of
+    it, since that is where the captured credentials go. The ``mcp`` flow is
+    different: its MCP endpoint, where the tokens are *used*, has to be on the
+    ``scheme://domain`` origin itself (see :func:`_validate_url_on_origin`),
+    while its OAuth endpoints are checked against what that origin publishes
+    at approval time (:mod:`imbue.mngr_latchkey.mcp_metadata`), falling back
+    to :func:`validate_mcp_login_on_domain`, so here they only have to be
+    URLs. What passes is registered as the agent sent it.
     """
     if login_url is None and login_flow is None and login_flow_params is None:
         return
@@ -452,13 +550,18 @@ def validate_login_flow(
         raise CustomServiceError(f"login_url is required for the {login_flow.value} login flow.")
     if login_flow_params is None:
         raise CustomServiceError(f"login_flow_params is required for the {login_flow.value} login flow.")
-    _validate_url_on_domain(login_url, "login_url", domain)
+    if login_flow is LoginFlow.MCP:
+        _validate_http_url(login_url, "login_url")
+    else:
+        _validate_url_on_domain(login_url, "login_url", domain)
     try:
         match login_flow:
             case LoginFlow.COOKIE_CAPTURE:
                 _validate_cookie_capture_params(CookieCaptureParams.model_validate(login_flow_params), domain)
             case LoginFlow.TOKEN_CAPTURE:
                 _validate_token_capture_params(TokenCaptureParams.model_validate(login_flow_params), domain)
+            case LoginFlow.MCP:
+                _validate_mcp_params(McpParams.model_validate(login_flow_params), domain, scheme)
             case unreachable:
                 assert_never(unreachable)
     except ValidationError as e:

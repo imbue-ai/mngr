@@ -277,7 +277,7 @@ class CustomServiceRequestPayload(FrozenModel):
         # CustomServiceError is a ValueError, which is what pydantic turns into
         # a validation error, so it propagates as-is.
         if self.login is not None:
-            validate_login_flow(self.domain, self.login.url, self.login.flow, self.login.flow_params)
+            validate_login_flow(self.domain, self.scheme, self.login.url, self.login.flow, self.login.flow_params)
             if self.header is not None:
                 raise CustomServiceError("header cannot be combined with login: a login flow supplies its own shape.")
         if self.header is not None:

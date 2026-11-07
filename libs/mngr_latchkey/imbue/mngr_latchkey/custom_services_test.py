@@ -3,6 +3,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import JsonValue
@@ -26,6 +27,7 @@ from imbue.mngr_latchkey.custom_services import CUSTOM_SERVICE_NAME_PREFIX
 from imbue.mngr_latchkey.custom_services import CustomServiceError
 from imbue.mngr_latchkey.custom_services import DomainWarning
 from imbue.mngr_latchkey.custom_services import LoginFlow
+from imbue.mngr_latchkey.custom_services import McpParams
 from imbue.mngr_latchkey.custom_services import base_api_url_for_domain
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
@@ -40,6 +42,7 @@ from imbue.mngr_latchkey.custom_services import validate_credential_header
 from imbue.mngr_latchkey.custom_services import validate_credential_instructions
 from imbue.mngr_latchkey.custom_services import validate_domain
 from imbue.mngr_latchkey.custom_services import validate_login_flow
+from imbue.mngr_latchkey.custom_services import validate_mcp_login_on_domain
 from imbue.mngr_latchkey.custom_services import validate_scheme
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -278,16 +281,88 @@ def test_registration_with_login_registers_the_flow_as_given() -> None:
             LoginFlow.TOKEN_CAPTURE,
             {"tokenUrl": "https://example.com/s", "tokenField": "t", "header": "X-Token: {token}"},
         ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {
+                "mcpEndpoint": "https://example.com/mcp",
+                "tokenEndpoint": "https://example.com/token",
+                "registrationEndpoint": "https://example.com/register",
+            },
+        ),
+        (
+            "https://auth.example.com/authorize",
+            LoginFlow.MCP,
+            {
+                "mcpEndpoint": "https://example.com/mcp",
+                "tokenEndpoint": "https://auth.example.com/oauth/token",
+                "registrationEndpoint": "https://auth.example.com/oauth/register",
+                "scopes": ["read", "write"],
+                "issuesRefreshTokens": False,
+            },
+        ),
+        # Trello's layout: an authorization server on another domain entirely,
+        # which the desktop verifies against the server's metadata instead.
+        (
+            "https://auth.atlassian.com/authorize",
+            LoginFlow.MCP,
+            {
+                "mcpEndpoint": "https://example.com/mcp",
+                "tokenEndpoint": "https://auth.atlassian.com/oauth/token",
+                "registrationEndpoint": "https://auth.atlassian.com/dcr/register",
+            },
+        ),
     ],
 )
 def test_login_flow_accepts_what_the_cli_accepts(
     login_url: str, login_flow: LoginFlow, params: dict[str, JsonValue]
 ) -> None:
-    validate_login_flow("example.com", login_url, login_flow, params)
+    validate_login_flow("example.com", "https", login_url, login_flow, params)
+
+
+_MCP_PARAMS: Final[dict[str, JsonValue]] = {
+    "mcpEndpoint": "https://example.com/mcp",
+    "tokenEndpoint": "https://example.com/token",
+    "registrationEndpoint": "https://example.com/register",
+}
+
+
+def test_login_flow_accepts_a_sign_in_at_the_parent_domain() -> None:
+    # Otter's layout: the MCP server hangs off the domain that signs it in.
+    validate_login_flow(
+        "mcp.otter.ai",
+        "https",
+        "https://otter.ai/oauth2/authorize",
+        LoginFlow.MCP,
+        {
+            "mcpEndpoint": "https://mcp.otter.ai/mcp",
+            "tokenEndpoint": "https://otter.ai/oauth/token",
+            "registrationEndpoint": "https://otter.ai/oauth/register",
+        },
+    )
+    validate_login_flow(
+        "app.example.com", "https", "https://example.com/login", LoginFlow.COOKIE_CAPTURE, {"cookieKeys": ["s"]}
+    )
+
+
+@pytest.mark.parametrize(
+    "login_url",
+    [
+        # A sibling: telling it from an unrelated domain would need a public-suffix list.
+        "https://auth.example.com/login",
+        # A bare top-level domain is never the approved party.
+        "https://com/login",
+        # A name that merely ends in the domain's label.
+        "https://notexample.com/login",
+    ],
+)
+def test_login_flow_rejects_a_sign_in_off_the_domain_family(login_url: str) -> None:
+    with pytest.raises(CustomServiceError, match=re.escape("login_url must be on mcp.example.com")):
+        validate_login_flow("mcp.example.com", "https", login_url, LoginFlow.COOKIE_CAPTURE, {"cookieKeys": ["s"]})
 
 
 def test_login_flow_accepts_no_sign_in_at_all() -> None:
-    validate_login_flow("example.com", None, None, None)
+    validate_login_flow("example.com", "https", None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -350,13 +425,80 @@ def test_login_flow_accepts_no_sign_in_at_all() -> None:
         ),
         # Cookie parameters on the token flow are unknown keys, not a near miss.
         ("https://example.com/login", LoginFlow.TOKEN_CAPTURE, {"cookieKeys": ["s"]}, "cookieKeys"),
+        # The MCP endpoint is where the tokens are used, so it has to be on the
+        # registered origin itself, not just the domain.
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "mcpEndpoint": "https://mcp.example.com/mcp"},
+            "mcpEndpoint must be on the origin https://example.com",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "mcpEndpoint": "http://example.com/mcp"},
+            "mcpEndpoint must be on the origin https://example.com",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "mcpEndpoint": "https://example.com:8443/mcp"},
+            "mcpEndpoint must be on the origin https://example.com",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "mcpEndpoint": "https://evil.test/mcp"},
+            "mcpEndpoint must be on the origin https://example.com",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "mcpEndpoint": "https://example.com:port/mcp"},
+            "mcpEndpoint is not a valid URL",
+        ),
+        # The OAuth endpoints only have to be URLs here; the desktop checks
+        # them against what the server publishes at approval time.
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "tokenEndpoint": "ftp://example.com/token"},
+            "tokenEndpoint must be an http or https URL",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "registrationEndpoint": "not a url"},
+            "registrationEndpoint must be an http or https URL",
+        ),
+        ("not a url", LoginFlow.MCP, _MCP_PARAMS, "login_url must be an http or https URL"),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {"mcpEndpoint": "https://example.com/mcp", "tokenEndpoint": "https://example.com/token"},
+            "registrationEndpoint",
+        ),
+        ("https://example.com/authorize", LoginFlow.MCP, {**_MCP_PARAMS, "scopes": ["read", ""]}, "empty scope"),
+        ("https://example.com/authorize", LoginFlow.MCP, {**_MCP_PARAMS, "scopes": "read"}, "scopes"),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "issuesRefreshTokens": "no"},
+            "issuesRefreshTokens",
+        ),
+        (
+            "https://example.com/authorize",
+            LoginFlow.MCP,
+            {**_MCP_PARAMS, "authorizationEndpoint": "x"},
+            "authorizationEndpoint",
+        ),
     ],
 )
 def test_login_flow_rejects(
     login_url: str | None, login_flow: LoginFlow | None, params: dict[str, JsonValue] | None, fragment: str
 ) -> None:
     with pytest.raises(CustomServiceError, match=re.escape(fragment)):
-        validate_login_flow("example.com", login_url, login_flow, params)
+        validate_login_flow("example.com", "https", login_url, login_flow, params)
 
 
 def test_registration_scope_schema_pins_the_domain_and_the_scheme() -> None:
@@ -679,10 +821,67 @@ def test_credential_instructions_rejects(instructions: str, expected_fragment: s
         validate_credential_instructions(instructions)
 
 
+@pytest.mark.parametrize(
+    "login_url,token_endpoint,registration_endpoint",
+    [
+        ("https://otter.ai/oauth2/authorize", "https://otter.ai/oauth/token", "https://otter.ai/oauth/register"),
+        ("https://mcp.otter.ai/authorize", "https://auth.mcp.otter.ai/token", "https://mcp.otter.ai/register"),
+    ],
+)
+def test_mcp_login_on_domain_accepts_the_domain_family(
+    login_url: str, token_endpoint: str, registration_endpoint: str
+) -> None:
+    params = McpParams.model_validate(
+        {
+            "mcpEndpoint": "https://mcp.otter.ai/mcp",
+            "tokenEndpoint": token_endpoint,
+            "registrationEndpoint": registration_endpoint,
+        }
+    )
+    validate_mcp_login_on_domain("mcp.otter.ai", login_url, params)
+
+
+@pytest.mark.parametrize(
+    "login_url,token_endpoint,registration_endpoint,fragment",
+    [
+        ("https://auth.atlassian.com/authorize", "https://mcp.trello.com/t", "https://mcp.trello.com/r", "login_url"),
+        ("https://mcp.trello.com/a", "https://api.trello.com/token", "https://mcp.trello.com/r", "tokenEndpoint"),
+        ("https://mcp.trello.com/a", "https://mcp.trello.com/t", "https://evil.test/register", "registrationEndpoint"),
+    ],
+)
+def test_mcp_login_on_domain_rejects_a_stranger(
+    login_url: str, token_endpoint: str, registration_endpoint: str, fragment: str
+) -> None:
+    params = McpParams.model_validate(
+        {
+            "mcpEndpoint": "https://mcp.trello.com/mcp",
+            "tokenEndpoint": token_endpoint,
+            "registrationEndpoint": registration_endpoint,
+        }
+    )
+    with pytest.raises(CustomServiceError, match=re.escape(f"{fragment} must be on mcp.trello.com")):
+        validate_mcp_login_on_domain("mcp.trello.com", login_url, params)
+
+
+def test_mcp_endpoint_is_held_to_the_registered_scheme() -> None:
+    # The same endpoint passes for an http service and fails for an https one:
+    # the origin check is against the scheme the service is registered under,
+    # not the one the endpoint happens to use.
+    params: dict[str, JsonValue] = {
+        "mcpEndpoint": "http://intranet.lan/mcp",
+        "tokenEndpoint": "http://intranet.lan/token",
+        "registrationEndpoint": "http://intranet.lan/register",
+    }
+    validate_login_flow("intranet.lan", "http", "http://intranet.lan/authorize", LoginFlow.MCP, params)
+    with pytest.raises(CustomServiceError, match=re.escape("origin https://intranet.lan")):
+        validate_login_flow("intranet.lan", "https", "http://intranet.lan/authorize", LoginFlow.MCP, params)
+
+
 def test_token_capture_header_is_held_to_the_same_rule() -> None:
     with pytest.raises(CustomServiceError, match="Host"):
         validate_login_flow(
             "example.com",
+            "https",
             "https://example.com/login",
             LoginFlow.TOKEN_CAPTURE,
             {"tokenUrl": "https://example.com/s", "tokenField": "t", "header": "Host: {token}"},
