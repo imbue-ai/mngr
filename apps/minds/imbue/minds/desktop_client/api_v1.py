@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -85,6 +86,7 @@ from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_auth import require_api_or_local_socket_auth
 from imbue.minds.desktop_client.api_models import AccountKeybindingsPutRequest
 from imbue.minds.desktop_client.api_models import AccountKeybindingsResponse
 from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
@@ -131,6 +133,7 @@ from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import RemoteExecutionRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
@@ -153,6 +156,8 @@ from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
+from imbue.minds.desktop_client.api_transport import agent_label_from_environ
+from imbue.minds.desktop_client.api_transport import transport_for_environ
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
@@ -211,6 +216,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import MACHINES_RESIZE_COMMAND_R
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import REMOTE_EXECUTION_DISABLED_CODE
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import is_agent_command_execution_allowed
 from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
@@ -218,6 +225,11 @@ from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launc
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
+from imbue.minds.desktop_client.remote_command_runner import REMOTE_EXECUTION_EVENTS_RELATIVE_PATH
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandAttribution
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandExecution
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandLog
+from imbue.minds.desktop_client.remote_command_runner import resolve_remote_command
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import AccountSession
@@ -301,6 +313,7 @@ from imbue.minds.errors import ConnectionRequiresMasterPasswordError
 from imbue.minds.errors import ConnectionTooNewError
 from imbue.minds.errors import ConnectionUpdateInProgressError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import RemoteCommandRequestError
 from imbue.minds.errors import SettingsRecordTooNewError
 from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.errors import WorkspaceSyncError
@@ -312,6 +325,7 @@ from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
 from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
 from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
+from imbue.minds.primitives import DeviceId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
@@ -2925,6 +2939,95 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     )
 
 
+# Remote execution route
+
+UNKNOWN_DEVICE_CODE: Final[str] = "unknown_device"
+EXECUTION_UNAVAILABLE_CODE: Final[str] = "execution_unavailable"
+_NDJSON_HEADERS: Final[dict[str, str]] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+@require_api_or_local_socket_auth
+@API_SPEC.validate(json=RemoteExecutionRequest)
+def _handle_remote_execution(device_id: str) -> Response:
+    """Run one command on this computer, as the user, and stream what it prints.
+
+    The most dangerous thing an agent can be allowed to do, so three gates stand
+    in front of it: the per-workspace remote-execution grant the gateway enforces
+    before the request reaches us, this device's master switch (Settings > This
+    computer, off by default and re-read on every call, so turning it off stops
+    every workspace at once), and the device id in the path, which must be this
+    install's own so a misrouted request fails closed instead of running on the
+    wrong computer. The browser UI is refused outright (``agents_only``).
+
+    Body: ``{"command": [argv...], "cwd"?: "...", "timeout_seconds"?: N}``. The
+    answer is an ``application/x-ndjson`` stream: ``stdout``/``stderr`` lines,
+    ``keepalive`` lines while the command is silent, and one final ``exit``
+    line (``code`` null when the timeout killed it). A dropped connection kills
+    the command. Every command is recorded under ``events/remote_execution``.
+    """
+    state = get_state()
+    try:
+        parsed_device_id = DeviceId(device_id)
+    except InvalidRandomIdError:
+        return _json_error(f"Unknown device {device_id}", 404, code=UNKNOWN_DEVICE_CODE)
+    if not state.device_id or str(parsed_device_id) != state.device_id:
+        return _json_error(
+            f"Unknown device {device_id}: this computer is {state.device_id or 'unidentified'}",
+            404,
+            code=UNKNOWN_DEVICE_CODE,
+        )
+    if not is_agent_command_execution_allowed():
+        return _json_error(
+            "Agents are not allowed to run commands on this computer. The user can change that under "
+            "Settings > This computer in Imbue Studio.",
+            403,
+            code=REMOTE_EXECUTION_DISABLED_CODE,
+        )
+    body = RemoteExecutionRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    parent_cg = state.root_concurrency_group
+    paths = state.api_v1_paths
+    if parent_cg is None or paths is None:
+        return _json_error("Running commands is not configured on this desktop", 503, code=EXECUTION_UNAVAILABLE_CODE)
+    try:
+        run = resolve_remote_command(body, Path.home())
+    except RemoteCommandRequestError as e:
+        return _json_field_error(str(e), e.field, code=e.code)
+    environment = dict(os.environ)
+    if state.login_shell_path is not None:
+        environment["PATH"] = state.login_shell_path.read()
+    execution = RemoteCommandExecution(
+        run=run,
+        attribution=_remote_command_attribution(state.backend_resolver),
+        log=RemoteCommandLog(events_path=paths.data_dir / REMOTE_EXECUTION_EVENTS_RELATIVE_PATH),
+        concurrency_group=parent_cg,
+        environment=environment,
+    )
+    logger.info(
+        "Running a command on this computer for {}: {}", execution.attribution.claimed_agent_id, run.command[0]
+    )
+    return make_streaming_response(
+        execution.stream_events(), media_type="application/x-ndjson", headers=_NDJSON_HEADERS
+    )
+
+
+def _remote_command_attribution(backend_resolver: BackendResolverInterface) -> RemoteCommandAttribution:
+    """Who is asking, from the self-declared agent label alone; recorded for the log, never consulted for access."""
+    claimed_agent_id = agent_label_from_environ(request.environ)
+    workspace_id: str | None = None
+    if claimed_agent_id is not None:
+        try:
+            labelled_agent = AgentId(claimed_agent_id)
+        except InvalidRandomIdError:
+            labelled_agent = None
+        if labelled_agent is not None and labelled_agent in backend_resolver.list_known_agent_ids():
+            workspace_id = str(_workspace_agent_id_for_agent(labelled_agent, backend_resolver))
+    return RemoteCommandAttribution(
+        claimed_agent_id=claimed_agent_id,
+        workspace_id=workspace_id,
+        transport=transport_for_environ(request.environ),
+    )
+
+
 # Bug report route
 
 
@@ -5210,6 +5313,7 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     # Baseline-granted at the gateway (``minds-api-timezone-read``), so every agent can read it.
     blueprint.add_url_rule("/timezone", view_func=_handle_timezone, methods=["GET"])
+    blueprint.add_url_rule("/remote-execution/<device_id>", view_func=_handle_remote_execution, methods=["POST"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/backups", view_func=_handle_workspaces_backups_stream, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])

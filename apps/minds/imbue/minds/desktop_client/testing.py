@@ -73,7 +73,9 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_ACCO
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_CUSTOM_SERVICE
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_REMOTE_EXECUTION
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_WORKSPACE
+from imbue.minds.desktop_client.latchkey.gateway_client import RemoteExecutionRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
@@ -361,6 +363,15 @@ class WriteCountingMindsConfig(MindsConfig):
     @property
     def write_count(self) -> int:
         return self._write_count
+
+
+def make_minds_config_allowing_agent_command_execution(data_dir: Path) -> MindsConfig:
+    """A config store with this device's remote-execution switch (Settings > This computer) already on."""
+    minds_config = MindsConfig(data_dir=data_dir)
+    assert minds_config.set_allow_agent_command_execution_if_version_matches(
+        "off", lambda on: "on" if on else "off", True
+    )
+    return minds_config
 
 
 class ReadCountingMindsConfig(MindsConfig):
@@ -1547,6 +1558,7 @@ def _streamed_request(
         | FileSharingRequestPayload
         | WorkspaceRequestPayload
         | AccountsRequestPayload
+        | RemoteExecutionRequestPayload
         | CustomServiceRequestPayload
     ),
     target: str,
@@ -1626,6 +1638,21 @@ def create_accounts_permission_request(
         rationale=rationale,
         request_type=REQUEST_TYPE_ACCOUNTS,
         payload=AccountsRequestPayload(),
+        target="/tmp/permissions.json",
+    )
+
+
+def create_remote_execution_permission_request(
+    agent_id: str,
+    rationale: str,
+    program: str | None = None,
+) -> StreamedPermissionRequest:
+    """Build a remote-execution permission request as the gateway would stream it, for any command or one program."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_REMOTE_EXECUTION,
+        payload=RemoteExecutionRequestPayload(program=program),
         target="/tmp/permissions.json",
     )
 

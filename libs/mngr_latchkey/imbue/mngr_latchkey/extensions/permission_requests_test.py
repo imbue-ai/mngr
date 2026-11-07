@@ -42,6 +42,7 @@ import pytest
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
+from imbue.mngr_latchkey.agent_setup import reconcile_baseline_permissions
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import LOCAL_DEVICE_ID_ENV_VAR
@@ -52,6 +53,9 @@ from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
 from imbue.mngr_latchkey.migrations.device_scoped_file_sharing import DeviceScopedFileSharingMigration
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote_execution import REMOTE_EXECUTION_PERMISSION_PREFIX
+from imbue.mngr_latchkey.remote_execution import RemoteExecutionGrant
+from imbue.mngr_latchkey.remote_execution import remote_execution_permission_name
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_HEADERS
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_INSTRUCTIONS
@@ -2434,13 +2438,6 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     assert list(pending_dir.iterdir()) == []
 
 
-_MCP_PARAMS: Final[dict[str, object]] = {
-    "mcpEndpoint": "https://example.com/mcp",
-    "tokenEndpoint": "https://example.com/token",
-    "registrationEndpoint": "https://example.com/register",
-}
-
-
 def _custom_service_body(payload: object, rationale: str = "needs the widget API") -> dict[str, object]:
     # A well-formed payload names a scheme; tests about the rest of the payload
     # get https unless they say otherwise.
@@ -2696,7 +2693,7 @@ def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Pat
         ({"url": "https://example.com/l"}, b"'flow' is required"),
         ({"flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}}, b"'url' is required"),
         ({"url": "https://example.com/l", "flow": "cookie-capture"}, b"'flow_params' is required"),
-        ({"url": "https://example.com/l", "flow": "magic", "flow_params": {}}, b"cookie-capture, token-capture, mcp"),
+        ({"url": "https://example.com/l", "flow": "magic", "flow_params": {}}, b"cookie-capture, token-capture"),
         # Every URL stays on the domain, whichever scheme it uses.
         (
             {"url": "https://evil.test/l", "flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}},
@@ -2763,75 +2760,6 @@ def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Pat
             },
             b"header line",
         ),
-        # The MCP endpoint is where the tokens are used, so it has to be on the
-        # registered origin itself; the authorization server may be a subdomain.
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "https://mcp.example.com/mcp"},
-            },
-            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
-        ),
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "http://example.com/mcp"},
-            },
-            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
-        ),
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "mcpEndpoint": "https://example.com:8443/mcp"},
-            },
-            b"'flow_params.mcpEndpoint' must be on the origin https://example.com",
-        ),
-        # The OAuth endpoints only have to be URLs here: the desktop checks
-        # them against what the server publishes at approval time.
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "tokenEndpoint": "ftp://example.com/token"},
-            },
-            b"'flow_params.tokenEndpoint' must be an http or https URL",
-        ),
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "registrationEndpoint": "not a url"},
-            },
-            b"'flow_params.registrationEndpoint' is not a valid URL",
-        ),
-        ({"url": "not a url", "flow": "mcp", "flow_params": _MCP_PARAMS}, b"'url' is not a valid URL"),
-        (
-            {"url": "https://example.com/a", "flow": "mcp", "flow_params": {"mcpEndpoint": "https://example.com/mcp"}},
-            b"tokenEndpoint",
-        ),
-        (
-            {"url": "https://example.com/a", "flow": "mcp", "flow_params": {**_MCP_PARAMS, "scopes": ["read", ""]}},
-            b"empty scope",
-        ),
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "issuesRefreshTokens": "no"},
-            },
-            b"issuesRefreshTokens",
-        ),
-        (
-            {
-                "url": "https://example.com/a",
-                "flow": "mcp",
-                "flow_params": {**_MCP_PARAMS, "authorizationEndpoint": "x"},
-            },
-            b"authorizationEndpoint",
-        ),
         # The old field names are refused, not silently ignored.
         (
             {"login_url": "https://example.com/l", "cookie_url": "https://example.com/", "cookie_keys": ["s"]},
@@ -2879,74 +2807,6 @@ def test_post_accepts_a_token_capture_login(node_extension: tuple[str, Path, Pat
             {
                 "domain": "example.com",
                 "login": {"url": "https://app.example.com/auth/login", "flow": "token-capture", "flow_params": params},
-            }
-        ),
-    )
-    assert status == 201, body
-    assert json.loads(body)["payload"]["login"]["flow_params"] == params
-
-
-def test_post_accepts_a_sign_in_at_the_parent_domain(node_extension: tuple[str, Path, Path]) -> None:
-    # Otter's layout: the MCP server hangs off the domain that signs it in.
-    base_url, _, _ = node_extension
-    params = {
-        "mcpEndpoint": "https://mcp.otter.ai/mcp",
-        "tokenEndpoint": "https://otter.ai/oauth/token",
-        "registrationEndpoint": "https://otter.ai/oauth/register",
-    }
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        _custom_service_body(
-            {
-                "domain": "mcp.otter.ai",
-                "login": {"url": "https://otter.ai/oauth2/authorize", "flow": "mcp", "flow_params": params},
-            }
-        ),
-    )
-    assert status == 201, body
-    assert json.loads(body)["payload"]["login"]["flow_params"] == params
-
-
-@pytest.mark.parametrize(
-    "login_url",
-    ["https://auth.example.com/login", "https://com/login", "https://notexample.com/login"],
-)
-def test_post_rejects_a_sign_in_off_the_domain_family(node_extension: tuple[str, Path, Path], login_url: str) -> None:
-    # A sibling, a bare top-level domain, and a name that merely ends in the
-    # domain's label are all strangers, however much they resemble a parent.
-    base_url, _, _ = node_extension
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        _custom_service_body(
-            {
-                "domain": "mcp.example.com",
-                "login": {"url": login_url, "flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}},
-            }
-        ),
-    )
-    assert status == 400, body
-    assert b"'url' must be on mcp.example.com" in body
-
-
-def test_post_accepts_an_mcp_login(node_extension: tuple[str, Path, Path]) -> None:
-    # The third generic flow: OAuth against an MCP server whose authorization
-    # server lives on another domain entirely (Trello's at Atlassian). Accepted
-    # and stored as sent; the desktop checks the endpoints against the server's
-    # metadata when the user approves.
-    base_url, _, _ = node_extension
-    params = {
-        "mcpEndpoint": "https://mcp.trello.com/mcp",
-        "tokenEndpoint": "https://auth.atlassian.com/oauth/token",
-        "registrationEndpoint": "https://auth.atlassian.com/dcr/register",
-        "scopes": ["read", "write"],
-        "issuesRefreshTokens": False,
-    }
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        _custom_service_body(
-            {
-                "domain": "mcp.trello.com",
-                "login": {"url": "https://auth.atlassian.com/authorize", "flow": "mcp", "flow_params": params},
             }
         ),
     )
@@ -3066,3 +2926,195 @@ def test_post_accepts_the_hostnames_a_private_network_uses(
     status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": domain}))
     assert status == 201, body
     assert json.loads(body)["payload"]["domain"] == expected
+
+
+# The one place a remote-execution grant may be minted is the request type below.
+# Every other source of permission names is checked against this prefix.
+_REMOTE_EXECUTION_PREFIX: Final[str] = REMOTE_EXECUTION_PERMISSION_PREFIX
+
+
+def _remote_execution_body() -> dict[str, object]:
+    return {
+        "agent_id": _VALID_AGENT_ID,
+        "rationale": "needs to install the tool the user asked for",
+        "type": "remote-execution",
+        "payload": {},
+    }
+
+
+def test_post_creates_remote_execution_request_pinned_to_this_desktop(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+
+    status, body = _post_json(f"{base_url}/permission-requests", _remote_execution_body())
+
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "remote-execution"
+    assert parsed["payload"] == {}
+    effect = parsed["effect"]
+    expected_name = remote_execution_permission_name(RemoteExecutionGrant(device_id=DesktopDeviceId(_LOCAL_DEVICE_ID)))
+    assert effect["rules"] == [{"latchkey-self": [expected_name]}]
+    schema = effect["schemas"][expected_name]
+    # The path is a constant, never a pattern: nothing under a wider prefix and
+    # no other desktop's route can match it.
+    assert schema["properties"]["method"] == {"const": "POST"}
+    assert schema["properties"]["path"] == {"const": f"/minds-api-proxy/api/v1/remote-execution/{_LOCAL_DEVICE_ID}"}
+    assert schema["required"] == ["method", "path"]
+
+
+def test_post_rejects_remote_execution_payload_with_fields(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+
+    status, _body = _post_json(
+        f"{base_url}/permission-requests", {**_remote_execution_body(), "payload": {"command": ["ls"]}}
+    )
+
+    assert status == 400
+
+
+@pytest.mark.parametrize("program", ["rsync", "~/.studio/custom-scripts/deploy.sh", "/opt/homebrew/bin/gh"])
+def test_post_creates_a_program_grant_that_pins_the_bodys_first_argv_element(
+    node_extension: tuple[str, Path, Path], program: str
+) -> None:
+    """A program grant admits the route only for a JSON body whose ``command[0]`` is exactly the program."""
+    base_url, *_ = node_extension
+
+    status, body = _post_json(
+        f"{base_url}/permission-requests", {**_remote_execution_body(), "payload": {"program": program}}
+    )
+
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"] == {"program": program}
+    expected_name = remote_execution_permission_name(
+        RemoteExecutionGrant(device_id=DesktopDeviceId(_LOCAL_DEVICE_ID), program=program)
+    )
+    assert expected_name == f"{_REMOTE_EXECUTION_PREFIX}{_LOCAL_DEVICE_ID}:{program}"
+    effect = parsed["effect"]
+    assert effect["rules"] == [{"latchkey-self": [expected_name]}]
+    schema = effect["schemas"][expected_name]
+    assert schema["properties"]["method"] == {"const": "POST"}
+    assert schema["properties"]["path"] == {"const": f"/minds-api-proxy/api/v1/remote-execution/{_LOCAL_DEVICE_ID}"}
+    assert schema["properties"]["parsedBody"] == {
+        "type": "object",
+        "properties": {"command": {"type": "array", "minItems": 1, "prefixItems": [{"const": program}]}},
+        "required": ["command"],
+    }
+    # Requiring the parsed body means a body detent could not parse as JSON is refused, not let through.
+    assert schema["required"] == ["method", "path", "parsedBody"]
+
+
+@pytest.mark.parametrize(
+    "program", ["", " rsync", "rsync ", "bin/tool", "./tool", "../x", "~tool", "-rf", "a\tb", 7, ["rsync"], "x" * 513]
+)
+def test_post_rejects_a_program_that_is_not_a_bare_name_or_a_rooted_path(
+    node_extension: tuple[str, Path, Path], program: object
+) -> None:
+    base_url, *_ = node_extension
+
+    status, _body = _post_json(
+        f"{base_url}/permission-requests", {**_remote_execution_body(), "payload": {"program": program}}
+    )
+
+    assert status == 400
+
+
+def test_remote_execution_is_refused_by_a_gateway_that_does_not_know_its_desktop(tmp_path: Path) -> None:
+    """A grant names the desktop whose commands it allows, so without one there is nothing to grant."""
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    with _running_extension(latchkey_directory, tmp_path / "permissions.json", None) as base_url:
+        status, body = _post_json(f"{base_url}/permission-requests", _remote_execution_body())
+
+    assert status == 503
+    assert LOCAL_DEVICE_ID_ENV_VAR in json.loads(body)["error"]
+
+
+def test_approve_remote_execution_folds_one_permission_into_latchkey_self_on_real_baseline(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    permissions_config_path.write_text(json.dumps(AGENT_BASELINE_PERMISSIONS.model_dump()))
+    status, body = _post_json(f"{base_url}/permission-requests", _remote_execution_body())
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+
+    status, _headers, approve_body = _http(f"{base_url}/permission-requests/approve/{request_id}", method="POST")
+
+    assert status == 200, approve_body
+    applied = json.loads(permissions_config_path.read_text())
+    self_rules = [rule for rule in applied["rules"] if "latchkey-self" in rule]
+    assert len(self_rules) == 1
+    granted = [name for name in self_rules[0]["latchkey-self"] if name.startswith(_REMOTE_EXECUTION_PREFIX)]
+    assert granted == [f"{_REMOTE_EXECUTION_PREFIX}{_LOCAL_DEVICE_ID}"]
+    assert applied["schemas"][granted[0]]["properties"]["path"] == {
+        "const": f"/minds-api-proxy/api/v1/remote-execution/{_LOCAL_DEVICE_ID}"
+    }
+    assert not list((latchkey_directory / "permission_requests" / "v3").glob(f"{request_id}*"))
+
+
+def test_approve_remote_execution_rejects_an_override_body(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _remote_execution_body())
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+
+    status, _headers, approve_body = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"permissions": ["any"]}).encode("utf-8"),
+    )
+
+    assert status == 400, approve_body
+    assert not permissions_config_path.exists()
+
+
+def _permission_names_in(config: LatchkeyPermissionsConfig) -> set[str]:
+    names = set(config.schemas)
+    for rule in config.rules:
+        for permissions in rule.values():
+            names.update(permissions)
+    return names
+
+
+def test_no_catalog_baseline_or_reconciliation_can_carry_a_remote_execution_grant() -> None:
+    """The grant is minted by its own request type and by nothing else.
+
+    The catalog is what a ``predefined`` request (and its ``any`` switch) can name,
+    the verb file is what a ``workspace`` request (and its "all workspaces")
+    can name, and the baseline is what every host starts with and is
+    reconciled up to; none of them may ever spell the prefix.
+    """
+    package_dir = _EXTENSION_PATH.parent
+    assert _REMOTE_EXECUTION_PREFIX not in (package_dir / "services.json").read_text()
+    assert _REMOTE_EXECUTION_PREFIX not in (package_dir / "workspace_permissions.json").read_text()
+    for name in _permission_names_in(AGENT_BASELINE_PERMISSIONS):
+        assert not name.startswith(_REMOTE_EXECUTION_PREFIX)
+    for name in _permission_names_in(reconcile_baseline_permissions(AGENT_BASELINE_PERMISSIONS)):
+        assert not name.startswith(_REMOTE_EXECUTION_PREFIX)
+
+
+def test_an_all_workspaces_grant_of_every_verb_never_yields_a_remote_execution_grant(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "everything, everywhere",
+            "type": "workspace",
+            "payload": {"permissions": [verb.permission for verb in WORKSPACE_VERBS], "target_workspace_id": None},
+        },
+    )
+
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    granted = [name for rule in effect["rules"] for names in rule.values() for name in names]
+    assert granted
+    assert not any(name.startswith(_REMOTE_EXECUTION_PREFIX) for name in granted)
+    assert not any(name.startswith(_REMOTE_EXECUTION_PREFIX) for name in effect["schemas"])

@@ -255,6 +255,7 @@ def run_background(
     name: str | None = None,
     is_output_accumulated: bool = True,
     stdin_bytes: bytes | None = None,
+    is_own_process_group: bool = False,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
@@ -278,6 +279,10 @@ def run_background(
 
     ``stdin_bytes`` is written to the child's standard input, which is then closed; see
     ``run_local_command_modern_version`` for the size limit that applies to it.
+
+    ``is_own_process_group`` spawns the child as the leader of its own process group and signals
+    the whole group on shutdown or timeout, so what it forked dies with it (see
+    ``run_local_command_modern_version``).
     """
     true_shutdown_event = shutdown_event if shutdown_event is not None else ShutdownEvent.build_root()
     process = process_class(
@@ -304,6 +309,7 @@ def run_background(
             name=name,
             is_output_accumulated=is_output_accumulated,
             stdin_bytes=stdin_bytes,
+            is_own_process_group=is_own_process_group,
         )
     )
     return process

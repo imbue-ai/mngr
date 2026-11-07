@@ -8,7 +8,8 @@
  *       with the fields:
  *         - ``agent_id``   (string, required)
  *         - ``rationale``  (string, required)
- *         - ``type``       (one of "predefined" | "file-sharing" | "workspace")
+ *         - ``type``       (one of "predefined" | "file-sharing" | "workspace" |
+ *                           "accounts" | "custom-service" | "remote-execution")
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...],
@@ -64,17 +65,12 @@
  *       letters, digits and hyphens; no scheme, port, path, underscore or
  *       wildcard -- and not the gateway's own address. ``scheme`` is
  *       required; the grant pins it along with the domain. ``login`` is
- *       optional: present, its ``url``, ``flow`` (``cookie-capture``,
- *       ``token-capture`` or ``mcp``) and ``flow_params`` are ``latchkey services
+ *       optional: present, its ``url``, ``flow`` (``cookie-capture`` or
+ *       ``token-capture``) and ``flow_params`` are ``latchkey services
  *       register``'s ``--login-url``, ``--login-flow`` and
  *       ``--login-flow-params`` (that flow's parameters, keyed as latchkey
- *       keys them; unknown keys are refused, and for the capture flows every
- *       URL among them must be on the domain, a subdomain or a parent of it,
- *       either scheme. For ``mcp`` the ``mcpEndpoint``, where the tokens are
- *       used, must be on the ``scheme://domain`` origin itself, and the OAuth
- *       endpoints are only checked to be URLs here: the desktop verifies them
- *       against the metadata that origin publishes when the user approves);
- *       absent, the
+ *       keys them; unknown keys are refused, and every URL among them must
+ *       be on the domain or a subdomain of it, either scheme); absent, the
  *       service is registered with a base URL alone and the user supplies a
  *       token through the dialog's credential form. ``header`` is optional and
  *       only meaningful without ``login`` (a login flow supplies its own
@@ -104,6 +100,21 @@
  *       merge (no ``anyOf``). The approve override body
  *       (``{permissions, target_workspace_id}``) recomputes the effect
  *       from the user's dialog choices (verb subset + all-vs-selected).
+ *       For ``type=="remote-execution"`` the payload is ``{}`` or
+ *       ``{program}``: the grant lets every agent of the asking host run
+ *       commands on the desktop this gateway runs on, as the user, through
+ *       the desktop's ``POST /api/v1/remote-execution/<device id>`` route.
+ *       With ``program`` (a bare name such as ``rsync``, or a ``~``-rooted
+ *       or absolute path) only commands whose first argv element is exactly
+ *       that string are admitted; the grant pins the JSON body's
+ *       ``command[0]`` to it. Like file-sharing it is minted for this
+ *       desktop's own device id, so a desktop can never grant commands on
+ *       another; a workspace addresses the desktop it wants with
+ *       ``X-Latchkey-Device``. The effect is one fixed permission under
+ *       ``latchkey-self`` whose path is a ``const``, so it matches that one
+ *       route and nothing under a wider prefix. It takes no approve
+ *       override: there is nothing to narrow. Without a
+ *       device id the gateway refuses the request with HTTP 503.
  *
  *       The body may also carry a ``request_id`` of the caller's choosing
  *       (filename-safe, see ``validateRequestId``), which is how one
@@ -251,12 +262,22 @@ const REQUEST_TYPE_ACCOUNTS = 'accounts';
 // is written by the desktop once the sign-in has produced an account, so the
 // effect is always empty.
 const REQUEST_TYPE_CUSTOM_SERVICE = 'custom-service';
+// ``remote-execution`` lets every agent of the asking host run commands on the
+// desktop this gateway runs on, as the user, through the desktop's
+// ``POST /api/v1/remote-execution/<device id>`` route, either any command or
+// (with ``payload.program``) one program. Like file-sharing it is pinned to this
+// desktop's own device id; like accounts it takes no approve override. It is a
+// request type of its own, rather than one more ``minds-workspaces`` verb, so
+// that no other dialog's "all" switch can ever carry it: the only way to grant
+// it is the one dialog built to warn about it.
+const REQUEST_TYPE_REMOTE_EXECUTION = 'remote-execution';
 const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_PREDEFINED,
   REQUEST_TYPE_FILE_SHARING,
   REQUEST_TYPE_WORKSPACE,
   REQUEST_TYPE_ACCOUNTS,
   REQUEST_TYPE_CUSTOM_SERVICE,
+  REQUEST_TYPE_REMOTE_EXECUTION,
 ]);
 
 // The validation rules below mirror ``imbue/mngr_latchkey/custom_services.py``,
@@ -475,6 +496,21 @@ const VALID_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const ACCOUNTS_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/accounts';
 const ACCOUNTS_SCOPE_NAME = 'latchkey-self';
 const ACCOUNTS_PERMISSION_NAME = 'minds-accounts-read';
+
+// The remote-execution grant: one fixed permission per desktop (or per desktop
+// and program) under the pre-existing ``latchkey-self`` scope, whose path is the
+// exact route of that desktop (a ``const``, never a prefix pattern). The name
+// and the program grammar mirror ``imbue/mngr_latchkey/remote_execution.py``,
+// which reads these names back: ``remote-execution-<device id>`` for any
+// command, ``remote-execution-<device id>:<program>`` for one program.
+const REMOTE_EXECUTION_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/remote-execution';
+const REMOTE_EXECUTION_SCOPE_NAME = 'latchkey-self';
+const REMOTE_EXECUTION_PERMISSION_PREFIX = 'remote-execution-';
+const REMOTE_EXECUTION_PROGRAM_SEPARATOR = ':';
+const REMOTE_EXECUTION_PROGRAM_MAX_LENGTH = 512;
+// A bare name (no slash, not starting with ``~`` or ``-``) or a path rooted at
+// ``/`` or ``~/``; no surrounding whitespace and no control characters anywhere.
+const REMOTE_EXECUTION_PROGRAM_PATTERN = /^(?:\/|~\/)?[^\x00-\x20\x7f/~-][^\x00-\x1f\x7f]*$/;
 
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
@@ -1044,36 +1080,25 @@ function validateCustomServiceDomain(rawDomain) {
 }
 
 /**
- * Whether ``host`` is ``domain`` itself, a subdomain of it, or a parent of it
- * with at least two labels.
+ * Whether ``host`` is ``domain`` itself or a subdomain of it.
  *
  * Deliberately strict, and worth knowing the tradeoff. Latchkey's cookie flow
  * anticipates a sign-in that *starts* on another host, so a looser rule would be
  * usable -- but the browser destination is then a domain the dialog never named,
  * and a user who clicks Approve expecting a login page is exactly who should not
- * be sent somewhere unexpected. And for the ``mcp`` flow the token endpoint
- * receives the authorization code, so one run by another party than the
- * authorization endpoint steals the sign-in outright. Keeping every URL with
- * the approved party makes what the dialog says and where the credentials go
- * provably the same.
+ * be sent somewhere unexpected. Restricting it to the approved subtree makes
+ * what the dialog says and where the browser goes provably the same.
  *
- * Parents count as the approved party: a service often signs in at the domain
- * it hangs off (``mcp.example.com`` at ``example.com``), and whoever runs the
- * parent delegated the child. The two-label floor keeps a bare top-level
- * domain out. The cost is that a service at ``api.example.com`` whose login
- * lives at ``accounts.example.com`` cannot use the browser flow: the agent
- * must either request ``example.com`` (a broader grant) or request no login at
- * all and let the user paste a token, which still works. Widening to siblings
- * correctly needs a public-suffix list -- "the registrable parent" cannot be
- * had by counting labels, since that would read ``co.uk`` as a shared parent
- * -- so it is left strict rather than approximated. Mirrored by
- * ``_is_related_domain`` in custom_services.py.
+ * The cost is that a service at ``api.example.com`` whose login lives at
+ * ``accounts.example.com`` cannot use the browser flow: the agent must either
+ * request ``example.com`` (a broader grant) or request no login at all and let
+ * the user paste a token, which still works. Widening this correctly needs a
+ * public-suffix list -- "the registrable parent" cannot be had by counting
+ * labels, since that would read ``co.uk`` as a parent domain -- so it is left
+ * strict rather than approximated.
  */
-function isRelatedDomain(host, domain) {
-  if (host === domain || host.endsWith(`.${domain}`)) {
-    return true;
-  }
-  return domain.endsWith(`.${host}`) && host.includes('.');
+function isWithinDomain(host, domain) {
+  return host === domain || host.endsWith(`.${domain}`);
 }
 
 /**
@@ -1090,12 +1115,13 @@ function validateCustomServiceScheme(rawScheme) {
 }
 
 /**
- * Require ``rawUrl`` to be an http or https URL and return it parsed. ``field``
- * names it in messages (``url``, ``flow_params.cookieUrl``). The scheme is the
- * user's business -- the dialog names where the browser will go -- so either
- * is accepted.
+ * Require ``rawUrl`` to be an http or https URL on ``domain`` or a subdomain of
+ * it. ``field`` names it in messages (``url``, ``flow_params.cookieUrl``). The scheme is the user's business -- the
+ * dialog names where the browser will go -- so either is accepted; the domain
+ * check is what keeps a sign-in, and the credentials it captures, on the
+ * service being approved.
  */
-function parseCustomServiceHttpUrl(rawUrl, field) {
+function validateCustomServiceUrl(rawUrl, field, domain) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
     throw new InvalidRequestBodyError(`payload.login.'${field}' is required and must be a non-empty string.`);
   }
@@ -1108,19 +1134,9 @@ function parseCustomServiceHttpUrl(rawUrl, field) {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new InvalidRequestBodyError(`payload.login.'${field}' must be an http or https URL. Got ${rawUrl}.`);
   }
-  return parsed;
-}
-
-/**
- * Require ``rawUrl`` to be an http or https URL on ``domain``, a subdomain or a
- * parent of it. The domain check is what keeps a sign-in, and the credentials
- * it captures, with the party being approved.
- */
-function validateCustomServiceUrl(rawUrl, field, domain) {
-  const parsed = parseCustomServiceHttpUrl(rawUrl, field);
-  if (!isRelatedDomain(parsed.hostname.toLowerCase(), domain)) {
+  if (!isWithinDomain(parsed.hostname.toLowerCase(), domain)) {
     throw new InvalidRequestBodyError(
-      `payload.login.'${field}' must be on ${domain}, a subdomain or a parent domain of it. Got ${rawUrl}.`,
+      `payload.login.'${field}' must be on ${domain} or a subdomain of it. Got ${rawUrl}.`,
     );
   }
   return rawUrl;
@@ -1212,59 +1228,9 @@ function validateTokenCaptureParams(params, domain) {
   }
 }
 
-/**
- * Require ``rawUrl`` to be on the origin the service is registered under,
- * ``scheme://domain``. Stricter than ``validateCustomServiceUrl``: latchkey
- * only injects a service's credentials into requests that start with its
- * ``baseApiUrl``, which is always the bare origin here, so a URL on a
- * subdomain, the other scheme or an explicit port would register a sign-in
- * whose credentials no request could ever use.
- */
-function validateCustomServiceOriginUrl(rawUrl, field, domain, scheme) {
-  const parsed = parseCustomServiceHttpUrl(rawUrl, field);
-  if (parsed.protocol !== `${scheme}:` || parsed.hostname.toLowerCase() !== domain || parsed.port !== '') {
-    throw new InvalidRequestBodyError(
-      `payload.login.'${field}' must be on the origin ${scheme}://${domain} itself. Got ${rawUrl}.`,
-    );
-  }
-  return rawUrl;
-}
-
-// The OAuth endpoints are not held to the domain here: the desktop checks them
-// against the authorization server metadata the MCP endpoint's origin publishes
-// at approval time (``mcp_metadata`` in mngr_latchkey), which is what lets a
-// server sign in through an authorization server on another domain, and falls
-// back to the domain rule only for a server that publishes none. The gateway
-// cannot do that walk before the user has even seen the request, so it checks
-// the shape and the one thing it can know: that the MCP endpoint, where the
-// tokens are used, is the approved origin.
-function validateMcpParams(params, domain, scheme) {
-  ensureNoExtraneousFields(
-    'payload.login.flow_params ',
-    ['mcpEndpoint', 'tokenEndpoint', 'registrationEndpoint', 'scopes', 'issuesRefreshTokens'],
-    params,
-  );
-  validateCustomServiceOriginUrl(params.mcpEndpoint, 'flow_params.mcpEndpoint', domain, scheme);
-  parseCustomServiceHttpUrl(params.tokenEndpoint, 'flow_params.tokenEndpoint');
-  parseCustomServiceHttpUrl(params.registrationEndpoint, 'flow_params.registrationEndpoint');
-  if (params.scopes !== undefined) {
-    ensureStringArray('payload.login.flow_params.', 'scopes', params.scopes);
-    if (params.scopes.some((scope) => scope.length === 0)) {
-      throw new InvalidRequestBodyError("payload.login.'flow_params.scopes' must not contain an empty scope.");
-    }
-  }
-  if (params.issuesRefreshTokens !== undefined && typeof params.issuesRefreshTokens !== 'boolean') {
-    throw new InvalidRequestBodyError("payload.login.'flow_params.issuesRefreshTokens' must be a boolean.");
-  }
-}
-
-// Per flow: its parameter validator, and whether its login URL is held to the
-// domain here (the capture flows) or verified by the desktop at approval time
-// against what the MCP server publishes (``mcp``, see ``validateMcpParams``).
 const CUSTOM_SERVICE_LOGIN_FLOWS = new Map([
-  ['cookie-capture', { validateParams: validateCookieCaptureParams, isLoginUrlHeldToDomain: true }],
-  ['token-capture', { validateParams: validateTokenCaptureParams, isLoginUrlHeldToDomain: true }],
-  ['mcp', { validateParams: validateMcpParams, isLoginUrlHeldToDomain: false }],
+  ['cookie-capture', validateCookieCaptureParams],
+  ['token-capture', validateTokenCaptureParams],
 ]);
 
 /**
@@ -1279,7 +1245,7 @@ const CUSTOM_SERVICE_LOGIN_FLOWS = new Map([
  * required -- a flow needs a URL and parameters -- and what passes here is
  * registered exactly as sent.
  */
-function validateCustomServiceLogin(login, domain, scheme) {
+function validateCustomServiceLogin(login, domain) {
   if (login === undefined || login === null) {
     return null;
   }
@@ -1293,18 +1259,13 @@ function validateCustomServiceLogin(login, domain, scheme) {
       + `Got ${JSON.stringify(login.flow)}.`,
     );
   }
-  const flow = CUSTOM_SERVICE_LOGIN_FLOWS.get(login.flow);
-  if (flow.isLoginUrlHeldToDomain) {
-    validateCustomServiceUrl(login.url, 'url', domain);
-  } else {
-    parseCustomServiceHttpUrl(login.url, 'url');
-  }
+  validateCustomServiceUrl(login.url, 'url', domain);
   if (typeof login.flow_params !== 'object' || login.flow_params === null || Array.isArray(login.flow_params)) {
     throw new InvalidRequestBodyError(
       `payload.login.'flow_params' is required for the ${login.flow} login flow and must be a JSON object.`,
     );
   }
-  flow.validateParams(login.flow_params, domain, scheme);
+  CUSTOM_SERVICE_LOGIN_FLOWS.get(login.flow)(login.flow_params, domain);
   return { url: login.url, flow: login.flow, flow_params: { ...login.flow_params } };
 }
 
@@ -1325,7 +1286,7 @@ function validateCustomServicePayload(payload) {
   ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login', 'header', 'credential_instructions'], payload);
   const domain = validateCustomServiceDomain(payload.domain);
   const scheme = validateCustomServiceScheme(payload.scheme);
-  const login = validateCustomServiceLogin(payload.login, domain, scheme);
+  const login = validateCustomServiceLogin(payload.login, domain);
   let header = null;
   if (payload.header !== undefined && payload.header !== null) {
     if (login !== null) {
@@ -1421,6 +1382,42 @@ function validateAccountsPayload(payload) {
   }
   ensureNoExtraneousFields('payload ', [], payload);
   return {};
+}
+
+/**
+ * Whether ``program`` is something a remote-execution grant may name: a bare
+ * name the desktop resolves on the user's PATH, or a ``~``-rooted or absolute
+ * path. A relative path, surrounding whitespace, or a control character is not.
+ */
+function isValidRemoteExecutionProgram(program) {
+  if (typeof program !== 'string' || program.length === 0) return false;
+  if (program.length > REMOTE_EXECUTION_PROGRAM_MAX_LENGTH) return false;
+  if (program !== program.trim()) return false;
+  if (!REMOTE_EXECUTION_PROGRAM_PATTERN.test(program)) return false;
+  return !program.includes('/') || program.startsWith('/') || program.startsWith('~/');
+}
+
+/**
+ * Validate the payload for a ``remote-execution`` permission request: ``{}``
+ * for any command on the desktop this gateway runs on, or ``{program}`` for
+ * one program there. Any other field is rejected.
+ */
+function validateRemoteExecutionPayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'remote-execution'.");
+  }
+  ensureNoExtraneousFields('payload ', ['program'], payload);
+  if (payload.program === undefined || payload.program === null) {
+    return {};
+  }
+  if (!isValidRemoteExecutionProgram(payload.program)) {
+    throw new InvalidRequestBodyError(
+      "payload.'program' must be a bare program name or a path starting with '/' or '~/', "
+      + `at most ${REMOTE_EXECUTION_PROGRAM_MAX_LENGTH} characters, without surrounding whitespace `
+      + 'or control characters.',
+    );
+  }
+  return { program: payload.program };
 }
 
 /**
@@ -1555,6 +1552,9 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_CUSTOM_SERVICE:
       payload = validateCustomServicePayload(parsed.payload);
       break;
+    case REQUEST_TYPE_REMOTE_EXECUTION:
+      payload = validateRemoteExecutionPayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -1603,6 +1603,8 @@ function computeEffect(type, payload) {
       // and the desktop then writes the grant through ``/permissions/rules``.
       // The empty effect means a bare approve only drops the record.
       return {};
+    case REQUEST_TYPE_REMOTE_EXECUTION:
+      return computeRemoteExecutionEffect(requireLocalDeviceId(), payload.program ?? null);
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -1802,6 +1804,42 @@ function computeAccountsEffect() {
       },
     },
     rules: [{ [ACCOUNTS_SCOPE_NAME]: [ACCOUNTS_PERMISSION_NAME] }],
+  };
+}
+
+/**
+ * Compute the ``effect`` for a ``remote-execution`` request: one permission
+ * named for this desktop (and, with ``program``, for that one program),
+ * matching ``POST`` on exactly this desktop's remote-execution route, attached
+ * to the pre-existing ``latchkey-self`` scope. The path is a ``const`` rather
+ * than a pattern so the grant can never widen to a sibling route or to another
+ * desktop's. A program grant additionally requires the JSON body's
+ * ``command[0]`` to be exactly the program: detent exposes a JSON body as
+ * ``parsedBody``, and requiring it means a body the gateway cannot parse is
+ * refused rather than let through.
+ */
+function computeRemoteExecutionEffect(deviceId, program) {
+  const permissionName = program === null
+    ? `${REMOTE_EXECUTION_PERMISSION_PREFIX}${deviceId}`
+    : `${REMOTE_EXECUTION_PERMISSION_PREFIX}${deviceId}${REMOTE_EXECUTION_PROGRAM_SEPARATOR}${program}`;
+  const properties = {
+    method: { const: 'POST' },
+    path: { const: `${REMOTE_EXECUTION_PROXY_PATH_PREFIX}/${deviceId}` },
+  };
+  const required = ['method', 'path'];
+  if (program !== null) {
+    properties.parsedBody = {
+      type: 'object',
+      properties: {
+        command: { type: 'array', minItems: 1, prefixItems: [{ const: program }] },
+      },
+      required: ['command'],
+    };
+    required.push('parsedBody');
+  }
+  return {
+    schemas: { [permissionName]: { properties, required } },
+    rules: [{ [REMOTE_EXECUTION_SCOPE_NAME]: [permissionName] }],
   };
 }
 
@@ -2564,11 +2602,17 @@ function resolveEffectForApproval(requestRecord, override) {
       ensureNoExtraneousFields('approve body ', [], override);
       return requestRecord.effect;
     }
+    case REQUEST_TYPE_REMOTE_EXECUTION: {
+      // The grant is fixed at request time (one desktop, any command or one
+      // program): there is nothing to narrow or widen.
+      ensureNoExtraneousFields('approve body ', [], override);
+      return requestRecord.effect;
+    }
     default:
       throw new InvalidRequestBodyError(
         `a body override is only valid for '${REQUEST_TYPE_PREDEFINED}', `
-        + `'${REQUEST_TYPE_FILE_SHARING}', '${REQUEST_TYPE_WORKSPACE}' or `
-        + `'${REQUEST_TYPE_CUSTOM_SERVICE}' requests; request `
+        + `'${REQUEST_TYPE_FILE_SHARING}', '${REQUEST_TYPE_WORKSPACE}', `
+        + `'${REQUEST_TYPE_CUSTOM_SERVICE}' or '${REQUEST_TYPE_REMOTE_EXECUTION}' requests; request `
         + `${requestRecord.request_id} is '${requestRecord.request_type}'.`,
       );
   }

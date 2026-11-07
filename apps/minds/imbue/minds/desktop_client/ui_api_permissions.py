@@ -87,9 +87,11 @@ from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequ
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import RemoteExecutionRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import is_agent_command_execution_allowed
 from imbue.minds.desktop_client.latchkey.machine_latchkey import is_machine_store_of_its_own
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
@@ -226,6 +228,8 @@ def _waiting_request_title_and_service(
         return "Other workspaces", req.rationale, ""
     if isinstance(payload, AccountsRequestPayload):
         return "Device accounts", req.rationale, ""
+    if isinstance(payload, RemoteExecutionRequestPayload):
+        return "This computer", req.rationale, ""
     if isinstance(payload, CustomServiceRequestPayload):
         # The domain, like everywhere else a custom service is named. There is
         # no brand mark for one -- it is a connection to a domain, not a vendor
@@ -426,6 +430,7 @@ def _unavailable_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
         workspace_toggles=(),
         waiting_requests=_build_waiting_requests(agent_id),
         permissions_unavailable=True,
+        is_remote_execution_enabled=is_agent_command_execution_allowed(),
         is_sync_supported=get_state().folder_sync_manager is not None,
         # No connection renders from this payload, so nothing reads it; the
         # shared reading is the one that overstates rather than understates what
@@ -463,6 +468,10 @@ def build_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
         workspace_toggles=tuple(
             UiSelfPermissionToggle.model_validate(toggle.model_dump()) for toggle in view.workspace_toggles
         ),
+        remote_execution_toggles=tuple(
+            UiSelfPermissionToggle.model_validate(toggle.model_dump()) for toggle in view.remote_execution_toggles
+        ),
+        is_remote_execution_enabled=is_agent_command_execution_allowed(),
         desktops=tuple(UiWorkspaceDesktop.model_validate(desktop.model_dump()) for desktop in view.desktops),
         waiting_requests=_build_waiting_requests(agent_id),
         permissions_unavailable=False,
@@ -592,7 +601,7 @@ def _handle_connector_toggle(agent_id: str) -> Response:
 
 
 def _handle_self_toggle(agent_id: str) -> Response:
-    """POST .../permissions/self-toggle: flip one Local files / Other workspaces permission."""
+    """POST .../permissions/self-toggle: flip one Local files / Other workspaces permission, or revoke a This computer one."""
     prelude = _write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude

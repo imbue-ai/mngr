@@ -45,7 +45,16 @@ def test_the_account_document_key_names_are_pinned() -> None:
         "sign_in_browser",
         "report_unexpected_errors",
         "notification_style",
+        "allow_agent_command_execution",
     }
+
+
+@pytest.mark.witnesses("remote-execution.switch-off-by-default")
+def test_agent_command_execution_is_install_keyed_and_off_by_default() -> None:
+    """The switch is one device's choice: an account-keyed record would sync it to every device."""
+    declaration = next(d for d in SETTING_DECLARATIONS if d.key == "allow_agent_command_execution")
+    assert declaration.scope is SettingScope.INSTALL
+    assert InstallSettings().allow_agent_command_execution is False
 
 
 def test_the_carriers_round_trip_unknown_keys() -> None:

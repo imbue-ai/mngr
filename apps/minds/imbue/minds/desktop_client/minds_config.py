@@ -495,6 +495,35 @@ class MindsConfig(MutableModel):
             data[key] = value
             self._write_raw(data)
 
+    def _set_bool_if_version_matches(
+        self,
+        key: str,
+        default: bool,
+        expected_version: str,
+        compute_version: Callable[[bool], str],
+        enabled: bool,
+    ) -> str | None:
+        """Compare-and-swap a top-level boolean setting under one lock hold.
+
+        Checks ``expected_version`` against the version ``compute_version``
+        derives from the flag's CURRENT stored value, and only then writes --
+        both the check and the write inside one lock acquisition. Unlike a
+        separate get and set (two lock acquisitions with a gap between them),
+        this closes the window where two concurrent writers starting from the
+        same version could both pass the check and the second would silently
+        clobber the first with no conflict reported to either. Returns the new
+        version, or None on a version mismatch (the caller should treat this as
+        a conflict).
+        """
+        with self._lock:
+            data = self._read_raw()
+            current_enabled = _bool_from_raw(data, key, default)
+            if compute_version(current_enabled) != expected_version:
+                return None
+            data[key] = enabled
+            self._write_raw(data)
+            return compute_version(enabled)
+
     def get_error_reporting_consent_given(self) -> bool:
         """Return whether the user has seen and answered the error-reporting consent screen. Default: False.
 
@@ -558,25 +587,37 @@ class MindsConfig(MutableModel):
     ) -> str | None:
         """Atomically compare-and-swap the error-reporting flag under one lock hold.
 
-        Checks ``expected_version`` against the version ``compute_version``
-        derives from the flag's CURRENT stored value, and only then writes --
-        both the check and the write inside one lock acquisition. Unlike
-        calling :meth:`get_report_unexpected_errors` and
-        :meth:`set_report_unexpected_errors` separately (two lock
-        acquisitions with a gap between them), this closes the window where
-        two concurrent writers starting from the same version could both pass
-        the check and the second would silently clobber the first with no
-        conflict reported to either. Returns the new version, or None on a
-        version mismatch (the caller should treat this as a conflict).
+        Returns the new version, or None on a version mismatch (a conflict); see
+        :meth:`_set_bool_if_version_matches` for why the check and the write
+        share one lock acquisition.
         """
-        with self._lock:
-            data = self._read_raw()
-            current_enabled = _bool_from_raw(data, "report_unexpected_errors", True)
-            if compute_version(current_enabled) != expected_version:
-                return None
-            data["report_unexpected_errors"] = enabled
-            self._write_raw(data)
-            return compute_version(enabled)
+        return self._set_bool_if_version_matches(
+            "report_unexpected_errors", True, expected_version, compute_version, enabled
+        )
+
+    def get_allow_agent_command_execution(self) -> bool:
+        """Return whether an approved workspace's agents may run commands on this device. Default: False.
+
+        The master switch behind the remote-execution route: the route re-reads it on
+        every call, so turning it off stops every workspace at once whatever grants
+        their hosts hold. Install-keyed and never synced, so it is one device's choice.
+        """
+        return self._get_bool("allow_agent_command_execution", default=False)
+
+    def set_allow_agent_command_execution_if_version_matches(
+        self,
+        expected_version: str,
+        compute_version: Callable[[bool], str],
+        enabled: bool,
+    ) -> str | None:
+        """Atomically compare-and-swap the remote-execution switch under one lock hold.
+
+        The same contract as :meth:`set_report_unexpected_errors_if_version_matches`:
+        a mismatch returns None without writing.
+        """
+        return self._set_bool_if_version_matches(
+            "allow_agent_command_execution", False, expected_version, compute_version, enabled
+        )
 
     def get_notification_style_with_choice(self) -> tuple[NotificationStyle, bool]:
         """Read the delivery style and whether this file records a notification choice, in one snapshot.

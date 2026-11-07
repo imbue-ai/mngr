@@ -333,49 +333,17 @@ credentials sent encrypted and in the clear. The grant pins both the domain and
 the scheme, so it covers exactly the origin the dialog showed.
 
 A browser sign-in is a `login` object described the way `latchkey services
-register` takes it: `url`, `flow` (`cookie-capture`, `token-capture` or `mcp`)
-and `flow_params`, the flow's own parameters keyed as latchkey keys them
-(`cookieKeys`/`cookieUrl`; `tokenUrl`/`tokenField`/`header`;
-`mcpEndpoint`/`tokenEndpoint`/`registrationEndpoint`/`scopes`/`issuesRefreshTokens`);
-all three are required inside it, and the object is omitted for a service with
-no browser sign-in. It is not passed through blind: the gateway and the
+register` takes it: `url`, `flow` (`cookie-capture` or `token-capture`) and
+`flow_params`, the flow's own parameters keyed as latchkey keys them
+(`cookieKeys`/`cookieUrl`, `tokenUrl`/`tokenField`/`header`); all three are
+required inside it, and the object is omitted for a service with no browser
+sign-in. It is not passed through blind: the gateway and the
 desktop both deserialize the parameters against the flow's schema and refuse
-an unknown key. For the capture flows, every URL -- the login page,
-`cookieUrl`, `tokenUrl` -- may use either scheme but must be on the approved
-domain, a subdomain of it, or a parent domain of it (with at least two labels,
-so never a bare top-level domain), so where the browser goes and where the
-captured credentials apply is always the party the dialog named. Parents are
-allowed because a service often signs in at the domain it hangs off; siblings
-(`api.example.com` for `mcp.example.com`) are not, since telling one from an
-unrelated domain would need a public-suffix list. What passes is registered
-exactly as the agent sent it.
-
-The `mcp` flow is held to different rules, because its endpoints mean
-different things. Its `mcpEndpoint`, where the stored tokens are *used*, must
-be on the approved origin itself (same scheme, exactly that host, no port):
-Latchkey only injects a custom service's credentials into requests under its
-base URL, which is always that bare origin, so an endpoint anywhere else would
-be signed in to but never usable. Its OAuth endpoints -- the login `url`, which
-is the authorization endpoint, plus `tokenEndpoint` and `registrationEndpoint`
--- are not held to any domain, because real MCP servers routinely keep their
-authorization server elsewhere (Trello's is Atlassian's; Supabase's is at
-`api.supabase.com`). They need checking all the same: the token endpoint
-receives the authorization code together with its PKCE verifier, so an agent
-naming the real sign-in page with a token endpoint of its own would be handed
-the user's tokens, and the dialog shows only the login page. So the desktop
-checks them at approval time against what the server publishes
-(`imbue.mngr_latchkey.mcp_metadata`): it reads the MCP endpoint's
-protected-resource metadata (RFC 9728, at `/.well-known/oauth-protected-resource`,
-path-aware form first) for its authorization servers, then each server's
-metadata (RFC 8414 or OpenID Connect discovery) for its endpoints, and the
-request passes only if some published server has exactly the three it names.
-Trust is anchored at the origin the user approves. A server that publishes
-nothing gets the capture flows' domain rule instead. A request the metadata
-contradicts, or that the domain rule refuses, is **denied** at Approve with a
-message naming the published endpoints, since nothing the user can do makes
-it right; the agent asks again with the corrected sign-in. The gateway checks
-only the shape of these three at request time, since it cannot make that walk
-before the user has even seen the request.
+an unknown key, and every URL among them -- the login page, `cookieUrl`,
+`tokenUrl` -- may use either scheme but must be on the approved domain or a
+subdomain of it, so where the browser goes and where the captured credentials
+apply is always what the dialog named. What passes is registered exactly as
+the agent sent it.
 
 A service with no browser sign-in may instead name the header the pasted token
 is sent as: `header`, a header line with `{token}` where the value goes
@@ -847,6 +815,60 @@ by an agent.
 on the same machine, and *only* those: the user's computer keeps one store for
 its local workspaces, and each remote workspace's VPS has one of its own (see
 [Per-machine credentials](#per-machine-credentials) below).
+
+## Running commands on the user's computer
+
+An agent in an approved workspace can run a command on one of the user's
+computers, as the user, through `POST /api/v1/remote-execution/<device_id>`
+(reached as `/minds-api-proxy/api/v1/remote-execution/<device_id>` through the
+gateway, with `X-Latchkey-Device` naming the same device). It is the most
+dangerous grant a workspace can hold, so three gates stand in front of it, and
+every one has to be open:
+
+1. **This device's switch.** Settings > This computer, "Allow agents to run
+   commands on this computer": an install-keyed setting in `config.toml`, off
+   by default, never synced to the account, so enabling it on one device never
+   enables it on another. Turning it on opens a warning the user has to
+   acknowledge before anything is written; turning it off writes at once and
+   leaves every grant in place, inert.
+2. **A per-workspace grant of its own kind.** The agent files a
+   `remote-execution` request addressed to one device, for any command
+   (payload `{}`) or for one program (payload `{"program": "..."}`: a bare
+   name such as `rsync`, or a `~`-rooted or absolute path the agent already
+   knows, such as a script it wrote through file sharing), and the user
+   approves it in the request popup, whose dialog carries the warning and
+   offers no Approve while the switch is off. For a program the dialog shows
+   the file it resolves to on this computer right now, through the user's
+   login-shell PATH, or that it is not there yet (approving anyway is fine; the
+   grant admits it once it exists); a shell or language runtime gets the
+   any-command warning. The gateway mints one permission,
+   `remote-execution-<device id>` or `remote-execution-<device id>:<program>`,
+   under the `latchkey-self` rule, pinned by a `const` path to that one
+   device's route and, for a program, to the JSON body's `command[0]`
+   (detent's `parsedBody`), so the restriction holds before the request
+   reaches the desktop. The permission lives nowhere else: not in the services
+   catalog (so no `any` switch reaches it), not in the cross-workspace verb
+   file (so no "all workspaces" grant reaches it), and not in the agent
+   baseline.
+3. **The route re-reads the switch on every call**, refuses a request naming
+   any other device (404), and refuses the browser session cookie outright:
+   the gateway bearer and the same-machine socket are the only ways in.
+
+The body names an argv list (`{"command": ["bash", "-lc", "..."], "cwd"?,
+"timeout_seconds"?}`); its first element is resolved on the user's login-shell
+PATH when bare, expanded when `~`-rooted, and must be exactly the program a
+program grant names. The answer is an `application/x-ndjson` stream in
+the owner-exec `/run` shape: `stdout` and `stderr` lines as they arrive, a
+`keepalive` while the command is silent, and one final `exit` line. Nothing
+is capped but time; a dropped connection, the timeout, or the desktop shutting
+down kills the command and everything it spawned. Every command leaves a
+`command_started` and a `command_finished` record under
+`<data_dir>/events/remote_execution/events.jsonl` (what ran and how it ended,
+never its output).
+
+The workspace options panel's Permissions tab lists the grants under **This
+computer**, one row per device and one per program, and can only turn them
+off: granting goes through the request flow alone. The design is `specs/remote-execution/spec.md`.
 
 ## Cross-workspace management API permissions
 

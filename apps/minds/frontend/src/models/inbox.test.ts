@@ -1564,3 +1564,30 @@ describe("the Chrome sign-in import offer", () => {
     expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual([]);
   });
 });
+
+describe("a remote-execution detail", () => {
+  const detail = {
+    kind: "remote_execution" as const,
+    request_id: "evt-rx",
+    agent_id: "agent-1",
+    ws_name: "alpha",
+    rationale: "install the CLI",
+    device_hostname: "kims-laptop",
+    program: null,
+    resolved_program_path: null,
+    is_program_interpreter: false,
+    is_setting_enabled: false,
+    is_workspace_shared: false,
+  };
+
+  it("allows Approve only while this device's switch is on, and submits no parameters", () => {
+    const model = new InboxModel();
+    model.selectedId = detail.request_id;
+    model.detail = detail;
+    expect(model.isApproveAllowed()).toBe(false);
+
+    model.detail = { ...detail, is_setting_enabled: true };
+
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+});

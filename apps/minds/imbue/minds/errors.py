@@ -109,6 +109,15 @@ class InvalidJsonBodyError(MindError, ValueError):
     ...
 
 
+class RemoteCommandRequestError(MindError, ValueError):
+    """Raised when a remote-execution request body cannot be run as asked (a working directory that is not one)."""
+
+    def __init__(self, message: str, code: str, field: str) -> None:
+        self.code = code
+        self.field = field
+        super().__init__(message)
+
+
 class MindsConfigError(MindError):
     """Raised when Imbue Studio config cannot be parsed or validated."""
 
