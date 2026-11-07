@@ -24,6 +24,8 @@ from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
+from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
 from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
@@ -74,6 +76,24 @@ def fetch_default_workspace_template_file(repo_relative_path: str) -> str | None
     except (ValueError, UnicodeDecodeError) as e:
         logger.trace("base64/utf-8 decode of {} failed: {}", url, e)
         return None
+
+
+def stacked_create_template_published_ports(
+    settings: Mapping[str, Any], template_names: Sequence[str]
+) -> tuple[PublishedPortDeclaration, ...]:
+    """The ports a create stacking ``template_names`` (in order) declares, read from a parsed ``.mngr/settings.toml``.
+
+    Resolved the way mngr reads the stack: each template's ``publish`` replaces the
+    list so far and its ``publish__extend`` extends it. Raises
+    InvalidPublishedPortError for a malformed or duplicated declaration.
+    """
+    create_templates = settings.get("create_templates", {})
+    declared: list[str] = []
+    for template_name in template_names:
+        template = create_templates.get(template_name, {})
+        declared = [str(value) for value in template.get("publish", declared)]
+        declared.extend(str(value) for value in template.get("publish__extend", ()))
+    return parse_published_port_declarations(declared)
 
 
 # The mngr profile id ``stub_mngr_host_dir`` activates.

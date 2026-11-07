@@ -65,6 +65,7 @@ from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
 from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.mngr_settings.provider_blocks import CLOUD_CONNECTION_DOCKER_RUNTIME
+from imbue.minds.mngr_settings.provider_blocks import CLOUD_CONNECTION_FIREWALL_PUBLISHED_PORTS
 from imbue.minds.mngr_settings.provider_blocks import CLOUD_CONNECTION_INSTALL_GVISOR_RUNTIME
 from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_DEFAULT_START_ARGS
@@ -96,6 +97,12 @@ def _cloud_connection_hardening_knobs() -> dict[str, object]:
         "install_gvisor_runtime": CLOUD_CONNECTION_INSTALL_GVISOR_RUNTIME,
         "docker_runtime": CLOUD_CONNECTION_DOCKER_RUNTIME,
     }
+
+
+@pure
+def _cloud_vm_firewall_knobs() -> dict[str, object]:
+    """The published ports the template's cloud-VM create templates declare, which each cloud's ``prepare`` opens and mngr_vps checks a create against."""
+    return {"firewall_published_ports": list(CLOUD_CONNECTION_FIREWALL_PUBLISHED_PORTS)}
 
 
 @pure
@@ -227,6 +234,7 @@ def connection_provider_block(
                 "default_region": aws_placement.default_region,
                 "default_instance_type": aws_placement.default_instance_type,
                 **_cloud_connection_hardening_knobs(),
+                **_cloud_vm_firewall_knobs(),
                 **_user_data_layout_knobs(),
                 **aws_keys,
             }
@@ -242,6 +250,7 @@ def connection_provider_block(
                 "default_zone": gcp_placement.default_zone,
                 "default_machine_type": gcp_placement.default_machine_type,
                 **_cloud_connection_hardening_knobs(),
+                **_cloud_vm_firewall_knobs(),
                 **_user_data_layout_knobs(),
                 "service_account_key_json": _secret(credentials.service_account_key_json),
             }
@@ -256,6 +265,7 @@ def connection_provider_block(
                 "default_vm_size": azure_placement.default_vm_size,
                 "resource_group": azure_placement.resource_group,
                 **_cloud_connection_hardening_knobs(),
+                **_cloud_vm_firewall_knobs(),
                 **_user_data_layout_knobs(),
                 **azure_keys,
             }

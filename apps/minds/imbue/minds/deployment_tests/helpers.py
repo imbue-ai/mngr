@@ -43,7 +43,7 @@ from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
-from imbue.mngr.primitives import parse_published_port_declarations
+from imbue.minds.testing import stacked_create_template_published_ports
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 
@@ -107,13 +107,7 @@ def pool_lease_published_ports(template_worktree: Path) -> list[dict[str, object
     stacked templates' ``publish`` lists, each later template extending the earlier ones.
     """
     settings = tomllib.loads((template_worktree / ".mngr" / "settings.toml").read_text())
-    create_templates = settings.get("create_templates", {})
-    declared: list[str] = []
-    for template_name in _POOL_BAKE_CREATE_TEMPLATES:
-        template = create_templates.get(template_name, {})
-        declared = [str(value) for value in template.get("publish", declared)]
-        declared.extend(str(value) for value in template.get("publish__extend", ()))
-    declarations = parse_published_port_declarations(declared)
+    declarations = stacked_create_template_published_ports(settings, _POOL_BAKE_CREATE_TEMPLATES)
     return [
         {"guest_port": declaration.guest_port, "protocol": declaration.protocol.value.lower()}
         for declaration in declarations

@@ -23,6 +23,9 @@ MODAL_BACKEND_NAME: Final[str] = "modal"
 # The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` bake settings so the cloud VM runs the agent in a runsc-hardened container; the matching ``docker run`` start args live in the template's per-cloud ``[create_templates.*]`` blocks, and mngr_vps itself mounts /run and /tmp on tmpfs whenever the runtime is runsc.
 CLOUD_CONNECTION_DOCKER_RUNTIME: Final[str] = "runsc"
 CLOUD_CONNECTION_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+# The guest ports the default-workspace-template's aws / gcp / azure create templates publish (``publish__extend``: the Screen's ICE muxes), written as ``firewall_published_ports`` on every cloud connection instance block.
+# mngr_vps refuses a create that publishes a port the block does not list, and each cloud's ``prepare`` opens the listed ports in the security group / NSG / firewall rule it manages, so the set here must match what the template declares (test_published_ports_alignment.py pins it).
+CLOUD_CONNECTION_FIREWALL_PUBLISHED_PORTS: Final[tuple[str, ...]] = ("59000/udp", "59000/tcp")
 AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 
 # The value a Modal connection instance's ``mode`` carries (the user's own Modal token); also how a legacy ambient ``[providers.modal]`` block is recognized for its rewrite into the suppression form.
