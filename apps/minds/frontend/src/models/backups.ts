@@ -99,6 +99,16 @@ export interface RestoreOptions {
   updateAfter?: boolean;
   skipSafetySnapshot?: boolean;
   skipChatGate?: boolean;
+  /** An archive id from the listing's previous repositories; null restores from current backups. */
+  repositoryId?: string | null;
+}
+
+/** Snapshots still readable at one of the workspace's previous backup destinations. */
+export interface PreviousBackupRepository {
+  archive_id: string;
+  archived_at: string;
+  snapshots?: BackupSnapshot[];
+  snapshots_error?: string | null;
 }
 
 interface OperationStatusPayload {
@@ -193,6 +203,7 @@ export class BackupOperationController {
       update_after: options.updateAfter !== false,
       skip_safety_snapshot: options.skipSafetySnapshot === true,
       skip_chat_gate: options.skipChatGate === true,
+      repository: options.repositoryId ?? null,
     };
     this.dispatch(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backups/${encodeURIComponent(snapshot.snapshot_id)}/restore`,
@@ -505,6 +516,7 @@ interface BackupsListingPayload {
   snapshots?: BackupSnapshot[];
   snapshots_total?: number;
   snapshots_error?: string | null;
+  previous_repositories?: PreviousBackupRepository[];
 }
 
 /** The paginated snapshot-history table (newest first, server-side paging). */
@@ -513,6 +525,10 @@ export class BackupHistoryModel {
   offset = 0;
   total = 0;
   snapshots: BackupSnapshot[] = [];
+  /** Previous backup destinations whose snapshots are still readable (newest archive first). */
+  previousRepositories: PreviousBackupRepository[] = [];
+  /** Whether the workspace has current backups; a restore (from any storage) needs them. */
+  isBackupsConfigured = false;
   /** Human status line replacing the table (loading / empty / error states). */
   statusMessage: string | null = "Loading backup history...";
   /** The backup-check verdict gating Restore (OFFLINE disables it). */
@@ -550,9 +566,14 @@ export class BackupHistoryModel {
   async loadPage(): Promise<void> {
     this.statusMessage = "Loading backup history...";
     this.deps.redraw();
+    // Previous destinations do not page and cost the server one restic
+    // listing each, so only the first page asks for them; later pages keep
+    // the ones already loaded.
+    const isFirstPage = this.offset === 0;
     const url =
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backups` +
-      `?limit=${BACKUP_HISTORY_PAGE_SIZE}&offset=${this.offset}`;
+      `?limit=${BACKUP_HISTORY_PAGE_SIZE}&offset=${this.offset}` +
+      (isFirstPage ? "&include_previous=1" : "");
     const payload = (await this.deps.getJson(
       url,
     )) as BackupsListingPayload | null;
@@ -561,6 +582,12 @@ export class BackupHistoryModel {
       this.deps.redraw();
       return;
     }
+    // Previous destinations are independent of the current listing's state:
+    // a workspace whose backups were turned off may still have readable history.
+    if (isFirstPage) {
+      this.previousRepositories = payload.previous_repositories ?? [];
+    }
+    this.isBackupsConfigured = payload.is_configured === true;
     if (payload.is_configured !== true) {
       this.statusMessage = "Backups are turned off for this workspace.";
       this.deps.redraw();
@@ -1441,11 +1468,18 @@ export function browserLifecycleDeps(redraw: () => void): LifecycleDeps {
 export async function downloadSnapshotExport(
   agentId: string,
   snapshotId: string,
+  // An archive id exports from one of the workspace's previous backup
+  // destinations; null exports from its current backups.
+  repositoryId: string | null = null,
 ): Promise<boolean> {
   let response: Response;
+  const query =
+    repositoryId === null
+      ? ""
+      : `?repository=${encodeURIComponent(repositoryId)}`;
   try {
     response = await fetch(
-      `/api/v1/workspaces/${encodeURIComponent(agentId)}/backups/${encodeURIComponent(snapshotId)}/export`,
+      `/api/v1/workspaces/${encodeURIComponent(agentId)}/backups/${encodeURIComponent(snapshotId)}/export${query}`,
       { method: "POST", credentials: "same-origin" },
     );
   } catch {

@@ -35,6 +35,21 @@ def _int_field(source: dict[str, Any], key: str) -> int:
 
 
 @pure
+def with_backup_storage_usage(info: dict[str, Any], *, used_bytes: int, quota_bytes: int) -> dict[str, Any]:
+    """Overlay the backup store's own usage and quota onto the connector's account-info JSON.
+
+    The store's numbers are exact and current (counted on every upload), so
+    the Accounts page's storage meter prefers them over the account summary
+    whenever the usage probe answers.
+    """
+    usage = dict(info.get("usage") or {})
+    usage["total_bucket_bytes"] = used_bytes
+    entitlements = dict(info.get("entitlements") or {})
+    entitlements["max_total_bucket_bytes"] = quota_bytes
+    return {**info, "usage": usage, "entitlements": entitlements}
+
+
+@pure
 def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
     """Build the template view model from the connector's account-info JSON.
 
@@ -56,10 +71,10 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
             "label": "Backup storage",
             "used": format_gb(_int_field(usage, "total_bucket_bytes")),
             "limit": format_gb(_int_field(entitlements, "max_total_bucket_bytes")),
-            "note": "Total across all storage buckets; backups turn read-only while over the limit.",
+            "note": "Total across all workspace backups; new backups pause while over the limit until space is freed.",
         },
         {
-            "label": "Storage buckets",
+            "label": "Backup repositories",
             "used": str(_int_field(usage, "buckets")),
             "limit": str(_int_field(entitlements, "max_buckets")),
             "note": "",
@@ -94,7 +109,7 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
         "is_over_storage_quota": _int_field(usage, "total_bucket_bytes")
         > _int_field(entitlements, "max_total_bucket_bytes"),
         # Gates the "review destroyed workspace backups" link: destroyed
-        # workspaces' buckets count against the cap until they are reaped.
+        # workspaces' repositories count against the cap until they are reaped.
         "is_at_bucket_quota": _int_field(usage, "buckets") >= _int_field(entitlements, "max_buckets"),
         "is_sharing_workspaces": _int_field(usage, "shared_workspaces") > 0,
     }

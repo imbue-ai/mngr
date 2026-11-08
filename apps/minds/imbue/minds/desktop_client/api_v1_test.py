@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
+from imbue.minds.desktop_client.api_models import PreviousBackupRepository
 from imbue.minds.desktop_client.api_v1 import CONNECTION_GONE_DURING_UPDATE_MESSAGE
 from imbue.minds.desktop_client.api_v1 import CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
 from imbue.minds.desktop_client.api_v1 import REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.api_v1 import UPDATE_IN_FLIGHT_ON_CONNECTION_MES
 from imbue.minds.desktop_client.api_v1 import _SSH_GRANT_WRITE_ATTEMPTS
 from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
+from imbue.minds.desktop_client.api_v1 import _list_previous_repositories_safely
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -58,6 +60,8 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
+from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
+from imbue.minds.desktop_client.backup_env_store import list_archived_envs
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
@@ -93,6 +97,7 @@ from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
@@ -111,6 +116,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
+from imbue.minds.desktop_client.testing import FAKE_BACKUP_USER_SEGMENT
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
@@ -800,6 +806,97 @@ def test_workspace_backups_lists_snapshots_newest_first(tmp_path: Path) -> None:
     assert body["snapshots_total"] == 3
     times = [s["time"] for s in body["snapshots"]]
     assert times == sorted(times, reverse=True)
+
+
+@pytest.mark.timeout(120)
+def test_workspace_backups_lists_previous_destinations_only_when_asked(tmp_path: Path) -> None:
+    # A destination change archives the canonical env; the archived repository's
+    # snapshots stay listable as "previous storage" (with include_previous=1),
+    # exportable, and a restore names the archive. Everything runs against two
+    # local restic repositories.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    password = "workspace-key"
+    old_repo = str(tmp_path / "old-repo")
+    restic_cli.init_repo(repository=old_repo, backend_env={}, password=password)
+    source = tmp_path / "data.txt"
+    source.write_text("old content")
+    restic_backup_a_file(old_repo, password, source)
+    write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={old_repo}\nRESTIC_PASSWORD={password}\n")
+    archive_canonical_env(paths, agent_id, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    new_repo = str(tmp_path / "new-repo")
+    restic_cli.init_repo(repository=new_repo, backend_env={}, password=password)
+    write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={new_repo}\nRESTIC_PASSWORD={password}\n")
+
+    plain = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    assert plain["snapshots"] == [] and plain["previous_repositories"] == []
+
+    body = json.loads(
+        client.get(f"/api/v1/workspaces/{agent_id}/backups?include_previous=1", headers=_auth_header()).data
+    )
+    assert body["snapshots"] == []
+    (previous,) = body["previous_repositories"]
+    assert previous["archive_id"] == "20260101T000000Z"
+    assert previous["archived_at"].startswith("2026-01-01T00:00:00")
+    assert previous["snapshots_error"] is None
+    (old_snapshot,) = previous["snapshots"]
+
+    export = client.post(
+        f"/api/v1/workspaces/{agent_id}/backups/{old_snapshot['snapshot_id']}/export?repository=20260101T000000Z",
+        headers=_auth_header(),
+    )
+    assert export.status_code == 200
+    assert export.headers["Content-Type"] == "application/zip"
+    missing = client.post(
+        f"/api/v1/workspaces/{agent_id}/backups/latest/export?repository=20260301T000000Z", headers=_auth_header()
+    )
+    assert missing.status_code == 404
+
+
+@pytest.mark.timeout(120)
+def test_previous_storage_the_connector_no_longer_has_is_dropped_from_the_listing(tmp_path: Path) -> None:
+    # Once the legacy reap (or the retention reaper) has deleted a previous
+    # destination, restic can no longer list it. While the connector still
+    # has the storage the row reports the error; once it says the storage is
+    # gone, the row disappears and the archived credentials go with it.
+    agent_id = AgentId()
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    password = "workspace-key"
+    unreachable_store_url = f"rest:http://127.0.0.1:1/{FAKE_BACKUP_USER_SEGMENT}/{agent_id}/"
+    write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={unreachable_store_url}\nRESTIC_PASSWORD={password}\n")
+    archive_canonical_env(paths, agent_id, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    current_repo = str(tmp_path / "current-repo")
+    restic_cli.init_repo(repository=current_repo, backend_env={}, password=password)
+    write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={current_repo}\nRESTIC_PASSWORD={password}\n")
+    cli = make_fake_imbue_cloud_cli()
+    cli.backup_repositories = [
+        BackupRepositoryInfo(
+            workspace_id=str(agent_id),
+            repository_url=unreachable_store_url,
+            used_bytes=1,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    ]
+
+    def list_previous() -> tuple[PreviousBackupRepository, ...]:
+        return _list_previous_repositories_safely(
+            paths,
+            agent_id,
+            listing_timeout_seconds=3.0,
+            parent_cg=None,
+            cli=cli,
+            account_email="a@example.com",
+        )
+
+    (still_there,) = list_previous()
+    assert still_there.archive_id == "20260101T000000Z"
+    assert still_there.snapshots_error is not None
+    assert len(list_archived_envs(paths, agent_id)) == 1
+
+    cli.backup_repositories = []
+    assert list_previous() == ()
+    assert list_archived_envs(paths, agent_id) == []
 
 
 @pytest.mark.timeout(120)
@@ -4631,6 +4728,31 @@ def test_backup_restore_unconfigured_workspace_returns_409(
     assert response.status_code == 409
     assert "not configured" in json.loads(response.data)["error"]
     # No operation record was created.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_backup_restore_from_an_unknown_previous_storage_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # A restore may name one of the workspace's previous backup destinations
+    # (an archived canonical env); an archive id that names none, or that is
+    # not a bare archive timestamp, is refused before any worker is claimed.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=/tmp/old-repo\nRESTIC_PASSWORD=pw\n")
+    archive_canonical_env(paths, agent_id, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=pw\n")
+
+    for archive_id in ("20260301T000000Z", f"../{agent_id}.env.20260101T000000Z"):
+        response = client.post(
+            f"/api/v1/workspaces/{agent_id}/backups/abc123/restore",
+            headers=_auth_header(),
+            json={"repository": archive_id},
+        )
+        assert response.status_code == 404, archive_id
+        assert "No previous backup storage" in json.loads(response.data)["error"]
     assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
 
 

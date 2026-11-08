@@ -568,6 +568,49 @@ class StorageRecheckResult(WireModel):
     keys: tuple[R2KeyInfo, ...] = Field(default=(), description="The account's bucket keys after enforcement")
 
 
+class BackupStorageMode(WireEnum):
+    """Enforcement mode of the account's backup storage (lowercase wire form).
+
+    ``unknown`` is the client-side coercion of a mode this client version
+    does not recognize; consumers treat it like ``readonly`` (the
+    conservative interpretation).
+    """
+
+    ACTIVE = auto()
+    READONLY = auto()
+    DISABLED = auto()
+    UNKNOWN = auto()
+
+
+class BackupRepositoryCredentials(WireModel):
+    """A workspace's backup-repository credentials (POST /backups/repositories and roll-token); the token is shown once."""
+
+    workspace_id: str = Field(description="The workspace the repository belongs to")
+    repository_url: str = Field(description="restic repository URL (rest:https://<host>/<user>/<workspace>/)")
+    rest_username: str = Field(description="HTTP basic-auth username for the REST backend (the workspace id)")
+    rest_password: SecretStr = Field(
+        description="HTTP basic-auth password (the repository token; never persisted by us)"
+    )
+
+
+class BackupRepositoryInfo(WireModel):
+    """One of the account's backup repositories (GET /backups/repositories)."""
+
+    workspace_id: str = Field(description="The workspace the repository belongs to")
+    repository_url: str = Field(description="restic repository URL (rest:https://<host>/<user>/<workspace>/)")
+    used_bytes: int = Field(description="Bytes the repository holds, as counted by the backup store")
+    created_at: str = Field(description="ISO 8601 timestamp when the repository was created")
+
+
+class BackupStorageUsage(WireModel):
+    """The account's backup storage usage and limits (GET /backups/usage)."""
+
+    used_bytes: int = Field(description="Bytes across every repository of the account")
+    quota_bytes: int = Field(description="The soft limit (the max_total_bucket_bytes entitlement)")
+    hard_limit_bytes: int = Field(description="The hard limit past which the store refuses data uploads")
+    mode: BackupStorageMode = Field(description="Enforcement mode: active, readonly, or disabled")
+
+
 class AccountEntitlementValues(WireModel):
     """The quota values an account currently holds (mirrors the connector's PlanEntitlements)."""
 

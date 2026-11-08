@@ -155,6 +155,7 @@ function renderRecentBackups(
             restoreDisabledReason: model.isRestoreDisabledByCheck
               ? "This workspace is offline; start it to restore a backup."
               : null,
+            repositoryId: null,
             onRestoreRequested: (snapshot) => {
               vnode.state.pendingRestoreSnapshot = snapshot;
             },

@@ -14,6 +14,8 @@ Authentication semantics:
 """
 
 import os
+import threading
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from functools import cache
@@ -44,6 +46,10 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryDeleteTimeoutError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupStoreUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
@@ -68,6 +74,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceActiveError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspacesPresentError
@@ -80,6 +87,9 @@ from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import AccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AdminAccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
+from imbue.mngr_imbue_cloud.wire_types import BackupRepositoryCredentials
+from imbue.mngr_imbue_cloud.wire_types import BackupRepositoryInfo
+from imbue.mngr_imbue_cloud.wire_types import BackupStorageUsage
 from imbue.mngr_imbue_cloud.wire_types import ContactEntry
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcomeEntry
 from imbue.mngr_imbue_cloud.wire_types import InvitationResult
@@ -116,6 +126,12 @@ from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
+
+# A repository destroy is bounded per connector call (the store deletes a
+# budget of objects and reports whether any remain), so the client loops; the
+# cap keeps a pathological repository from looping forever.
+_REPOSITORY_DESTROY_MAX_CALLS = 500
+_REPOSITORY_DESTROY_WAIT_SECONDS = 0.5
 # Operator release: the connector deletes the stop artifacts and tears the
 # slice VM down synchronously before answering.
 ADMIN_RELEASE_TIMEOUT_SECONDS = 300.0
@@ -1387,6 +1403,132 @@ class ImbueCloudConnectorClient(MutableModel):
         body = self._check_bucket(response)
         return parse_wire_entries(R2KeyInfo, body, f"GET {path}", ImbueCloudBucketError)
 
+    # Backup repositories (the backup store; specs/backup-store/spec.md)
+
+    def _check_backup_repository(self, response: httpx2.Response) -> Any:
+        """Validate a ``/backups/*`` response, mapping status codes to typed errors."""
+        self._raise_if_client_too_old(response)
+        self._raise_if_quota_exceeded(response)
+        self._raise_if_email_not_verified(response)
+        self._raise_if_account_suspended(response)
+        self._raise_if_account_deleted(response)
+        self._raise_if_auth_upstream_unavailable(response)
+        if response.status_code in (200, 202):
+            if not response.content:
+                return {}
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ImbueCloudBackupRepositoryError(
+                    f"Connector returned non-JSON response: {response.text[:200]}"
+                ) from exc
+        if response.status_code in (401, 403):
+            raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
+        detail = _detail_from_response(response)
+        structured = _detail_dict_from_response(response)
+        code = structured.get("code") if structured is not None else None
+        # The structured refusals carry the user-facing sentence in `message`;
+        # the detail text of such a body is the repr of the whole dict.
+        structured_message = structured.get("message") if structured is not None else None
+        message = structured_message if isinstance(structured_message, str) else detail
+        if response.status_code == 404:
+            raise ImbueCloudBackupRepositoryNotFoundError(message)
+        if response.status_code == 409 and code == "workspace_active":
+            raise ImbueCloudWorkspaceActiveError(message)
+        if response.status_code == 503 and code == "backup_store_unavailable":
+            raise ImbueCloudBackupStoreUnavailableError(message)
+        raise ImbueCloudBackupRepositoryError(f"Connector error {response.status_code}: {detail}")
+
+    def create_backup_repository(self, access_token: SecretStr, workspace_id: str) -> BackupRepositoryCredentials:
+        """Create the workspace's backup repository (idempotent: an existing one gets a fresh token)."""
+        response = self._send(
+            "POST",
+            self._url("/backups/repositories"),
+            exc_cls=ImbueCloudBackupRepositoryError,
+            headers=self._bearer(access_token),
+            json={"workspace_id": workspace_id},
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return validate_wire(BackupRepositoryCredentials, self._check_backup_repository(response))
+
+    def list_backup_repositories(self, access_token: SecretStr) -> list[BackupRepositoryInfo]:
+        response = self._send(
+            "GET",
+            self._url("/backups/repositories"),
+            exc_cls=ImbueCloudBackupRepositoryError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check_backup_repository(response)
+        return parse_wire_entries(
+            BackupRepositoryInfo, body, "GET /backups/repositories", ImbueCloudBackupRepositoryError
+        )
+
+    def roll_backup_repository_token(self, access_token: SecretStr, workspace_id: str) -> BackupRepositoryCredentials:
+        """Mint a fresh token for the repository; the previous token stops working at once."""
+        response = self._send(
+            "POST",
+            self._url(f"/backups/repositories/{quote(workspace_id, safe='')}/roll-token"),
+            exc_cls=ImbueCloudBackupRepositoryError,
+            headers=self._bearer(access_token),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return validate_wire(BackupRepositoryCredentials, self._check_backup_repository(response))
+
+    def destroy_backup_repository(
+        self,
+        access_token: SecretStr,
+        workspace_id: str,
+        # Substitutable wait between the bounded delete calls (tests pass a no-op).
+        wait_between_calls: Callable[[float], None] | None = None,
+    ) -> None:
+        """Delete the repository and everything in it, looping while the connector reports objects remaining.
+
+        Raises :class:`ImbueCloudWorkspaceActiveError` while the workspace record is
+        ACTIVE and :class:`ImbueCloudBackupRepositoryDeleteTimeoutError` when the
+        bounded number of calls still leaves objects behind.
+        """
+        wait = wait_between_calls if wait_between_calls is not None else _wait_between_destroy_calls
+        for _ in range(_REPOSITORY_DESTROY_MAX_CALLS):
+            response = self._send(
+                "DELETE",
+                self._url(f"/backups/repositories/{quote(workspace_id, safe='')}"),
+                exc_cls=ImbueCloudBackupRepositoryError,
+                headers=self._bearer(access_token),
+                timeout=KEY_OP_TIMEOUT_SECONDS,
+            )
+            body = self._check_backup_repository(response)
+            if response.status_code == 200 or not bool(body.get("remaining", False)):
+                return
+            wait(_REPOSITORY_DESTROY_WAIT_SECONDS)
+        raise ImbueCloudBackupRepositoryDeleteTimeoutError(
+            f"Repository of workspace {workspace_id} still had objects after {_REPOSITORY_DESTROY_MAX_CALLS} delete calls"
+        )
+
+    def get_backup_storage_usage(self, access_token: SecretStr) -> BackupStorageUsage:
+        response = self._send(
+            "GET",
+            self._url("/backups/usage"),
+            exc_cls=ImbueCloudBackupRepositoryError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        return validate_wire(BackupStorageUsage, self._check_backup_repository(response))
+
+    def freeze_bucket(self, access_token: SecretStr, name: str) -> None:
+        """Rewrite a legacy bucket's S3 key read-only (the migration's freeze; POST /buckets/{name}/freeze).
+
+        CLEANUP: remove with the bucket routes once the legacy bucket reap has run on production.
+        """
+        response = self._send(
+            "POST",
+            self._url(f"/buckets/{name}/freeze"),
+            exc_cls=ImbueCloudBucketError,
+            headers=self._bearer(access_token),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        self._check_bucket(response)
+
     # Account (plan + entitlements + usage)
 
     def get_account(self, access_token: SecretStr) -> AccountInfo:
@@ -1878,6 +2020,34 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return self._check(response, ImbueCloudAccountError)
 
+    def admin_push_backup_entitlements(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
+        """Re-push one account's storage quota and mode to the backup store (operator repair for a missed push)."""
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/backup-entitlements"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_run_legacy_bucket_sweep(self, admin_api_key: SecretStr, dry_run: bool) -> dict[str, Any]:
+        """Run one legacy-bucket reap pass on demand (operator tool; specs/backup-store section 5).
+
+        ``dry_run`` lists every legacy bucket with the action a pass would take
+        and deletes nothing. A real pass empties buckets through Cloudflare and
+        can run long, hence the sweep timeout.
+        """
+        response = self._send(
+            "POST",
+            self._url("/admin/sweep/legacy-buckets"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            params={"dry_run": "1"} if dry_run else None,
+            timeout=ADMIN_SWEEP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
     def admin_run_lease_record_sweep(
         self, admin_api_key: SecretStr, dry_run: bool, grace_seconds: float | None
     ) -> dict[str, Any]:
@@ -2275,6 +2445,10 @@ def _is_route_not_served(response: httpx2.Response) -> bool:
         body = None
     detail = body.get("detail") if isinstance(body, dict) else None
     return detail is None or detail in ("Not Found", "Method Not Allowed")
+
+
+def _wait_between_destroy_calls(seconds: float) -> None:
+    threading.Event().wait(timeout=seconds)
 
 
 def _detail_from_response(response: httpx2.Response) -> str:

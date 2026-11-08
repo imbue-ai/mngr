@@ -244,9 +244,10 @@ class BackupProvider(UpperCaseStrEnum):
     valid. Backup setup runs asynchronously after the host is created; the
     same code path can be re-applied to an existing host later.
 
-    - ``IMBUE_CLOUD`` -- create a per-workspace R2 bucket (named after the
-      host id) + a scoped key against the selected account, then inject a
-      ``data/.secrets/restic.env`` pointing restic at that bucket.
+    - ``IMBUE_CLOUD`` -- create a per-workspace repository in the account's
+      backup store (a restic REST server; the repository is named by the
+      workspace id) with its own token, then inject a
+      ``data/.secrets/restic.env`` pointing restic at that repository.
       Requires a selected account.
     - ``API_KEY`` -- inject a user-supplied ``KEY=VALUE`` block verbatim
       into ``restic.env``; the user owns ``RESTIC_REPOSITORY`` and any

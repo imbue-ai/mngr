@@ -4,6 +4,7 @@ import click
 
 from imbue.mngr_imbue_cloud.cli.account import account
 from imbue.mngr_imbue_cloud.cli.auth import auth
+from imbue.mngr_imbue_cloud.cli.backups import backup_repo
 from imbue.mngr_imbue_cloud.cli.buckets import bucket
 from imbue.mngr_imbue_cloud.cli.contacts import contacts
 from imbue.mngr_imbue_cloud.cli.hosts import hosts
@@ -16,7 +17,7 @@ from imbue.mngr_imbue_cloud.cli.users import users
 
 @click.group(name="imbue_cloud")
 def imbue_cloud() -> None:
-    """Imbue Cloud (auth, account plans/quotas, host leasing, machines, keys, buckets, shares, users, contacts)."""
+    """Imbue Cloud (auth, account plans/quotas, host leasing, machines, keys, backup repositories, shares, users, contacts)."""
 
 
 imbue_cloud.add_command(auth)
@@ -24,6 +25,7 @@ imbue_cloud.add_command(account)
 imbue_cloud.add_command(hosts)
 imbue_cloud.add_command(machines)
 imbue_cloud.add_command(keys)
+imbue_cloud.add_command(backup_repo)
 imbue_cloud.add_command(bucket)
 imbue_cloud.add_command(shares)
 imbue_cloud.add_command(sync)

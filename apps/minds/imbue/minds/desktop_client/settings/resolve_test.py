@@ -3,6 +3,7 @@ import pytest
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
+from imbue.minds.desktop_client.settings.resolve import resolve_allow_agent_command_execution
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
 from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
@@ -154,3 +155,9 @@ def test_a_malformed_keybindings_value_raises_instead_of_resolving(bad_value: ob
     context = _context(user_override_by_key={"keybindings": bad_value})
     with pytest.raises(SettingValueError):
         resolve_keybindings(context)
+
+
+def test_agent_command_execution_resolves_from_the_install_record_and_defaults_off() -> None:
+    assert resolve_allow_agent_command_execution(_context()) is False
+    context = _context(install=InstallSettings(allow_agent_command_execution=True))
+    assert resolve_allow_agent_command_execution(context) is True

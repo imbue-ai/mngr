@@ -18,6 +18,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
+from imbue.minds.desktop_client.backup_env_store import read_archived_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
@@ -43,6 +44,21 @@ class CanonicalRepositoryAccess(FrozenModel):
     password: str | None = Field(description="The RESTIC_PASSWORD, when one is set")
 
 
+def parse_repository_access(content: str, agent_id: AgentId) -> CanonicalRepositoryAccess:
+    """Parse a restic.env's text into repository coordinates.
+
+    Raises ``BackupProvisioningError`` when the env carries no repository address.
+    """
+    env = parse_restic_env(content)
+    repository = env.get("RESTIC_REPOSITORY", "")
+    if not repository:
+        raise BackupProvisioningError(f"restic.env for {agent_id} has no RESTIC_REPOSITORY")
+    backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
+    return CanonicalRepositoryAccess(
+        repository=repository, backend_env=backend_env, password=env.get("RESTIC_PASSWORD")
+    )
+
+
 def load_canonical_repository_access(paths: InstallationPaths, agent_id: AgentId) -> CanonicalRepositoryAccess:
     """Parse the workspace's canonical restic.env into repository coordinates.
 
@@ -52,14 +68,28 @@ def load_canonical_repository_access(paths: InstallationPaths, agent_id: AgentId
     content = read_canonical_env(paths, agent_id)
     if content is None:
         raise BackupProvisioningError(f"No backups are configured for {agent_id}")
-    env = parse_restic_env(content)
-    repository = env.get("RESTIC_REPOSITORY", "")
-    if not repository:
-        raise BackupProvisioningError(f"Canonical restic.env for {agent_id} has no RESTIC_REPOSITORY")
-    backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
-    return CanonicalRepositoryAccess(
-        repository=repository, backend_env=backend_env, password=env.get("RESTIC_PASSWORD")
-    )
+    return parse_repository_access(content, agent_id)
+
+
+def load_repository_access(
+    paths: InstallationPaths,
+    agent_id: AgentId,
+    *,
+    # None selects the canonical env (the workspace's current backups); an
+    # archive id selects one of its previous backup destinations.
+    archive_id: str | None,
+) -> CanonicalRepositoryAccess:
+    """Repository coordinates of the workspace's current or one previous backup destination.
+
+    Raises ``BackupProvisioningError`` when the selected env does not exist
+    or carries no repository address.
+    """
+    if archive_id is None:
+        return load_canonical_repository_access(paths, agent_id)
+    content = read_archived_env(paths, agent_id, archive_id)
+    if content is None:
+        raise BackupProvisioningError(f"No previous backup storage {archive_id} exists for {agent_id}")
+    return parse_repository_access(content, agent_id)
 
 
 def list_workspace_snapshots(
@@ -68,15 +98,16 @@ def list_workspace_snapshots(
     *,
     parent_cg: ConcurrencyGroup | None = None,
     timeout_seconds: float = STATUS_RESTIC_TIMEOUT_SECONDS,
+    archive_id: str | None = None,
 ) -> tuple[restic_cli.ResticSnapshot, ...]:
-    """List a workspace's restic snapshots from its canonical restic.env.
+    """List a workspace's restic snapshots from its canonical (or one archived) restic.env.
 
     Works even when the workspace is offline or destroyed, because Imbue Studio holds
     the canonical ``restic.env``. Raises ``BackupProvisioningError`` when no
     backups are configured (no canonical env) or its repository is missing, and
     propagates restic failures.
     """
-    access = load_canonical_repository_access(paths, agent_id)
+    access = load_repository_access(paths, agent_id, archive_id=archive_id)
     return restic_cli.list_snapshots(
         repository=access.repository,
         backend_env=access.backend_env,
@@ -94,9 +125,10 @@ def list_workspace_snapshot_directory(
     directory: str,
     parent_cg: ConcurrencyGroup | None = None,
     timeout_seconds: float = STATUS_RESTIC_TIMEOUT_SECONDS,
+    archive_id: str | None = None,
 ) -> tuple[str, ...]:
-    """List the entries directly under ``directory`` in one snapshot, from the canonical restic.env."""
-    access = load_canonical_repository_access(paths, agent_id)
+    """List the entries directly under ``directory`` in one snapshot, from the canonical (or one archived) restic.env."""
+    access = load_repository_access(paths, agent_id, archive_id=archive_id)
     return restic_cli.list_snapshot_directory(
         repository=access.repository,
         backend_env=access.backend_env,

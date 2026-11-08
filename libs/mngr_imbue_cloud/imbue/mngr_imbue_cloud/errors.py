@@ -194,6 +194,26 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
 
 
+class ImbueCloudBackupRepositoryError(ImbueCloudError):
+    """Raised when a backup-repository operation against the backup store fails."""
+
+
+class ImbueCloudBackupRepositoryNotFoundError(ImbueCloudBackupRepositoryError):
+    """Raised when referencing a backup repository the account does not have."""
+
+
+class ImbueCloudBackupStoreUnavailableError(ImbueCloudBackupRepositoryError):
+    """Raised when the connector could not reach the backup store (503 ``backup_store_unavailable``)."""
+
+
+class ImbueCloudWorkspaceActiveError(ImbueCloudBackupRepositoryError):
+    """Raised when destroying a backup repository whose record is still ACTIVE (409 ``workspace_active``)."""
+
+
+class ImbueCloudBackupRepositoryDeleteTimeoutError(ImbueCloudBackupRepositoryError):
+    """Raised when a repository destroy still reports objects remaining after the bounded number of calls."""
+
+
 class ImbueCloudSyncError(ImbueCloudError):
     """Raised when a workspace-record, key-bundle, or account-document sync operation fails."""
 

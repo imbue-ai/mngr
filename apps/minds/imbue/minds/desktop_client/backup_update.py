@@ -30,6 +30,7 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 """
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Final
 from typing import assert_never
 
@@ -38,6 +39,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
@@ -45,10 +47,13 @@ from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
+from imbue.minds.desktop_client.backup_env_store import read_archived_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import RESTIC_PREVIOUS_ENV_REMOTE_PATH
 from imbue.minds.desktop_client.backup_provisioning import change_backup_destination_for_host
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_host
+from imbue.minds.desktop_client.backup_provisioning import inject_previous_env_into_workspace
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agent
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
@@ -431,6 +436,9 @@ def run_backup_restore_sequence(
     is_skip_safety_snapshot: bool,
     is_skip_chat_gate: bool,
     workspace_version_ref: str | None,
+    # None restores from the workspace's current backups; an archive id from
+    # one of its previous backup destinations (an archived canonical env).
+    archive_id: str | None = None,
 ) -> None:
     """Worker-thread entry point: restore one workspace to one restic snapshot, in place.
 
@@ -447,6 +455,7 @@ def run_backup_restore_sequence(
             registry=registry,
             parent_cg=parent_cg,
             snapshot_id=snapshot_id,
+            archive_id=archive_id,
             is_stop_chats=is_stop_chats,
             is_update_after=is_update_after,
             is_skip_safety_snapshot=is_skip_safety_snapshot,
@@ -463,6 +472,7 @@ def _resolve_restore_snapshot(
     agent_id: AgentId,
     paths: InstallationPaths,
     snapshot_id: str,
+    archive_id: str | None,
     parent_cg: ConcurrencyGroup | None,
 ) -> restic_cli.ResticSnapshot:
     """Resolve the snapshot to restore, from Imbue Studio's own view of the repository.
@@ -475,7 +485,7 @@ def _resolve_restore_snapshot(
     has been taken for nothing.
     """
     snapshots = backup_status.list_workspace_snapshots(
-        paths, agent_id, parent_cg=parent_cg, timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS
+        paths, agent_id, parent_cg=parent_cg, timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS, archive_id=archive_id
     )
     for snapshot in snapshots:
         if snapshot_id in (snapshot.snapshot_id, snapshot.short_id):
@@ -490,6 +500,7 @@ def _resolve_restore_subpath(
     agent_id: AgentId,
     paths: InstallationPaths,
     snapshot: restic_cli.ResticSnapshot,
+    archive_id: str | None,
     parent_cg: ConcurrencyGroup | None,
 ) -> str:
     """Locate the workspace subtree inside the snapshot (identified by its repo checkout).
@@ -514,6 +525,7 @@ def _resolve_restore_subpath(
         directory=root,
         parent_cg=parent_cg,
         timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+        archive_id=archive_id,
     )
     if f"{root}/workspace" in root_entries or f"{root}/code" in root_entries:
         return root
@@ -526,6 +538,7 @@ def _resolve_restore_subpath(
             directory=nested_root,
             parent_cg=parent_cg,
             timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+            archive_id=archive_id,
         )
         if f"{nested_root}/workspace" in nested_entries or f"{nested_root}/code" in nested_entries:
             return nested_root
@@ -536,6 +549,7 @@ def _resolve_restore_subpath(
         directory="/",
         parent_cg=parent_cg,
         timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+        archive_id=archive_id,
     )
     if "/workspace" in tree_root_entries:
         return "/"
@@ -623,6 +637,7 @@ def _run_restore_phases(
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     snapshot_id: str,
+    archive_id: str | None,
     is_stop_chats: bool,
     is_update_after: bool,
     is_skip_safety_snapshot: bool,
@@ -632,20 +647,104 @@ def _run_restore_phases(
     # Phase 0: resolve the snapshot and its host-dir subpath before anything
     # waits or mutates, so an unknown id (or a snapshot with no workspace in
     # it) fails fast and cheaply.
-    snapshot = _resolve_restore_snapshot(agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, parent_cg=parent_cg)
-    snapshot_subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=parent_cg)
+    snapshot = _resolve_restore_snapshot(
+        agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, archive_id=archive_id, parent_cg=parent_cg
+    )
+    snapshot_subpath = _resolve_restore_subpath(
+        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=archive_id, parent_cg=parent_cg
+    )
 
     # Phase 0.5: converge the workspace's restic.env to the canonical copy
-    # before dispatch -- the restore script reads its credentials from the
-    # workspace file, and precisely the workspaces most in need of a restore
-    # (ENV_MISSING / ENV_MISMATCH) would otherwise fail. A differing
-    # workspace copy is archived aside, never destroyed. Also proves, before
-    # anything mutates, that the snapshot the user picked lives in the same
-    # repository the script will read: both came from the canonical env.
+    # before dispatch -- the restore script takes its safety and restored-state
+    # snapshots with the workspace file's credentials, and precisely the
+    # workspaces most in need of a restore (ENV_MISSING / ENV_MISMATCH) would
+    # otherwise fail. A differing workspace copy is archived aside, never
+    # destroyed. A restore from a previous destination hands that archived env
+    # to the script separately (phase 2), so the workspace's own env, which
+    # host_backup ticks against, is never pointed at the retired repository.
     agent_address = build_agent_address(agent_id, resolver)
     registry.append_log(agent_id, "Making sure the workspace has the right backup credentials...")
     reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
+    source_env_content: str | None = None
+    if archive_id is not None:
+        source_env_content = read_archived_env(paths, agent_id, archive_id)
+        if source_env_content is None:
+            raise BackupProvisioningError(f"No previous backup storage {archive_id} exists for {agent_id}")
+    _run_restore_from_workspace_env(
+        agent_id=agent_id,
+        agent_address=agent_address,
+        paths=paths,
+        resolver=resolver,
+        facts_cache=facts_cache,
+        registry=registry,
+        parent_cg=parent_cg,
+        snapshot_id=snapshot_id,
+        snapshot=snapshot,
+        snapshot_subpath=snapshot_subpath,
+        source_env_content=source_env_content,
+        is_stop_chats=is_stop_chats,
+        is_update_after=is_update_after,
+        is_skip_safety_snapshot=is_skip_safety_snapshot,
+        is_skip_chat_gate=is_skip_chat_gate,
+        workspace_version_ref=workspace_version_ref,
+    )
 
+
+@pure
+def build_restore_program_arguments(
+    *,
+    agent_id: AgentId,
+    snapshot_id: str,
+    snapshot_subpath: str,
+    snapshot_time: datetime,
+    is_from_previous_storage: bool,
+    is_stop_chats: bool,
+    is_skip_chat_gate: bool,
+    is_skip_safety_snapshot: bool,
+) -> tuple[str, ...]:
+    """The restore program's argv: the snapshot metadata the desktop resolved, plus the flags."""
+    return (
+        (
+            "--agent-id",
+            str(agent_id),
+            "--snapshot-id",
+            snapshot_id,
+            # Resolved by the desktop from its own view of the repository, so the
+            # script never re-queries restic for this metadata.
+            "--snapshot-subpath",
+            snapshot_subpath,
+            "--source-time",
+            snapshot_time.isoformat(),
+        )
+        + (("--source-env-path", RESTIC_PREVIOUS_ENV_REMOTE_PATH) if is_from_previous_storage else ())
+        + (("--stop-chats",) if is_stop_chats else ())
+        + (("--skip-chat-gate",) if is_skip_chat_gate else ())
+        + (("--skip-safety-snapshot",) if is_skip_safety_snapshot else ())
+    )
+
+
+def _run_restore_from_workspace_env(
+    *,
+    agent_id: AgentId,
+    agent_address: str,
+    paths: InstallationPaths,
+    resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
+    registry: WorkspaceOperationRegistryInterface,
+    parent_cg: ConcurrencyGroup | None,
+    snapshot_id: str,
+    snapshot: restic_cli.ResticSnapshot,
+    snapshot_subpath: str,
+    # The archived env of a previous destination to restore from; None
+    # restores from the workspace's current repository.
+    source_env_content: str | None,
+    is_stop_chats: bool,
+    is_update_after: bool,
+    is_skip_safety_snapshot: bool,
+    is_skip_chat_gate: bool,
+    workspace_version_ref: str | None,
+) -> None:
+    """Phases 1-4 of a restore, against the restic.env the workspace holds."""
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet). Kept
     # even for a forced restore: the probe tolerates a broken `mngr list`
     # (gate_error) by design, and real knowledge of running chats must still
@@ -676,27 +775,27 @@ def _run_restore_phases(
     # Phase 2: one exec runs the whole restore (safety snapshot / in-place
     # sync restore / env write-back / uv sync / restart services) and reports
     # a verdict, streaming its phase + restic progress lines into the
-    # operation log as it runs.
+    # operation log as it runs. A previous destination's env is handed over
+    # only now, past the point of no return, as a side file the script reads
+    # and removes.
+    if source_env_content is not None:
+        registry.append_log(agent_id, "Handing the previous backup storage's credentials to the workspace...")
+        inject_previous_env_into_workspace(agent_address, source_env_content, parent_cg=parent_cg)
     registry.append_log(
         agent_id, "Backing up the current state, then restoring the selected backup. This can take a while..."
     )
     restore_command = build_workspace_program_command(
         backup_restore,
-        (
-            "--agent-id",
-            str(agent_id),
-            "--snapshot-id",
-            snapshot_id,
-            # Resolved above from Imbue Studio's own view of the repository, so the
-            # script never re-queries restic for this metadata.
-            "--snapshot-subpath",
-            snapshot_subpath,
-            "--source-time",
-            snapshot.time.isoformat(),
-        )
-        + (("--stop-chats",) if is_stop_chats else ())
-        + (("--skip-chat-gate",) if is_skip_chat_gate else ())
-        + (("--skip-safety-snapshot",) if is_skip_safety_snapshot else ()),
+        build_restore_program_arguments(
+            agent_id=agent_id,
+            snapshot_id=snapshot_id,
+            snapshot_subpath=snapshot_subpath,
+            snapshot_time=snapshot.time,
+            is_from_previous_storage=source_env_content is not None,
+            is_stop_chats=is_stop_chats,
+            is_skip_chat_gate=is_skip_chat_gate,
+            is_skip_safety_snapshot=is_skip_safety_snapshot,
+        ),
     )
     restore_result = run_mngr_exec_on_agent(
         agent_address,
@@ -755,7 +854,8 @@ def _run_restore_phases(
 
     # Phase 3: the script wrote back the pre-restore restic.env, but re-inject
     # the canonical copy anyway so the workspace ends converged even if the
-    # env had drifted before the restore.
+    # env had drifted before the restore. Must precede phase 4, whose
+    # verification compares the two.
     if has_canonical_env(paths, agent_id):
         registry.append_log(agent_id, "Re-injecting backup credentials...")
         reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)

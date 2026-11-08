@@ -444,6 +444,9 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         stdin_bytes: bytes | None = None,
         # How long the process gets to exit after SIGTERM before it is sent SIGKILL.
         shutdown_timeout_sec: float = 30.0,
+        # Spawn the child as the leader of its own process group and signal the whole group on
+        # shutdown or timeout, so what it forked dies with it.
+        is_own_process_group: bool = False,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -481,6 +484,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 is_output_accumulated=is_output_accumulated,
                 stdin_bytes=stdin_bytes,
                 shutdown_timeout_sec=shutdown_timeout_sec,
+                is_own_process_group=is_own_process_group,
             )
 
         return self.start_background_process_from_factory(process_factory)

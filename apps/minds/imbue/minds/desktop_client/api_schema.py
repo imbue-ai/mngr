@@ -85,6 +85,7 @@ from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import RemoteExecutionRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
@@ -186,6 +187,8 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         response_model=AccountShareRemovedResponse
     ),
     ("GET", "/api/v1/timezone"): _RouteModels(response_model=TimezoneResponse),
+    # The response is an NDJSON stream, which the request model's docstring describes; no body model.
+    ("POST", "/api/v1/remote-execution/{device_id}"): _RouteModels(request_model=RemoteExecutionRequest),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
     ),

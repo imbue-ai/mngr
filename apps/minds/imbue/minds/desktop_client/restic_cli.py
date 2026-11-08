@@ -9,8 +9,10 @@ the password is passed as ``RESTIC_PASSWORD``, or via the global
 ``--insecure-no-password`` flag when the password is empty.
 """
 
+import functools
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -30,6 +32,7 @@ from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -78,16 +81,30 @@ _TRANSIENT_AUTH_SIGNALS: Final[tuple[str, ...]] = (
     "request signature we calculated does not match",
 )
 # restic's message when it cannot write its lock file to the repository --
-# the failure mode of a read-only (storage-quota-downgraded) key. Read-only
-# operations retry once with --no-lock when they see it.
+# the failure mode of a read-only credential (a frozen legacy bucket's).
+# Read-only operations retry once with --no-lock when they see it.
 _LOCK_WRITE_FAILURE_SIGNAL: Final[str] = "unable to create lock"
-# Space reclaim (forget --prune) repacks data and can take a while on a
-# large repository.
+# restic's message when no key in the repository matches the password.
+_WRONG_PASSWORD_SIGNAL: Final[str] = "wrong password"
+# A prune repacks data and can take a while on a large repository.
 _PRUNE_TIMEOUT_SECONDS: Final[float] = 1800.0
+# restic reads ``RESTIC_REST_USERNAME`` / ``RESTIC_REST_PASSWORD`` (how the
+# backup store's credentials travel) from 0.16 on.
+MINIMUM_RESTIC_VERSION: Final[tuple[int, int, int]] = (0, 16, 0)
+_RESTIC_VERSION_TIMEOUT_SECONDS: Final[float] = 30.0
+_RESTIC_VERSION_RE: Final[re.Pattern[str]] = re.compile(r"restic (\d+)\.(\d+)\.(\d+)")
+# Target pack size in MiB (restic's default), pinned explicitly so every pack
+# stays far under the backup store's request body ceiling.
+RESTIC_PACK_SIZE_MIB: Final[int] = 16
+_BYTES_PER_MIB: Final[int] = 1024 * 1024
 
 
 class ResticNotInstalledError(BackupProvisioningError):
     """Raised when the ``restic`` binary is not available on the computer running Imbue Studio."""
+
+
+class ResticTooOldError(BackupProvisioningError):
+    """Raised when the ``restic`` binary predates the features Imbue Studio relies on."""
 
 
 class ResticTransientAuthError(BackupProvisioningError):
@@ -96,6 +113,10 @@ class ResticTransientAuthError(BackupProvisioningError):
     Typically a just-minted storage credential that has not yet propagated to
     the backend edge; a short retry succeeds.
     """
+
+
+class ResticWrongPasswordError(BackupProvisioningError):
+    """Raised when an already-initialized repository does not open with the password being provisioned."""
 
 
 class ResticTimeoutError(BackupProvisioningError, TimeoutError):
@@ -117,6 +138,49 @@ def ensure_restic_available() -> None:
             "to bundle it; run `pnpm build` in apps/minds/ to download "
             "resources/restic/restic, or set MINDS_RESTIC_BINARY explicitly."
         )
+    ensure_restic_version_supported(binary)
+
+
+def ensure_restic_version_supported(binary: str) -> None:
+    """Raise ``ResticTooOldError`` when ``binary`` predates :data:`MINIMUM_RESTIC_VERSION`."""
+    version = read_restic_version(binary)
+    if version is not None and version < MINIMUM_RESTIC_VERSION:
+        minimum = ".".join(str(part) for part in MINIMUM_RESTIC_VERSION)
+        found = ".".join(str(part) for part in version)
+        raise ResticTooOldError(
+            f"restic {found} at {binary!r} is too old; Imbue Studio needs restic {minimum} or newer "
+            "(it passes backup-store credentials through RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD). "
+            "Run `pnpm build` in apps/minds/ to refresh the bundled binary, or point MINDS_RESTIC_BINARY "
+            "at a newer one."
+        )
+
+
+def parse_restic_version(version_output: str) -> tuple[int, int, int] | None:
+    """Parse ``restic version`` output (``restic 0.18.1 compiled with ...``) into a version tuple."""
+    match = _RESTIC_VERSION_RE.search(version_output)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+@functools.cache
+def read_restic_version(binary: str) -> tuple[int, int, int] | None:
+    """The binary's version, or None when it cannot be read (an unparseable or failing ``restic version``).
+
+    Cached per binary path: the check runs before every restic invocation and
+    a binary does not change version under a running app. An unreadable
+    version is deliberately not an error: the binary exists and the operation
+    that follows reports its own failure in restic's words.
+    """
+    try:
+        with ConcurrencyGroup(name="restic-version") as cg:
+            result = cg.run_process_to_completion(
+                command=[binary, "version"], timeout=_RESTIC_VERSION_TIMEOUT_SECONDS, is_checked_after=False
+            )
+    except (OSError, ConcurrencyGroupError) as e:
+        logger.debug("Could not read the restic version from {}: {}", binary, e)
+        return None
+    return parse_restic_version(result.stdout)
 
 
 def _run_restic(
@@ -228,9 +292,35 @@ def _init_repo_once(
     if result.returncode == 0:
         return
     if _looks_already_initialized(result.stderr):
-        logger.debug("restic repo already initialized; reusing it")
+        _ensure_repository_opens(env, flags, parent_cg=parent_cg)
+        logger.debug("restic repo already initialized with this password; reusing it")
         return
     _raise_restic_failure("restic init", result, timeout_seconds=_INIT_TIMEOUT_SECONDS)
+
+
+def _ensure_repository_opens(
+    env: Mapping[str, str], flags: Sequence[str], *, parent_cg: ConcurrencyGroup | None
+) -> None:
+    """Raise unless the already-initialized repository opens with the password in ``env``.
+
+    A repository has one key, the password of the env that initialized it. An
+    env built around another password would look provisioned yet open nothing,
+    so the mismatch has to fail here, where the caller can still report it.
+    """
+    result = _run_restic(
+        [*flags, "--no-lock", "cat", "config"],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=_INIT_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 0:
+        return
+    if _WRONG_PASSWORD_SIGNAL in result.stderr.lower():
+        raise ResticWrongPasswordError(
+            "the repository is already initialized with a different password; "
+            "the env that initialized it holds the only key"
+        )
+    _raise_restic_failure("restic cat config", result, timeout_seconds=_INIT_TIMEOUT_SECONDS)
 
 
 def init_repo(
@@ -271,10 +361,10 @@ def restore_snapshot(
     than ``restic dump`` (which fetches sequentially) for a many-file snapshot.
 
     Restore normally takes a (non-exclusive) repository lock, which is a
-    *write* -- so it fails against a read-only key even though the restore
-    itself only reads. When the failure is specifically the lock write, the
-    restore is retried once with ``--no-lock`` so storage-quota-downgraded
-    accounts can still restore their data.
+    *write* -- so it fails against a read-only credential even though the
+    restore itself only reads. When the failure is specifically the lock
+    write, the restore is retried once with ``--no-lock`` so a frozen legacy
+    bucket ("previous storage") can still be restored from.
     """
     env, flags = _env_and_flags(repository, backend_env, password)
     result = _run_restic(
@@ -287,7 +377,7 @@ def restore_snapshot(
         return
     if not _looks_like_lock_write_failure(result.stderr):
         _raise_restic_failure("restic restore", result, timeout_seconds=timeout_seconds)
-    logger.debug("restic restore could not write its repository lock (read-only key?); retrying with --no-lock")
+    logger.debug("restic restore could not write its repository lock (read-only credential?); retrying with --no-lock")
     retried = _run_restic(
         [*flags, "--no-lock", "restore", snapshot, "--target", str(target_dir)],
         env_overrides=env,
@@ -304,27 +394,44 @@ def forget_snapshots(
     backend_env: Mapping[str, str],
     password: str | None,
     snapshot_ids: Sequence[str],
-    # When set, restic reclaims the space in the same invocation (forget
-    # alone only unreferences data; prune is what actually deletes it).
-    is_pruning: bool,
     parent_cg: ConcurrencyGroup | None = None,
     timeout_seconds: float = _PRUNE_TIMEOUT_SECONDS,
 ) -> None:
-    """Forget the given snapshots (optionally pruning) via ``restic forget``.
+    """Forget the given snapshots via ``restic forget``.
 
-    Requires a writable key: forget deletes snapshot files and prune repacks
-    data, so this cannot run against a storage-quota-downgraded (read-only)
-    credential -- request a cleanup grant first.
+    Forget only unreferences data (it deletes snapshot files); the space is
+    reclaimed by ``prune_repository``, whose repack is bounded so its writes
+    fit inside the backup store's hard-limit headroom.
     """
     if not snapshot_ids:
         return
     env, flags = _env_and_flags(repository, backend_env, password)
     args = [*flags, "forget", *snapshot_ids]
-    if is_pruning:
-        args.append("--prune")
     result = _run_restic(args, env_overrides=env, parent_cg=parent_cg, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         _raise_restic_failure("restic forget", result, timeout_seconds=timeout_seconds)
+
+
+def prune_repository(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    # Caps how much data one prune repacks, so its transient growth (new packs
+    # are written before the old ones are deleted) stays inside the backup
+    # store's hard-limit headroom; None lets restic repack everything.
+    max_repack_bytes: int | None,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _PRUNE_TIMEOUT_SECONDS,
+) -> None:
+    """Reclaim the space of forgotten snapshots via ``restic prune``."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    args = [*flags, "prune", "--pack-size", str(RESTIC_PACK_SIZE_MIB)]
+    if max_repack_bytes is not None:
+        args.extend(["--max-repack-size", f"{max(1, max_repack_bytes // _BYTES_PER_MIB)}M"])
+    result = _run_restic(args, env_overrides=env, parent_cg=parent_cg, timeout_seconds=timeout_seconds)
+    if result.returncode != 0:
+        _raise_restic_failure("restic prune", result, timeout_seconds=timeout_seconds)
 
 
 class ResticSnapshot(FrozenModel):

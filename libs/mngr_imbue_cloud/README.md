@@ -186,9 +186,34 @@ The lease matches a create's declared ports against the row's set exactly, the w
 So a template that starts declaring ports needs the pool rebaked at that tag before it is promoted; a workspace that already runs on a host baked without them keeps running and reports none until a template update restores it onto a host that has them.
 A restore onto another box re-picks the box ports with the sshd ports and the connector re-reports them; `mngr list --format json` shows the current ones as `host.published_endpoints`, reachable at the box's address.
 
-## Buckets
+## Backup repositories
 
-Create an R2 bucket (for storing files remotely). Each bucket is isolated (think one per host) and has exactly **one** S3 key.
+Workspace backups live on the backup store (`specs/backup-store/spec.md`): one restic repository per workspace, reached over restic's REST backend with a per-repository token the connector issues. There are no per-workspace Cloudflare keys.
+
+```bash
+# Create the workspace's repository; emits the credentials (the token is shown once).
+# Idempotent: an existing repository gets a fresh token and the old one stops working.
+mngr imbue_cloud backup-repo create agent-<hex> --account alice@imbue.com
+
+# List the account's repositories with their usage.
+mngr imbue_cloud backup-repo list
+
+# Fresh credentials for an existing repository.
+mngr imbue_cloud backup-repo roll-token agent-<hex>
+
+# Delete the repository and every backup in it (refused while the workspace
+# record is still ACTIVE; destroy the workspace first). Prompts unless -y.
+mngr imbue_cloud backup-repo destroy agent-<hex> -y
+
+# Used bytes, the soft limit (your plan's quota), the hard limit, and the mode.
+mngr imbue_cloud backup-repo usage
+```
+
+The emitted `repository_url`, `rest_username`, and `rest_password` go straight into a `restic.env` as `RESTIC_REPOSITORY`, `RESTIC_REST_USERNAME`, and `RESTIC_REST_PASSWORD`. Storage is capped by your plan: past the soft limit our clients stop backing up and prune, and past the hard limit (the soft limit plus a headroom) the store refuses data uploads with 507, while deletes always work.
+
+## Buckets (legacy)
+
+Buckets are the previous backup model (one R2 bucket per workspace with its own S3 key) and remain only while existing workspaces migrate to the backup store; `bucket freeze <name>` makes a bucket's key read-only once its workspace has moved. Each bucket has exactly **one** S3 key.
 
 ```bash
 # Create a bucket; emits {bucket, key} where key includes the one-time secret.

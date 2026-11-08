@@ -16,6 +16,8 @@ export interface SnapshotTableAttrs {
   controller: BackupOperationController;
   /** Non-null disables every Restore with this tooltip (e.g. offline gate). */
   restoreDisabledReason: string | null;
+  /** An archive id when these snapshots live at a previous backup destination; null for current backups. */
+  repositoryId: string | null;
   onRestoreRequested: (snapshot: BackupSnapshot) => void;
 }
 
@@ -31,7 +33,8 @@ export function SnapshotTable(): m.Component<SnapshotTableAttrs, SnapshotTableSt
       vnode.state.failedSnapshotIds = new Set();
     },
     view(vnode) {
-      const { agentId, snapshots, controller, restoreDisabledReason, onRestoreRequested } = vnode.attrs;
+      const { agentId, snapshots, controller, restoreDisabledReason, repositoryId, onRestoreRequested } =
+        vnode.attrs;
       const nowMs = Date.now();
       return m(
         "div",
@@ -68,7 +71,7 @@ export function SnapshotTable(): m.Component<SnapshotTableAttrs, SnapshotTableSt
                     onclick: () => {
                       vnode.state.downloadingSnapshotIds.add(snapshot.snapshot_id);
                       vnode.state.failedSnapshotIds.delete(snapshot.snapshot_id);
-                      void downloadSnapshotExport(agentId, snapshot.snapshot_id).then((isOk) => {
+                      void downloadSnapshotExport(agentId, snapshot.snapshot_id, repositoryId).then((isOk) => {
                         vnode.state.downloadingSnapshotIds.delete(snapshot.snapshot_id);
                         if (!isOk) vnode.state.failedSnapshotIds.add(snapshot.snapshot_id);
                         m.redraw();

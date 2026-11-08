@@ -45,6 +45,9 @@ from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryCredentials
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupStorageUsage
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -57,6 +60,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import MobileAccessLinkCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import NotificationPreferencesCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
@@ -71,6 +75,8 @@ from imbue.minds.desktop_client.supertokens_routes import _record_web_login_stat
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.testing import FAKE_BACKUP_STORE_URL
+from imbue.minds.desktop_client.testing import FAKE_BACKUP_USER_SEGMENT
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
@@ -448,27 +454,98 @@ class FakeImbueCloudCli(ImbueCloudCli):
         self.notification_preferences_by_email[account] = info
         return info
 
-    # In-memory storage-cleanup backend (drives the backup-trim tests)
+    # In-memory backup store (drives the provisioning, trim, reaper, and migration tests)
 
-    storage_recheck_results: list[dict[str, object]] = Field(
+    backup_usage_results: list[BackupStorageUsage] = Field(
         default_factory=list,
-        description="Queue of recheck_storage results, consumed in order (the last entry repeats)",
+        description="Queue of get_backup_usage results, consumed in order (the last entry repeats)",
     )
-    cleanup_grant_result: dict[str, object] = Field(
-        default_factory=dict, description="Result returned by create_storage_cleanup_grant"
+    backup_repositories: list[BackupRepositoryInfo] = Field(
+        default_factory=list, description="What list_backup_repositories answers, every account"
     )
-    cleanup_grant_call_count: int = Field(default=0, description="How many grants were requested")
+    backup_store_url: str = Field(
+        default=FAKE_BACKUP_STORE_URL,
+        description="Origin the fake mints repository URLs under (rest:<origin>/<user>/<workspace>/)",
+    )
+    backup_user_segment: str = Field(
+        default=FAKE_BACKUP_USER_SEGMENT,
+        description="The user path segment the fake mints repository URLs under",
+    )
+    created_backup_repositories: list[str] = Field(
+        default_factory=list, description="Every workspace id create_backup_repository was called with, in order"
+    )
+    destroyed_backup_repositories: list[str] = Field(
+        default_factory=list, description="Every workspace id destroy_backup_repository was called with, in order"
+    )
+    frozen_buckets: list[str] = Field(
+        default_factory=list, description="Every legacy bucket short name freeze_bucket was called with, in order"
+    )
+    freeze_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, freeze_bucket raises this after recording the call"
+    )
+    legacy_bucket_names: list[str] = Field(
+        default_factory=list,
+        description="The legacy bucket short names get_bucket_info finds; any other name is not found",
+    )
+    backup_mint_count: int = Field(default=0, description="How many tokens the fake has minted (makes each unique)")
 
-    def recheck_storage(self, account: str) -> dict[str, object]:
-        if not self.storage_recheck_results:
-            raise ImbueCloudCliError("recheck storage: no fake results configured on FakeImbueCloudCli")
-        if len(self.storage_recheck_results) > 1:
-            return dict(self.storage_recheck_results.pop(0))
-        return dict(self.storage_recheck_results[0])
+    def _mint_backup_credentials(self, workspace_id: str) -> BackupRepositoryCredentials:
+        self.backup_mint_count += 1
+        return BackupRepositoryCredentials(
+            workspace_id=workspace_id,
+            repository_url=f"rest:{self.backup_store_url}/{self.backup_user_segment}/{workspace_id}/",
+            rest_username=workspace_id,
+            rest_password=SecretStr(f"fake-token-{self.backup_mint_count}"),
+        )
 
-    def create_storage_cleanup_grant(self, account: str) -> dict[str, object]:
-        self.cleanup_grant_call_count += 1
-        return dict(self.cleanup_grant_result)
+    def create_backup_repository(self, *, account: str, workspace_id: str) -> BackupRepositoryCredentials:
+        self.created_backup_repositories.append(workspace_id)
+        if all(info.workspace_id != workspace_id for info in self.backup_repositories):
+            self.backup_repositories.append(
+                BackupRepositoryInfo(
+                    workspace_id=workspace_id,
+                    repository_url=f"rest:{self.backup_store_url}/{self.backup_user_segment}/{workspace_id}/",
+                    used_bytes=0,
+                    created_at="2026-01-01T00:00:00+00:00",
+                )
+            )
+        return self._mint_backup_credentials(workspace_id)
+
+    is_backup_repository_listing_failing: bool = Field(
+        default=False,
+        description="When True, list_backup_repositories raises ImbueCloudCliError (connector unreachable)",
+    )
+
+    def list_backup_repositories(self, account: str) -> list[BackupRepositoryInfo]:
+        if self.is_backup_repository_listing_failing:
+            raise ImbueCloudCliError("backup-repo list: connector unreachable")
+        return list(self.backup_repositories)
+
+    def destroy_backup_repository(self, account: str, workspace_id: str) -> None:
+        self.destroyed_backup_repositories.append(workspace_id)
+        self.backup_repositories = [info for info in self.backup_repositories if info.workspace_id != workspace_id]
+
+    def get_backup_usage(self, account: str) -> BackupStorageUsage:
+        if not self.backup_usage_results:
+            raise ImbueCloudCliError("backup-repo usage: no fake results configured on FakeImbueCloudCli")
+        if len(self.backup_usage_results) > 1:
+            return self.backup_usage_results.pop(0)
+        return self.backup_usage_results[0]
+
+    def freeze_bucket(self, account: str, name: str) -> None:
+        self.frozen_buckets.append(name)
+        if self.freeze_error_to_raise is not None:
+            raise self.freeze_error_to_raise
+
+    def get_bucket_info(self, account: str, name: str) -> R2BucketInfo:
+        if name not in self.legacy_bucket_names:
+            # The plugin CLI's stderr for a bucket the connector no longer has.
+            error = ImbueCloudCliError(f"bucket info: 'Bucket not found: {name}'")
+            error.stderr = json.dumps(
+                {"error": f"Bucket not found: {name}", "error_class": "ImbueCloudBucketNotFoundError"}
+            )
+            raise error
+        return R2BucketInfo(bucket_name=name, s3_endpoint=AnyUrl("https://acct.r2.cloudflarestorage.com"))
 
     # In-memory machine listing (drives the stop-kind tracker)
 

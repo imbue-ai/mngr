@@ -236,3 +236,11 @@ llm_origin = "https://llm.studio.imbue.com"
 # and the app is deployed -- so unified deploys must keep maintaining it.
 [analytics]
 is_deployed = true
+
+# Whether this tier deploys the backup store: the per-environment
+# backup-store-<env> Cloudflare Worker and its backups-<env> R2 bucket, which
+# hold every Imbue Cloud workspace backup (specs/backup-store/spec.md). The
+# deploy stamps the Worker's URL and admin secret into the connector; off is
+# only for an environment whose Cloudflare account is not ready yet.
+[backup_store]
+is_deployed = true

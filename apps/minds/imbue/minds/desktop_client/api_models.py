@@ -211,6 +211,13 @@ class BackupServiceUpdateRequest(ApiRequestModel):
 class BackupRestoreRequest(ApiRequestModel):
     """Body for the in-place restore of one workspace to one snapshot."""
 
+    repository: str | None = Field(
+        default=None,
+        description=(
+            "An archive id from the backups listing's previous_repositories to restore a snapshot from one of "
+            "the workspace's previous backup destinations; absent restores from its current backups"
+        ),
+    )
     stop_chats: bool = Field(
         default=False,
         description=(
@@ -310,6 +317,41 @@ class EstablishSshRequest(ApiRequestModel):
         description="The caller's OpenSSH public key (single line); the private key never leaves the caller"
     )
     requester_workspace_id: str = Field(description="The calling workspace's own agent id (self-reported)")
+
+
+class RemoteExecutionRequest(ApiRequestModel):
+    """Body for running one command on the user's computer, as the user.
+
+    The response is not a JSON document but an ``application/x-ndjson`` stream
+    of one object per line: ``{"type": "stdout"|"stderr", "data": "<text>"}``
+    chunks as they arrive, ``{"type": "keepalive"}`` while the command is
+    silent, and a final ``{"type": "exit", "code": <int or null>,
+    "timed_out": <bool>}``. A command that cannot be started is reported on
+    the stream too (its OS error on ``stderr``, exit code 127 or 126), never
+    as an HTTP error.
+    """
+
+    command: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The argv to execute directly (no shell of the desktop's own); wrap a shell command as "
+            "['bash', '-lc', '<command>']. The first element may be a bare name (resolved on the user's "
+            "login-shell PATH), a '~/'-rooted or absolute path, or a path relative to cwd. A grant for one "
+            "program admits only commands whose first element is exactly that program."
+        ),
+    )
+    cwd: str | None = Field(
+        default=None,
+        description="Working directory, absolute or '~'-rooted; must exist. Defaults to the user's home directory.",
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Seconds the command may run before it is killed (the exit event then carries timed_out=true). "
+            "Defaults to 600; there is no maximum."
+        ),
+    )
 
 
 class SshConnectionResponse(FrozenModel):
@@ -1101,6 +1143,21 @@ class BackupSnapshotSummary(FrozenModel):
     total_size_bytes: int | None = Field(default=None, description="Total snapshot size in bytes, when known")
 
 
+class PreviousBackupRepository(FrozenModel):
+    """Snapshots still readable at one of a workspace's previous backup destinations.
+
+    A destination change (or the backup-store migration) archives the
+    workspace's canonical ``restic.env``; the archive keeps the old repository
+    readable, so its snapshots can be exported and restored until the
+    repository is reaped. Requested with ``?include_previous=1``.
+    """
+
+    archive_id: str = Field(description="Names the archived env in the export and restore routes")
+    archived_at: str = Field(description="When the destination was retired (UTC ISO 8601)")
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="Its snapshots, newest-first")
+    snapshots_error: str | None = Field(default=None, description="Why listing it failed, when it did")
+
+
 class WorkspaceBackupsResponse(FrozenModel):
     """A workspace's snapshot picture: the restic listing plus the live backing-up flag.
 
@@ -1124,6 +1181,13 @@ class WorkspaceBackupsResponse(FrozenModel):
     )
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
+    )
+    previous_repositories: tuple[PreviousBackupRepository, ...] = Field(
+        default=(),
+        description=(
+            "Snapshots at the workspace's previous backup destinations (archived envs), newest archive first; "
+            "only filled when the request asks for them with include_previous=1"
+        ),
     )
 
 

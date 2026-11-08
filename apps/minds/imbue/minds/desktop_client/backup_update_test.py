@@ -16,12 +16,14 @@ from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.backup_provisioning import RESTIC_PREVIOUS_ENV_REMOTE_PATH
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
 from imbue.minds.desktop_client.backup_update import _apply_update_and_verify
 from imbue.minds.desktop_client.backup_update import _chained_update_warning
 from imbue.minds.desktop_client.backup_update import _resolve_restore_snapshot
 from imbue.minds.desktop_client.backup_update import _resolve_restore_subpath
 from imbue.minds.desktop_client.backup_update import _restore_completion_warnings
+from imbue.minds.desktop_client.backup_update import build_restore_program_arguments
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_update import run_backup_update_sequence
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -101,9 +103,11 @@ def test_resolve_restore_subpath_uses_the_snapshot_root_for_current_layout_snaps
     _backup_tree(repository, home)
 
     snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), archive_id=None, parent_cg=None
     )
-    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+    subpath = _resolve_restore_subpath(
+        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=None, parent_cg=None
+    )
 
     assert subpath == snapshot.paths[0]
 
@@ -124,9 +128,11 @@ def test_resolve_restore_subpath_uses_the_tree_root_for_snapshots_stored_at_the_
     _backup_tree(repository, home, is_tree_at_snapshot_root=True)
 
     snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), archive_id=None, parent_cg=None
     )
-    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+    subpath = _resolve_restore_subpath(
+        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=None, parent_cg=None
+    )
 
     assert snapshot.paths[0] == str(home)
     assert subpath == "/"
@@ -147,9 +153,11 @@ def test_resolve_restore_subpath_uses_the_snapshot_root_for_plain_snapshots(tmp_
     _backup_tree(repository, host)
 
     snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), archive_id=None, parent_cg=None
     )
-    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+    subpath = _resolve_restore_subpath(
+        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=None, parent_cg=None
+    )
 
     assert subpath == snapshot.paths[0]
 
@@ -173,9 +181,11 @@ def test_resolve_restore_subpath_descends_into_the_nested_host_dir(tmp_path: Pat
     _backup_tree(repository, volume)
 
     snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), archive_id=None, parent_cg=None
     )
-    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+    subpath = _resolve_restore_subpath(
+        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=None, parent_cg=None
+    )
 
     assert subpath == snapshot.paths[0] + "/host_dir"
 
@@ -195,11 +205,11 @@ def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path
     _backup_tree(repository, junk)
 
     snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), archive_id=None, parent_cg=None
     )
 
     with pytest.raises(BackupProvisioningError, match="no workspace/ or code/ checkout"):
-        _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+        _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=None, parent_cg=None)
 
 
 def _only_snapshot_id(paths: InstallationPaths, agent_id: AgentId) -> str:
@@ -308,3 +318,46 @@ def test_the_restore_does_not_offer_a_retry_for_an_update_it_will_always_refuse(
     failed = _chained_update_warning("restic snapshots timed out after 90s")
     assert "restic snapshots timed out after 90s" in failed
     assert "Update backup software" in failed
+
+
+def test_restore_program_arguments_name_the_previous_storage_env_only_for_an_archived_restore() -> None:
+    agent_id = AgentId.generate()
+    at = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    current = build_restore_program_arguments(
+        agent_id=agent_id,
+        snapshot_id="abcdef12",
+        snapshot_subpath="/home/user",
+        snapshot_time=at,
+        is_from_previous_storage=False,
+        is_stop_chats=False,
+        is_skip_chat_gate=False,
+        is_skip_safety_snapshot=False,
+    )
+    assert current == (
+        "--agent-id",
+        str(agent_id),
+        "--snapshot-id",
+        "abcdef12",
+        "--snapshot-subpath",
+        "/home/user",
+        "--source-time",
+        at.isoformat(),
+    )
+
+    previous = build_restore_program_arguments(
+        agent_id=agent_id,
+        snapshot_id="abcdef12",
+        snapshot_subpath="/home/user",
+        snapshot_time=at,
+        is_from_previous_storage=True,
+        is_stop_chats=True,
+        is_skip_chat_gate=True,
+        is_skip_safety_snapshot=True,
+    )
+    assert previous[8:] == (
+        "--source-env-path",
+        RESTIC_PREVIOUS_ENV_REMOTE_PATH,
+        "--stop-chats",
+        "--skip-chat-gate",
+        "--skip-safety-snapshot",
+    )

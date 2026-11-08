@@ -8,7 +8,8 @@
  *       with the fields:
  *         - ``agent_id``   (string, required)
  *         - ``rationale``  (string, required)
- *         - ``type``       (one of "predefined" | "file-sharing" | "workspace")
+ *         - ``type``       (one of "predefined" | "file-sharing" | "workspace" |
+ *                           "accounts" | "custom-service" | "remote-execution")
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...],
@@ -104,6 +105,21 @@
  *       merge (no ``anyOf``). The approve override body
  *       (``{permissions, target_workspace_id}``) recomputes the effect
  *       from the user's dialog choices (verb subset + all-vs-selected).
+ *       For ``type=="remote-execution"`` the payload is ``{}`` or
+ *       ``{program}``: the grant lets every agent of the asking host run
+ *       commands on the desktop this gateway runs on, as the user, through
+ *       the desktop's ``POST /api/v1/remote-execution/<device id>`` route.
+ *       With ``program`` (a bare name such as ``rsync``, or a ``~``-rooted
+ *       or absolute path) only commands whose first argv element is exactly
+ *       that string are admitted; the grant pins the JSON body's
+ *       ``command[0]`` to it. Like file-sharing it is minted for this
+ *       desktop's own device id, so a desktop can never grant commands on
+ *       another; a workspace addresses the desktop it wants with
+ *       ``X-Latchkey-Device``. The effect is one fixed permission under
+ *       ``latchkey-self`` whose path is a ``const``, so it matches that one
+ *       route and nothing under a wider prefix. It takes no approve
+ *       override: there is nothing to narrow. Without a
+ *       device id the gateway refuses the request with HTTP 503.
  *
  *       The body may also carry a ``request_id`` of the caller's choosing
  *       (filename-safe, see ``validateRequestId``), which is how one
@@ -251,12 +267,22 @@ const REQUEST_TYPE_ACCOUNTS = 'accounts';
 // is written by the desktop once the sign-in has produced an account, so the
 // effect is always empty.
 const REQUEST_TYPE_CUSTOM_SERVICE = 'custom-service';
+// ``remote-execution`` lets every agent of the asking host run commands on the
+// desktop this gateway runs on, as the user, through the desktop's
+// ``POST /api/v1/remote-execution/<device id>`` route, either any command or
+// (with ``payload.program``) one program. Like file-sharing it is pinned to this
+// desktop's own device id; like accounts it takes no approve override. It is a
+// request type of its own, rather than one more ``minds-workspaces`` verb, so
+// that no other dialog's "all" switch can ever carry it: the only way to grant
+// it is the one dialog built to warn about it.
+const REQUEST_TYPE_REMOTE_EXECUTION = 'remote-execution';
 const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_PREDEFINED,
   REQUEST_TYPE_FILE_SHARING,
   REQUEST_TYPE_WORKSPACE,
   REQUEST_TYPE_ACCOUNTS,
   REQUEST_TYPE_CUSTOM_SERVICE,
+  REQUEST_TYPE_REMOTE_EXECUTION,
 ]);
 
 // The validation rules below mirror ``imbue/mngr_latchkey/custom_services.py``,
@@ -475,6 +501,21 @@ const VALID_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const ACCOUNTS_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/accounts';
 const ACCOUNTS_SCOPE_NAME = 'latchkey-self';
 const ACCOUNTS_PERMISSION_NAME = 'minds-accounts-read';
+
+// The remote-execution grant: one fixed permission per desktop (or per desktop
+// and program) under the pre-existing ``latchkey-self`` scope, whose path is the
+// exact route of that desktop (a ``const``, never a prefix pattern). The name
+// and the program grammar mirror ``imbue/mngr_latchkey/remote_execution.py``,
+// which reads these names back: ``remote-execution-<device id>`` for any
+// command, ``remote-execution-<device id>:<program>`` for one program.
+const REMOTE_EXECUTION_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/remote-execution';
+const REMOTE_EXECUTION_SCOPE_NAME = 'latchkey-self';
+const REMOTE_EXECUTION_PERMISSION_PREFIX = 'remote-execution-';
+const REMOTE_EXECUTION_PROGRAM_SEPARATOR = ':';
+const REMOTE_EXECUTION_PROGRAM_MAX_LENGTH = 512;
+// A bare name (no slash, not starting with ``~`` or ``-``) or a path rooted at
+// ``/`` or ``~/``; no surrounding whitespace and no control characters anywhere.
+const REMOTE_EXECUTION_PROGRAM_PATTERN = /^(?:\/|~\/)?[^\x00-\x20\x7f/~-][^\x00-\x1f\x7f]*$/;
 
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
@@ -1424,6 +1465,42 @@ function validateAccountsPayload(payload) {
 }
 
 /**
+ * Whether ``program`` is something a remote-execution grant may name: a bare
+ * name the desktop resolves on the user's PATH, or a ``~``-rooted or absolute
+ * path. A relative path, surrounding whitespace, or a control character is not.
+ */
+function isValidRemoteExecutionProgram(program) {
+  if (typeof program !== 'string' || program.length === 0) return false;
+  if (program.length > REMOTE_EXECUTION_PROGRAM_MAX_LENGTH) return false;
+  if (program !== program.trim()) return false;
+  if (!REMOTE_EXECUTION_PROGRAM_PATTERN.test(program)) return false;
+  return !program.includes('/') || program.startsWith('/') || program.startsWith('~/');
+}
+
+/**
+ * Validate the payload for a ``remote-execution`` permission request: ``{}``
+ * for any command on the desktop this gateway runs on, or ``{program}`` for
+ * one program there. Any other field is rejected.
+ */
+function validateRemoteExecutionPayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'remote-execution'.");
+  }
+  ensureNoExtraneousFields('payload ', ['program'], payload);
+  if (payload.program === undefined || payload.program === null) {
+    return {};
+  }
+  if (!isValidRemoteExecutionProgram(payload.program)) {
+    throw new InvalidRequestBodyError(
+      "payload.'program' must be a bare program name or a path starting with '/' or '~/', "
+      + `at most ${REMOTE_EXECUTION_PROGRAM_MAX_LENGTH} characters, without surrounding whitespace `
+      + 'or control characters.',
+    );
+  }
+  return { program: payload.program };
+}
+
+/**
  * Validate a ``{permissions, target_workspace_id}`` object for a ``workspace``
  * request, shared by the create payload and the approve override body.
  *
@@ -1555,6 +1632,9 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_CUSTOM_SERVICE:
       payload = validateCustomServicePayload(parsed.payload);
       break;
+    case REQUEST_TYPE_REMOTE_EXECUTION:
+      payload = validateRemoteExecutionPayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -1603,6 +1683,8 @@ function computeEffect(type, payload) {
       // and the desktop then writes the grant through ``/permissions/rules``.
       // The empty effect means a bare approve only drops the record.
       return {};
+    case REQUEST_TYPE_REMOTE_EXECUTION:
+      return computeRemoteExecutionEffect(requireLocalDeviceId(), payload.program ?? null);
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -1802,6 +1884,42 @@ function computeAccountsEffect() {
       },
     },
     rules: [{ [ACCOUNTS_SCOPE_NAME]: [ACCOUNTS_PERMISSION_NAME] }],
+  };
+}
+
+/**
+ * Compute the ``effect`` for a ``remote-execution`` request: one permission
+ * named for this desktop (and, with ``program``, for that one program),
+ * matching ``POST`` on exactly this desktop's remote-execution route, attached
+ * to the pre-existing ``latchkey-self`` scope. The path is a ``const`` rather
+ * than a pattern so the grant can never widen to a sibling route or to another
+ * desktop's. A program grant additionally requires the JSON body's
+ * ``command[0]`` to be exactly the program: detent exposes a JSON body as
+ * ``parsedBody``, and requiring it means a body the gateway cannot parse is
+ * refused rather than let through.
+ */
+function computeRemoteExecutionEffect(deviceId, program) {
+  const permissionName = program === null
+    ? `${REMOTE_EXECUTION_PERMISSION_PREFIX}${deviceId}`
+    : `${REMOTE_EXECUTION_PERMISSION_PREFIX}${deviceId}${REMOTE_EXECUTION_PROGRAM_SEPARATOR}${program}`;
+  const properties = {
+    method: { const: 'POST' },
+    path: { const: `${REMOTE_EXECUTION_PROXY_PATH_PREFIX}/${deviceId}` },
+  };
+  const required = ['method', 'path'];
+  if (program !== null) {
+    properties.parsedBody = {
+      type: 'object',
+      properties: {
+        command: { type: 'array', minItems: 1, prefixItems: [{ const: program }] },
+      },
+      required: ['command'],
+    };
+    required.push('parsedBody');
+  }
+  return {
+    schemas: { [permissionName]: { properties, required } },
+    rules: [{ [REMOTE_EXECUTION_SCOPE_NAME]: [permissionName] }],
   };
 }
 
@@ -2564,11 +2682,17 @@ function resolveEffectForApproval(requestRecord, override) {
       ensureNoExtraneousFields('approve body ', [], override);
       return requestRecord.effect;
     }
+    case REQUEST_TYPE_REMOTE_EXECUTION: {
+      // The grant is fixed at request time (one desktop, any command or one
+      // program): there is nothing to narrow or widen.
+      ensureNoExtraneousFields('approve body ', [], override);
+      return requestRecord.effect;
+    }
     default:
       throw new InvalidRequestBodyError(
         `a body override is only valid for '${REQUEST_TYPE_PREDEFINED}', `
-        + `'${REQUEST_TYPE_FILE_SHARING}', '${REQUEST_TYPE_WORKSPACE}' or `
-        + `'${REQUEST_TYPE_CUSTOM_SERVICE}' requests; request `
+        + `'${REQUEST_TYPE_FILE_SHARING}', '${REQUEST_TYPE_WORKSPACE}', `
+        + `'${REQUEST_TYPE_CUSTOM_SERVICE}' or '${REQUEST_TYPE_REMOTE_EXECUTION}' requests; request `
         + `${requestRecord.request_id} is '${requestRecord.request_type}'.`,
       );
   }

@@ -25,6 +25,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
+from imbue.minds.desktop_client.backup_env_store import read_archived_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
@@ -122,16 +123,25 @@ def export_snapshot_zip(
     host_id: str,
     snapshot: str = "latest",
     parent_cg: ConcurrencyGroup | None = None,
+    # None exports from the workspace's current backups; an archive id from
+    # one of its previous backup destinations (an archived canonical env).
+    archive_id: str | None = None,
 ) -> Path:
     """Restore the given snapshot (default ``latest``) and zip it; return the zip path.
 
     Raises ``BackupExportError`` when the workspace has no canonical restic.env
-    (backups were never configured) or its repository address is missing;
-    propagates ``BackupProvisioningError`` if restic itself fails.
+    (backups were never configured), the named archive does not exist, or the
+    repository address is missing; propagates ``BackupProvisioningError`` if
+    restic itself fails.
     """
     with _export_in_flight(agent_id):
         return _export_snapshot_zip_inner(
-            paths=paths, agent_id=agent_id, host_id=host_id, snapshot=snapshot, parent_cg=parent_cg
+            paths=paths,
+            agent_id=agent_id,
+            host_id=host_id,
+            snapshot=snapshot,
+            parent_cg=parent_cg,
+            archive_id=archive_id,
         )
 
 
@@ -142,8 +152,13 @@ def _export_snapshot_zip_inner(
     host_id: str,
     snapshot: str,
     parent_cg: ConcurrencyGroup | None,
+    archive_id: str | None,
 ) -> Path:
-    content = read_canonical_env(paths, agent_id)
+    content = (
+        read_canonical_env(paths, agent_id) if archive_id is None else read_archived_env(paths, agent_id, archive_id)
+    )
+    if content is None and archive_id is not None:
+        raise BackupExportError(f"No previous backup storage {archive_id} exists for {agent_id}")
     if content is None:
         raise BackupExportError(f"No backups are configured for {agent_id}")
     env = parse_restic_env(content)

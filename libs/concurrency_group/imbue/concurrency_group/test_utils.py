@@ -1,4 +1,5 @@
 import resource
+import subprocess
 import time
 from collections.abc import Callable
 from typing import Final
@@ -13,6 +14,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 # avoids any chance of collision with unrelated processes if a test ever identifies a process by its
 # command line. The value is large enough that the process never exits on its own during a test.
 LONG_SLEEP_SECONDS: Final[str] = "36284"
+
+
+def is_process_with_marker_running(marker: str) -> bool:
+    """Whether any process's command line carries ``marker`` (so a test can see what a kill left behind)."""
+    return subprocess.run(["pgrep", "-f", marker], capture_output=True, check=False).returncode == 0
 
 
 def poll_until(

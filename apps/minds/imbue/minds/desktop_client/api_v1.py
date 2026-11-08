@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -63,6 +64,7 @@ from imbue.minds.desktop_client import backup_verification
 from imbue.minds.desktop_client import create_attempt_discard
 from imbue.minds.desktop_client import desktop_control
 from imbue.minds.desktop_client import destroying
+from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_ssh_tunnel
@@ -85,6 +87,7 @@ from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_auth import require_api_or_local_socket_auth
 from imbue.minds.desktop_client.api_models import AccountKeybindingsPutRequest
 from imbue.minds.desktop_client.api_models import AccountKeybindingsResponse
 from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
@@ -131,6 +134,8 @@ from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import PreviousBackupRepository
+from imbue.minds.desktop_client.api_models import RemoteExecutionRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
@@ -153,13 +158,20 @@ from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
+from imbue.minds.desktop_client.api_transport import agent_label_from_environ
+from imbue.minds.desktop_client.api_transport import transport_for_environ
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
+from imbue.minds.desktop_client.backup_env_store import ArchivedBackupEnv
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
+from imbue.minds.desktop_client.backup_env_store import list_previous_destination_envs
+from imbue.minds.desktop_client.backup_env_store import read_archived_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
+from imbue.minds.desktop_client.backup_reaper import backup_target_from_env
+from imbue.minds.desktop_client.backup_reaper import is_backup_target_present
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
@@ -211,6 +223,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import MACHINES_RESIZE_COMMAND_R
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import REMOTE_EXECUTION_DISABLED_CODE
+from imbue.minds.desktop_client.latchkey.handlers.remote_execution import is_agent_command_execution_allowed
 from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
@@ -218,6 +232,11 @@ from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launc
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
+from imbue.minds.desktop_client.remote_command_runner import REMOTE_EXECUTION_EVENTS_RELATIVE_PATH
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandAttribution
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandExecution
+from imbue.minds.desktop_client.remote_command_runner import RemoteCommandLog
+from imbue.minds.desktop_client.remote_command_runner import resolve_remote_command
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import AccountSession
@@ -301,6 +320,7 @@ from imbue.minds.errors import ConnectionRequiresMasterPasswordError
 from imbue.minds.errors import ConnectionTooNewError
 from imbue.minds.errors import ConnectionUpdateInProgressError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import RemoteCommandRequestError
 from imbue.minds.errors import SettingsRecordTooNewError
 from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.errors import WorkspaceSyncError
@@ -312,6 +332,7 @@ from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
 from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
 from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
+from imbue.minds.primitives import DeviceId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
@@ -790,25 +811,107 @@ def _list_workspace_snapshots_safely(
     )
     # restic returns oldest-first; the API documents newest-first so callers
     # (settings recent table, full-history page) do not re-sort.
-    ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
+    ordered = _snapshots_newest_first(snapshots)
     end = None if limit is None else offset + limit
-    window = ordered[offset:end]
     return _WorkspaceSnapshotListing(
-        snapshots=tuple(
-            BackupSnapshotSummary(
-                snapshot_id=snapshot.snapshot_id,
-                short_id=snapshot.short_id,
-                time=snapshot.time.isoformat(),
-                paths=tuple(snapshot.paths),
-                hostname=snapshot.hostname,
-                tags=tuple(snapshot.tags),
-                total_size_bytes=snapshot.total_size_bytes,
-            )
-            for snapshot in window
-        ),
+        snapshots=ordered[offset:end],
         total=len(ordered),
         is_backing_up=is_backing_up,
     )
+
+
+def _snapshots_newest_first(snapshots: Sequence[restic_cli.ResticSnapshot]) -> tuple[BackupSnapshotSummary, ...]:
+    """Serialize restic's oldest-first listing as the API's newest-first summaries."""
+    ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
+    return tuple(
+        BackupSnapshotSummary(
+            snapshot_id=snapshot.snapshot_id,
+            short_id=snapshot.short_id,
+            time=snapshot.time.isoformat(),
+            paths=tuple(snapshot.paths),
+            hostname=snapshot.hostname,
+            tags=tuple(snapshot.tags),
+            total_size_bytes=snapshot.total_size_bytes,
+        )
+        for snapshot in ordered
+    )
+
+
+def _is_previous_destination_reaped(
+    archive: ArchivedBackupEnv, cli: ImbueCloudCli | None, account_email: str | None
+) -> bool:
+    """Whether the connector says the archived env's backup is gone (a reaped legacy bucket or store repository).
+
+    Only the connector's answer counts: a restic failure alone (the listing
+    that led here) may be a network blip, and a BYO backend or an account
+    this device cannot ask for is never judged gone.
+    """
+    if cli is None or account_email is None:
+        return False
+    try:
+        target = backup_target_from_env(archive.path.read_text())
+    except OSError as e:
+        logger.debug("Could not read archived env {} to ask the connector about its storage: {}", archive.path, e)
+        return False
+    if target is None:
+        return False
+    try:
+        return not is_backup_target_present(cli, account_email, target)
+    except ImbueCloudCliError as e:
+        logger.debug("Could not ask the connector whether {} still exists: {}", target, e)
+        return False
+
+
+def _list_previous_repositories_safely(
+    paths: InstallationPaths,
+    parsed_id: AgentId,
+    *,
+    listing_timeout_seconds: float,
+    parent_cg: ConcurrencyGroup | None,
+    cli: ImbueCloudCli | None,
+    account_email: str | None,
+) -> tuple[PreviousBackupRepository, ...]:
+    """List the snapshots at each of the workspace's previous backup destinations, newest archive first.
+
+    A destination whose listing fails is reported with its error rather than
+    hiding the others, unless the connector confirms its storage is gone (the
+    legacy reap or the retention reaper got to it): then the archived env is
+    just a dead credential, so it is removed and the destination omitted.
+    """
+    previous: list[PreviousBackupRepository] = []
+    for archive in list_previous_destination_envs(paths, parsed_id):
+        try:
+            snapshots = backup_status.list_workspace_snapshots(
+                paths,
+                parsed_id,
+                parent_cg=parent_cg,
+                timeout_seconds=listing_timeout_seconds,
+                archive_id=archive.archive_id,
+            )
+        except BackupProvisioningError as e:
+            logger.debug("Previous backup storage {} of {} could not be listed: {}", archive.archive_id, parsed_id, e)
+            if _is_previous_destination_reaped(archive, cli, account_email):
+                logger.info(
+                    "Previous backup storage {} of {} is gone; dropping its archived env",
+                    archive.archive_id,
+                    parsed_id,
+                )
+                archive.path.unlink(missing_ok=True)
+                continue
+            previous.append(
+                PreviousBackupRepository(
+                    archive_id=archive.archive_id, archived_at=archive.archived_at.isoformat(), snapshots_error=str(e)
+                )
+            )
+            continue
+        previous.append(
+            PreviousBackupRepository(
+                archive_id=archive.archive_id,
+                archived_at=archive.archived_at.isoformat(),
+                snapshots=_snapshots_newest_first(snapshots),
+            )
+        )
+    return tuple(previous)
 
 
 def _require_workspace_facts_cache(state: DesktopClientState) -> WorkspaceFactsCache | Response:
@@ -838,6 +941,17 @@ def _check_backup_service_safely(
         # failed); the response still degrades to UNKNOWN rather than failing.
         logger.warning("Backup service check for {} failed: {}", parsed_id, e)
         return backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
+
+
+def _backup_account_email_for(parsed_id: AgentId) -> str | None:
+    """The email of the account whose synced record names the workspace, or None when no record synced here."""
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return None
+    found = session_store.record_store.find_record_any_state(str(parsed_id))
+    if found is None:
+        return None
+    return session_store.record_store.account_email_for(found[0])
 
 
 def _materialize_env_from_record_if_missing(paths: InstallationPaths, parsed_id: AgentId) -> None:
@@ -881,9 +995,12 @@ def _parse_snapshot_limit_offset() -> "tuple[int | None, int] | Response":
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
     """One workspace's snapshot listing + live backing-up flag (fast; no exec).
 
-    Runs restic from this machine, so it works even when the workspace is
-    offline or destroyed -- and never waits on the (slow, exec-based) service
-    verification, which lives on the separate ``backup-check`` route.
+    ``?include_previous=1`` adds the snapshots of the workspace's previous
+    backup destinations (its archived envs), each listed as its own
+    repository. Runs restic from this machine, so it works even when the
+    workspace is offline or destroyed -- and never waits on the (slow,
+    exec-based) service verification, which lives on the separate
+    ``backup-check`` route.
     Cross-workspace parallelism is the frontend's job: it fans out one
     request per workspace.
     """
@@ -905,6 +1022,20 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         listing_timeout_seconds=backup_status.HISTORY_RESTIC_TIMEOUT_SECONDS,
         parent_cg=state.root_concurrency_group,
     )
+    # Previous destinations cost one restic listing each, so only the full
+    # history page asks for them; the landing badges and settings never do.
+    previous = (
+        _list_previous_repositories_safely(
+            paths,
+            parsed_id,
+            listing_timeout_seconds=backup_status.HISTORY_RESTIC_TIMEOUT_SECONDS,
+            parent_cg=state.root_concurrency_group,
+            cli=state.imbue_cloud_cli,
+            account_email=_backup_account_email_for(parsed_id),
+        )
+        if request.args.get("include_previous") == "1"
+        else ()
+    )
     return WorkspaceBackupsResponse(
         agent_id=str(parsed_id),
         is_configured=has_canonical_env(paths, parsed_id),
@@ -912,6 +1043,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         snapshots=listing.snapshots,
         snapshots_total=listing.total,
         snapshots_error=listing.error,
+        previous_repositories=previous,
     )
 
 
@@ -1171,6 +1303,47 @@ def _drain_backup_summary_rows(
         yield json.dumps(summary) + "\n"
 
 
+def _start_backup_store_migration_scan(
+    state: DesktopClientState, paths: InstallationPaths, agent_ids: list[AgentId]
+) -> None:
+    """Offer the batch's workspaces to the migration manager on a thread of the root group.
+
+    The scan lists the store's repositories through the CLI (a subprocess) for
+    any legacy workspace it finds, so it runs off the request thread: the
+    stream's first row never waits on it. The manager claims each workspace
+    itself, so scans from consecutive batches may overlap.
+    """
+    root_cg = state.root_concurrency_group
+    if root_cg is None or not agent_ids:
+        return
+    try:
+        start_mngr_thread(
+            root_cg,
+            target=state.backup_store_migration_manager.maybe_start_migrations,
+            args=(agent_ids,),
+            kwargs={
+                "paths": paths,
+                "imbue_cloud_cli": state.imbue_cloud_cli,
+                "resolver": state.backend_resolver,
+                "registry": state.workspace_operation_registry,
+                "session_store": state.session_store,
+                "record_store": state.session_store.record_store if state.session_store is not None else None,
+                "parent_cg": root_cg,
+            },
+            name="backup-store-migration-scan",
+            daemon=True,
+            # A scan that fails is logged, not raised into the app's root group.
+            is_checked=False,
+            on_failure=_log_backup_store_migration_scan_failure,
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Could not start the backup-store migration scan: {}", exc)
+
+
+def _log_backup_store_migration_scan_failure(exc: BaseException) -> None:
+    logger.opt(exception=exc).warning("The backup-store migration scan failed")
+
+
 @require_api_or_cookie_auth
 def _handle_workspaces_backups_stream() -> Response:
     """Stream every requested workspace's landing backup badge as NDJSON.
@@ -1209,6 +1382,10 @@ def _handle_workspaces_backups_stream() -> Response:
         created_at_by_agent_id[agent_id] = (
             info.create_time.isoformat() if info is not None and info.create_time is not None else None
         )
+    # The status batch is also what drives the legacy-to-store backup
+    # migration: a few of the rendered workspaces still on a legacy bucket
+    # start moving per pass (tracked operations, online workspaces only).
+    _start_backup_store_migration_scan(state, paths, [AgentId(agent_id) for agent_id in valid_agent_ids])
     invalid_rows = (
         json.dumps(_degraded_backup_summary(invalid_id, None, "not a workspace agent id")) + "\n"
         for invalid_id in invalid_agent_ids
@@ -1229,7 +1406,9 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 
     ``snapshot_id`` is passed to restic verbatim, so restic's own snapshot
     addressing applies -- in particular ``latest`` exports the newest snapshot
-    without the caller having to list them first.
+    without the caller having to list them first. ``?repository=<archive id>``
+    exports from one of the workspace's previous backup destinations instead
+    of its current backups.
     """
     parsed_id = AgentId(agent_id)
     paths: InstallationPaths | None = get_state().api_v1_paths
@@ -1240,6 +1419,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_id = info.host_id if info is not None else str(parsed_id)
     download_label = info.agent_name if info is not None else str(parsed_id)
+    archive_id = request.args.get("repository") or None
     try:
         zip_path = export_snapshot_zip(
             paths=paths,
@@ -1247,6 +1427,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
             host_id=host_id,
             snapshot=snapshot_id,
             parent_cg=get_state().root_concurrency_group,
+            archive_id=archive_id,
         )
     except BackupExportError as e:
         return _json_error(str(e), 404)
@@ -2324,9 +2505,10 @@ def _handle_workspace_backup_restore(
     """Dispatch an in-place restore of the workspace to one snapshot; return a handle to poll.
 
     Body: ``{"stop_chats"?, "update_after"?, "skip_safety_snapshot"?,
-    "skip_chat_gate"?}`` (see :class:`BackupRestoreRequest`; the skip flags
-    are only ever set by the explicit retry affordances the failure notice
-    offers). One tracked operation runs per workspace at a time;
+    "skip_chat_gate"?, "repository"?}`` (see :class:`BackupRestoreRequest`;
+    the skip flags are only ever set by the explicit retry affordances the
+    failure notice offers, and ``repository`` names one of the workspace's
+    previous backup destinations to restore from). One tracked operation runs per workspace at a time;
     ``start_if_idle`` rejects a second dispatch (of any kind) with a 409
     rather than stacking.
     """
@@ -2341,6 +2523,15 @@ def _handle_workspace_backup_restore(
     if isinstance(facts_cache, Response):
         return facts_cache
     body = request.get_json(silent=True, force=True) or {}
+    archive_id = str(body.get("repository") or "") or None
+    if archive_id is not None:
+        try:
+            archived_env = read_archived_env(paths, parsed_id, archive_id)
+        except BackupProvisioningError as e:
+            logger.warning("Previous backup storage {} of {} could not be read: {}", archive_id, parsed_id, e)
+            return _json_error(str(e), 500)
+        if archived_env is None:
+            return _json_error(f"No previous backup storage {archive_id} exists for {agent_id}", 404)
     return _dispatch_backup_worker(
         parsed_id=parsed_id,
         parent_cg=parent_cg,
@@ -2352,6 +2543,7 @@ def _handle_workspace_backup_restore(
             "resolver": state.backend_resolver,
             "facts_cache": facts_cache,
             "snapshot_id": snapshot_id,
+            "archive_id": archive_id,
             "is_stop_chats": bool(body.get("stop_chats", False)),
             "is_update_after": bool(body.get("update_after", True)),
             "is_skip_safety_snapshot": bool(body.get("skip_safety_snapshot", False)),
@@ -2922,6 +3114,95 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         host=connection.host,
         port=connection.port,
         expires_at=connection.expires_at.isoformat(),
+    )
+
+
+# Remote execution route
+
+UNKNOWN_DEVICE_CODE: Final[str] = "unknown_device"
+EXECUTION_UNAVAILABLE_CODE: Final[str] = "execution_unavailable"
+_NDJSON_HEADERS: Final[dict[str, str]] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+@require_api_or_local_socket_auth
+@API_SPEC.validate(json=RemoteExecutionRequest)
+def _handle_remote_execution(device_id: str) -> Response:
+    """Run one command on this computer, as the user, and stream what it prints.
+
+    The most dangerous thing an agent can be allowed to do, so three gates stand
+    in front of it: the per-workspace remote-execution grant the gateway enforces
+    before the request reaches us, this device's master switch (Settings > This
+    computer, off by default and re-read on every call, so turning it off stops
+    every workspace at once), and the device id in the path, which must be this
+    install's own so a misrouted request fails closed instead of running on the
+    wrong computer. The browser UI is refused outright (``agents_only``).
+
+    Body: ``{"command": [argv...], "cwd"?: "...", "timeout_seconds"?: N}``. The
+    answer is an ``application/x-ndjson`` stream: ``stdout``/``stderr`` lines,
+    ``keepalive`` lines while the command is silent, and one final ``exit``
+    line (``code`` null when the timeout killed it). A dropped connection kills
+    the command. Every command is recorded under ``events/remote_execution``.
+    """
+    state = get_state()
+    try:
+        parsed_device_id = DeviceId(device_id)
+    except InvalidRandomIdError:
+        return _json_error(f"Unknown device {device_id}", 404, code=UNKNOWN_DEVICE_CODE)
+    if not state.device_id or str(parsed_device_id) != state.device_id:
+        return _json_error(
+            f"Unknown device {device_id}: this computer is {state.device_id or 'unidentified'}",
+            404,
+            code=UNKNOWN_DEVICE_CODE,
+        )
+    if not is_agent_command_execution_allowed():
+        return _json_error(
+            "Agents are not allowed to run commands on this computer. The user can change that under "
+            "Settings > This computer in Imbue Studio.",
+            403,
+            code=REMOTE_EXECUTION_DISABLED_CODE,
+        )
+    body = RemoteExecutionRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    parent_cg = state.root_concurrency_group
+    paths = state.api_v1_paths
+    if parent_cg is None or paths is None:
+        return _json_error("Running commands is not configured on this desktop", 503, code=EXECUTION_UNAVAILABLE_CODE)
+    try:
+        run = resolve_remote_command(body, Path.home())
+    except RemoteCommandRequestError as e:
+        return _json_field_error(str(e), e.field, code=e.code)
+    environment = dict(os.environ)
+    if state.login_shell_path is not None:
+        environment["PATH"] = state.login_shell_path.read()
+    execution = RemoteCommandExecution(
+        run=run,
+        attribution=_remote_command_attribution(state.backend_resolver),
+        log=RemoteCommandLog(events_path=paths.data_dir / REMOTE_EXECUTION_EVENTS_RELATIVE_PATH),
+        concurrency_group=parent_cg,
+        environment=environment,
+    )
+    logger.info(
+        "Running a command on this computer for {}: {}", execution.attribution.claimed_agent_id, run.command[0]
+    )
+    return make_streaming_response(
+        execution.stream_events(), media_type="application/x-ndjson", headers=_NDJSON_HEADERS
+    )
+
+
+def _remote_command_attribution(backend_resolver: BackendResolverInterface) -> RemoteCommandAttribution:
+    """Who is asking, from the self-declared agent label alone; recorded for the log, never consulted for access."""
+    claimed_agent_id = agent_label_from_environ(request.environ)
+    workspace_id: str | None = None
+    if claimed_agent_id is not None:
+        try:
+            labelled_agent = AgentId(claimed_agent_id)
+        except InvalidRandomIdError:
+            labelled_agent = None
+        if labelled_agent is not None and labelled_agent in backend_resolver.list_known_agent_ids():
+            workspace_id = str(_workspace_agent_id_for_agent(labelled_agent, backend_resolver))
+    return RemoteCommandAttribution(
+        claimed_agent_id=claimed_agent_id,
+        workspace_id=workspace_id,
+        transport=transport_for_environ(request.environ),
     )
 
 
@@ -5210,6 +5491,7 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     # Baseline-granted at the gateway (``minds-api-timezone-read``), so every agent can read it.
     blueprint.add_url_rule("/timezone", view_func=_handle_timezone, methods=["GET"])
+    blueprint.add_url_rule("/remote-execution/<device_id>", view_func=_handle_remote_execution, methods=["POST"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/backups", view_func=_handle_workspaces_backups_stream, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])

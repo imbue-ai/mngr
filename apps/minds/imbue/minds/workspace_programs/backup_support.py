@@ -33,11 +33,17 @@ GIT_IDENTITY: Final[tuple[str, ...]] = (
     "-c",
     "user.email=backup-update@minds.local",
 )
+# Every event type that ends a host_backup tick. Must track host_backup's
+# TICK_TERMINAL_EVENT_TYPES in the workspace template: a terminal type missing
+# here makes every tick look in flight and the mutation gate wait out its
+# full timeout.
 _TICK_COMPLETION_TYPES: Final[tuple[str, ...]] = (
     "RESTIC_BACKUP_SUCCEEDED",
     "RESTIC_BACKUP_FAILED",
+    "BACKUP_SKIPPED_OVER_QUOTA",
     "TICK_SKIPPED_DUE_TO_MISSING_SECRETS",
     "TICK_ERROR",
+    "TICK_ABANDONED",
     "SNAPSHOT_FAILED",
 )
 # Imbue Studio already waited (unboundedly, cancellably) for a quiet workspace before

@@ -25,6 +25,10 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryDeleteTimeoutError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupRepositoryNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBackupStoreUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
@@ -46,6 +50,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceActiveError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspacesPresentError
@@ -55,6 +60,7 @@ from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
+from imbue.mngr_imbue_cloud.wire_types import BackupStorageMode
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcome
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
@@ -2533,6 +2539,42 @@ def test_admin_run_share_retirement_sweep_passes_dry_run_as_a_query_param(monkey
     assert seen["auth"] == "Bearer adminkey"
 
 
+def test_admin_push_backup_entitlements_posts_the_account_route_with_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen["path"] = request.url.raw_path.decode()
+        seen["auth"] = request.headers.get("authorization")
+        return httpx2.Response(200, json={"status": "pushed"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    body = client.admin_push_backup_entitlements(SecretStr("adminkey"), "alice+1@example.com")
+
+    assert body == {"status": "pushed"}
+    assert seen["path"] == "/admin/accounts/alice%2B1@example.com/backup-entitlements"
+    assert seen["auth"] == "Bearer adminkey"
+
+
+def test_admin_run_legacy_bucket_sweep_passes_dry_run_as_a_query_param(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        return httpx2.Response(200, json={"candidates": []})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    assert client.admin_run_legacy_bucket_sweep(SecretStr("adminkey"), dry_run=True) == {"candidates": []}
+    assert client.admin_run_legacy_bucket_sweep(SecretStr("adminkey"), dry_run=False) == {"candidates": []}
+
+    assert seen == [("/admin/sweep/legacy-buckets", {"dry_run": "1"}), ("/admin/sweep/legacy-buckets", {})]
+
+
+def test_admin_run_legacy_bucket_sweep_surfaces_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install_mock_httpx(monkeypatch, lambda request: httpx2.Response(401, json={"detail": "bad key"}))
+    with pytest.raises(ImbueCloudAuthError, match="bad key"):
+        client.admin_run_legacy_bucket_sweep(SecretStr("adminkey"), dry_run=False)
+
+
 def test_admin_run_lease_record_sweep_passes_dry_run_and_grace_as_query_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3254,3 +3296,212 @@ def test_lease_host_sends_the_declared_ports_only_when_declared(monkeypatch: pyt
     )
     client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
     assert "published_ports" not in bodies[-1]
+
+
+# Backup repositories (the backup store)
+
+
+def _make_backup_client(handler) -> ImbueCloudConnectorClient:
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+
+
+def _backup_credentials_response() -> dict:
+    return {
+        "workspace_id": "agent-abc",
+        "repository_url": "rest:https://backups.example.com/user1/agent-abc/",
+        "rest_username": "agent-abc",
+        "rest_password": "tok-secret",
+    }
+
+
+def test_create_backup_repository_parses_credentials() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/backups/repositories"
+        assert _json.loads(request.content) == {"workspace_id": "agent-abc"}
+        return httpx2.Response(200, json=_backup_credentials_response())
+
+    credentials = _make_backup_client(handler).create_backup_repository(SecretStr("tok"), "agent-abc")
+    assert credentials.workspace_id == "agent-abc"
+    assert credentials.repository_url == "rest:https://backups.example.com/user1/agent-abc/"
+    assert credentials.rest_username == "agent-abc"
+    assert credentials.rest_password.get_secret_value() == "tok-secret"
+    # The token is a secret: it never shows in the model's repr.
+    assert "tok-secret" not in repr(credentials)
+
+
+def test_create_backup_repository_quota_exceeded_raises_the_quota_error() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "quota_exceeded",
+                    "entitlement": "max_buckets",
+                    "limit": 5,
+                    "current": 5,
+                    "message": "Quota exceeded: 5 of 5 backup repositories",
+                }
+            },
+        )
+
+    with pytest.raises(ImbueCloudQuotaExceededError) as exc_info:
+        _make_backup_client(handler).create_backup_repository(SecretStr("tok"), "agent-abc")
+    assert exc_info.value.entitlement == "max_buckets"
+
+
+def test_create_backup_repository_account_suspended_403_raises_the_typed_error() -> None:
+    # The backup routes answer the account refusals like every other account
+    # route; a suspended user must not read as a bad token.
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            403,
+            json={"detail": {"code": "account_suspended", "message": "This account is suspended. Contact support."}},
+        )
+
+    with pytest.raises(ImbueCloudAccountSuspendedError, match="suspended"):
+        _make_backup_client(handler).create_backup_repository(SecretStr("tok"), "agent-abc")
+
+
+def test_create_backup_repository_store_unavailable_raises_typed_error() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            503, json={"detail": {"code": "backup_store_unavailable", "message": "backup store unreachable"}}
+        )
+
+    with pytest.raises(ImbueCloudBackupStoreUnavailableError, match="^backup store unreachable$"):
+        _make_backup_client(handler).create_backup_repository(SecretStr("tok"), "agent-abc")
+
+
+def test_create_backup_repository_bad_workspace_raises_generic_error() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, json={"detail": "No workspace record named agent-zzz"})
+
+    with pytest.raises(ImbueCloudBackupRepositoryError, match="agent-zzz"):
+        _make_backup_client(handler).create_backup_repository(SecretStr("tok"), "agent-zzz")
+
+
+def test_list_backup_repositories_parses_entries() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/backups/repositories"
+        return httpx2.Response(
+            200,
+            json=[
+                {
+                    "workspace_id": "agent-abc",
+                    "repository_url": "rest:https://backups.example.com/user1/agent-abc/",
+                    "used_bytes": 1234,
+                    "created_at": "2026-10-31T00:00:00Z",
+                    "a_future_field": "ignored",
+                }
+            ],
+        )
+
+    items = _make_backup_client(handler).list_backup_repositories(SecretStr("tok"))
+    assert [(item.workspace_id, item.used_bytes) for item in items] == [("agent-abc", 1234)]
+
+
+def test_roll_backup_repository_token_posts_to_the_workspace_route() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/backups/repositories/agent-abc/roll-token"
+        return httpx2.Response(200, json=_backup_credentials_response())
+
+    credentials = _make_backup_client(handler).roll_backup_repository_token(SecretStr("tok"), "agent-abc")
+    assert credentials.rest_password.get_secret_value() == "tok-secret"
+
+
+def test_roll_backup_repository_token_not_found_raises() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, json={"detail": {"code": "not_found", "message": "no such repository"}})
+
+    with pytest.raises(ImbueCloudBackupRepositoryNotFoundError, match="^no such repository$"):
+        _make_backup_client(handler).roll_backup_repository_token(SecretStr("tok"), "agent-abc")
+
+
+def test_destroy_backup_repository_loops_while_objects_remain() -> None:
+    calls: list[str] = []
+    waits: list[float] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/backups/repositories/agent-abc"
+        calls.append(request.url.path)
+        if len(calls) < 3:
+            return httpx2.Response(202, json={"status": "deleting", "remaining": True})
+        return httpx2.Response(200, json={"status": "deleted"})
+
+    _make_backup_client(handler).destroy_backup_repository(
+        SecretStr("tok"), "agent-abc", wait_between_calls=waits.append
+    )
+    assert len(calls) == 3
+    assert len(waits) == 2
+
+
+def test_destroy_backup_repository_gives_up_after_the_bounded_number_of_calls() -> None:
+    call_count = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx2.Response(202, json={"status": "deleting", "remaining": True})
+
+    with pytest.raises(ImbueCloudBackupRepositoryDeleteTimeoutError):
+        _make_backup_client(handler).destroy_backup_repository(
+            SecretStr("tok"), "agent-abc", wait_between_calls=lambda seconds: None
+        )
+    assert call_count == connector_client_module._REPOSITORY_DESTROY_MAX_CALLS
+
+
+def test_destroy_backup_repository_workspace_active_raises_typed_error() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            409, json={"detail": {"code": "workspace_active", "message": "destroy the workspace first"}}
+        )
+
+    with pytest.raises(ImbueCloudWorkspaceActiveError, match="^destroy the workspace first$"):
+        _make_backup_client(handler).destroy_backup_repository(
+            SecretStr("tok"), "agent-abc", wait_between_calls=lambda seconds: None
+        )
+
+
+def test_get_backup_storage_usage_parses_and_coerces_unknown_mode() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/backups/usage"
+        return httpx2.Response(
+            200,
+            json={"used_bytes": 10, "quota_bytes": 100, "hard_limit_bytes": 110, "mode": "some-future-mode"},
+        )
+
+    usage = _make_backup_client(handler).get_backup_storage_usage(SecretStr("tok"))
+    assert usage.used_bytes == 10
+    assert usage.hard_limit_bytes == 110
+    assert usage.mode == BackupStorageMode.UNKNOWN
+
+
+def test_get_backup_storage_usage_parses_known_mode() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, json={"used_bytes": 0, "quota_bytes": 100, "hard_limit_bytes": 110, "mode": "readonly"}
+        )
+
+    assert _make_backup_client(handler).get_backup_storage_usage(SecretStr("tok")).mode == BackupStorageMode.READONLY
+
+
+def test_backup_route_auth_upstream_unavailable_503_raises_the_unreachable_error() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503, json={"detail": {"code": "auth_upstream_unavailable", "message": "down"}})
+
+    with pytest.raises(ImbueCloudUnreachableError):
+        _make_backup_client(handler).get_backup_storage_usage(SecretStr("tok"))
+
+
+def test_freeze_bucket_posts_to_the_compat_route() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append((request.method, request.url.path))
+        return httpx2.Response(200, json={"status": "frozen"})
+
+    _make_backup_client(handler).freeze_bucket(SecretStr("tok"), "u--agent-abc")
+    assert seen == [("POST", "/buckets/u--agent-abc/freeze")]

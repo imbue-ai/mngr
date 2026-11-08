@@ -215,10 +215,62 @@ describe("BackupHistoryModel", () => {
     await settle();
     expect(model.offset).toBe(BACKUP_HISTORY_PAGE_SIZE);
     expect(deps.getUrls[0]).toContain(`offset=${BACKUP_HISTORY_PAGE_SIZE}`);
+    // Only the first page asks for the previous destinations.
+    expect(deps.getUrls[0]).not.toContain("include_previous");
 
     deps.checkResponses.push({ check_state: "OFFLINE" });
     await model.fetchCheckState();
     expect(model.isRestoreDisabledByCheck()).toBe(true);
+  });
+
+  it("asks for previous destinations and keeps them even when current backups are off", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupHistoryModel("agent-11", deps);
+    deps.getResponses.push({
+      is_configured: false,
+      previous_repositories: [
+        {
+          archive_id: "20260101T000000Z",
+          archived_at: "2026-01-01T00:00:00Z",
+          snapshots: [{ snapshot_id: "old-1", time: "2025-12-31T00:00:00Z" }],
+        },
+      ],
+    });
+    await model.loadPage();
+    expect(deps.getUrls[0]).toContain("include_previous=1");
+    expect(model.statusMessage).toBe(
+      "Backups are turned off for this workspace.",
+    );
+    expect(model.previousRepositories).toHaveLength(1);
+    expect(model.previousRepositories[0].archive_id).toBe("20260101T000000Z");
+    expect(model.isBackupsConfigured).toBe(false);
+  });
+});
+
+describe("BackupOperationController restore from a previous destination", () => {
+  it("names the archive in the restore body, and null for current backups", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, json: null });
+    controller.startRestore(
+      { snapshot_id: "old-1", time: "2025-12-31T00:00:00Z" },
+      "",
+      { repositoryId: "20260101T000000Z" },
+    );
+    await settle();
+    expect(deps.postCalls[0].body).toMatchObject({
+      repository: "20260101T000000Z",
+    });
+
+    deps.postResponses.push({ status: 202, json: null });
+    const current = new BackupOperationController("agent-12", deps);
+    current.startRestore(
+      { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
+      "",
+      {},
+    );
+    await settle();
+    expect(deps.postCalls[1].body).toMatchObject({ repository: null });
   });
 });
 

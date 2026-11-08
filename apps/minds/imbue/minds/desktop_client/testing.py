@@ -73,7 +73,9 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_ACCO
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_CUSTOM_SERVICE
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_REMOTE_EXECUTION
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_WORKSPACE
+from imbue.minds.desktop_client.latchkey.gateway_client import RemoteExecutionRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
@@ -363,6 +365,15 @@ class WriteCountingMindsConfig(MindsConfig):
         return self._write_count
 
 
+def make_minds_config_allowing_agent_command_execution(data_dir: Path) -> MindsConfig:
+    """A config store with this device's remote-execution switch (Settings > This computer) already on."""
+    minds_config = MindsConfig(data_dir=data_dir)
+    assert minds_config.set_allow_agent_command_execution_if_version_matches(
+        "off", lambda on: "on" if on else "off", True
+    )
+    return minds_config
+
+
 class ReadCountingMindsConfig(MindsConfig):
     """MindsConfig double that counts config-file reads: each is one lock-guarded load, so counting
     them proves whether a multi-field getter reads its fields under one lock acquisition or several."""
@@ -553,6 +564,38 @@ def build_ui_state_publisher_for_test(
         client_queue, UiClientStateMessage(client_id="test-window", route="/", account_id=LOCAL_PROFILE_USER_ID)
     )
     return publisher, client_queue
+
+
+# The signed-in account the desktop backup tests share, with its backup-store coordinates.
+FAKE_BACKUP_USER_ID: Final[str] = "01234567-89ab-cdef-0123-456789abcdef"
+FAKE_BACKUP_USER_SEGMENT: Final[str] = "0123456789abcdef0123456789abcdef"
+FAKE_BACKUP_STORE_URL: Final[str] = "https://backups.example.com"
+
+
+def store_repository_url(workspace_id: str, *, user_segment: str = FAKE_BACKUP_USER_SEGMENT) -> str:
+    """The restic ``rest:`` URL the fake CLI mints for a workspace's backup-store repository."""
+    return f"rest:{FAKE_BACKUP_STORE_URL}/{user_segment}/{workspace_id}/"
+
+
+def store_restic_env(
+    workspace_id: str, *, user_segment: str = FAKE_BACKUP_USER_SEGMENT, is_with_rest_credentials: bool = False
+) -> str:
+    """A canonical restic.env naming a workspace's backup-store repository (optionally with its REST credentials)."""
+    lines = [
+        f"RESTIC_REPOSITORY={store_repository_url(workspace_id, user_segment=user_segment)}",
+        "RESTIC_PASSWORD=pw",
+    ]
+    if is_with_rest_credentials:
+        lines.extend([f"RESTIC_REST_USERNAME={workspace_id}", "RESTIC_REST_PASSWORD=tok"])
+    return "\n".join(lines) + "\n"
+
+
+def legacy_restic_env(bucket_name: str) -> str:
+    """A canonical restic.env naming a legacy per-workspace R2 bucket over S3, with its key."""
+    return (
+        f"RESTIC_REPOSITORY=s3:https://acct.r2.cloudflarestorage.com/{bucket_name}\n"
+        "RESTIC_PASSWORD=pw\nAWS_ACCESS_KEY_ID=k\nAWS_SECRET_ACCESS_KEY=s\n"
+    )
 
 
 _DEFAULT_WORKSPACE_AGENT_NAME: Final[AgentName] = AgentName("my-claude-agent")
@@ -1547,6 +1590,7 @@ def _streamed_request(
         | FileSharingRequestPayload
         | WorkspaceRequestPayload
         | AccountsRequestPayload
+        | RemoteExecutionRequestPayload
         | CustomServiceRequestPayload
     ),
     target: str,
@@ -1626,6 +1670,21 @@ def create_accounts_permission_request(
         rationale=rationale,
         request_type=REQUEST_TYPE_ACCOUNTS,
         payload=AccountsRequestPayload(),
+        target="/tmp/permissions.json",
+    )
+
+
+def create_remote_execution_permission_request(
+    agent_id: str,
+    rationale: str,
+    program: str | None = None,
+) -> StreamedPermissionRequest:
+    """Build a remote-execution permission request as the gateway would stream it, for any command or one program."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_REMOTE_EXECUTION,
+        payload=RemoteExecutionRequestPayload(program=program),
         target="/tmp/permissions.json",
     )
 

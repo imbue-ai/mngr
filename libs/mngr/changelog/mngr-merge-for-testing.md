@@ -1,0 +1,1 @@
+Testing branch merging `mngr/avoid-api-key-limits` and `mngr/remote-execution`. For this project it carries the regenerated `mngr imbue_cloud` CLI reference for the `backup-repo` group unchanged; see the backup-store branch's entry.

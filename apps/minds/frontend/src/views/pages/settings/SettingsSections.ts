@@ -1,5 +1,6 @@
 // The app-level settings sections: left nav + one panel each for
-// notifications, display, browser sign-ins, error reporting, updates, and the master password. What an
+// notifications, display, browser sign-ins, error reporting, updates, the master password,
+// and this computer (whether agents may run commands here). What an
 // agent may reach is not here: credentials and grants belong to one machine
 // each, so they live on that machine's Permissions tab. Port of
 // templates/AppSettingsSections.jinja with the interactivity of
@@ -31,6 +32,7 @@ import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
+import { thisComputerPanel } from "./ThisComputerSection";
 import { workspaceUpdateSettings } from "./WorkspaceUpdateSettings";
 
 interface SectionsAttrs {
@@ -1072,6 +1074,7 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
             model.activeSection === "backups"
               ? masterPasswordPanel(model, masterPasswordState)
               : null,
+            model.activeSection === "this-computer" ? thisComputerPanel(model) : null,
           ],
         }),
       ];

@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.settings.schema import ALLOW_AGENT_COMMAND_EXECUTION
 from imbue.minds.desktop_client.settings.schema import AUTO_UPDATE_PROMPT_DECISION
 from imbue.minds.desktop_client.settings.schema import AUTO_UPDATE_WORKSPACES
 from imbue.minds.desktop_client.settings.schema import AccountSettings
@@ -135,6 +136,13 @@ def resolve_report_unexpected_errors(context: SettingsResolutionContext) -> bool
     return _require_bool(
         REPORT_UNEXPECTED_ERRORS.key,
         resolve_setting(REPORT_UNEXPECTED_ERRORS, context, context.install.report_unexpected_errors),
+    )
+
+
+def resolve_allow_agent_command_execution(context: SettingsResolutionContext) -> bool:
+    return _require_bool(
+        ALLOW_AGENT_COMMAND_EXECUTION.key,
+        resolve_setting(ALLOW_AGENT_COMMAND_EXECUTION, context, context.install.allow_agent_command_execution),
     )
 
 

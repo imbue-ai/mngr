@@ -864,6 +864,20 @@ class SshCaConfig(FrozenModel):
         return self
 
 
+class BackupStoreDeployConfig(FrozenModel):
+    """Whether the tier deploys the backup store (the ``backup-store-<env>`` Worker, specs/backup-store).
+
+    On for every committed tier: the connector's backup routes need the store,
+    and the deployment tests exercise it on the ci tier. Off is a bring-up
+    escape hatch for an environment whose Cloudflare account is not ready.
+    """
+
+    is_deployed: bool = Field(
+        default=True,
+        description="Deploy the backup-store Worker and its bucket, and stamp its URL + admin secret into the connector.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds-admin env create`.
 
@@ -937,6 +951,13 @@ class DeployEnvConfig(FrozenModel):
             "Whether this tier deploys the analytics app. Off by default (and in every "
             "committed deploy.toml) until the tier's analytics bringup has run; dynamic dev "
             "envs override via the sticky --with-analytics deploy flag."
+        ),
+    )
+    backup_store: BackupStoreDeployConfig = Field(
+        default_factory=BackupStoreDeployConfig,
+        description=(
+            "Whether this tier deploys the backup store (Worker + R2 bucket per environment). "
+            "On everywhere by default; see specs/backup-store/spec.md."
         ),
     )
     paid: PaidDefaultsConfig = Field(

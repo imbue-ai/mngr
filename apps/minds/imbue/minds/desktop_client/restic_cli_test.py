@@ -156,6 +156,34 @@ def test_retry_on_transient_auth_does_not_retry_fatal_errors() -> None:
 # --- ensure_restic_available ---
 
 
+def test_parse_restic_version_reads_the_version_line() -> None:
+    assert restic_cli.parse_restic_version("restic 0.18.1 compiled with go1.25.1 on linux/amd64\n") == (0, 18, 1)
+    assert restic_cli.parse_restic_version("restic 0.9.6\n") == (0, 9, 6)
+    assert restic_cli.parse_restic_version("something else") is None
+
+
+def _write_fake_restic(tmp_path: Path, version_line: str) -> str:
+    script = tmp_path / "restic"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_ensure_restic_version_supported_rejects_a_binary_older_than_the_minimum(tmp_path: Path) -> None:
+    too_old = _write_fake_restic(tmp_path, "restic 0.15.2 compiled with go1.20 on linux/amd64")
+    with pytest.raises(restic_cli.ResticTooOldError, match="0.15.2"):
+        restic_cli.ensure_restic_version_supported(too_old)
+
+
+def test_ensure_restic_version_supported_accepts_the_minimum_and_an_unreadable_version(tmp_path: Path) -> None:
+    at_minimum = _write_fake_restic(tmp_path / "ok", "restic 0.16.0 compiled with go1.20 on linux/amd64")
+    restic_cli.ensure_restic_version_supported(at_minimum)
+    # A binary whose version cannot be read is left to report its own failure.
+    unreadable = _write_fake_restic(tmp_path / "odd", "not a version")
+    restic_cli.ensure_restic_version_supported(unreadable)
+
+
 def test_ensure_restic_available_does_not_raise() -> None:
     # restic is a required dependency: this must pass in every test env.
     restic_cli.ensure_restic_available()
@@ -289,6 +317,17 @@ def test_init_repo_is_idempotent_on_existing_repo(tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(60)
+def test_init_repo_rejects_an_existing_repo_keyed_with_another_password(tmp_path: Path) -> None:
+    # A repository has one key; an env built around a different password would
+    # look provisioned but open nothing, so the mismatch must fail loudly.
+    repo = str(tmp_path / "repo")
+    restic_cli.init_repo(repository=repo, backend_env={}, password="pw")
+
+    with pytest.raises(restic_cli.ResticWrongPasswordError):
+        restic_cli.init_repo(repository=repo, backend_env={}, password="other")
+
+
+@pytest.mark.timeout(60)
 def test_restore_snapshot_restores_files(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
     password = "restore-test-pw"
@@ -333,7 +372,7 @@ def test_restore_snapshot_retries_with_no_lock_when_lock_write_fails(tmp_path: P
 
 
 @pytest.mark.timeout(120)
-def test_forget_snapshots_prunes_old_snapshot_against_local_repo(tmp_path: Path) -> None:
+def test_forget_then_prune_removes_an_old_snapshot_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
     password = "forget-test-pw"
     restic_cli.init_repo(repository=repo, backend_env={}, password=password)
@@ -346,12 +385,11 @@ def test_forget_snapshots_prunes_old_snapshot_against_local_repo(tmp_path: Path)
     assert len(snapshots) == 2
 
     # An empty id list is a no-op (no restic invocation at all).
-    restic_cli.forget_snapshots(repository=repo, backend_env={}, password=password, snapshot_ids=[], is_pruning=True)
+    restic_cli.forget_snapshots(repository=repo, backend_env={}, password=password, snapshot_ids=[])
     assert len(restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)) == 2
 
     forgotten_id, surviving_id = snapshots[0].snapshot_id, snapshots[1].snapshot_id
-    restic_cli.forget_snapshots(
-        repository=repo, backend_env={}, password=password, snapshot_ids=[forgotten_id], is_pruning=True
-    )
+    restic_cli.forget_snapshots(repository=repo, backend_env={}, password=password, snapshot_ids=[forgotten_id])
+    restic_cli.prune_repository(repository=repo, backend_env={}, password=password, max_repack_bytes=None)
     remaining = restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)
     assert [snapshot.snapshot_id for snapshot in remaining] == [surviving_id]

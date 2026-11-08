@@ -228,6 +228,7 @@ def _shutdown_popen(
     exited_event: Event,
     shutdown_timeout_sec: float,
     reason: str,
+    is_own_process_group: bool = False,
 ) -> int | None:
     # A shutdown request routinely races with the process's own exit (e.g. a
     # single-use worker whose parent reaps it right after reading its result),
@@ -252,19 +253,25 @@ def _shutdown_popen(
         process.pid,
         reason,
     ):
-        _send_shutdown_signal(process, signal.SIGTERM)
+        _send_shutdown_signal(process, signal.SIGTERM, is_own_process_group)
         if exited_event.wait(timeout=shutdown_timeout_sec):
             return process.returncode
         logger.warning("Process didn't die within {} seconds of SIGTERM", shutdown_timeout_sec)
-        _send_shutdown_signal(process, signal.SIGKILL)
+        _send_shutdown_signal(process, signal.SIGKILL, is_own_process_group)
         if exited_event.wait(timeout=_POST_SIGKILL_WAIT_SECONDS):
             return process.returncode
         logger.error("Process didn't die after kill()")
         return None
 
 
-def _send_shutdown_signal(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
-    """Send ``sig`` to the child, tolerating a refusal: the caller waits for the exit either way.
+def _send_shutdown_signal(
+    process: subprocess.Popen[bytes], sig: signal.Signals, is_own_process_group: bool = False
+) -> None:
+    """Send ``sig`` to the child (or, for a group leader, to its whole process group), tolerating a refusal.
+
+    The caller waits for the exit either way. A group leader was spawned with
+    ``start_new_session``, so everything it forked shares its group and the
+    signal reaches the grandchildren a plain ``send_signal`` would leave behind.
 
     macOS can refuse a signal to our own child with EPERM while that child is
     in the middle of exiting (``send_signal`` only suppresses ESRCH). The signal
@@ -275,7 +282,12 @@ def _send_shutdown_signal(process: subprocess.Popen[bytes], sig: signal.Signals)
     warning and error instead.
     """
     try:
-        process.send_signal(sig)
+        if is_own_process_group:
+            os.killpg(process.pid, sig)
+        else:
+            process.send_signal(sig)
+    except ProcessLookupError as exc:
+        logger.debug("Subprocess group {} was already gone when sent {}: {}", process.pid, sig.name, exc)
     except PermissionError as exc:
         logger.debug("Could not send {} to subprocess (pid {}): {}", sig.name, process.pid, exc)
 
@@ -418,6 +430,9 @@ def run_local_command_modern_version(
     is_output_accumulated: bool = True,
     stdin_bytes: bytes | None = None,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    # Spawn the child as the leader of its own session and process group, and signal the whole group
+    # on shutdown or timeout, so what the child forked dies with it.
+    is_own_process_group: bool = False,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
@@ -465,6 +480,7 @@ def run_local_command_modern_version(
                 stderr=subprocess.PIPE,
                 env=env if env is not None else os.environ.copy(),
                 pass_fds=tuple(pass_fds),
+                start_new_session=is_own_process_group,
             )
             if stdin_bytes is not None:
                 # ``process.stdin`` is a pipe exactly when we asked for one above.
@@ -531,7 +547,9 @@ def run_local_command_modern_version(
                     shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
                 else:
                     shutdown_reason = "the parent requested cleanup (shutdown_event was set)"
-                exit_code = _shutdown_popen(process, exited_event, shutdown_timeout_sec, shutdown_reason)
+                exit_code = _shutdown_popen(
+                    process, exited_event, shutdown_timeout_sec, shutdown_reason, is_own_process_group
+                )
                 # Drain what the child wrote between the last gather and its death --
                 # including anything it printed while handling the shutdown signal.
                 # For a timeout kill this is the tail that diagnoses where the
