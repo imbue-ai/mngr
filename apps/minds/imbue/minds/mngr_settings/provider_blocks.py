@@ -26,6 +26,10 @@ CLOUD_CONNECTION_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 # The guest ports the default-workspace-template's aws / gcp / azure create templates publish (``publish__extend``: the Screen's ICE muxes), written as ``firewall_published_ports`` on every cloud connection instance block.
 # mngr_vps refuses a create that publishes a port the block does not list, and each cloud's ``prepare`` opens the listed ports in the security group / NSG / firewall rule it manages, so the set here must match what the template declares (test_published_ports_alignment.py pins it).
 CLOUD_CONNECTION_FIREWALL_PUBLISHED_PORTS: Final[tuple[str, ...]] = ("59000/udp", "59000/tcp")
+# The root disk every cloud connection instance block (aws, gcp, azure) sizes its VMs with unless the create
+# form picks another size for one machine. mngr_vps carves the workspace's data volume out of what this disk
+# has free after a 20 GB reserve for the image and the OS, which leaves little of mngr's own 30 GB default.
+CLOUD_CONNECTION_ROOT_DISK_SIZE_GB: Final[int] = 50
 AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 
 # The value a Modal connection instance's ``mode`` carries (the user's own Modal token); also how a legacy ambient ``[providers.modal]`` block is recognized for its rewrite into the suppression form.

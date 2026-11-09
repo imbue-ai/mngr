@@ -317,7 +317,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     return model.submitErrorField === fieldId ? " !ring-1 ring-important" : "";
   }
 
-  /** The CPUs / memory / disk fields for a mode sized by numbers (DOCKER, LIMA, MODAL); nothing for the others. */
+  /** The CPUs / memory / disk fields for a mode sized by numbers (DOCKER, LIMA, MODAL), the disk alone for a cloud
+   * (AWS, GCP, AZURE, whose CPUs and memory come from the instance type above); nothing for the others. */
   function machineSizeRow(): m.Children {
     const defaults = model.machineSizeDefaults();
     const draft = model.machineSizeDraft();
@@ -331,16 +332,23 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         isInvalid: invalid.has(dimension),
         oninput: (text: string) => model.setMachineSizeField(dimension, text),
       });
+    const isDiskOnly = defaults.cpu_count === null && defaults.memory_gb === null;
     return m("div", { id: "machine-size-row" }, [
       m("div", { class: "flex items-start justify-between gap-3" }, [
         m("div", [
-          m(FormLabel, { target: "machine-size-cpu_count", inline: true }, "Machine size"),
+          m(
+            FormLabel,
+            { target: isDiskOnly ? "machine-size-disk_gb" : "machine-size-cpu_count", inline: true },
+            isDiskOnly ? "Disk size" : "Machine size",
+          ),
           m(
             "p",
             { class: "mt-1 type-helper text-tertiary" },
-            defaults.disk_gb === null
-              ? "CPUs and memory the machine is capped at. Whole numbers."
-              : "CPUs and memory the machine boots with, and the disk its data lives on. Whole numbers.",
+            isDiskOnly
+              ? "The machine's disk, in GB. Its data lives on what is left after the system's own 20 GB. Whole number."
+              : defaults.disk_gb === null
+                ? "CPUs and memory the machine is capped at. Whole numbers."
+                : "CPUs and memory the machine boots with, and the disk its data lives on. Whole numbers.",
           ),
         ]),
         m("div", { class: "flex flex-wrap items-center justify-end gap-3" }, [

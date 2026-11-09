@@ -76,6 +76,7 @@ from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
+from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -927,17 +928,30 @@ def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
         (LaunchMode.DOCKER, ["-s", "--cpus=4", "-s", "--memory=16g"]),
         (LaunchMode.LIMA, ["-s", "--cpus=4", "-s", "--memory=16", "-S", "providers.lima.host_data_disk_size=200GiB"]),
         (LaunchMode.MODAL, ["-b", "cpu=4", "-b", "memory=16"]),
+        # The clouds take the root disk alone; CPUs and RAM ride the instance type.
+        (LaunchMode.AWS, ["-b", "--aws-root-disk-gb=200"]),
+        (LaunchMode.GCP, ["-b", "--gcp-root-disk-gb=200"]),
+        (LaunchMode.AZURE, ["-b", "--azure-root-disk-gb=200"]),
     ],
 )
 def test_build_mngr_create_command_passes_the_machine_size_in_the_providers_own_flags(
     launch_mode: LaunchMode, expected_args: list[str]
 ) -> None:
+    # Modal and the clouds are reachable only through a connection; the local modes ignore the account.
+    connection_by_mode = {
+        LaunchMode.MODAL: "modal_" + "0" * 32,
+        LaunchMode.AWS: _AWS_CONNECTION,
+        LaunchMode.GCP: "gcp_" + "0" * 32,
+        LaunchMode.AZURE: "azure_" + "0" * 32,
+    }
     command = _build_mngr_create_command(
         launch_mode=launch_mode,
         host_name=HostName("hello"),
-        machine_size=MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200),
-        # Modal is reachable only through a connection; the local modes ignore the account.
-        cloud_account="modal_" + "0" * 32 if launch_mode is LaunchMode.MODAL else None,
+        machine_size=narrow_machine_size_to_launch_mode(
+            MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200), launch_mode
+        ),
+        region="us-west-2" if launch_mode in connection_by_mode else None,
+        cloud_account=connection_by_mode.get(launch_mode),
     )
     rendered = " ".join(command)
     assert " ".join(expected_args) in rendered

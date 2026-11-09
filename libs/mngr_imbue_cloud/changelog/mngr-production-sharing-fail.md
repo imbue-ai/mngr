@@ -1,0 +1,1 @@
+The gen-2 slice VM's container headroom publisher (`mngr-publish-container-meminfo.service`) now renders its container discovery and its two-slot, symlink-refusing writes from the Perl it shares with mngr_vps's VPS-host publisher (`imbue.imbue_common.container_meminfo_publisher`), adding only the disk-quota half. What it publishes, and where, is unchanged.

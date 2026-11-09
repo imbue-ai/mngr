@@ -117,6 +117,7 @@ from imbue.mngr_vps.container_setup import remove_container
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import remove_volume
 from imbue.mngr_vps.container_setup import restart_policy_start_args
+from imbue.mngr_vps.container_setup import runsc_memlock_start_args
 from imbue.mngr_vps.container_setup import runsc_tmpfs_start_args
 from imbue.mngr_vps.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps.data_types import ContainerFile
@@ -154,6 +155,7 @@ from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VPS_HOST_ACCESS_MANIFEST
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
@@ -899,7 +901,7 @@ class VpsProvider(BaseProviderInstance):
                 vps_public_key=vps_public_key,
             )
 
-            shape = self._describe_instance_shape(vps_instance_id, parsed.plan)
+            shape = self._describe_instance_shape(vps_instance_id, parsed.plan, parsed.root_disk_gb)
 
             with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 host = self.create_host_on_existing_vps(
@@ -1374,12 +1376,16 @@ class VpsProvider(BaseProviderInstance):
             return False
         return True
 
-    def _describe_instance_shape(self, vps_instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+    def _describe_instance_shape(
+        self, vps_instance_id: VpsInstanceId, plan: str, root_disk_gb_override: VpsDiskGb | None
+    ) -> VpsInstanceShape | None:
         """Ask the cloud for the created instance's shape, or None when it cannot say.
 
         The instance is already running and billing by now, so a failed describe
         is logged rather than failing the create: the host then lists with an
-        unknown size instead of not existing at all.
+        unknown size instead of not existing at all. The client answers the root
+        disk from its configured size, so a per-create override (the provider's
+        ``--<prefix>-root-disk-gb=`` build arg) is stamped over it here.
         """
         with log_span("Describing the shape of VPS instance {}", vps_instance_id):
             try:
@@ -1398,6 +1404,9 @@ class VpsProvider(BaseProviderInstance):
                 vps_instance_id,
                 plan,
             )
+            return None
+        if root_disk_gb_override is not None:
+            return shape.model_copy_update(to_update(shape.field_ref().root_disk_gb, root_disk_gb_override))
         return shape
 
     def _finalize_host_creation(
@@ -1585,11 +1594,11 @@ class VpsProvider(BaseProviderInstance):
         """The full ``docker run`` args for the container: config-derived args, then the caller's.
 
         Order matters under docker's last-one-wins semantics: the configured
-        runtime, the tmpfs mounts runsc needs (/tmp capped from ``mem_total_kib``)
-        and the restart policy (each skipped when the configured args already
-        carry it), then ``default_start_args``, then provider-computed args
-        (``_compute_extra_start_args``), then the caller's ``start_args`` last so
-        an explicit caller flag always wins.
+        runtime, the tmpfs mounts and the memlock limit runsc needs (/tmp capped
+        from ``mem_total_kib``) and the restart policy (each skipped when the
+        configured args already carry it), then ``default_start_args``, then
+        provider-computed args (``_compute_extra_start_args``), then the caller's
+        ``start_args`` last so an explicit caller flag always wins.
         """
         # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
         runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
@@ -1599,8 +1608,9 @@ class VpsProvider(BaseProviderInstance):
             + tuple(start_args or ())
         )
         tmpfs_args = runsc_tmpfs_start_args(self.config.docker_runtime, configured_args, mem_total_kib)
+        memlock_args = runsc_memlock_start_args(self.config.docker_runtime, configured_args)
         restart_args = restart_policy_start_args(configured_args)
-        return runtime_args + tmpfs_args + restart_args + configured_args
+        return runtime_args + tmpfs_args + memlock_args + restart_args + configured_args
 
     def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
         """Provider-computed ``docker run`` args appended after ``default_start_args``.

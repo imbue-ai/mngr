@@ -1,0 +1,3 @@
+The create form offers a disk size for AWS, GCP, and Azure workspaces (50 GB by default, passed as the provider's `--<cloud>-root-disk-gb=` build arg), and the aws / gcp / azure connection blocks carry `root_disk_size_gb = 50` for a create that does not pick one; mngr's own 30 GB default left such workspaces a 6 GB data volume once the image and the OS had taken their 20 GB reserve.
+
+The share panel's readiness poll no longer believes a share gateway status that says `up` but was last stamped more than five minutes ago: the template's gateway now restamps a running stack's status every minute, so an old `up` means the gateway is not alive to write it (a container restarted with its services down).

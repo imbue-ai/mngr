@@ -34,6 +34,7 @@ from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_root_disk_gb
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
@@ -223,7 +224,9 @@ class AwsProvider(OfflineCapableVpsProvider):
         """Parse AWS-prefixed build args.
 
         Accepts ``--aws-region=REGION``, ``--aws-instance-type=TYPE``,
-        ``--aws-ami=AMI-ID``, ``--aws-spot`` (presence-only), and the shared
+        ``--aws-ami=AMI-ID``, ``--aws-root-disk-gb=N`` (the root EBS volume's
+        size for this host, overriding the config's ``root_disk_size_gb``),
+        ``--aws-spot`` (presence-only), and the shared
         ``--git-depth=N``. ``--aws-ami=`` is the per-host AMI override (when
         omitted, the provider config's ``default_ami_id`` applies, or, if that
         is unset too, the newest Debian 13 AMI for the instance type's
@@ -237,6 +240,7 @@ class AwsProvider(OfflineCapableVpsProvider):
         region, args = extract_single_value_arg(args, "--aws-region=")
         instance_type, args = extract_single_value_arg(args, "--aws-instance-type=")
         ami_override, args = extract_single_value_arg(args, "--aws-ami=")
+        root_disk_gb, args = extract_root_disk_gb(args, "--aws-root-disk-gb=")
         spot, args = extract_presence_flag(args, "--aws-spot")
         git_depth, args = extract_git_depth(args)
         # FIXME: this allowlist only covers the per-host knobs wired up so far.
@@ -247,7 +251,6 @@ class AwsProvider(OfflineCapableVpsProvider):
         #   --aws-security-group=    (security_group; existing id or auto-create name)
         #   --aws-ssh-cidr=          (allowed_ssh_cidrs; repeatable)
         #   --aws-iam-profile=       (iam_instance_profile)
-        #   --aws-root-disk-size=    (root_disk_size_gb)
         #   --aws-root-volume-type=  (root_volume_type)
         #   --aws-associate-public-ip / --aws-no-associate-public-ip (associate_public_ip)
         #   --aws-eip                (planned, when the destroy-path lifecycle work lands)
@@ -256,6 +259,7 @@ class AwsProvider(OfflineCapableVpsProvider):
             "--aws-region=",
             "--aws-instance-type=",
             "--aws-ami=",
+            "--aws-root-disk-gb=",
             "--aws-spot",
             "--git-depth=",
         )
@@ -270,6 +274,7 @@ class AwsProvider(OfflineCapableVpsProvider):
             ami_id_override=ami_override,
             spot=spot,
             git_depth=git_depth,
+            root_disk_gb=root_disk_gb,
             docker_build_args=tuple(docker_build_args),
         )
 
@@ -315,6 +320,7 @@ class AwsProvider(OfflineCapableVpsProvider):
             tags=tags,
             ami_id_override=effective_ami_id,
             spot=spot,
+            root_disk_gb=parsed.root_disk_gb,
         )
 
     # The shared ``OfflineCapableVpsProvider._list_provider_vps_entries``

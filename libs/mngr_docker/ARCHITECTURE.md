@@ -191,13 +191,15 @@ delete_host(host)
 
 ## Container Entrypoint
 
-All containers (both host containers and the state container) use the same entrypoint:
+The state container idles with:
 
 ```sh
 trap 'exit 0' TERM; tail -f /dev/null & wait
 ```
 
 This keeps PID 1 alive (via `tail -f /dev/null`) and responds to SIGTERM with a clean exit (exit code 0). This is important because `docker stop` sends SIGTERM, and we want containers to exit cleanly.
+
+Host containers use the self-healing entrypoint shared with the VPS providers (`build_self_healing_host_entrypoint_command` in `imbue.mngr.providers.ssh_host_setup`). It idles the same way, but first, once mngr has provisioned the host (a marker file it writes during provisioning), it restarts sshd and then runs the image's start hook, `/usr/local/bin/mngr-container-start-hook`, detached, when the image ships an executable one. A container that docker restarts on its own (a daemon restart, an OOM kill under a restart policy) is therefore reachable again without `mngr start`, and the hook is where an image relaunches anything else it needs.
 
 ## Container Labels
 

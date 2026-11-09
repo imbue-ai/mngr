@@ -42,6 +42,7 @@ from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_root_disk_gb
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
@@ -286,7 +287,9 @@ class GcpProvider(OfflineCapableVpsProvider):
         a zone, not a region; it must equal the provider's bound zone), the
         machine type via ``--gcp-machine-type=TYPE``, a per-host boot-disk image
         override via ``--gcp-image=IMAGE`` (defaults to the config's
-        ``default_source_image``), ``--gcp-spot`` (presence-only, opts the host
+        ``default_source_image``), ``--gcp-root-disk-gb=N`` (the boot disk's
+        size for this host, overriding the config's ``root_disk_size_gb``),
+        ``--gcp-spot`` (presence-only, opts the host
         onto GCE Spot capacity), and the shared ``--git-depth=N``. Composed from
         the shared low-level helpers (rather
         than the ``parse_vps_build_args`` convenience, which hardcodes a
@@ -300,9 +303,17 @@ class GcpProvider(OfflineCapableVpsProvider):
         zone, args = extract_single_value_arg(args, "--gcp-zone=")
         machine_type, args = extract_single_value_arg(args, "--gcp-machine-type=")
         image, args = extract_single_value_arg(args, "--gcp-image=")
+        root_disk_gb, args = extract_root_disk_gb(args, "--gcp-root-disk-gb=")
         spot, args = extract_presence_flag(args, "--gcp-spot")
         git_depth, args = extract_git_depth(args)
-        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--gcp-image=", "--gcp-spot", "--git-depth=")
+        valid_args = (
+            "--gcp-zone=",
+            "--gcp-machine-type=",
+            "--gcp-image=",
+            "--gcp-root-disk-gb=",
+            "--gcp-spot",
+            "--git-depth=",
+        )
         docker_build_args: list[str] = []
         for arg in args:
             raise_if_vps_migration_arg(arg)
@@ -314,6 +325,7 @@ class GcpProvider(OfflineCapableVpsProvider):
             spot=spot,
             image=image,
             git_depth=git_depth,
+            root_disk_gb=root_disk_gb,
             docker_build_args=tuple(docker_build_args),
         )
 
@@ -344,6 +356,7 @@ class GcpProvider(OfflineCapableVpsProvider):
             tags=tags,
             spot=spot,
             image=image,
+            root_disk_gb=parsed.root_disk_gb,
         )
 
     def _generate_bootstrap_payload(

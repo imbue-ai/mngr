@@ -93,6 +93,7 @@ mngr create my-agent --provider gcp
 mngr create my-agent --provider gcp -b --gcp-machine-type=e2-medium -b --gcp-zone=us-west1-b
 mngr create my-agent --provider gcp -b --gcp-spot   # run on (preemptible) GCE Spot capacity
 mngr create my-agent --provider gcp -b --gcp-image=projects/my-proj/global/images/family/custom   # per-host boot image
+mngr create my-agent --provider gcp -b --gcp-root-disk-gb=100   # per-host boot disk size
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent

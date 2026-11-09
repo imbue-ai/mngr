@@ -613,8 +613,12 @@ class AzureVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         spot: bool = False,
+        root_disk_gb: int | None = None,
     ) -> VpsInstanceId:
         """Provision an Azure VM (public IP + NIC + VM) in the client's region.
+
+        ``root_disk_gb`` (from the per-host ``--azure-root-disk-gb`` build arg)
+        sizes this VM's OS disk instead of the client's ``os_disk_size_gb``.
 
         ``plan`` is the Azure VM size (e.g. ``Standard_B2s``). The public IP and
         NIC are created with ``delete_option=Delete`` and the OS disk with
@@ -656,7 +660,7 @@ class AzureVpsClient(VpsClientInterface):
             vm_tags[AZURE_PYTEST_LAUNCHED_TAG] = "true"
 
         nic_id = self._create_public_ip_and_nic(vm_name, subnet_id, vm_tags)
-        vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
+        vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot, root_disk_gb)
 
         # The public IP + NIC are created before the VM. If VM creation fails
         # (e.g. SkuNotAvailable / quota), this method raises before returning an
@@ -753,6 +757,7 @@ class AzureVpsClient(VpsClientInterface):
         nic_id: str,
         vm_tags: Mapping[str, str],
         spot: bool,
+        root_disk_gb: int | None,
     ) -> Any:
         # azure-mgmt-compute 38.x "flattens" the per-VM sub-profiles into
         # ``properties`` at runtime, but its typed __init__ overload only exposes
@@ -770,7 +775,7 @@ class AzureVpsClient(VpsClientInterface):
                 os_disk=compute_models.OSDisk(
                     create_option="FromImage",
                     delete_option="Delete",
-                    disk_size_gb=self.os_disk_size_gb,
+                    disk_size_gb=root_disk_gb if root_disk_gb is not None else self.os_disk_size_gb,
                     managed_disk=compute_models.ManagedDiskParameters(storage_account_type=self.os_disk_type),
                 ),
             ),

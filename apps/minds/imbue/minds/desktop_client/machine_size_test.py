@@ -23,7 +23,17 @@ _FULL = MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200)
 
 
 def test_every_launch_mode_sized_by_numbers_has_a_default_the_form_can_offer() -> None:
-    assert set(DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE) == {LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.MODAL}
+    assert set(DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE) == {
+        LaunchMode.DOCKER,
+        LaunchMode.LIMA,
+        LaunchMode.MODAL,
+        LaunchMode.AWS,
+        LaunchMode.GCP,
+        LaunchMode.AZURE,
+    }
+    # The clouds size CPUs and RAM from an instance type, so their typed number is the root disk alone.
+    for cloud_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE):
+        assert DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE[cloud_mode] == MachineSizeSelection(disk_gb=50)
     for launch_mode, default_size in DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE.items():
         assert narrow_machine_size_to_launch_mode(default_size, launch_mode) == default_size
 
@@ -44,9 +54,9 @@ def test_clamping_to_a_cpu_count_lowers_only_a_cpu_count_above_it() -> None:
         (LaunchMode.LIMA, _FULL),
         (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, None),
-        (LaunchMode.AWS, None),
-        (LaunchMode.GCP, None),
-        (LaunchMode.AZURE, None),
+        (LaunchMode.AWS, MachineSizeSelection(disk_gb=200)),
+        (LaunchMode.GCP, MachineSizeSelection(disk_gb=200)),
+        (LaunchMode.AZURE, MachineSizeSelection(disk_gb=200)),
     ],
 )
 def test_narrow_machine_size_keeps_only_the_dimensions_the_mode_takes(
@@ -58,6 +68,7 @@ def test_narrow_machine_size_keeps_only_the_dimensions_the_mode_takes(
 def test_narrow_machine_size_is_none_when_nothing_the_mode_takes_was_chosen() -> None:
     assert narrow_machine_size_to_launch_mode(MachineSizeSelection(disk_gb=200), LaunchMode.DOCKER) is None
     assert narrow_machine_size_to_launch_mode(MachineSizeSelection(), LaunchMode.LIMA) is None
+    assert narrow_machine_size_to_launch_mode(MachineSizeSelection(cpu_count=4, memory_gb=16), LaunchMode.AWS) is None
 
 
 def test_machine_size_create_args_speak_each_providers_own_flags() -> None:
@@ -73,7 +84,11 @@ def test_machine_size_create_args_speak_each_providers_own_flags() -> None:
     assert machine_size_create_args(LaunchMode.MODAL, _FULL) == ["-b", "cpu=4", "-b", "memory=16"]
     assert machine_size_create_args(LaunchMode.DOCKER, MachineSizeSelection(memory_gb=8)) == ["-s", "--memory=8g"]
     assert machine_size_create_args(LaunchMode.IMBUE_CLOUD, _FULL) == []
-    assert machine_size_create_args(LaunchMode.AWS, _FULL) == []
+    # The clouds take the root disk as their own build arg; CPUs and RAM ride the instance type instead.
+    assert machine_size_create_args(LaunchMode.AWS, _FULL) == ["-b", "--aws-root-disk-gb=200"]
+    assert machine_size_create_args(LaunchMode.GCP, _FULL) == ["-b", "--gcp-root-disk-gb=200"]
+    assert machine_size_create_args(LaunchMode.AZURE, _FULL) == ["-b", "--azure-root-disk-gb=200"]
+    assert machine_size_create_args(LaunchMode.AWS, MachineSizeSelection(cpu_count=4, memory_gb=16)) == []
 
 
 def test_only_local_docker_and_lima_machines_are_resizable_and_only_lima_grows_its_disk() -> None:

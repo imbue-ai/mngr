@@ -210,7 +210,10 @@ class CreateFormDefaultsResponse(FrozenModel):
     )
     default_instance_type_by_backend: dict[str, str] = Field(description="Default machine size per cloud backend")
     machine_size_defaults_by_launch_mode: dict[str, MachineSizeSelection] = Field(
-        description="Default CPUs / memory / disk per compute mode sized by numbers (DOCKER, LIMA, MODAL)"
+        description=(
+            "Default CPUs / memory / disk per compute mode that takes a typed size (CPUs and memory for "
+            "DOCKER, LIMA, MODAL; the root disk for AWS, GCP, AZURE)"
+        )
     )
     cloud_accounts: tuple[CloudAccountOption, ...] = Field(
         description="Cloud connections whose credentials are available on this device, every owner included"
@@ -495,7 +498,7 @@ def _handle_create_form_defaults() -> Response:
 def _machine_size_defaults_for_this_machine(
     probe: HostProbeInterface | None, local_prerequisites: Sequence[LocalBackendPrerequisite]
 ) -> dict[str, MachineSizeSelection]:
-    """The default size per numbered mode, with Docker's CPU count lowered to what the local daemon can give.
+    """The default size per mode that takes one, with Docker's CPU count lowered to what the local daemon can give.
 
     The form submits the default it shows, as an explicit ``--cpus`` cap that
     the docker provider does not clamp (only its own configured default is),

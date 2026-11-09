@@ -66,6 +66,7 @@ def test_backend_build_args_help_mentions_aws_specific_args() -> None:
     assert "--aws-region=REGION" in help_text
     assert "--aws-instance-type=TYPE" in help_text
     assert "--aws-ami=AMI-ID" in help_text
+    assert "--aws-root-disk-gb=N" in help_text
     assert "default_ami_id" in help_text
 
 
@@ -763,6 +764,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
     assert parsed.region == provider.aws_config.default_region
     assert parsed.plan == provider.aws_config.default_instance_type
     assert parsed.ami_id_override is None
+    assert parsed.root_disk_gb is None
     assert parsed.git_depth is None
     assert parsed.docker_build_args == ()
 
@@ -786,6 +788,7 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
             "--aws-region=us-west-2",
             "--aws-instance-type=t3.medium",
             "--aws-ami=ami-deadbeef",
+            "--aws-root-disk-gb=100",
             "--aws-spot",
             "--git-depth=1",
             "--file=Dockerfile",
@@ -795,6 +798,7 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
     assert parsed.region == "us-west-2"
     assert parsed.plan == "t3.medium"
     assert parsed.ami_id_override == "ami-deadbeef"
+    assert parsed.root_disk_gb == 100
     assert parsed.spot is True
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")

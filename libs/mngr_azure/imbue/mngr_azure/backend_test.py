@@ -200,17 +200,26 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
     assert parsed.region == "westus"
     assert parsed.plan == "Standard_B2s"
     assert parsed.spot is False
+    assert parsed.root_disk_gb is None
     assert parsed.git_depth is None
 
 
 def test_parse_build_args_extracts_azure_knobs_plus_docker_passthrough(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=3600)
     parsed = provider._parse_build_args(
-        ["--azure-region=eastus", "--azure-vm-size=Standard_D2s_v5", "--azure-spot", "--file=Dockerfile", "."]
+        [
+            "--azure-region=eastus",
+            "--azure-vm-size=Standard_D2s_v5",
+            "--azure-root-disk-gb=100",
+            "--azure-spot",
+            "--file=Dockerfile",
+            ".",
+        ]
     )
     assert parsed.region == "eastus"
     assert parsed.plan == "Standard_D2s_v5"
     assert parsed.spot is True
+    assert parsed.root_disk_gb == 100
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 

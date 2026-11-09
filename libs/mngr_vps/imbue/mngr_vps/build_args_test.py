@@ -5,6 +5,7 @@ import pytest
 from imbue.mngr.errors import MngrError
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_root_disk_gb
 from imbue.mngr_vps.build_args import parse_vps_build_args
 
 _DEFAULT_REGION = "ewr"
@@ -143,11 +144,6 @@ def test_parse_build_args_aws_rejects_aws_plan() -> None:
         )
 
 
-# =============================================================================
-# extract_presence_flag (composable helper for boolean opt-in flags)
-# =============================================================================
-
-
 def test_extract_presence_flag_returns_false_when_absent() -> None:
     """Default behavior: no occurrence -> (False, args verbatim)."""
     present, remaining = extract_presence_flag(["--file=Dockerfile", "."], "--aws-spot")
@@ -169,3 +165,17 @@ def test_extract_presence_flag_rejects_value_bearing_form() -> None:
     """``--aws-spot=anything`` -> error (clearer than silently accepting either form)."""
     with pytest.raises(MngrError, match="presence-only flag"):
         extract_presence_flag(["--aws-spot=true"], "--aws-spot")
+
+
+def test_extract_root_disk_gb_pops_a_whole_positive_number_of_gb() -> None:
+    assert extract_root_disk_gb(["--aws-root-disk-gb=100", "--file=Dockerfile"], "--aws-root-disk-gb=") == (
+        100,
+        ["--file=Dockerfile"],
+    )
+    assert extract_root_disk_gb(["--file=Dockerfile"], "--aws-root-disk-gb=") == (None, ["--file=Dockerfile"])
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "50GB", "0", "-5"])
+def test_extract_root_disk_gb_rejects_anything_but_a_positive_whole_number(raw: str) -> None:
+    with pytest.raises(MngrError, match="--gcp-root-disk-gb must be a"):
+        extract_root_disk_gb([f"--gcp-root-disk-gb={raw}"], "--gcp-root-disk-gb=")

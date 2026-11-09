@@ -236,6 +236,8 @@ Provider: aws
                                 (default: provider config's default_ami_id, or the
                                 newest Debian 13 AMI in the region for the instance
                                 type's architecture, resolved from EC2 at create time)
+    --aws-root-disk-gb=N        Root EBS volume size in GB for this create only
+                                (default: provider config's root_disk_size_gb)
     --aws-spot                  Run on EC2 spot capacity (presence-only flag).
                                 AWS may reclaim with ~2 min notice; the host is
                                 terminated, not stopped, on reclaim. Opt-in only.
@@ -249,6 +251,8 @@ Provider: azure
   Azure-specific args (consumed by provider, not passed to docker):
     --azure-region=REGION       Azure region / location (default: westus)
     --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)
+    --azure-root-disk-gb=N      OS disk size in GB for this create only (default: the
+                                config's root_disk_size_gb)
     --azure-spot                Run on Azure Spot capacity (presence-only flag).
                                 Azure may reclaim on capacity pressure; the host is
                                 deleted, not stopped, on eviction. Opt-in only.
@@ -270,6 +274,8 @@ Provider: gcp
     --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
     --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the
                              config's default_source_image (a full image / family URL)
+    --gcp-root-disk-gb=N     Boot disk size in GB for this create only (default: the
+                             config's root_disk_size_gb)
     --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).
     --git-depth=N            Shallow-clone build context to depth N before upload
 

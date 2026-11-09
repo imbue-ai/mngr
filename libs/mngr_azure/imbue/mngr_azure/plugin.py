@@ -27,6 +27,8 @@ AZURE_BUILD_ARGS_HELP: Final[str] = (
     "Azure-specific args (consumed by provider, not passed to docker):\n"
     "  --azure-region=REGION       Azure region / location (default: westus)\n"
     "  --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)\n"
+    "  --azure-root-disk-gb=N      OS disk size in GB for this create only (default: the\n"
+    "                              config's root_disk_size_gb)\n"
     "  --azure-spot                Run on Azure Spot capacity (presence-only flag).\n"
     "                              Azure may reclaim on capacity pressure; the host is\n"
     "                              deleted, not stopped, on eviction. Opt-in only.\n"

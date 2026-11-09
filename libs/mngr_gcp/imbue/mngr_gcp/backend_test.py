@@ -266,6 +266,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
     assert parsed.plan == "e2-small"
     assert parsed.spot is False
     assert parsed.image is None
+    assert parsed.root_disk_gb is None
     assert parsed.git_depth is None
     assert parsed.docker_build_args == ()
 
@@ -277,6 +278,7 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
             "--gcp-zone=us-west1-b",
             "--gcp-machine-type=e2-medium",
             "--gcp-image=projects/my-proj/global/images/family/custom",
+            "--gcp-root-disk-gb=100",
             "--gcp-spot",
             "--git-depth=1",
             "--file=Dockerfile",
@@ -288,6 +290,7 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
     assert parsed.plan == "e2-medium"
     assert parsed.spot is True
     assert parsed.image == "projects/my-proj/global/images/family/custom"
+    assert parsed.root_disk_gb == 100
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 

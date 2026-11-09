@@ -18,7 +18,7 @@ def test_prevent_todos() -> None:
 
 
 def test_prevent_exec() -> None:
-    rc.check_exec(_DIR, snapshot(1))
+    rc.check_exec(_DIR, snapshot(0))
 
 
 def test_prevent_eval() -> None:

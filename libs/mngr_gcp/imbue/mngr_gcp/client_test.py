@@ -169,6 +169,32 @@ def test_create_instance_builds_expected_resource() -> None:
     assert built.network_interfaces[0].access_configs[0].type_ == "ONE_TO_ONE_NAT"
 
 
+def test_create_instance_sizes_the_boot_disk_from_the_override() -> None:
+    """``root_disk_gb`` (from --gcp-root-disk-gb=) sizes the boot disk instead of the client's default."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "ssh-ed25519 AAAA test")
+    client.create_instance(
+        label="mngr-my-agent",
+        region="us-west1-a",
+        plan="e2-medium",
+        user_data="#!/bin/bash\n",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-provider": "gcp", "mngr-host-id": "host-abcdef0123456789abcdef0123456789"},
+        root_disk_gb=100,
+    )
+    assert instances.inserted[0].disks[0].initialize_params.disk_size_gb == 100
+    client.create_instance(
+        label="mngr-my-agent",
+        region="us-west1-a",
+        plan="e2-medium",
+        user_data="#!/bin/bash\n",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-provider": "gcp", "mngr-host-id": "host-abcdef0123456789abcdef0123456789"},
+    )
+    assert instances.inserted[1].disks[0].initialize_params.disk_size_gb == client.boot_disk_size_gb
+
+
 def test_create_instance_stamps_isolation_marker_into_metadata() -> None:
     """The ``mngr-isolation`` placement marker rides in GCE metadata (not a label).
 

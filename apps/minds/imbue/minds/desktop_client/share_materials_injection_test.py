@@ -6,17 +6,22 @@ import threading
 import tomllib
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 from pydantic import Field
 
+from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
+from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
+from imbue.minds.desktop_client.share_materials_injection import is_share_gateway_status_stale
 from imbue.minds.desktop_client.share_materials_injection import parse_share_gateway_status
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
@@ -520,6 +525,28 @@ def test_parse_share_gateway_status_reads_the_runner_document() -> None:
     assert status.failed_attempt_count == 3
     assert status.last_error == "no relay assignment available yet"
     assert status.next_retry_at == "2026-09-13T12:01:00+00:00"
+    assert status.updated_at == datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+
+
+def test_an_up_status_goes_stale_once_the_runners_minute_stamp_is_old() -> None:
+    """Only an "up" the runner stopped restamping is disbelieved; retrying, halted, and unstamped statuses stand."""
+    now = datetime(2026, 11, 9, 0, 10, tzinfo=timezone.utc)
+    fresh_up = ShareGatewayStatus(
+        state=ShareGatewayState.UP, updated_at=datetime(2026, 11, 9, 0, 8, 30, tzinfo=timezone.utc)
+    )
+    stale_up = ShareGatewayStatus(
+        state=ShareGatewayState.UP, updated_at=datetime(2026, 11, 8, 20, 47, 46, tzinfo=timezone.utc)
+    )
+    # A naive stamp is read as UTC.
+    naive_stale_up = ShareGatewayStatus(state=ShareGatewayState.UP, updated_at=datetime(2026, 11, 8, 20, 47, 46))
+    assert is_share_gateway_status_stale(fresh_up, now) is False
+    assert is_share_gateway_status_stale(stale_up, now) is True
+    assert is_share_gateway_status_stale(naive_stale_up, now) is True
+    assert is_share_gateway_status_stale(ShareGatewayStatus(state=ShareGatewayState.UP), now) is False
+    old_halt = ShareGatewayStatus(
+        state=ShareGatewayState.HALTED, updated_at=datetime(2026, 11, 8, 20, 47, 46, tzinfo=timezone.utc)
+    )
+    assert is_share_gateway_status_stale(old_halt, now) is False
 
 
 @pytest.mark.parametrize(
@@ -532,6 +559,7 @@ def test_parse_share_gateway_status_reads_the_runner_document() -> None:
         '{"state": "up", "failed_attempt_count": "many"}',
         '{"state": "exploded", "failed_attempt_count": 1}',
         '{"failed_attempt_count": 1}',
+        '{"state": "up", "updated_at": "soon"}',
     ],
 )
 def test_parse_share_gateway_status_tolerates_garbage(raw: str) -> None:

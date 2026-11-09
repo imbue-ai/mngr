@@ -51,6 +51,7 @@ function buildDefaults(
       DOCKER: { cpu_count: 4, memory_gb: 8, disk_gb: null },
       LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
+      AWS: { cpu_count: null, memory_gb: null, disk_gb: 50 },
     },
     cloud_accounts: [
       {
@@ -954,6 +955,18 @@ describe("CreateFormModel machine size", () => {
     expect(model.machineSizeDraft()).toEqual({ cpu_count: "4", memory_gb: "8", disk_gb: "" });
     model.launchValue = "LIMA";
     expect(model.machineSizeDraft()).toEqual({ cpu_count: "2", memory_gb: "4", disk_gb: "100" });
+  });
+
+  it("offers a cloud mode its disk alone, and submits only that", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = "CONNECTION:aws_acct";
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "", memory_gb: "", disk_gb: "50" });
+    model.setMachineSizeField("disk_gb", "120");
+    const body = model.submitBody();
+    expect(body.cpu_count).toBeUndefined();
+    expect(body.memory_gb).toBeUndefined();
+    expect(body.disk_gb).toBe(120);
   });
 
   it("sends the typed size as whole numbers, keeping a pick per mode", () => {

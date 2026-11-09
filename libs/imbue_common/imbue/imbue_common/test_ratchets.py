@@ -30,7 +30,7 @@ def test_prevent_todos() -> None:
 
 
 def test_prevent_exec() -> None:
-    rc.check_exec(_DIR, snapshot(2))
+    rc.check_exec(_DIR, snapshot(3))
 
 
 def test_prevent_eval() -> None:

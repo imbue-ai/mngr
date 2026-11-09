@@ -168,6 +168,47 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     assert instance_id == VpsInstanceId("i-0abc123def456")
 
 
+def test_create_instance_sizes_the_root_volume_from_the_override(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """``root_disk_gb`` (from --aws-root-disk-gb=) sizes the root EBS volume instead of the client's default."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-0abc123def456"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": [
+                {
+                    "DeviceName": "/dev/xvda",
+                    "Ebs": {
+                        "VolumeSize": 100,
+                        "VolumeType": client.root_volume_type,
+                        "DeleteOnTermination": True,
+                        "Encrypted": True,
+                    },
+                }
+            ],
+            "InstanceInitiatedShutdownBehavior": "stop",
+            "NetworkInterfaces": ANY,
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "KeyName": "key-1",
+        },
+    )
+    client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-provider": "test", "mngr-host-id": "h1"},
+        root_disk_gb=100,
+    )
+
+
 def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     """``ami_id_override`` (from --aws-ami=) wins over the client's configured default AMI."""
     client, stubber = stubbed_client

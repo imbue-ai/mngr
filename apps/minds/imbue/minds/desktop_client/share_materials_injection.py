@@ -29,6 +29,8 @@ import shlex
 import threading
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from typing import Final
 
 from loguru import logger
@@ -66,6 +68,10 @@ SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 # How long one gateway-status read is reused by the readiness poll (which
 # fires every ~2 seconds; each read is an exec into the workspace).
 _GATEWAY_STATUS_CACHE_TTL_SECONDS: Final[float] = 15.0
+# How old an "up" status may be before it is read as unknown: the runner restamps a
+# running stack's status every minute, so a stamp this old means nothing is alive to
+# write it and the file's "up" is what it said before that, not what is true now.
+_UP_STATUS_STALE_AFTER_SECONDS: Final[float] = 5 * 60.0
 
 
 class ShareInjectionError(RuntimeError):
@@ -424,8 +430,10 @@ def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller, ti
 class ShareGatewayStatus(WireModel):
     """The share gateway's own account of bringing the stack up, from its status file.
 
-    A WireModel because the document also carries fields the poll does not
-    need (``workspace_domain``, ``updated_at``).
+    A WireModel because the document also carries a field the poll does not
+    need (``workspace_domain``). ``updated_at`` is read: a running stack restamps
+    it every minute, which is how an "up" left behind by a dead runner is told
+    apart from a live one (``is_share_gateway_status_stale``).
     """
 
     state: ShareGatewayState = Field(description="Up, retrying, or halted (permanent refusal; needs a re-share)")
@@ -436,6 +444,32 @@ class ShareGatewayStatus(WireModel):
     next_retry_at: str | None = Field(
         default=None, description="ISO timestamp of the next attempt; None when up or halted"
     )
+    updated_at: datetime | None = Field(
+        default=None,
+        description="When the document was last written; a running stack restamps it every minute, so an old 'up' is stale",
+    )
+
+
+@pure
+def is_share_gateway_status_stale(status: ShareGatewayStatus, now: datetime) -> bool:
+    """Whether an "up" status is too old to be believed (see ``_UP_STATUS_STALE_AFTER_SECONDS``).
+
+    Only "up" goes stale: a retrying or halted stack writes its status on each
+    attempt and nothing else can take its place, while an "up" written by a
+    runner that has since died with its container is exactly the misleading
+    case. A status with no stamp is never stale. A gateway from before the
+    heartbeat stamps its "up" once, at bring-up, so that "up" is disbelieved
+    five minutes later too; this costs nothing, since the readiness poll asks
+    the gateway only while the share is not live, where a once-written "up"
+    explained nothing. A stamp that is not a timestamp makes the whole document
+    malformed, which ``parse_share_gateway_status`` reports.
+    """
+    if status.state is not ShareGatewayState.UP or status.updated_at is None:
+        return False
+    updated_at = (
+        status.updated_at if status.updated_at.tzinfo is not None else status.updated_at.replace(tzinfo=timezone.utc)
+    )
+    return (now - updated_at).total_seconds() > _UP_STATUS_STALE_AFTER_SECONDS
 
 
 def parse_share_gateway_status(status_json_text: str) -> ShareGatewayStatus | None:
@@ -473,7 +507,15 @@ def read_share_gateway_status_from_agent(agent_address: str, mngr_caller: MngrCa
     status_text = extract_exec_stdout(result.stdout)
     if status_text is None:
         return None
-    return parse_share_gateway_status(status_text)
+    status = parse_share_gateway_status(status_text)
+    if status is not None and is_share_gateway_status_stale(status, datetime.now(timezone.utc)):
+        logger.debug(
+            "Ignoring the share gateway status of agent {}: it says up but was last stamped at {}",
+            agent_address,
+            status.updated_at.isoformat() if status.updated_at is not None else None,
+        )
+        return None
+    return status
 
 
 class ShareGatewayStatusCache(HostKeyedTtlCache[ShareGatewayStatus | None]):

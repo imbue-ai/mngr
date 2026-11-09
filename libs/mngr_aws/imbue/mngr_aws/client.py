@@ -524,8 +524,12 @@ class AwsVpsClient(VpsClientInterface):
         tags: Mapping[str, str],
         ami_id_override: str | None = None,
         spot: bool = False,
+        root_disk_gb: int | None = None,
     ) -> VpsInstanceId:
         """Provision an EC2 instance.
+
+        ``root_disk_gb`` (from ``--aws-root-disk-gb=N``) sizes this instance's
+        root EBS volume instead of the client's configured ``root_volume_size_gb``.
 
         Uses ``ami_id_override`` when supplied (from ``--aws-ami=<ami-id>`` on
         ``mngr create``), otherwise the client's configured default
@@ -574,7 +578,7 @@ class AwsVpsClient(VpsClientInterface):
             {
                 "DeviceName": "/dev/xvda",
                 "Ebs": {
-                    "VolumeSize": self.root_volume_size_gb,
+                    "VolumeSize": root_disk_gb if root_disk_gb is not None else self.root_volume_size_gb,
                     "VolumeType": self.root_volume_type,
                     "DeleteOnTermination": True,
                     # Explicit Encrypted=True so encryption-at-rest is guaranteed

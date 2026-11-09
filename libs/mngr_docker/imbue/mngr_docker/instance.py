@@ -146,9 +146,8 @@ from imbue.mngr_docker.volume import state_container_name
 from imbue.mngr_docker.volume import state_volume_name
 
 # PID-1 entrypoint for host containers. Unlike the idle state-container
-# entrypoint, this self-heals sshd on every (re)start once mngr has provisioned
-# this host (tracked by a marker, so a host key pre-baked into the base image is
-# never used by mistake), so the container is reachable again after an
+# entrypoint, once mngr has provisioned the host it restarts sshd and runs the
+# image's start hook on every (re)start, so the container recovers from an
 # out-of-band restart without waiting for `mngr start`.
 HOST_CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
 

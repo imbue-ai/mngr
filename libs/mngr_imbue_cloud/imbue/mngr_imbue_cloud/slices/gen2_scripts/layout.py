@@ -7,6 +7,7 @@ from typing import Final
 
 from pydantic import Field
 
+from imbue.imbue_common.container_meminfo_publisher import CONTAINER_HOST_MEMINFO_FILE_NAME
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -428,7 +429,7 @@ GEN2_QGROUP_LIMIT_MAX_REFERENCED_FLAG: Final[int] = 1
 # from its own cgroup (the template's publish_cgroup_meminfo program, which
 # mirrors the formula of the VM-side publisher in ``guest.py`` and exits under
 # gVisor).
-GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = ".host-meminfo"
+GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = CONTAINER_HOST_MEMINFO_FILE_NAME
 # Beside it, the VM publishes the host quota's limit and usage, for the
 # workspace to read at ``/mngr-vol/.host-diskinfo``: statfs inside the
 # container reports the data filesystem's free space, never the quota, and

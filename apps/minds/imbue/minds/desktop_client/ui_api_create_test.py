@@ -98,8 +98,13 @@ def test_form_defaults_exclude_connection_only_launch_modes_and_carry_region_con
     assert payload["region_options_by_launch_mode"]["MODAL"][:2] == ["any", "nearest"]
     assert payload["region_selected_by_launch_mode"]["MODAL"] == "any"
     assert payload["default_instance_type_by_backend"]["AWS"]
-    # The modes sized by numbers each offer a default size; the others offer none.
-    assert set(payload["machine_size_defaults_by_launch_mode"]) == {"DOCKER", "LIMA", "MODAL"}
+    # The modes sized by numbers each offer a default size (the clouds their root disk alone); the others offer none.
+    assert set(payload["machine_size_defaults_by_launch_mode"]) == {"DOCKER", "LIMA", "MODAL", "AWS", "GCP", "AZURE"}
+    assert payload["machine_size_defaults_by_launch_mode"]["AWS"] == {
+        "cpu_count": None,
+        "memory_gb": None,
+        "disk_gb": 50,
+    }
     assert payload["machine_size_defaults_by_launch_mode"]["DOCKER"] == {
         "cpu_count": 4,
         "memory_gb": 8,

@@ -7,11 +7,15 @@ from typing import Final
 
 from pydantic import Field
 
+from imbue.imbue_common.container_meminfo_publisher import CONTAINER_HOST_MEMINFO_FILE_NAME
+from imbue.imbue_common.container_meminfo_publisher import MEMINFO_PUBLISHER_PERL_PRAGMAS
+from imbue.imbue_common.container_meminfo_publisher import MEMINFO_PUBLISHER_PERL_SUBS
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.providers.ssh_host_setup import build_cap_journald_command
+from imbue.mngr_vps.container_setup import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import LABEL_MEMORY_CAP
 from imbue.mngr_vps.container_setup import MEMORY_CAP_FOLLOWS_VM_LABEL_VALUE
@@ -444,6 +448,99 @@ if ! cmp -s "$MNGR_MEMORY_STAGE/script" {_CONTAINER_MEMORY_SCRIPT_PATH} || ! cmp
 fi
 rm -rf "$MNGR_MEMORY_STAGE\""""
 
+# The VM publishes each agent container's memory headroom into the container's
+# volume, read inside the container at
+# ``<HOST_VOLUME_MOUNT_PATH>/<CONTAINER_HOST_MEMINFO_FILE_NAME>`` by the
+# container's memory guard, earlyoom (``--host-meminfo``). Under gVisor the
+# sandbox's own /proc/meminfo reports the cgroup cap as MemTotal but cannot see
+# the memory the runtime itself is charged against that cap (the sentry's heap,
+# page tables and kernel objects, half a GiB on an 8 GB VM), so a guard reading
+# only the sandbox view acts once the cgroup is already at its limit. The file
+# carries the cgroup's limit as MemTotal and, as MemAvailable, the limit minus
+# the usage plus the inactive file cache: the name and format the gen-2 slice
+# VMs publish too (``imbue_common.container_meminfo_publisher``), which an earlyoom run with
+# ``--host-meminfo`` already reads.
+CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-vps-container-meminfo.service"
+_CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-vps-container-meminfo.pl"
+_CONTAINER_MEMINFO_UNIT_PATH: Final[str] = f"/etc/systemd/system/{CONTAINER_MEMINFO_UNIT_NAME}"
+# Where docker's systemd cgroup driver puts each container's memory cgroup (cgroup v2).
+_DOCKER_CGROUP_PARENT: Final[str] = "/sys/fs/cgroup/system.slice"
+# One rewrite every quarter second: well inside the staleness earlyoom tolerates
+# (its reader reopens the file on every poll). Discovery is re-run every 40 rewrites.
+_CONTAINER_MEMINFO_PUBLISH_INTERVAL_SECONDS: Final[float] = 0.25
+_CONTAINER_MEMINFO_ROUNDS_PER_DISCOVERY: Final[int] = 40
+# The main loop a VPS publisher appends to the shared subs: the memory alone, every interval.
+_CONTAINER_MEMINFO_PUBLISHER_LOOP: Final[str] = r"""
+my @targets;
+for (my $round = 0; ; $round++) {
+    @targets = discover() if $round % $rounds_per_discovery == 0;
+    for my $target (@targets) {
+        my ($cgroup_dir, $volume_dir) = @$target;
+        publish_memory($cgroup_dir, "$volume_dir/$file_name");
+    }
+    select(undef, undef, undef, $interval_seconds);
+}
+"""
+
+
+@pure
+def render_container_meminfo_publisher_script() -> str:
+    """The long-running VM-side script publishing each agent container's memory headroom into its volume.
+
+    The container discovery and the two-slot, symlink-refusing writes are the
+    ``imbue_common.container_meminfo_publisher`` Perl shared with the gen-2 slice guests' publisher
+    (``mngr_imbue_cloud``), which publishes the disk headroom beside it; a VPS
+    data volume is a plain loop file with no quota group to report, so this
+    loop publishes the memory alone.
+    """
+    header = f"""#!/usr/bin/perl
+# Installed by mngr_vps: publish each agent container's memory headroom into its volume.
+{MEMINFO_PUBLISHER_PERL_PRAGMAS}
+my $cgroup_parent = '{_DOCKER_CGROUP_PARENT}';
+my $host_id_label = '{LABEL_HOST_ID}';
+my $volume_mount_path = '{HOST_VOLUME_MOUNT_PATH}';
+my $file_name = '{CONTAINER_HOST_MEMINFO_FILE_NAME}';
+my $interval_seconds = {_CONTAINER_MEMINFO_PUBLISH_INTERVAL_SECONDS};
+my $rounds_per_discovery = {_CONTAINER_MEMINFO_ROUNDS_PER_DISCOVERY};
+"""
+    return header + MEMINFO_PUBLISHER_PERL_SUBS + _CONTAINER_MEMINFO_PUBLISHER_LOOP
+
+
+@pure
+def _render_container_meminfo_publisher_unit() -> str:
+    return render_systemd_unit(
+        {
+            "Unit": [
+                ("Description", "mngr: publish the agent container's memory headroom into its volume"),
+                ("After", "docker.service"),
+                ("Wants", "docker.service"),
+            ],
+            "Service": [
+                ("Type", "simple"),
+                ("ExecStart", _CONTAINER_MEMINFO_SCRIPT_PATH),
+                ("Restart", "always"),
+                ("RestartSec", "2"),
+            ],
+            "Install": [("WantedBy", "multi-user.target")],
+        }
+    )
+
+
+_CONTAINER_MEMINFO_INSTALL_SCRIPT: Final[str] = f"""set -e
+MNGR_MEMINFO_STAGE="$(mktemp -d)"
+cat > "$MNGR_MEMINFO_STAGE/script" <<'MNGR_MEMINFO_SCRIPT_EOF'
+{render_container_meminfo_publisher_script()}MNGR_MEMINFO_SCRIPT_EOF
+cat > "$MNGR_MEMINFO_STAGE/unit" <<'MNGR_MEMINFO_UNIT_EOF'
+{_render_container_meminfo_publisher_unit()}MNGR_MEMINFO_UNIT_EOF
+if ! cmp -s "$MNGR_MEMINFO_STAGE/script" {_CONTAINER_MEMINFO_SCRIPT_PATH} || ! cmp -s "$MNGR_MEMINFO_STAGE/unit" {_CONTAINER_MEMINFO_UNIT_PATH}; then
+    install -m 0755 "$MNGR_MEMINFO_STAGE/script" {_CONTAINER_MEMINFO_SCRIPT_PATH}
+    install -m 0644 "$MNGR_MEMINFO_STAGE/unit" {_CONTAINER_MEMINFO_UNIT_PATH}
+    systemctl daemon-reload
+    systemctl enable {CONTAINER_MEMINFO_UNIT_NAME}
+    systemctl restart {CONTAINER_MEMINFO_UNIT_NAME}
+fi
+rm -rf "$MNGR_MEMINFO_STAGE\""""
+
 # Prints the VM's RAM in KiB, the input to every RAM-derived size (the container
 # memory cap, the /tmp tmpfs cap).
 MEM_TOTAL_PROBE_COMMAND: Final[str] = "awk '/^MemTotal:/{print $2}' /proc/meminfo"
@@ -579,6 +676,12 @@ def build_host_setup_steps(
         HostSetupStep(
             description="Install the every-boot container memory cap reconciler",
             script=_CONTAINER_MEMORY_INSTALL_SCRIPT,
+        )
+    )
+    steps.append(
+        HostSetupStep(
+            description="Install the container memory headroom publisher",
+            script=_CONTAINER_MEMINFO_INSTALL_SCRIPT,
         )
     )
     if is_qemu_purge_enabled:

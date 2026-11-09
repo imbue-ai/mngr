@@ -397,6 +397,7 @@ def test_startup_materializes_accounts_and_connections_from_the_index_and_replic
                 "default_instance_type": "t3.large",
                 "install_gvisor_runtime": True,
                 "docker_runtime": "runsc",
+                "root_disk_size_gb": 50,
                 "firewall_published_ports": ["59000/udp", "59000/tcp"],
                 "host_dir": "/home/user/.mngr",
                 "volume_home_path": "/home/user",

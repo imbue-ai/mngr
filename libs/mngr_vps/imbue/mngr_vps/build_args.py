@@ -5,6 +5,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr_vps.primitives import VpsDiskGb
 
 
 class ParsedVpsBuildOptions(FrozenModel):
@@ -14,6 +15,13 @@ class ParsedVpsBuildOptions(FrozenModel):
     plan: str = Field(description="VPS plan")
     git_depth: int | None = Field(
         default=None, description="Git clone depth for build context, or None for full clone"
+    )
+    root_disk_gb: VpsDiskGb | None = Field(
+        default=None,
+        description=(
+            "Per-host root disk size in GB from the provider's ``--<prefix>-root-disk-gb=`` build arg, "
+            "or None to use the provider config's ``root_disk_size_gb``"
+        ),
     )
     docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
 
@@ -48,6 +56,25 @@ def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
         return int(raw), remaining
     except ValueError as e:
         raise MngrError(f"--git-depth must be an integer. Got: {raw!r}") from e
+
+
+def extract_root_disk_gb(args: Sequence[str], flag: str) -> tuple[VpsDiskGb | None, list[str]]:
+    """Pop the provider's ``--<prefix>-root-disk-gb=N`` from ``args``: the host's root disk in whole GB.
+
+    Shared because every cloud whose root disk is a config knob
+    (``root_disk_size_gb``) takes the same per-host override; ``flag`` is the
+    provider's spelling of it. A value that is not a positive integer raises.
+    """
+    raw, remaining = extract_single_value_arg(args, flag)
+    if raw is None:
+        return None, remaining
+    try:
+        root_disk_gb = int(raw)
+    except ValueError as e:
+        raise MngrError(f"{flag.rstrip('=')} must be a whole number of GB. Got: {raw!r}") from e
+    if root_disk_gb <= 0:
+        raise MngrError(f"{flag.rstrip('=')} must be a positive number of GB. Got: {raw!r}")
+    return VpsDiskGb(root_disk_gb), remaining
 
 
 def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:

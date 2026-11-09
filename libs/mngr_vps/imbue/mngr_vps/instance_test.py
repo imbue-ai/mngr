@@ -865,6 +865,8 @@ def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: Mngr
         "/run",
         "--tmpfs",
         "/tmp:exec,size=993m",
+        "--ulimit",
+        "memlock=67108864:67108864",
         "--restart=unless-stopped",
         "--cap-add=SYS_PTRACE",
         "--memory=6921m",
@@ -931,6 +933,8 @@ def test_effective_start_args_under_runsc_add_only_the_tmpfs_mounts_not_already_
         "runsc",
         "--tmpfs",
         "/tmp:exec,size=993m",
+        "--ulimit",
+        "memlock=67108864:67108864",
         "--restart=unless-stopped",
         "--tmpfs",
         "/run",
@@ -939,6 +943,8 @@ def test_effective_start_args_under_runsc_add_only_the_tmpfs_mounts_not_already_
     assert provider._compose_effective_start_args(["--tmpfs=/tmp:rw,size=1g"], _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
         "--runtime",
         "runsc",
+        "--ulimit",
+        "memlock=67108864:67108864",
         "--restart=unless-stopped",
         "--tmpfs",
         "/run",
@@ -1143,7 +1149,11 @@ class _ShapeDescribingVpsClient(ExternallyManagedVpsClient):
 def test_describe_instance_shape_returns_what_the_client_reports(temp_mngr_ctx: MngrContext) -> None:
     provider = _minimal_provider(temp_mngr_ctx, vps_client=_ShapeDescribingVpsClient(shape=_RECORDED_SHAPE))
 
-    assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p") == _RECORDED_SHAPE
+    assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p", None) == _RECORDED_SHAPE
+    # A per-create root disk (the provider's --<prefix>-root-disk-gb= build arg) is recorded over the client's default.
+    assert provider._describe_instance_shape(
+        VpsInstanceId("i-1"), "p", VpsDiskGb(100)
+    ) == _RECORDED_SHAPE.model_copy_update(to_update(_RECORDED_SHAPE.field_ref().root_disk_gb, VpsDiskGb(100)))
 
 
 def test_describe_instance_shape_tolerates_an_api_error_so_the_create_still_finishes(
@@ -1152,7 +1162,7 @@ def test_describe_instance_shape_tolerates_an_api_error_so_the_create_still_fini
     provider = _minimal_provider(temp_mngr_ctx, vps_client=_ShapeDescribingVpsClient(api_error_message="throttled"))
 
     with capture_loguru() as captured:
-        assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p") is None
+        assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p", None) is None
     assert any("throttled" in line for line in captured.getvalue().splitlines())
 
 

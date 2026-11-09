@@ -4,6 +4,8 @@ from typing import Final
 import yaml
 from pydantic import Field
 
+from imbue.imbue_common.container_meminfo_publisher import MEMINFO_PUBLISHER_PERL_PRAGMAS
+from imbue.imbue_common.container_meminfo_publisher import MEMINFO_PUBLISHER_PERL_SUBS
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_DISKINFO_FILE_NAME
@@ -59,40 +61,9 @@ _DISKINFO_PUBLISH_ROUNDS_PER_REWRITE: Final[int] = 8
 GUEST_BTRFS_SYSFS_ROOT: Final[str] = "/sys/fs/btrfs"
 
 
-_MEMINFO_PUBLISHER_BODY: Final[str] = r"""
-# docker's output, or undef if it fails. Its stderr is dropped: a container
-# that stops mid-discovery fails its inspect.
-sub docker_output {
-    my $pid = open(my $out, '-|') // return undef;
-    if ($pid == 0) {
-        open(STDERR, '>', '/dev/null');
-        exec('docker', @_) or exit 127;
-    }
-    my $output = do { local $/; <$out> } // '';
-    close($out) or return undef;
-    chomp $output;
-    return $output;
-}
-
-# [cgroup directory, published meminfo, published diskinfo] for each running
-# agent host container.
-sub discover {
-    my @targets;
-    my $ids = docker_output('ps', '-q', '--no-trunc', '--filter', "label=$host_id_label") // return ();
-    for my $container_id (split ' ', $ids) {
-        my $volume_name = docker_output(
-            'inspect', '--format',
-            '{{range .Mounts}}{{if eq .Destination "' . $volume_mount_path . '"}}{{.Name}}{{end}}{{end}}',
-            $container_id,
-        );
-        next unless defined $volume_name && $volume_name ne '';
-        my $volume_dir = docker_output('volume', 'inspect', '--format', '{{.Options.device}}', $volume_name);
-        next unless defined $volume_dir && $volume_dir ne '' && -d $volume_dir;
-        push @targets, ["$cgroup_parent/docker-$container_id.scope", "$volume_dir/$file_name", "$volume_dir/$diskinfo_file_name"];
-    }
-    return @targets;
-}
-
+# What the gen-2 guest adds to the shared publisher (``imbue_common.container_meminfo_publisher``):
+# the disk headroom, from the data filesystem's host quota group.
+_MEMINFO_PUBLISHER_GEN2_TAIL: Final[str] = r"""
 # The sysfs directory of the host quota group on the data filesystem, or undef
 # when the VM has no such filesystem or it carries no quota group.
 sub find_host_quota_dir {
@@ -103,116 +74,6 @@ sub find_host_quota_dir {
         return -d $quota_dir ? $quota_dir : undef;
     }
     return undef;
-}
-
-sub read_first_line {
-    my ($path) = @_;
-    open(my $fh, '<', $path) or return undef;
-    my $line = <$fh>;
-    close($fh);
-    return undef unless defined $line;
-    chomp $line;
-    return $line;
-}
-
-# Replaces $path by rename from a fresh temp file beside it, created so that
-# no planted name can be written through. True once $path holds $content.
-sub write_replacing {
-    my ($path, $content) = @_;
-    my ($fh, $tmp);
-    for (1 .. 100) {
-        $tmp = sprintf('%s.%08x', $path, int(rand(4294967296)));
-        last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
-        undef $fh;
-    }
-    return 0 unless defined $fh;
-    print {$fh} $content;
-    close($fh) or do { unlink $tmp; return 0 };
-    return 1 if rename($tmp, $path);
-    unlink $tmp;
-    return 0;
-}
-
-# Overwrites $path in place, so it keeps its inode. Only a regular file of
-# exactly the content's length is overwritten; anything else (the first write,
-# an older format, a planted symlink or fifo) is replaced by rename. True once
-# $path holds $content.
-sub write_in_place {
-    my ($path, $content) = @_;
-    if (sysopen(my $fh, $path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK)) {
-        if (-f $fh && -s _ == length($content)) {
-            my $written = syswrite($fh, $content);
-            close($fh);
-            return 1 if defined $written && $written == length($content);
-        } else {
-            close($fh);
-        }
-    }
-    return write_replacing($path, $content);
-}
-
-# Points $path at a complete copy of $content while the sandbox only ever sees
-# two inodes. gVisor's gofer keeps an entry for every distinct inode the sandbox
-# sees, for its lifetime, so replacing $path with a fresh file on every rewrite
-# grows it without bound; overwriting $path itself would let a reader catch a
-# half-written file. Instead the content is written in place into whichever of
-# two slot files $path does not name, which is then renamed onto $path through
-# a hard link.
-sub publish_through_slot {
-    my ($path, $content) = @_;
-    my @published = lstat($path);
-    my @slot0 = lstat("$path.slot0");
-    my $slot = @published && @slot0 && $published[0] == $slot0[0] && $published[1] == $slot0[1] ? 1 : 0;
-    my $slot_path = "$path.slot$slot";
-    write_in_place($slot_path, $content) or return;
-    my $link;
-    for (1 .. 100) {
-        $link = sprintf('%s.%08x', $path, int(rand(4294967296)));
-        last if link($slot_path, $link);
-        return unless $!{EEXIST};
-        undef $link;
-    }
-    return unless defined $link;
-    # A rename onto a name for the same file does nothing and leaves $link behind.
-    rename($link, $path);
-    unlink $link;
-}
-
-sub withdraw {
-    my ($target_file) = @_;
-    unlink $target_file, "$target_file.slot0", "$target_file.slot1";
-}
-
-sub publish_memory {
-    my ($cgroup_dir, $target_file) = @_;
-    # A container can stop, and its cgroup vanish, between any two reads.
-    my $limit = read_first_line("$cgroup_dir/memory.max") // return;
-    if ($limit eq 'max') {
-        withdraw($target_file);
-        return;
-    }
-    return unless $limit =~ /^\d+$/;
-    my $usage = read_first_line("$cgroup_dir/memory.current") // return;
-    return unless $usage =~ /^\d+$/;
-    open(my $stat, '<', "$cgroup_dir/memory.stat") or return;
-    my $inactive_file = 0;
-    while (my $line = <$stat>) {
-        my ($key, $value) = split ' ', $line;
-        next unless defined $value && $value =~ /^\d+$/;
-        $inactive_file = $value if $key eq 'inactive_file';
-    }
-    close($stat);
-    my $available = $limit - $usage + $inactive_file;
-    $available = 0 if $available < 0;
-    $available = $limit if $available > $limit;
-    # Fixed-width fields, so every rewrite of a slot has the same length (see write_in_place).
-    publish_through_slot(
-        $target_file,
-        sprintf(
-            "MemTotal: %15d kB\nMemAvailable: %15d kB\nTimestamp: %15d\n",
-            $limit / 1024, $available / 1024, time,
-        ),
-    );
 }
 
 # The quota covers everything the VM's agent host writes, so every container
@@ -246,9 +107,9 @@ for (my $round = 0; ; $round++) {
         $quota_dir = find_host_quota_dir();
     }
     for my $target (@targets) {
-        my ($cgroup_dir, $meminfo_file, $diskinfo_file) = @$target;
-        publish_memory($cgroup_dir, $meminfo_file);
-        publish_disk($quota_dir, $diskinfo_file) if $round % $rounds_per_disk_publish == 0;
+        my ($cgroup_dir, $volume_dir) = @$target;
+        publish_memory($cgroup_dir, "$volume_dir/$file_name");
+        publish_disk($quota_dir, "$volume_dir/$diskinfo_file_name") if $round % $rounds_per_disk_publish == 0;
     }
     select(undef, undef, undef, $interval_seconds);
 }
@@ -413,10 +274,7 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str, btrfs_sy
 # One long-running process, so a rewrite starts none. perl, because every write
 # into the container's volume must refuse a symlink the container planted
 # there, and bash cannot open with O_NOFOLLOW.
-use strict;
-use warnings;
-use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);
-
+{MEMINFO_PUBLISHER_PERL_PRAGMAS}
 my $cgroup_parent = '{cgroup_parent}';
 my $host_id_label = '{GEN2_HOST_ID_CONTAINER_LABEL}';
 my $volume_mount_path = '{GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH}';
@@ -430,7 +288,7 @@ my $interval_seconds = {_MEMINFO_PUBLISH_INTERVAL_SECONDS};
 my $rounds_per_discovery = {_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY};
 my $rounds_per_disk_publish = {_DISKINFO_PUBLISH_ROUNDS_PER_REWRITE};
 """
-    return header + _MEMINFO_PUBLISHER_BODY
+    return header + MEMINFO_PUBLISHER_PERL_SUBS + _MEMINFO_PUBLISHER_GEN2_TAIL
 
 
 @pure

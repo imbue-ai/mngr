@@ -155,6 +155,22 @@ def test_create_instance_builds_public_ip_nic_and_vm() -> None:
     assert str(instance_id).startswith("my-agent-")
 
 
+def test_create_instance_sizes_the_os_disk_from_the_override() -> None:
+    """``root_disk_gb`` (from --azure-root-disk-gb=) sizes the OS disk instead of the client's default."""
+    client = _make_client()
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    client.create_instance(
+        label="my-agent",
+        region=_REGION,
+        plan="Standard_B2s",
+        user_data="#cloud-config\n",
+        ssh_key_ids=["k1"],
+        tags={"mngr-host-id": "host-abc", "mngr-provider": "azure"},
+        root_disk_gb=100,
+    )
+    assert _created_vm(client).storage_profile.os_disk.disk_size_gb == 100
+
+
 def test_create_instance_injects_ssh_key_and_base64_custom_data() -> None:
     client = _make_client()
     client.upload_ssh_key("k1", "ssh-ed25519 PUBKEY")

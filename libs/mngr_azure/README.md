@@ -118,6 +118,7 @@ mngr create my-west-agent --provider azure-west
 mngr create my-agent --provider azure
 mngr create my-agent --provider azure -b --azure-vm-size=Standard_D2s_v5 -b --azure-region=eastus
 mngr create my-agent --provider azure -b --azure-spot                       # run on Azure Spot capacity
+mngr create my-agent --provider azure -b --azure-root-disk-gb=100           # per-host OS disk size
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent

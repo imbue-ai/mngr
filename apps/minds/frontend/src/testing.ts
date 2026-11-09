@@ -228,6 +228,7 @@ export function createFormDefaults(
       DOCKER: { cpu_count: 4, memory_gb: 8, disk_gb: null },
       LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
+      AWS: { cpu_count: null, memory_gb: null, disk_gb: 50 },
     },
     cloud_accounts: [],
     connection_backends: [...CONNECTION_BACKEND_OPTIONS],

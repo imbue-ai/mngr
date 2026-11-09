@@ -1522,8 +1522,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         else:
             # A known size for a sized mode: passes through to the create command.
             pass
-    # The size of a DOCKER / LIMA / MODAL machine, in the dimensions that mode
-    # takes (a stray dimension for another mode is dropped, like instance_type).
+    # The machine's size in the dimensions that mode takes (CPUs and RAM for
+    # DOCKER / LIMA / MODAL, the disk for LIMA and the clouds; a stray dimension
+    # for another mode is dropped, like instance_type).
     machine_size = narrow_machine_size_to_launch_mode(
         MachineSizeSelection(
             cpu_count=body.get("cpu_count"), memory_gb=body.get("memory_gb"), disk_gb=body.get("disk_gb")

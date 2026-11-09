@@ -30,6 +30,8 @@ GCP_BUILD_ARGS_HELP: Final[str] = (
     "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
     "  --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the\n"
     "                           config's default_source_image (a full image / family URL)\n"
+    "  --gcp-root-disk-gb=N     Boot disk size in GB for this create only (default: the\n"
+    "                           config's root_disk_size_gb)\n"
     "  --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).\n"
     "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
     "\n"

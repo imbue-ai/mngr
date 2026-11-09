@@ -83,11 +83,10 @@ HOME_SUBPATH: Final[str] = "home"
 # container home symlink ``setup_container_ssh`` creates.
 HOST_VOLUME_HOME_PATH: Final[str] = f"{HOST_VOLUME_MOUNT_PATH}/{HOME_SUBPATH}"
 
-# Shell command for the agent container's PID 1. Self-heals sshd on every
-# (re)start once mngr has provisioned a host key, so the container is reachable
-# again after an out-of-band restart (VM reboot, `docker restart`) without
-# waiting for `mngr start`. Also traps SIGTERM and stays alive until SIGTERM
-# arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
+# Shell command for the agent container's PID 1. Once mngr has provisioned the
+# host it restarts sshd and runs the image's start hook on every (re)start, so
+# the container recovers from an out-of-band restart (VM reboot, `docker
+# restart`) without waiting for `mngr start`.
 CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
 
 # The runtime name gVisor registers with the Docker daemon (``docker run --runtime runsc``).
@@ -168,6 +167,47 @@ def runsc_tmpfs_start_args(
         if path not in present_paths
         for arg in ("--tmpfs", mount_spec)
     )
+
+
+# gVisor starts every sandbox process with a 64 KiB RLIMIT_MEMLOCK (runc inherits
+# dockerd's, 8 MiB on Debian), and both kernels measure ``mlockall`` against the
+# whole mapped address space, where gVisor's pre-sized 8 MiB main stack alone
+# exceeds either default, so no daemon inside a runsc container can lock itself
+# in. 64 MiB covers a small daemon's whole mapping with room to spare and is far
+# below anything that could starve the cgroup.
+CONTAINER_MEMLOCK_LIMIT_BYTES: Final[int] = 64 * 1024 * 1024
+_MEMLOCK_ULIMIT_NAME: Final[str] = "memlock"
+
+
+@pure
+def has_memlock_ulimit_start_arg(start_args: Sequence[str]) -> bool:
+    """Whether ``start_args`` already sets a ``docker run --ulimit memlock=...`` limit, in either flag spelling."""
+    is_next_arg_ulimit = False
+    for arg in start_args:
+        if is_next_arg_ulimit:
+            if arg.startswith(f"{_MEMLOCK_ULIMIT_NAME}="):
+                return True
+            is_next_arg_ulimit = False
+        elif arg == "--ulimit":
+            is_next_arg_ulimit = True
+        elif arg.startswith(f"--ulimit={_MEMLOCK_ULIMIT_NAME}="):
+            return True
+        else:
+            pass
+    return False
+
+
+@pure
+def runsc_memlock_start_args(docker_runtime: str | None, configured_start_args: Sequence[str]) -> tuple[str, ...]:
+    """The ``--ulimit memlock`` a runsc container needs unless ``configured_start_args`` already sets one.
+
+    Empty for any other runtime, whose default limit already lets a small daemon lock itself in.
+    """
+    if docker_runtime != _GVISOR_DOCKER_RUNTIME_NAME:
+        return ()
+    if has_memlock_ulimit_start_arg(configured_start_args):
+        return ()
+    return ("--ulimit", f"{_MEMLOCK_ULIMIT_NAME}={CONTAINER_MEMLOCK_LIMIT_BYTES}:{CONTAINER_MEMLOCK_LIMIT_BYTES}")
 
 
 # Docker brings the container back after an out-of-band exit (an OOM kill, a

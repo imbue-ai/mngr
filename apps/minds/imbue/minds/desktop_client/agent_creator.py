@@ -1453,8 +1453,9 @@ def _build_mngr_create_command(
     if create_attempt_id_label:
         create_attempt_host_label_args = ["--host-label", f"{CREATE_ATTEMPT_ID_HOST_LABEL}={create_attempt_id_label}"]
 
-    # The machine's size, in whichever flags this mode's provider takes it (none
-    # for the modes sized by a named instance shape or by the connector).
+    # The machine's size, in whichever flags this mode's provider takes it (the
+    # root disk alone for the clouds, whose CPUs and RAM come from the instance
+    # type; none for the connector-sized imbue_cloud and for vultr).
     size_args = machine_size_create_args(launch_mode, machine_size) if machine_size is not None else []
 
     match launch_mode:
@@ -1500,6 +1501,7 @@ def _build_mngr_create_command(
             # provider block's default_instance_type when set.
             if instance_type:
                 mngr_command.extend(_build_arg_flag(f"--aws-instance-type={instance_type}"))
+            mngr_command.extend(size_args)
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -1554,6 +1556,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(_build_arg_flag(f"--gcp-zone={region}"))
             if instance_type:
                 mngr_command.extend(_build_arg_flag(f"--gcp-machine-type={instance_type}"))
+            mngr_command.extend(size_args)
         case LaunchMode.AZURE:
             # Same shape as aws; the address already selects the ``azure_<hex>``
             # connection instance.
@@ -1563,6 +1566,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(_build_arg_flag(f"--azure-region={region}"))
             if instance_type:
                 mngr_command.extend(_build_arg_flag(f"--azure-vm-size={instance_type}"))
+            mngr_command.extend(size_args)
         case _ as unreachable:
             assert_never(unreachable)
 

@@ -23,12 +23,14 @@ from imbue.mngr_vps.container_setup import build_image_on_outer_from_build_args
 from imbue.mngr_vps.container_setup import build_write_container_file_command
 from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
 from imbue.mngr_vps.container_setup import env_sourced_build_secrets
+from imbue.mngr_vps.container_setup import has_memlock_ulimit_start_arg
 from imbue.mngr_vps.container_setup import has_memory_limit_start_arg
 from imbue.mngr_vps.container_setup import has_restart_policy_start_arg
 from imbue.mngr_vps.container_setup import image_exists
 from imbue.mngr_vps.container_setup import memory_cap_labels
 from imbue.mngr_vps.container_setup import resolve_remote_build_root
 from imbue.mngr_vps.container_setup import restart_policy_start_args
+from imbue.mngr_vps.container_setup import runsc_memlock_start_args
 from imbue.mngr_vps.container_setup import runsc_tmpfs_start_args
 from imbue.mngr_vps.container_setup import tmpfs_mount_paths_in_start_args
 from imbue.mngr_vps.data_types import ContainerFile
@@ -86,6 +88,26 @@ def test_has_memory_limit_start_arg_reads_every_docker_spelling() -> None:
 def test_memory_cap_labels_mark_only_containers_without_an_explicit_limit() -> None:
     assert memory_cap_labels(("--restart=unless-stopped",)) == {"com.imbue.mngr.memory-cap": "vm"}
     assert memory_cap_labels(("--memory=7168m", "--memory-swap=7168m")) == {}
+
+
+def test_runsc_memlock_start_args_only_under_runsc_and_only_when_the_caller_set_none() -> None:
+    assert runsc_memlock_start_args("runsc", ()) == ("--ulimit", "memlock=67108864:67108864")
+    assert runsc_memlock_start_args(None, ()) == ()
+    assert runsc_memlock_start_args("runc", ()) == ()
+    assert runsc_memlock_start_args("runsc", ("--ulimit", "memlock=-1:-1")) == ()
+    assert runsc_memlock_start_args("runsc", ("--ulimit=memlock=8388608",)) == ()
+    # Another ulimit is not a memlock limit.
+    assert runsc_memlock_start_args("runsc", ("--ulimit", "nofile=1024:1024")) == (
+        "--ulimit",
+        "memlock=67108864:67108864",
+    )
+
+
+def test_has_memlock_ulimit_start_arg_reads_both_flag_spellings() -> None:
+    assert has_memlock_ulimit_start_arg(("--ulimit", "memlock=1:1"))
+    assert has_memlock_ulimit_start_arg(("--ulimit=memlock=1:1",))
+    assert not has_memlock_ulimit_start_arg(("--ulimit", "nproc=1:1", "--memory=1g"))
+    assert not has_memlock_ulimit_start_arg(())
 
 
 def test_restart_policy_start_args_defaults_to_unless_stopped_unless_the_caller_chose_one() -> None:

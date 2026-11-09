@@ -9,12 +9,14 @@ import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.container_meminfo_publisher import CONTAINER_HOST_MEMINFO_FILE_NAME
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.providers.ssh_host_setup import JOURNALD_DROP_IN_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.host_setup import CONTAINER_MEMINFO_UNIT_NAME
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_UNIT_NAME
 from imbue.mngr_vps.host_setup import ContainerMemoryCapProbe
@@ -28,6 +30,7 @@ from imbue.mngr_vps.host_setup import build_remote_script_command
 from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
 from imbue.mngr_vps.host_setup import parse_container_memory_cap_probe
 from imbue.mngr_vps.host_setup import parse_mem_total_kib
+from imbue.mngr_vps.host_setup import render_container_meminfo_publisher_script
 from imbue.mngr_vps.host_setup import render_container_memory_reconcile_script
 from imbue.mngr_vps.host_setup import render_gvisor_binary_install_script
 from imbue.mngr_vps.host_setup import render_sshd_drop_in_stage_script
@@ -89,7 +92,8 @@ def test_build_host_setup_steps_minimal_order() -> None:
     assert "Docker" in descriptions[3]
     assert descriptions[4].startswith("Install the sshd drop-in")
     assert descriptions[5].startswith("Install the every-boot container memory cap")
-    assert len(descriptions) == 6
+    assert descriptions[6].startswith("Install the container memory headroom publisher")
+    assert len(descriptions) == 7
     assert not any("gVisor" in d or "runsc" in d for d in descriptions)
     assert not any("qemu" in d for d in descriptions)
 
@@ -200,6 +204,38 @@ def test_container_memory_reconcile_script_caps_labelled_containers_at_mem_total
     assert f'docker ps -aq --filter "label={LABEL_HOST_ID}" --filter "label=com.imbue.mngr.memory-cap=vm"' in script
     assert 'docker update --memory "${cap_mib}m" --memory-swap "${cap_mib}m"' in script
     assert 'if [ "$cap_mib" -le 0 ]; then exit 0; fi' in script
+
+
+def test_container_meminfo_publisher_step_installs_a_restarting_unit_guarded_on_change() -> None:
+    steps = build_host_setup_steps(install_gvisor_runtime=False, is_qemu_purge_enabled=False)
+    publisher_step = next(step for step in steps if "memory headroom publisher" in step.description)
+    assert render_container_meminfo_publisher_script() in publisher_step.script
+    assert "ExecStart=/usr/local/sbin/mngr-vps-container-meminfo.pl" in publisher_step.script
+    assert "Restart=always" in publisher_step.script
+    assert "After=docker.service" in publisher_step.script
+    assert f"systemctl enable {CONTAINER_MEMINFO_UNIT_NAME}" in publisher_step.script
+    assert f"systemctl restart {CONTAINER_MEMINFO_UNIT_NAME}" in publisher_step.script
+    assert publisher_step.script.index("cmp -s") < publisher_step.script.index("systemctl daemon-reload")
+
+
+def test_container_meminfo_publisher_script_reads_each_labelled_containers_cgroup_into_its_volume() -> None:
+    script = render_container_meminfo_publisher_script()
+    assert script.startswith("#!/usr/bin/perl\n")
+    assert subprocess.run(["perl", "-c"], input=script.encode(), capture_output=True).returncode == 0
+    # The containers are found by mngr's label, their volume by the in-container mount path, and the
+    # headroom is read from the container's own cgroup under docker's systemd slice.
+    assert f"my $host_id_label = '{LABEL_HOST_ID}';" in script
+    assert "my $volume_mount_path = '/mngr-vol';" in script
+    # The volume is written at its bind source, the subvolume itself, not docker's own mount of it.
+    assert "docker_output('volume', 'inspect', '--format', '{{.Options.device}}', $volume_name)" in script
+    assert f"my $file_name = '{CONTAINER_HOST_MEMINFO_FILE_NAME}';" in script
+    assert "my $cgroup_parent = '/sys/fs/cgroup/system.slice';" in script
+    assert "docker-$container_id.scope" in script
+    assert 'read_first_line("$cgroup_dir/memory.max")' in script
+    assert "my $available = $limit - $usage + $inactive_file;" in script
+    # The format earlyoom's --host-meminfo reads; an uncapped container gets no file.
+    assert '"MemTotal: %15d kB\\nMemAvailable: %15d kB\\nTimestamp: %15d\\n"' in script
+    assert "if ($limit eq 'max') {" in script
 
 
 def test_apply_container_memory_cap_command_starts_the_unit_only_when_installed() -> None:

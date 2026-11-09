@@ -190,6 +190,15 @@ SSHD_START_OPTIONS: Final[str] = (
 # outside the ``ssh_host_*`` glob that ``build_configure_ssh_command`` removes.
 SSHD_PROVISIONED_MARKER_PATH: Final[str] = "/etc/ssh/mngr_host_provisioned"
 
+# An executable the container image may install to be run, detached, on every
+# container (re)start after sshd is up. Docker's restart policy brings a
+# container back after an out-of-band exit (an OOM kill, a daemon restart, a VM
+# reboot) with nothing but sshd in it; the image's hook is where it relaunches
+# whatever else it needs (an image that runs a service supervisor under its
+# agent restarts that agent there). A hook that is absent, or not executable,
+# is skipped.
+CONTAINER_START_HOOK_PATH: Final[str] = "/usr/local/bin/mngr-container-start-hook"
+
 
 @pure
 def _build_sshd_not_running_check() -> str:
@@ -223,13 +232,17 @@ def build_self_healing_host_entrypoint_command() -> str:
     host (indicated by the marker file), (re)start sshd in daemon mode so the
     container becomes reachable again after an out-of-band restart
     (``docker restart``, daemon restart, host reboot) without waiting for
-    ``mngr start`` to re-exec it. On the very first create the marker does not
-    exist yet -- even when the base image ships a pre-generated host key -- so
-    this is a no-op and mngr starts sshd during provisioning as usual. PID 1
-    then idles, trapping SIGTERM so a ``docker stop`` exits cleanly and fast.
+    ``mngr start`` to re-exec it, and then run the image's start hook
+    (``CONTAINER_START_HOOK_PATH``), when it has one, in the background so a
+    slow or failing hook never holds up PID 1. On the very first create the
+    marker does not exist yet -- even when the base image ships a pre-generated
+    host key -- so this is a no-op and mngr starts sshd during provisioning as
+    usual. PID 1 then idles, trapping SIGTERM so a ``docker stop`` exits cleanly
+    and fast.
     """
     start_sshd = f"mkdir -p /run/sshd; /usr/sbin/sshd {SSHD_START_OPTIONS}"
-    self_heal = f"[ -f {SSHD_PROVISIONED_MARKER_PATH} ] && {{ {start_sshd}; }}"
+    run_hook = f"{{ [ -x {CONTAINER_START_HOOK_PATH} ] && {CONTAINER_START_HOOK_PATH}; }} &"
+    self_heal = f"[ -f {SSHD_PROVISIONED_MARKER_PATH} ] && {{ {start_sshd}; {run_hook} }}"
     return f"trap 'exit 0' TERM; {self_heal}; tail -f /dev/null & wait"
 
 

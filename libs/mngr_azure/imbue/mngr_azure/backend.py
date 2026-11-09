@@ -39,6 +39,7 @@ from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_root_disk_gb
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
@@ -368,7 +369,9 @@ class AzureProvider(OfflineCapableVpsProvider):
         """Parse Azure-prefixed build args.
 
         Accepts ``--azure-region=REGION``, ``--azure-vm-size=SIZE``,
-        ``--azure-spot`` (presence-only), and the shared ``--git-depth=N``.
+        ``--azure-root-disk-gb=N`` (the OS disk's size for this host, overriding
+        the config's ``root_disk_size_gb``), ``--azure-spot`` (presence-only),
+        and the shared ``--git-depth=N``.
         Composed from the shared low-level helpers rather than the convenience
         ``parse_vps_build_args`` because Azure has a knob (spot) beyond region +
         plan.
@@ -376,11 +379,13 @@ class AzureProvider(OfflineCapableVpsProvider):
         args = list(build_args or ())
         region, args = extract_single_value_arg(args, "--azure-region=")
         vm_size, args = extract_single_value_arg(args, "--azure-vm-size=")
+        root_disk_gb, args = extract_root_disk_gb(args, "--azure-root-disk-gb=")
         spot, args = extract_presence_flag(args, "--azure-spot")
         git_depth, args = extract_git_depth(args)
         valid_args = (
             "--azure-region=",
             "--azure-vm-size=",
+            "--azure-root-disk-gb=",
             "--azure-spot",
             "--git-depth=",
         )
@@ -394,6 +399,7 @@ class AzureProvider(OfflineCapableVpsProvider):
             plan=vm_size or self.azure_config.default_vm_size,
             spot=spot,
             git_depth=git_depth,
+            root_disk_gb=root_disk_gb,
             docker_build_args=tuple(docker_build_args),
         )
 
@@ -423,6 +429,7 @@ class AzureProvider(OfflineCapableVpsProvider):
             ssh_key_ids=ssh_key_ids,
             tags=tags,
             spot=spot,
+            root_disk_gb=parsed.root_disk_gb,
         )
 
     # The shared ``OfflineCapableVpsProvider._list_provider_vps_entries``

@@ -34,6 +34,8 @@ AWS_BUILD_ARGS_HELP: Final[str] = (
     "                              (default: provider config's default_ami_id, or the\n"
     "                              newest Debian 13 AMI in the region for the instance\n"
     "                              type's architecture, resolved from EC2 at create time)\n"
+    "  --aws-root-disk-gb=N        Root EBS volume size in GB for this create only\n"
+    "                              (default: provider config's root_disk_size_gb)\n"
     "  --aws-spot                  Run on EC2 spot capacity (presence-only flag).\n"
     "                              AWS may reclaim with ~2 min notice; the host is\n"
     "                              terminated, not stopped, on reclaim. Opt-in only.\n"

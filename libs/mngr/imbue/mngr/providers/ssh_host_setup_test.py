@@ -15,6 +15,7 @@ import imbue.mngr.resources as mngr_resources
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
+from imbue.mngr.providers.ssh_host_setup import CONTAINER_START_HOOK_PATH
 from imbue.mngr.providers.ssh_host_setup import JOURNALD_DROP_IN_PATH
 from imbue.mngr.providers.ssh_host_setup import JOURNALD_SYSTEM_MAX_USE
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
@@ -491,6 +492,36 @@ def test_self_healing_entrypoint_is_valid_shell_and_backgrounds_only_idle() -> N
     # the mere presence of an image-baked host key.
     assert SSHD_PROVISIONED_MARKER_PATH in cmd
     assert "/usr/sbin/sshd" in cmd
+    # The image's start hook runs detached, behind the same marker gate as sshd.
+    assert f"{{ [ -x {CONTAINER_START_HOOK_PATH} ] && {CONTAINER_START_HOOK_PATH}; }} &" in cmd
+
+
+def test_self_healing_entrypoint_runs_an_executable_start_hook_only_once_provisioned(tmp_path: Path) -> None:
+    """The start hook runs after sshd on a provisioned host, and is skipped when absent or not executable."""
+    hook_ran = tmp_path / "hook_ran"
+    hook_path = tmp_path / "start-hook"
+    hook_path.write_text(f"#!/bin/sh\ntouch {hook_ran}\n")
+    marker_path = tmp_path / "mngr_host_provisioned"
+    cmd = build_self_healing_host_entrypoint_command()
+    prefix = cmd.split("; tail -f /dev/null")[0]
+    # `wait` collects the detached hook so its effect is observable before the probe returns.
+    probe = (
+        prefix.replace(SSHD_PROVISIONED_MARKER_PATH, str(marker_path))
+        .replace("mkdir -p /run/sshd; ", "")
+        .replace(f"/usr/sbin/sshd {SSHD_START_OPTIONS}", "true")
+        .replace(CONTAINER_START_HOOK_PATH, str(hook_path))
+    ) + "; wait"
+    # Not provisioned yet: nothing runs, hook or not.
+    subprocess.run(["sh", "-c", probe], check=False)
+    assert not hook_ran.exists()
+    # Provisioned, but the hook is not executable: skipped.
+    marker_path.write_text("")
+    subprocess.run(["sh", "-c", probe], check=False)
+    assert not hook_ran.exists()
+    # Provisioned with an executable hook: it runs.
+    hook_path.chmod(0o755)
+    subprocess.run(["sh", "-c", probe], check=False)
+    assert hook_ran.exists()
 
 
 def test_self_healing_entrypoint_skips_sshd_without_provisioned_marker(tmp_path: Path) -> None:

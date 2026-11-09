@@ -25,20 +25,33 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.mngr_command import shell_quoted_create_flag
 from imbue.minds.errors import MindError
+from imbue.minds.mngr_settings.provider_blocks import CLOUD_CONNECTION_ROOT_DISK_SIZE_GB
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import MACHINE_UNITS_STEP
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import MAX_MACHINE_UNITS
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
-# The size a new local workspace gets unless the create form says otherwise. The
+# The size a new workspace gets unless the create form says otherwise. The
 # docker and lima values mirror the template's ``[providers.docker]`` block and
 # ``[create_templates.lima]`` (plus mngr_lima's 100 GiB data disk), and the modal
 # values its ``[create_templates.modal]`` settings, so a form left at its defaults
-# creates the machine the template would have created on its own.
+# creates the machine the template would have created on its own. The clouds
+# pick CPUs and RAM from a named instance shape (the form's instance-type
+# picker), so their one number is the root disk, mirroring the connection
+# block's ``root_disk_size_gb``.
 DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE: Final[dict[LaunchMode, MachineSizeSelection]] = {
     LaunchMode.DOCKER: MachineSizeSelection(cpu_count=4, memory_gb=8),
     LaunchMode.LIMA: MachineSizeSelection(cpu_count=2, memory_gb=4, disk_gb=100),
     LaunchMode.MODAL: MachineSizeSelection(cpu_count=2, memory_gb=4),
+    LaunchMode.AWS: MachineSizeSelection(disk_gb=CLOUD_CONNECTION_ROOT_DISK_SIZE_GB),
+    LaunchMode.GCP: MachineSizeSelection(disk_gb=CLOUD_CONNECTION_ROOT_DISK_SIZE_GB),
+    LaunchMode.AZURE: MachineSizeSelection(disk_gb=CLOUD_CONNECTION_ROOT_DISK_SIZE_GB),
+}
+
+_ROOT_DISK_BUILD_ARG_BY_LAUNCH_MODE: Final[dict[LaunchMode, str]] = {
+    LaunchMode.AWS: "--aws-root-disk-gb",
+    LaunchMode.GCP: "--gcp-root-disk-gb",
+    LaunchMode.AZURE: "--azure-root-disk-gb",
 }
 
 # The provider instance names whose machines are resized through that provider's
@@ -93,7 +106,9 @@ def narrow_machine_size_to_launch_mode(
             narrowed = MachineSizeSelection(cpu_count=selection.cpu_count, memory_gb=selection.memory_gb)
         case LaunchMode.LIMA:
             narrowed = selection
-        case LaunchMode.VULTR | LaunchMode.IMBUE_CLOUD | LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE:
+        case LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE:
+            narrowed = MachineSizeSelection(disk_gb=selection.disk_gb)
+        case LaunchMode.VULTR | LaunchMode.IMBUE_CLOUD:
             return None
         case _ as unreachable:
             assert_never(unreachable)
@@ -106,7 +121,11 @@ def machine_size_create_args(launch_mode: LaunchMode, selection: MachineSizeSele
 
     Docker and lima take their size as start args (last one wins over the
     template's defaults); lima's disk is the btrfs data disk the host's data
-    lives on, a provider setting rather than a start arg; modal takes build args.
+    lives on, a provider setting rather than a start arg; modal takes build
+    args, and so do the clouds for their root disk (a ``-S`` override of the
+    connection block's ``root_disk_size_gb`` cannot be used: mngr parses a
+    setting on its own, where a connection instance name is not a known
+    backend).
     """
     args: list[str] = []
     match launch_mode:
@@ -127,7 +146,14 @@ def machine_size_create_args(launch_mode: LaunchMode, selection: MachineSizeSele
                 args.extend(shell_quoted_create_flag("-b", f"cpu={selection.cpu_count}"))
             if selection.memory_gb is not None:
                 args.extend(shell_quoted_create_flag("-b", f"memory={selection.memory_gb}"))
-        case LaunchMode.VULTR | LaunchMode.IMBUE_CLOUD | LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE:
+        case LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE:
+            if selection.disk_gb is not None:
+                args.extend(
+                    shell_quoted_create_flag(
+                        "-b", f"{_ROOT_DISK_BUILD_ARG_BY_LAUNCH_MODE[launch_mode]}={selection.disk_gb}"
+                    )
+                )
+        case LaunchMode.VULTR | LaunchMode.IMBUE_CLOUD:
             pass
         case _ as unreachable:
             assert_never(unreachable)

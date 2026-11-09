@@ -548,8 +548,12 @@ class GcpVpsClient(VpsClientInterface):
         tags: Mapping[str, str],
         spot: bool = False,
         image: str | None = None,
+        root_disk_gb: int | None = None,
     ) -> VpsInstanceId:
         """Provision a GCE instance in the client's bound zone.
+
+        ``root_disk_gb`` (from the per-host ``--gcp-root-disk-gb`` build arg)
+        sizes this VM's boot disk instead of the client's ``boot_disk_size_gb``.
 
         ``region`` is interpreted as the **zone** for GCP (GCE VMs are zonal);
         it must equal the zone this client is bound to.
@@ -664,7 +668,7 @@ class GcpVpsClient(VpsClientInterface):
                     auto_delete=True,
                     initialize_params=compute_v1.AttachedDiskInitializeParams(
                         source_image=source_image,
-                        disk_size_gb=self.boot_disk_size_gb,
+                        disk_size_gb=root_disk_gb if root_disk_gb is not None else self.boot_disk_size_gb,
                         disk_type=f"projects/{self.project_id}/zones/{self.zone}/diskTypes/{self.boot_disk_type}",
                     ),
                 )
