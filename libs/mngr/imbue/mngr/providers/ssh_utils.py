@@ -1,16 +1,21 @@
 import base64
+import binascii
 import fcntl
 import os
+import re
 import socket
+import struct
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
 import paramiko
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from loguru import logger
+from paramiko.pkey import UnknownKeyType
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
@@ -18,6 +23,8 @@ from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import PyinfraConnectorUnavailableError
+from imbue.mngr.errors import SSHPrivateKeyEncryptedError
+from imbue.mngr.errors import SSHPrivateKeyUnparseableError
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import clear_endpoint_pins
@@ -50,6 +57,20 @@ from imbue.mngr.utils.pyinfra_install import take_pyinfra_install_snapshot
 # room to answer. A genuinely dead endpoint still fails fast at the TCP layer,
 # refused or unreachable, which this timeout does not stretch.
 SSH_BANNER_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# How each on-disk private-key encoding declares that it is passphrase-protected.
+# PKCS#8 says so in the PEM label; classic (RFC 1421) PEM says so in a header
+# line; the OpenSSH container names its cipher and KDF in the binary body, where
+# the literal "none" means unencrypted.
+_PKCS8_ENCRYPTED_PEM_LABEL: Final[bytes] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----"
+_CLASSIC_PEM_ENCRYPTION_HEADER: Final[bytes] = b"Proc-Type: 4,ENCRYPTED"
+_OPENSSH_PRIVATE_KEY_PEM_PATTERN: Final[re.Pattern[bytes]] = re.compile(
+    rb"-----BEGIN OPENSSH PRIVATE KEY-----(.*?)-----END OPENSSH PRIVATE KEY-----",
+    re.DOTALL,
+)
+_OPENSSH_PRIVATE_KEY_MAGIC: Final[bytes] = b"openssh-key-v1\x00"
+_OPENSSH_UNENCRYPTED_CIPHER_NAME: Final[bytes] = b"none"
+_OPENSSH_STRING_LENGTH_PREFIX_BYTES: Final[int] = 4
 
 
 def _generate_ed25519_keypair() -> tuple[str, str]:
@@ -144,6 +165,78 @@ def load_or_create_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tupl
         if not (private_key_path.exists() and public_key_path.exists()):
             save_ssh_keypair(key_dir, key_name)
     return private_key_path, public_key_path.read_text().strip()
+
+
+def _read_openssh_container_cipher_name(private_key_bytes: bytes) -> bytes | None:
+    """Return the cipher an OpenSSH-format private key records, or None if it is not that format.
+
+    The OpenSSH container stores its cipher name as the first length-prefixed
+    string of the base64 body, right after the ``openssh-key-v1`` magic. A file
+    that does not parse this far is simply not an OpenSSH container, and is left
+    for the real loader to reject with a useful message.
+    """
+    match = _OPENSSH_PRIVATE_KEY_PEM_PATTERN.search(private_key_bytes)
+    if match is None:
+        return None
+    try:
+        body = base64.b64decode(match.group(1))
+    except binascii.Error:
+        return None
+    if not body.startswith(_OPENSSH_PRIVATE_KEY_MAGIC):
+        return None
+    header = body[len(_OPENSSH_PRIVATE_KEY_MAGIC) :]
+    if len(header) < _OPENSSH_STRING_LENGTH_PREFIX_BYTES:
+        return None
+    (cipher_name_length,) = struct.unpack(">I", header[:_OPENSSH_STRING_LENGTH_PREFIX_BYTES])
+    cipher_name_end = _OPENSSH_STRING_LENGTH_PREFIX_BYTES + cipher_name_length
+    if len(header) < cipher_name_end:
+        return None
+    return header[_OPENSSH_STRING_LENGTH_PREFIX_BYTES:cipher_name_end]
+
+
+def is_passphrase_protected_private_key(private_key_bytes: bytes) -> bool:
+    """Whether an SSH private key file is passphrase-protected, read from its encoding's encryption marker.
+
+    An unrecognized encoding counts as not protected, leaving the loader to say
+    why it cannot be parsed.
+    """
+    if _PKCS8_ENCRYPTED_PEM_LABEL in private_key_bytes:
+        return True
+    if _CLASSIC_PEM_ENCRYPTION_HEADER in private_key_bytes:
+        return True
+    cipher_name = _read_openssh_container_cipher_name(private_key_bytes)
+    return cipher_name is not None and cipher_name != _OPENSSH_UNENCRYPTED_CIPHER_NAME
+
+
+def load_ssh_private_key_file(private_key_path: Path) -> paramiko.PKey:
+    """Load an SSH private key of any type paramiko supports, detecting the type from the file contents.
+
+    Use this rather than handing paramiko the path (``SSHClient.connect(key_filename=...)``)
+    or trying key classes one at a time. Either way paramiko tries each key class
+    in turn and keeps only the last exception, so a key that loads fine but that
+    the host rejects is reported as a later class's parse error (``encountered
+    RSA key, expected OPENSSH key``) instead of as the ``AuthenticationException``.
+
+    Raises ``SSHPrivateKeyEncryptedError`` for a passphrase-protected key and
+    ``SSHPrivateKeyUnparseableError`` for one that cannot be read or parsed.
+    """
+    try:
+        private_key_bytes = private_key_path.read_bytes()
+    except OSError as e:
+        raise SSHPrivateKeyUnparseableError(private_key_path, str(e)) from e
+
+    # Read from the file rather than caught as the ``TypeError`` cryptography
+    # raises for a missing password: it raises the same ``TypeError`` for a bad
+    # argument, which is a bug and must not be reported as an unusable key file.
+    if is_passphrase_protected_private_key(private_key_bytes):
+        raise SSHPrivateKeyEncryptedError(private_key_path)
+
+    try:
+        return paramiko.PKey.from_path(private_key_path)
+    except (paramiko.SSHException, UnknownKeyType, ValueError, OSError, UnsupportedAlgorithm) as e:
+        # Most of these come from ``cryptography``, not paramiko, so they are not
+        # ``SSHException``s; ``OSError`` covers the file going away between the two reads.
+        raise SSHPrivateKeyUnparseableError(private_key_path, str(e)) from e
 
 
 def generate_ed25519_host_keypair() -> tuple[str, str]:

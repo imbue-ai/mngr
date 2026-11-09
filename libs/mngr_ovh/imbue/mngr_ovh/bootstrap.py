@@ -8,8 +8,10 @@ from loguru import logger
 from paramiko.pkey import PKey
 
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.errors import SSHPrivateKeyError
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.providers.ssh_utils import load_ssh_private_key_file
 from imbue.mngr_vps.errors import VpsProvisioningError
 
 _SSH_CONNECT_BACKOFF_SECONDS: float = 5.0
@@ -284,30 +286,11 @@ def _connect_with_retry(
 
 
 def _load_private_key(private_key_path: Path) -> paramiko.PKey:
-    """Load an SSH private key by trying each supported key type in turn.
-
-    The base ``VpsProvider`` produces SSH keypairs via
-    ``ssh_utils.load_or_create_ssh_keypair`` -> ``generate_ssh_keypair``,
-    which returns an OpenSSH-format Ed25519 key (older installs still hold
-    RSA keys in TraditionalOpenSSL PEM format from the previous generator).
-    paramiko's per-class ``from_private_key_file`` constructors are strict:
-    ``Ed25519Key.from_private_key_file`` raises if the file isn't an
-    OpenSSH-format Ed25519 key, even though paramiko itself can handle RSA
-    fine. Rather than hardcode either type (which would break if the base
-    class swaps generator), try each type and use the one that parses; this
-    keeps the OVH provider working regardless of which key flavor the base
-    class produces.
-    """
-    last_error: paramiko.SSHException | None = None
-    for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-        try:
-            return key_class.from_private_key_file(str(private_key_path))
-        except paramiko.SSHException as e:
-            last_error = e
-    raise VpsProvisioningError(
-        f"Could not parse SSH private key at {private_key_path} as any supported type "
-        f"(Ed25519, RSA, ECDSA); last paramiko error: {last_error!r}"
-    )
+    """Load an SSH private key of any type, raising ``VpsProvisioningError`` if it cannot be loaded."""
+    try:
+        return load_ssh_private_key_file(private_key_path)
+    except SSHPrivateKeyError as e:
+        raise VpsProvisioningError(str(e)) from e
 
 
 def _run_or_raise(

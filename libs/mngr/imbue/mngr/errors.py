@@ -432,6 +432,30 @@ class VolumeListingError(MngrError, OSError):
     """
 
 
+class SSHPrivateKeyError(MngrError):
+    """Base class for failures to load an SSH private key file."""
+
+
+class SSHPrivateKeyEncryptedError(SSHPrivateKeyError):
+    """Raised when an SSH private key file is protected by a passphrase, which mngr cannot supply."""
+
+    def __init__(self, private_key_path: Path) -> None:
+        self.private_key_path = private_key_path
+        super().__init__(f"SSH private key at {private_key_path} is protected by a passphrase")
+        self.user_help_text = (
+            "mngr has no passphrase to unlock it with. Point mngr at a key with no passphrase, "
+            f"or remove the passphrase from this one: ssh-keygen -p -N '' -f {private_key_path}"
+        )
+
+
+class SSHPrivateKeyUnparseableError(SSHPrivateKeyError):
+    """Raised when an SSH private key file cannot be read, or is not a key mngr can use."""
+
+    def __init__(self, private_key_path: Path, reason: str) -> None:
+        self.private_key_path = private_key_path
+        super().__init__(f"Could not parse SSH private key at {private_key_path}: {reason}")
+
+
 class ProviderError(MngrError):
     """Base class for all provider-related errors."""
 

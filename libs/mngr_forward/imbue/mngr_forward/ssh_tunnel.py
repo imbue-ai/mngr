@@ -14,9 +14,7 @@ from typing import Final
 from urllib.parse import urlparse
 
 import paramiko
-from cryptography.exceptions import UnsupportedAlgorithm
 from loguru import logger
-from paramiko.pkey import UnknownKeyType
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -27,6 +25,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.suspension import ClockReading
 from imbue.imbue_common.suspension import read_clocks
 from imbue.imbue_common.suspension import was_suspended_since
+from imbue.mngr.errors import SSHPrivateKeyEncryptedError
+from imbue.mngr.errors import SSHPrivateKeyError
+from imbue.mngr.providers.ssh_utils import load_ssh_private_key_file
 from imbue.mngr_forward.relay import relay_data
 
 _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
@@ -1029,6 +1030,23 @@ def _resolve_known_hosts_path(ssh_info: RemoteSSHInfo) -> Path | None:
     return None
 
 
+def _load_private_key(key_path: Path) -> paramiko.PKey | None:
+    """Load the key this device authenticates with, or None when only the user's own SSH setup can use it.
+
+    A passphrase-protected key gives None: mngr has no passphrase for it, but an
+    ssh-agent holding it can still authenticate. Any other key that will not
+    load is a misconfiguration of this device, so it raises ``SSHTunnelError``
+    tagged ``LOCAL_SETUP`` rather than falling back.
+    """
+    try:
+        return load_ssh_private_key_file(key_path)
+    except SSHPrivateKeyEncryptedError as e:
+        logger.warning("Authenticating with the user's own SSH setup instead of the configured key: {}", e)
+        return None
+    except SSHPrivateKeyError as e:
+        raise SSHTunnelError(str(e), SSHTunnelPhase.LOCAL_SETUP) from e
+
+
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
@@ -1040,14 +1058,14 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
 
     Raises ``SSHTunnelError`` tagged ``LOCAL_SETUP`` when either piece of trust
     material this device is supposed to hold -- the known_hosts file or the
-    private key -- is not on disk. Both are checked before connecting, which is
-    what earns them that phase: paramiko would otherwise report the missing key
-    only during authentication, after the host has answered, where it is
-    indistinguishable from the host rejecting us and would be read as the
-    host's fault. A key that is present but no longer accepted (rotated
-    out) cannot be told from a rejection without asking the host, so it is
-    left as paramiko's ``AuthenticationException`` and never tagged
-    ``LOCAL_SETUP``.
+    private key -- is not on disk, or when the key is on disk but will not
+    load. All of it is checked before connecting, which is what earns it that
+    phase: paramiko would otherwise report a missing key only during
+    authentication, after the host has answered, where it is indistinguishable
+    from the host rejecting us and would be read as the host's fault. A key
+    that is present but no longer accepted (rotated out) cannot be told from a
+    rejection without asking the host, so it is left as paramiko's
+    ``AuthenticationException`` and never tagged ``LOCAL_SETUP``.
 
     A host that hangs up mid-handshake also raises ``SSHTunnelError`` tagged
     ``HOST_CONNECT``: paramiko reports it as a bare ``EOFError``, which is
@@ -1055,7 +1073,8 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
 
     The one exception to the key check is a credential-deferring host (no
     producer-owned key at all): its authentication material is the user's own
-    SSH setup, so only the known_hosts check applies to it.
+    SSH setup, so only the known_hosts check applies to it. A key that needs a
+    passphrase is left to that same setup (see ``_load_private_key``).
     """
     client = paramiko.SSHClient()
 
@@ -1066,10 +1085,7 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     # the missing-key refusal below must not fire.
     is_user_config_host = _is_user_config_host(ssh_info)
     # ``is_file`` rather than ``exists``: a stale record could name a directory,
-    # which ``exists()`` reports as present. paramiko would then fail on the
-    # directory with an ``IsADirectoryError`` -- an ``OSError``, so it escapes
-    # the ``SSHException`` arm of paramiko's key loop and lands back here
-    # untagged.
+    # which ``exists()`` reports as present.
     if not is_user_config_host and not ssh_info.key_path.is_file():
         raise SSHTunnelError(
             f"No SSH key file at {ssh_info.key_path}; this device is missing the material to authenticate with",
@@ -1097,27 +1113,40 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     client.load_host_keys(str(known_hosts_path))
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
-    # A host with no producer-owned key defers authentication to the user's
-    # own SSH setup: let paramiko run its default lookup chain (``~/.ssh/id_*``
-    # and the agent) instead of pointing it at an empty key filename.
+    # A host with a key of its own is authenticated with that key alone: it is
+    # the only one the host is expected to accept, and also offering the agent's
+    # keys and ``~/.ssh/id_*`` would let one of their failures be the one
+    # paramiko reports. Without a key mngr can load, paramiko's default lookup
+    # chain is the only credential there is.
+    private_key = None if is_user_config_host else _load_private_key(ssh_info.key_path)
+    is_ambient_authentication_used = private_key is None
+    is_connected = False
     try:
         client.connect(
             hostname=ssh_info.host,
             port=ssh_info.port,
             username=ssh_info.user,
-            key_filename=None if is_user_config_host else str(ssh_info.key_path),
+            pkey=private_key,
+            allow_agent=is_ambient_authentication_used,
+            look_for_keys=is_ambient_authentication_used,
             timeout=10.0,
         )
+        is_connected = True
     except paramiko.SSHException as e:
         if _was_rejected_during_authentication(client, e):
-            _log_authentication_failure(ssh_info, e)
+            _log_authentication_failure(ssh_info, private_key, e)
         raise
     except EOFError as e:
-        client.close()
         raise SSHTunnelError(
             f"SSH host {ssh_info.host}:{ssh_info.port} closed the connection during the handshake",
             SSHTunnelPhase.HOST_CONNECT,
         ) from e
+    finally:
+        # paramiko starts the transport's thread before it checks the host key or
+        # authenticates, and leaves it running when ``connect`` fails; nothing else
+        # references this client.
+        if not is_connected:
+            client.close()
 
     # Send periodic keepalives so an idle reverse tunnel is not reaped for
     # inactivity, which would leave the remote sshd's forwarded listener bound
@@ -1133,11 +1162,11 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
 def _was_rejected_during_authentication(client: paramiko.SSHClient, error: paramiko.SSHException) -> bool:
     """Whether ``connect`` failed in the authentication phase, after offering credentials the server did not accept.
 
-    paramiko tries a key file as each key class in turn and raises only the
-    last failure, so an RSA or ECDSA key the server rejected surfaces as the
-    later classes' load error rather than as an ``AuthenticationException``.
-    An authentication attempt on a transport that is still unauthenticated
-    identifies the rejection either way.
+    paramiko raises only the last failure among the credentials it tried, so
+    when it falls back to the user's own keys the error can be one of their
+    load errors (a passphrase-protected ``~/.ssh/id_*``, say) rather than an
+    ``AuthenticationException``. An authentication attempt on a transport that
+    is still unauthenticated identifies the rejection either way.
     """
     if isinstance(error, paramiko.AuthenticationException):
         return True
@@ -1145,7 +1174,9 @@ def _was_rejected_during_authentication(client: paramiko.SSHClient, error: param
     return transport is not None and transport.auth_handler is not None and not transport.is_authenticated()
 
 
-def _log_authentication_failure(ssh_info: RemoteSSHInfo, error: paramiko.SSHException) -> None:
+def _log_authentication_failure(
+    ssh_info: RemoteSSHInfo, offered_key: paramiko.PKey | None, error: paramiko.SSHException
+) -> None:
     """Record what this device offered to an sshd that would not authenticate it.
 
     A rejection persists across cycles for very different reasons: the host no
@@ -1154,9 +1185,6 @@ def _log_authentication_failure(ssh_info: RemoteSSHInfo, error: paramiko.SSHExce
     port), or the host defers to the user's own SSH setup, which may not exist
     for this process. The message also distinguishes a refusal ("Authentication
     failed.") from a server that never answered ("Authentication timeout.").
-    paramiko also tries the agent's keys and ``~/.ssh/id_*`` after the key
-    described here and raises only the last failure, so the error can come from
-    one of those rather than from this key.
     Only identifiers are logged, never the key path, which can embed a username.
     """
     allowed_types = error.allowed_types if isinstance(error, paramiko.BadAuthenticationType) else None
@@ -1166,30 +1194,28 @@ def _log_authentication_failure(ssh_info: RemoteSSHInfo, error: paramiko.SSHExce
         ssh_info.port,
         type(error).__name__,
         error,
-        _describe_offered_key(ssh_info),
+        _describe_offered_key(ssh_info, offered_key),
         "not reported" if allowed_types is None else ", ".join(allowed_types),
     )
 
 
-def _describe_offered_key(ssh_info: RemoteSSHInfo) -> str:
-    """The fingerprint and modification time of the key this device authenticates with.
+def _describe_offered_key(ssh_info: RemoteSSHInfo, offered_key: paramiko.PKey | None) -> str:
+    """The fingerprint and file modification time of the key this device offered, or what it offered instead.
 
-    Fingerprinted from the private key, loaded the way paramiko loads it to
-    offer it, in the same form ``log_client_key_configuration`` logs for the
-    public key a host is configured with: a host configured from a ``.pub``
-    that no longer matches the private key shows up as two different
+    The fingerprint is in the same form ``log_client_key_configuration`` logs
+    for the public key a host is configured with: a host configured from a
+    ``.pub`` that no longer matches the private key shows up as two different
     fingerprints.
     """
-    if _is_user_config_host(ssh_info):
-        return "the user's own SSH setup (credential-deferring host)"
+    if offered_key is None:
+        if _is_user_config_host(ssh_info):
+            return "the user's own SSH setup (credential-deferring host)"
+        return "the user's own SSH setup (the configured key needs a passphrase)"
     try:
-        fingerprint = paramiko.PKey.from_path(ssh_info.key_path).fingerprint
         modified_at = datetime.fromtimestamp(ssh_info.key_path.stat().st_mtime, tz=timezone.utc)
-    # Unreadable, malformed, passphrase-protected, or a key type this paramiko
-    # or ``cryptography`` build does not support.
-    except (OSError, ValueError, TypeError, UnsupportedAlgorithm, UnknownKeyType, paramiko.SSHException) as e:
-        return f"a key file that could not be read back ({type(e).__name__})"
-    return f"key {fingerprint} (file modified {modified_at.isoformat()})"
+    except OSError as e:
+        return f"key {offered_key.fingerprint} (file no longer readable: {type(e).__name__})"
+    return f"key {offered_key.fingerprint} (file modified {modified_at.isoformat()})"
 
 
 def _create_short_path_tmpdir(prefix: str) -> tempfile.TemporaryDirectory[str]:
