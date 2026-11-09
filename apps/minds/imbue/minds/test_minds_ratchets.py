@@ -22,7 +22,7 @@ from imbue.minds import workspace_programs
 
 _DIR = Path(__file__).parent.parent.parent
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 _RAW_POST_MESSAGE_RULE = RatchetRuleInfo(
     rule_name="raw postMessage / message-listener usages outside the embed contract",

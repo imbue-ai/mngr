@@ -8,7 +8,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 
 _DIR = Path(__file__).parent.parent.parent
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # These files carry Python programs as strings that run inside a workspace container (or stand in
@@ -295,8 +295,6 @@ def test_prevent_unpinned_modal_pip_install() -> None:
 # ratchet_group("AST-based ratchets")
 
 
-# Flaky: the tree-wide AST parse can exceed the 10s pytest-timeout on a loaded offload sandbox.
-@pytest.mark.flaky
 def test_prevent_if_elif_without_else() -> None:
     rc.check_if_elif_without_else(_DIR, snapshot(2))
 

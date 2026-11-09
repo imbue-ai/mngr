@@ -50,6 +50,7 @@ from uuid import uuid4
 import pytest
 from coverage.exceptions import CoverageException
 
+from imbue.imbue_common.ratchet_testing.standard_ratchet_checks import preload_ratchet_scan_for_test
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
 from imbue.resource_guards.resource_guards import register_all_resource_guards
@@ -131,6 +132,8 @@ _SHARED_MARKERS: Final[list[str]] = [
     " deployed production environment; never collected by any other test selection",
     "harness_internals(harness): marks a release test that asserts an internal of the harness CLI"
     " that mngr reads, such as a transcript record, hook payload, TUI string or launch flag",
+    "ratchet_scan(source_dir): marks a ratchet test that scans source_dir; the scan is loaded during"
+    " setup, so the test's timeout covers only its own check",
 ]
 
 # Additional markers registered by projects via register_marker().
@@ -852,6 +855,13 @@ def _write_flaky_manifest(session: pytest.Session) -> None:
     output_file.write_text("\n".join(flaky_ids) + "\n")
 
 
+def _pytest_runtest_setup(item: pytest.Item) -> None:
+    """Load the scan a ratchet_scan-marked test reads, so its timed body pays only for its own check."""
+    marker = item.get_closest_marker("ratchet_scan")
+    if marker is not None:
+        preload_ratchet_scan_for_test(source_dir=marker.args[0], test_name=item.name)
+
+
 @pytest.hookimpl(trylast=True)
 def _pytest_terminal_summary(
     terminalreporter: "pytest.TerminalReporter",
@@ -1051,6 +1061,7 @@ def register_conftest_hooks(namespace: dict) -> None:
     namespace["pytest_configure"] = _pytest_configure
     namespace["pytest_collection_modifyitems"] = _pytest_collection_modifyitems
     namespace["pytest_collection_finish"] = _pytest_collection_finish
+    namespace["pytest_runtest_setup"] = _pytest_runtest_setup
     namespace["pytest_terminal_summary"] = _pytest_terminal_summary
     # Resource guard hooks are registered as a plugin by start_resource_guards()
     # during pytest_sessionstart, so they don't need to be injected here.

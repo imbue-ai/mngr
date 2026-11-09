@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Final
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ARGS_IN_DOCSTRINGS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASSERT_ISINSTANCE
@@ -63,6 +64,8 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_YAML_USAG
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import preload_python_ast_scan
+from imbue.imbue_common.ratchet_testing.core import preload_text_scan
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
@@ -471,3 +474,27 @@ def check_code_in_init_files(
         "Code found in __init__.py files (should be empty per style guide):\n"
         + "\n".join(f"  - {v}" for v in violations)
     )
+
+
+# The tests of the checks that read parsed ASTs. Parsing is the costly part of a scan, so only
+# these tests have it preloaded; every other check reads file contents alone.
+_PYTHON_AST_CHECK_TEST_NAMES: Final[frozenset[str]] = frozenset(
+    f"test_prevent_{check.__name__.removeprefix('check_')}"
+    for check in (
+        check_silent_decode_error_catches,
+        check_if_elif_without_else,
+        check_inline_functions,
+        check_underscore_imports,
+        check_init_methods_in_non_exception_classes,
+        check_cast_usage,
+        check_per_file_host_upload,
+        check_assert_isinstance,
+    )
+)
+
+
+def preload_ratchet_scan_for_test(source_dir: Path, test_name: str) -> None:
+    """Fill the caches the named ratchet test's check reads under source_dir, so the check itself reads no file."""
+    preload_text_scan(source_dir)
+    if test_name in _PYTHON_AST_CHECK_TEST_NAMES:
+        preload_python_ast_scan(source_dir)

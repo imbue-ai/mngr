@@ -5,7 +5,6 @@ import shlex
 import subprocess
 import sys
 import tomllib
-from functools import cache
 from pathlib import Path
 
 import pytest
@@ -47,8 +46,6 @@ _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_state_mng_to_mngr.sh",
     "release_tombstones.py",
 )
-
-pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
 
 def _get_all_project_dirs() -> list[Path]:
@@ -193,6 +190,22 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
             mismatches.append("\n".join(parts))
 
     assert len(mismatches) == 0, "test_ratchets.py files have different test functions:\n" + "\n".join(mismatches)
+
+
+_RATCHET_SCAN_DECLARATION = "pytestmark = pytest.mark.ratchet_scan(_DIR)"
+
+
+def test_every_test_ratchets_file_declares_its_ratchet_scan() -> None:
+    """Ensure each test_ratchets.py names the directory it scans, so the scan is loaded before its timed tests."""
+    undeclared = [
+        str(ratchet_file.relative_to(_REPO_ROOT))
+        for project_dir in _get_all_project_dirs()
+        if (ratchet_file := _find_test_ratchets_file(project_dir)) is not None
+        and _RATCHET_SCAN_DECLARATION not in ratchet_file.read_text().splitlines()
+    ]
+    assert len(undeclared) == 0, f"These test_ratchets.py files lack the line `{_RATCHET_SCAN_DECLARATION}`:\n" + (
+        "\n".join(f"  - {path}" for path in undeclared)
+    )
 
 
 @pytest.mark.flaky
@@ -460,10 +473,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 )
 
 
-# Reads every file in the checkout and has run well past the 10s default; see
-# test_no_import_layer_violations for the flaky/timeout rationale.
-@pytest.mark.flaky
-@pytest.mark.timeout(60)
+@pytest.mark.ratchet_scan(_REPO_ROOT)
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
     exclusions = _SELF_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
@@ -471,11 +481,7 @@ def test_prevent_old_mng_name_in_file_contents() -> None:
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
 
-# Walks the same whole-checkout file list as the contents ratchet above (one shared cache
-# entry, but whichever runs first pays the walk); see test_no_import_layer_violations for
-# the flaky/timeout rationale.
-@pytest.mark.flaky
-@pytest.mark.timeout(60)
+@pytest.mark.ratchet_scan(_REPO_ROOT)
 def test_prevent_old_mng_name_in_file_paths() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file paths."""
     mng_not_mngr = re.compile(r"mng(?!r)")
@@ -1329,45 +1335,6 @@ def test_offload_version_pinned_consistently() -> None:
     )
 
 
-@cache
-def _collect_class_defs_for_model_config_checks() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
-    """Collect, repo-wide, each class's base names and any extra="forbid" declarations in its body.
-
-    Cached: three tests share this repo-wide AST walk, and the meta-ratchet
-    xdist group runs them in one process, so the repo is parsed once instead
-    of three times (the walk alone can approach a 10s timeout on a loaded CI
-    sandbox).
-
-    Returns ``(base_names_by_class, forbid_locations_by_class)``. Classes are keyed
-    by bare name; two same-named classes in different files have their bases merged,
-    which can only over-approximate a base's subclass set (acceptable for guards
-    that should match nothing). Cached (callers only read the result): the
-    repo-wide AST parse is the dominant cost of its three consumer tests, and
-    without the cache each one re-parses every .py file in the repo.
-    """
-    base_names_by_class: dict[str, set[str]] = {}
-    forbid_locations_by_class: dict[str, list[str]] = {}
-    for py_path in _get_all_text_files_with_extension(_REPO_ROOT, ".py"):
-        try:
-            tree = ast.parse(py_path.read_text())
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            base_names = {
-                base.id if isinstance(base, ast.Name) else base.attr
-                for base in node.bases
-                if isinstance(base, (ast.Name, ast.Attribute))
-            }
-            base_names_by_class.setdefault(node.name, set()).update(base_names)
-            if _class_body_sets_extra_forbid(node):
-                forbid_locations_by_class.setdefault(node.name, []).append(
-                    f"{py_path.relative_to(_REPO_ROOT)}:{node.lineno}"
-                )
-    return base_names_by_class, forbid_locations_by_class
-
-
 def _transitive_subclass_names(base_names_by_class: dict[str, set[str]], seed_names: set[str]) -> set[str]:
     """Every class name that (transitively, by bare name) inherits one of ``seed_names``, seeds included."""
     subclass_names = set(seed_names)
@@ -1383,53 +1350,9 @@ def _transitive_subclass_names(base_names_by_class: dict[str, set[str]], seed_na
     return subclass_names
 
 
-def _class_body_sets_extra_forbid(class_def: ast.ClassDef) -> bool:
-    """Whether the class body assigns a model_config containing extra="forbid".
-
-    Handles all three spellings: ``model_config = ConfigDict(extra="forbid")``,
-    the plain-dict form ``model_config = {"extra": "forbid"}``, and the annotated
-    form ``model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")``.
-    """
-    for statement in class_def.body:
-        if isinstance(statement, ast.Assign):
-            if not any(isinstance(t, ast.Name) and t.id == "model_config" for t in statement.targets):
-                continue
-            value = statement.value
-        elif isinstance(statement, ast.AnnAssign):
-            if not (isinstance(statement.target, ast.Name) and statement.target.id == "model_config"):
-                continue
-            if statement.value is None:
-                continue
-            value = statement.value
-        else:
-            continue
-        if _config_value_sets_extra_forbid(value):
-            return True
-    return False
-
-
-def _config_value_sets_extra_forbid(value: ast.expr) -> bool:
-    """Whether a model_config value expression contains extra="forbid"."""
-    if isinstance(value, ast.Call):
-        for keyword in value.keywords:
-            if keyword.arg == "extra" and isinstance(keyword.value, ast.Constant):
-                if keyword.value.value == "forbid":
-                    return True
-    elif isinstance(value, ast.Dict):
-        for key, dict_value in zip(value.keys, value.values, strict=True):
-            if isinstance(key, ast.Constant) and key.value == "extra":
-                if isinstance(dict_value, ast.Constant) and dict_value.value == "forbid":
-                    return True
-    else:
-        pass
-    return False
-
-
-# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
-# timeout is too tight on a loaded CI sandbox.
-@pytest.mark.flaky
-@pytest.mark.timeout(60)
-def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
+def test_event_envelope_subclasses_never_re_forbid_extra(
+    model_config_class_defs: tuple[dict[str, set[str]], dict[str, list[str]]],
+) -> None:
     """No EventEnvelope subclass anywhere in the repo may set extra="forbid".
 
     EventEnvelope models are persisted, cross-process, cross-version event
@@ -1441,7 +1364,7 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     Subclass membership is computed transitively by class name across the whole
     repo (an over-approximation, which for this guard can only catch more).
     """
-    base_names_by_class, forbid_locations_by_class = _collect_class_defs_for_model_config_checks()
+    base_names_by_class, forbid_locations_by_class = model_config_class_defs
     envelope_class_names = _transitive_subclass_names(base_names_by_class, {"EventEnvelope"})
 
     violations = [
@@ -1456,11 +1379,9 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     )
 
 
-# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
-# timeout is too tight on a loaded CI sandbox.
-@pytest.mark.flaky
-@pytest.mark.timeout(60)
-def test_wire_model_subclasses_never_re_forbid_extra() -> None:
+def test_wire_model_subclasses_never_re_forbid_extra(
+    model_config_class_defs: tuple[dict[str, set[str]], dict[str, list[str]]],
+) -> None:
     """No WireModel subclass anywhere in the repo may set extra="forbid".
 
     WireModel models parse remote_service_connector responses in shipped
@@ -1473,7 +1394,7 @@ def test_wire_model_subclasses_never_re_forbid_extra() -> None:
     name across the whole repo (an over-approximation, which for a guard that
     should match nothing can only catch more).
     """
-    base_names_by_class, forbid_locations_by_class = _collect_class_defs_for_model_config_checks()
+    base_names_by_class, forbid_locations_by_class = model_config_class_defs
     wire_model_class_names = _transitive_subclass_names(base_names_by_class, {"WireModel"})
 
     violations = [
@@ -1488,11 +1409,9 @@ def test_wire_model_subclasses_never_re_forbid_extra() -> None:
     )
 
 
-# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
-# timeout is too tight on a loaded CI sandbox.
-@pytest.mark.flaky
-@pytest.mark.timeout(60)
-def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
+def test_wire_types_files_contain_only_wire_models_and_wire_enums(
+    model_config_class_defs: tuple[dict[str, set[str]], dict[str, list[str]]],
+) -> None:
     """Every class in a wire_types.py must be (transitively) a WireModel or WireEnum.
 
     ``wire_types.py`` files hold connector response shapes by contract (see
@@ -1501,7 +1420,7 @@ def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
     forward-compatibility guarantees. Bases are resolved transitively by
     class name across the repo, so intermediate bases defined elsewhere work.
     """
-    base_names_by_class, _forbid_locations = _collect_class_defs_for_model_config_checks()
+    base_names_by_class, _forbid_locations = model_config_class_defs
     tolerant_class_names = _transitive_subclass_names(base_names_by_class, {"WireModel", "WireEnum"})
 
     violations = []

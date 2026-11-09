@@ -26,7 +26,7 @@ _STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = (
 _COMMON_TRANSCRIPT_CONVERT_SCRIPT: tuple[str, ...] = ("common_transcript_convert.py",)
 _FAKE_CLAUDE_TUI_SCRIPT: tuple[str, ...] = ("fake_claude_tui.py",)
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # ratchet_group("Code safety")

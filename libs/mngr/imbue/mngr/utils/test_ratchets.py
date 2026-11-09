@@ -29,7 +29,7 @@ _VENDORED_ATIF_PATTERNS = (
     "agents/data_types/atif/trajectory.py",
 )
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # ratchet_group("Code safety")
@@ -109,10 +109,6 @@ def test_prevent_importlib_import_module() -> None:
     rc.check_importlib_import_module(_DIR, snapshot(0))
 
 
-# Flaky: the tree-wide regex scan usually finishes in well under a second, but
-# on a cold-cache offload run (sandbox I/O still saturated by the base image
-# build) it has blown the 10s pytest-timeout once and passed on retry.
-@pytest.mark.flaky
 def test_prevent_getattr() -> None:
     rc.check_getattr(_DIR, snapshot(9), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 

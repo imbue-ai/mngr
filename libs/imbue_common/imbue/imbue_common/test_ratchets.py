@@ -7,7 +7,7 @@ from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 
 _DIR = Path(__file__).parent.parent.parent
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # The shared Sentry error-reporting machinery (``imbue_common/sentry/``) is ported from

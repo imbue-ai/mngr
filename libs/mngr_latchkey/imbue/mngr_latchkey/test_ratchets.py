@@ -8,7 +8,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 
 _DIR = Path(__file__).parent.parent.parent
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # ratchet_group("Code safety")

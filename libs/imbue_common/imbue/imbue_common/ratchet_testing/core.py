@@ -270,6 +270,19 @@ def get_ast_nodes_of_type(file_path: Path, node_type: type[_AstNodeT]) -> list[_
     return narrowed
 
 
+def preload_text_scan(source_dir: Path) -> None:
+    """Fill the caches a text ratchet reads under source_dir: both file listings and every listed file's contents."""
+    for extension in (FileExtension(".py"), None):
+        for file_path in _get_all_text_files_with_extension(source_dir, extension):
+            _read_file_contents(file_path)
+
+
+def preload_python_ast_scan(source_dir: Path) -> None:
+    """Fill the AST cache an AST ratchet reads: every Python file under source_dir, parsed and walked."""
+    for file_path in _get_all_text_files_with_extension(source_dir, FileExtension(".py")):
+        _get_ast_nodes_by_type(file_path)
+
+
 @lru_cache(maxsize=None)
 def _get_file_blame_dates(file_path: Path) -> dict[int, datetime]:
     """Run git blame once for an entire file and return a mapping of line_number -> commit_date.

@@ -43,7 +43,7 @@ run. By area:
 - **Utils / misc**: `bootstrap_test.py`, `build_info_test.py`, `main_test.py`,
   `utils/*_test.py`, `scripts/build_test.py`.
 - **Ratchets**: `imbue/minds/test_ratchets.py` (~65 `test_prevent_*` checks,
-  `xdist_group(name="ratchets")`).
+  `ratchet_scan(_DIR)`, which loads their file scan during setup).
 
 ### 1.2 Marked Python suites (`test_*.py`)
 

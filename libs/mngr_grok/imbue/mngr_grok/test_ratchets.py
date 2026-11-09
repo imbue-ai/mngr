@@ -13,7 +13,7 @@ _DIR = Path(__file__).parent.parent.parent
 # Long-lived standard-library processes run on the agent host, where mngr's helpers are unavailable.
 _STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = ("grok_transcript_streamer.py",)
 
-pytestmark = pytest.mark.xdist_group(name="ratchets")
+pytestmark = pytest.mark.ratchet_scan(_DIR)
 
 
 # ratchet_group("Code safety")
