@@ -66,6 +66,7 @@ from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import CloudAccountsResponse
 from imbue.minds.desktop_client.api_models import CreateAttemptDiscardStatusResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -185,6 +186,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("GET", "/api/v1/agents/{agent_id}/folder-syncs"): _RouteModels(response_model=AgentFolderSyncsResponse),
     ("GET", "/api/v1/app/version"): _RouteModels(response_model=AppVersionResponse),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
+    ("GET", "/api/v1/workspaces/cloud-accounts"): _RouteModels(response_model=CloudAccountsResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),
     ("GET", "/api/v1/account-shares/{account_id}"): _RouteModels(response_model=AccountSharesResponse),
     ("DELETE", "/api/v1/account-shares/{account_id}/{host_id}"): _RouteModels(

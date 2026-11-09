@@ -58,10 +58,15 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.backend_resolver import INSTANCE_TYPE_LABEL
+from imbue.minds.desktop_client.backend_resolver import LAUNCH_MODE_LABEL
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
+from imbue.minds.desktop_client.connections.primitives import backend_for_connection_instance_name
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
@@ -1197,6 +1202,38 @@ def provider_instance_name_for_launch(
             assert_never(unreachable)
 
 
+# The single-instance backends, keyed by the provider name their create targets.
+_LAUNCH_MODE_BY_BARE_PROVIDER_NAME: Final[Mapping[str, LaunchMode]] = {
+    provider_instance_name_for_launch(launch_mode): launch_mode
+    for launch_mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR)
+}
+
+
+@pure
+def launch_mode_for_provider_name(provider_name: str) -> LaunchMode | None:
+    """The inverse of :func:`provider_instance_name_for_launch`: the mode whose create targets ``provider_name``.
+
+    None for a provider instance minds does not create on (a workspace adopted
+    from elsewhere, or a record predating connections).
+    """
+    connection_backend = backend_for_connection_instance_name(provider_name)
+    if connection_backend is not None:
+        match connection_backend:
+            case ConnectionBackend.AWS:
+                return LaunchMode.AWS
+            case ConnectionBackend.GCP:
+                return LaunchMode.GCP
+            case ConnectionBackend.AZURE:
+                return LaunchMode.AZURE
+            case ConnectionBackend.MODAL:
+                return LaunchMode.MODAL
+            case _ as unreachable:
+                assert_never(unreachable)
+    if provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
+        return LaunchMode.IMBUE_CLOUD
+    return _LAUNCH_MODE_BY_BARE_PROVIDER_NAME.get(provider_name)
+
+
 def latchkey_gateway_location_for_launch(launch_mode: LaunchMode) -> LatchkeyGatewayLocation:
     """Select the intended gateway topology before the workspace host exists."""
     match launch_mode:
@@ -1382,6 +1419,12 @@ def _build_mngr_create_command(
     if original_branch:
         branch_label_args = ["--label", f"original_branch={original_branch}"]
 
+    # An agent inside cannot read its placement off the sandbox (gVisor hides
+    # the CPU model and the cloud's metadata service), so the create stamps it.
+    placement_label_args: list[str] = ["--label", f"{LAUNCH_MODE_LABEL}={launch_mode.value}"]
+    if instance_type:
+        placement_label_args.extend(["--label", f"{INSTANCE_TYPE_LABEL}={instance_type}"])
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
@@ -1412,6 +1455,7 @@ def _build_mngr_create_command(
         *color_label_args,
         *version_label_args,
         *branch_label_args,
+        *placement_label_args,
     ]
 
     match launch_mode:

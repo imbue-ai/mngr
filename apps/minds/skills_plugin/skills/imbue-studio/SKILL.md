@@ -101,7 +101,7 @@ These are the verbs:
 
 | Verb permission | Covers | Targeted? |
 |---|---|---|
-| `minds-workspaces-read` | list, detail, version, backups (read), operation status and logs | no (all workspaces) |
+| `minds-workspaces-read` | list (placement and size included), detail, version, backups (read), the cloud connections a workspace can be created on, operation status and logs | no (all workspaces) |
 | `minds-workspaces-create` | create a new workspace | no |
 | `minds-workspaces-ssh` | establish SSH access | yes |
 | `minds-workspaces-backups-export` | export a backup snapshot | yes |
@@ -129,7 +129,8 @@ Ask for the smallest set of verbs the task needs, with a rationale that names th
 
 ## 6. Acting on other workspaces from inside one
 
-A workspace is addressed by its agent id; your own is usually `$MNGR_AGENT_ID`.
+A workspace is addressed by the id of its primary agent (the one carrying the `is_primary` label).
+Your `$MNGR_AGENT_ID` is your own agent, one of the workspace's several, so from inside resolve your workspace's id with `mngr ls --include 'has(labels.is_primary)' --ids` (only this workspace's agents are visible from inside, so exactly one carries the label) and fall back to `$MNGR_AGENT_ID` when that is empty.
 
 **Creating a workspace.** `POST /api/v1/workspaces` answers `202`; poll `/api/v1/workspaces/operations/create/<op>` until `is_done`.
 The poll is a read, so ask for `minds-workspaces-read` together with `minds-workspaces-create`.
@@ -138,11 +139,36 @@ Omitted, the new workspace takes the template's default branch, unreleased code;
 If the read fails, say so and create nothing.
 From any other repository, send a ref that repository has, or omit `branch` for its default branch.
 
+Where the workspace runs is the body's `launch_mode`.
+Left out, it is `DOCKER`: a container on the user's own computer, sized by `cpu_count` and `memory_gb`.
+The cloud modes (`AWS`, `GCP`, `AZURE`, `MODAL`) also need `cloud_account`, a connection's name.
+The VM modes (`AWS`, `GCP`, `AZURE`) take `instance_type` (one of the sizes the app's create form offers) and `disk_gb`, the VM's root disk; the data volume is carved from it and comes out about 20 GB smaller.
+A `MODAL` sandbox is sized by `cpu_count` and `memory_gb`, like a container.
+An `IMBUE_CLOUD` machine needs `account_id` and sizes itself; the size fields are dropped.
+An AWS, GCP or Azure connection pins its region, so `region` is not sent for them; a Modal connection places each sandbox per create, so `region` may be sent or left out.
+Unless the user asks for a different machine, place the new workspace like your own: your entry in `GET /api/v1/workspaces` (the one whose `agent_id` is your workspace's id, resolved as above) carries `provider_name` (the `cloud_account` value when it starts with `aws_`, `gcp_`, `azure_` or `modal_`), `launch_mode`, `instance_type`, and the host's `cpu_count`, `memory_gb` and `disk_gb`.
+A workspace created before the placement was stamped still reports `launch_mode` (read off its provider) but a null `instance_type`; the size fields come from what the host's provider recorded, and when they are null, `nproc` and `MemTotal` in `/proc/meminfo` give your size class, and `df` on your home gives your data volume.
+When the user names a connection by its alias, or yours is not the one to use, `GET /api/v1/workspaces/cloud-accounts` lists every connection usable from the user's computer (`name`, alias, backend, pinned region, a masked key hint, and `owner_user_id`; never a credential); it rides the same read grant.
+A connection is offered only under the account that owns it, so send its `owner_user_id` as `account_id`; one owned by `local` (this device's profile) goes with any account or none.
+A `400` naming `instance_type` or `cloud_account` means the value is not one the app offers, or the connection does not go with the `account_id` sent; show the user the message rather than guessing another.
+
+Set `enable_web_access` to `true` only when your own workspace is published (the file `data/.secrets/share.env` exists; `ls` it to check, see section 7) and the new workspace is a peer for the user's own use.
+Leave it out for a workspace meant to isolate untrusted code or to try something out.
+It requires `account_id`, the signed-in account your own entry reports.
+
 ```bash
 REF=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/app/version | jq -er .workspace_template_ref) || exit 1
-latchkey curl -XPOST http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces \
-  -H 'Content-Type: application/json' \
-  -d '{"git_url": "<template-repo-url>", "branch": "'"$REF"'"}'
+WORKSPACE_ID=$(mngr ls --include 'has(labels.is_primary)' --ids)
+ME=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces \
+  | jq -ec --arg id "${WORKSPACE_ID:-$MNGR_AGENT_ID}" '.workspaces[] | select(.agent_id == $id)') || exit 1
+BODY=$(jq -n --arg ref "$REF" --argjson me "$ME" '{
+  git_url: "<template-repo-url>", branch: $ref, launch_mode: $me.launch_mode, account_id: $me.account_id,
+  cloud_account: (if ($me.launch_mode | IN("AWS", "GCP", "AZURE", "MODAL")) then $me.provider_name else null end),
+  instance_type: $me.instance_type, cpu_count: $me.cpu_count,
+  memory_gb: (if $me.memory_gb == null then null else ($me.memory_gb | floor) end),
+  disk_gb: (if $me.disk_gb == null then null else ($me.disk_gb | floor) end)
+} | with_entries(select(.value != null))')
+latchkey curl -XPOST http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces -H 'Content-Type: application/json' -d "$BODY"
 ```
 
 **SSH into another workspace.** Generate a keypair locally; only the public key leaves you, and the grant is time-limited (`expires_at`; re-request to refresh, it does not stack).

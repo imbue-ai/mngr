@@ -6,7 +6,7 @@
       "method": "GET",
       "path": { "kind": "tree" },
       "display_name": "List and read workspaces",
-      "description": "List all workspaces and read their detail, version, and backups. Applies to all workspaces (listing is not per-workspace)."
+      "description": "List all workspaces and read their detail, version, size, and backup catalog, and list the cloud connections a workspace can be created on. Applies to all workspaces (listing is not per-workspace)."
     },
     {
       "permission": "minds-workspaces-create",
