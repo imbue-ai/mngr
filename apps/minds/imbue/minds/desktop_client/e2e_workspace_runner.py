@@ -5,17 +5,6 @@ asserts on: launch the Electron app, drive its create form via Playwright
 over CDP, and wait until the workspace's ``system_interface`` desktop
 renders through the desktop client's subdomain proxy.
 
-Two callers consume this module:
-
-- ``apps/minds/test_snapshot_resume.py`` -- the pytest test
-  (``test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``)
-  wraps :func:`create_workspace_via_electron` under a minds root of its own
-  and removes that root's containers in its ``finally``.
-- ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
-  calls the same function but deliberately *does not* destroy the agent,
-  because the whole point of the snapshot is to capture a sandbox in
-  which the workspace's Docker container is alive and ready to use.
-
 Everything in this module is non-pytest -- callers pass plain arguments
 and own the environment / cleanup story themselves.
 """
