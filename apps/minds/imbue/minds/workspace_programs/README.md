@@ -47,6 +47,12 @@ the rest of the app.
 - `background_task_markers.py`: reads the template's background-task marker
   files where the template has no CLI of its own to read them, for the
   dispatcher's watchdog and the `busy` mode.
+- `workspace_command_contract.py`: the workspace command contract, the one
+  declaration of every template script and console script the app and these
+  programs run in a workspace, with the builders their arguments go through.
+  `workspace_command_contract.json` beside it is the same declaration as data,
+  which default-workspace-template checks its scripts against. See
+  `docs/workspace-command-contract.md`.
 
 ## Sharing code and constants
 
@@ -94,6 +100,9 @@ reads no chat as busy.
   `desktop_client/update_workspace_command_test.py` run the update program's
   modes against a staged workspace with stub `mngr`, `tk` and template scripts,
   in-process and through the shipped command.
+- `desktop_client/workspace_command_contract_test.py` checks every argument
+  shape the contract's builders and the app's command builders produce against
+  the declared invocations, and that the published JSON matches the module.
 - `test_workspace_programs_e2e.py` (in `apps/minds/`) runs programs inside a
   real workspace container built from the default workspace template, through
   the `running_workspace` fixture in `apps/minds/conftest.py` and

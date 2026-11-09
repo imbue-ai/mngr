@@ -47,6 +47,7 @@ from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import SHARE_GATEWAY_SERVICE_DIRECTORY
 from imbue.mngr_imbue_cloud.wire import WireModel
 
 _SHARE_ENV_FILE: Final[str] = "data/.secrets/share.env"
@@ -253,8 +254,6 @@ def provision_share_files_in_agent(
         raise ShareInjectionError(f"Failed to write share files into agent {agent_address}: {result.stderr.strip()}")
 
 
-_SHARE_GATEWAY_SERVICE_DIR: Final[str] = "system/services/share_gateway"
-
 # Marker lines the state probe prints (parsed out of the exec JSON envelope so
 # an SSH-level failure stays distinguishable from a negative answer).
 _PROBE_GATEWAY_PREFIX: Final[str] = "MNGR_SHARE_GATEWAY="
@@ -272,7 +271,7 @@ _PROBE_UNREADABLE_VALUE: Final[str] = "UNREADABLE"
 # works on any base64 (echo is safe here -- base64 output never starts with a
 # dash and carries no escapes).
 _PROBE_SHARE_STATE_SCRIPT: Final[str] = (
-    f"if test -d {_SHARE_GATEWAY_SERVICE_DIR}; then echo {_PROBE_GATEWAY_PREFIX}1; "
+    f"if test -d {SHARE_GATEWAY_SERVICE_DIRECTORY}; then echo {_PROBE_GATEWAY_PREFIX}1; "
     f"else echo {_PROBE_GATEWAY_PREFIX}0; fi; "
     f"if test -f {_SHARE_ENV_FILE}; then echo {_PROBE_SHARE_ENV_PREFIX}1; "
     f"else echo {_PROBE_SHARE_ENV_PREFIX}0; fi; "

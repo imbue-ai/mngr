@@ -41,10 +41,13 @@ from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_de
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import SEED_WELCOME_CHAT
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
+from imbue.minds.workspace_programs.workspace_command_contract import seed_welcome_chat_arguments
 from imbue.mngr.primitives import AgentId
 
 # The template's seeding script, relative to the repo root ``mngr exec`` runs from.
-SEED_SCRIPT_PATH: Final[str] = "system/scripts/seed_welcome_chat.py"
+SEED_SCRIPT_PATH: Final[str] = SEED_WELCOME_CHAT["target"]
 # Longer than the script's own retry window (120 s), so a slow chat app is the script's
 # verdict rather than a killed call.
 SEED_TIMEOUT_SECONDS: Final[float] = 150.0
@@ -86,7 +89,7 @@ def build_seed_welcome_chat_args(workspace_address: str, welcome_chat: WelcomeCh
     """The ``mngr`` args that run the template's seeding script in the workspace with the transcript."""
     body = json.dumps(welcome_chat.model_dump(mode="json"))
     encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
-    command = shlex.join(["python3", SEED_SCRIPT_PATH, "--transcript-base64", encoded])
+    command = shlex.join(command_argv(SEED_WELCOME_CHAT, seed_welcome_chat_arguments(encoded)))
     # --no-start: the workspace was just created and is running; seeding must never boot one.
     return ["exec", "--agent", workspace_address, command, "--no-start"]
 

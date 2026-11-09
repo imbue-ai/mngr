@@ -52,6 +52,10 @@ from imbue.minds.workspace_programs.update_protocol import DISPATCHER_CRON_NAME
 from imbue.minds.workspace_programs.update_protocol import LIVE_CRON_DIRECTORY
 from imbue.minds.workspace_programs.update_protocol import RUN_RECORD_PATH
 from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
+from imbue.minds.workspace_programs.workspace_command_contract import BACKGROUND_TASKS
+from imbue.minds.workspace_programs.workspace_command_contract import BackgroundTasksFormat
+from imbue.minds.workspace_programs.workspace_command_contract import background_tasks_list_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -95,7 +99,7 @@ WATCHDOG_INSTALLED_SENTINEL: Final[str] = "MNGR_UPDATE_WATCHDOG_INSTALLED"
 
 # The template's background-task CLI, relative to the work_dir; a template that predates it is read through the
 # installed dispatcher's ``busy`` mode instead.
-BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
+BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = BACKGROUND_TASKS["target"]
 
 # The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
 # 10s reading before it falls back to the marker files. One cut off prints nothing, so no chat reads busy.
@@ -184,11 +188,7 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
         [
             "timeout",
             str(_BACKGROUND_TASKS_TIMEOUT_SECONDS),
-            "python3",
-            BACKGROUND_TASKS_SCRIPT_PATH,
-            "list",
-            "--format",
-            "tsv",
+            *command_argv(BACKGROUND_TASKS, background_tasks_list_arguments(BackgroundTasksFormat.TSV)),
         ]
     )
     # CLEANUP: drop this fallback (and the answer it prints, which ``_parse_busy_agents`` reads) once

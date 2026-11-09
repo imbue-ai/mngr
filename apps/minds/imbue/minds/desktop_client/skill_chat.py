@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.chat_app import ChatAppVerdict
 from imbue.minds.desktop_client.chat_app import build_chat_app_exec_args
 from imbue.minds.desktop_client.chat_app import build_message_chat_command
 from imbue.minds.desktop_client.chat_app import read_chat_app_answer
+from imbue.minds.desktop_client.chat_app import warn_if_arguments_rejected
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
 from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
@@ -57,6 +58,8 @@ from imbue.minds.desktop_client.in_workspace_mngr import is_exec_cut_off_on_reac
 from imbue.minds.desktop_client.workspace_version import GIT_CURRENT_VERSION_WITHOUT_FETCH_COMMAND
 from imbue.minds.desktop_client.workspace_version import parse_current_version
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import message_chat_create_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import skill_definition_path
 
 # The inner create spawns a fresh chat agent (tmux window, claude process) on an
 # existing host: no provisioning or git transfer, but slower than a plain message.
@@ -309,10 +312,7 @@ def build_create_chat_script_args(*, chat_name: str, message: str) -> list[str]:
     the chat user-created itself. The script waits for the chat app to finish the create,
     so its answer comes once the chat exists or with the create's own failure.
     """
-    script_args = ["--create", "--name", chat_name]
-    for label in AUTO_OPEN_CHAT_LABELS:
-        script_args += ["--label", f"{label}=true"]
-    return [*script_args, "-m", message]
+    return message_chat_create_arguments(chat_name, [(label, "true") for label in AUTO_OPEN_CHAT_LABELS], message)
 
 
 def build_bare_create_command(*, chat_name: str, message: str, account_args: Sequence[str]) -> str:
@@ -456,7 +456,7 @@ def build_skill_chat_launch_command(*, skill_name: str, chat_name: str, message:
 
     Runs in the workspace's work_dir, where ``mngr exec`` lands by default.
     """
-    skill_path = f".agents/skills/{skill_name}/SKILL.md"
+    skill_path = skill_definition_path(skill_name)
     chat_app_command = build_message_chat_command(
         build_create_chat_script_args(chat_name=chat_name, message=message),
         _build_bare_create_fallback_command(chat_name=chat_name, message=message),
@@ -518,6 +518,7 @@ def launch_skill_chat(
     if skill_sentinel(skill_name, "ABSENT") in inner_stdout:
         return SkillChatLaunch(outcome=SkillChatLaunchOutcome.UNSUPPORTED)
     answer = read_chat_app_answer(result)
+    warn_if_arguments_rejected(answer, workspace_address)
     if skill_sentinel(skill_name, "PRESENT") not in inner_stdout:
         # Only mngr's own account of failing before it reached the host says the exec never ran
         # the launch. A timeout, a warm process that died mid-call, or a failure on the reached

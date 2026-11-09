@@ -66,6 +66,10 @@ from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDet
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import WORKSPACE_LAYOUT
+from imbue.minds.workspace_programs.workspace_command_contract import WorkspaceLayoutIfPresent
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
+from imbue.minds.workspace_programs.workspace_command_contract import workspace_layout_open_arguments
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 
@@ -103,7 +107,9 @@ _SIGN_IN_OPEN_ATTEMPTS: Final[int] = 15
 _SIGN_IN_OPEN_INTERVAL_SECONDS: Final[int] = 2
 _SIGN_IN_OPENED_SENTINEL: Final[str] = "MINDS_SIGN_IN_CHAT_OPENED"
 _SIGN_IN_TIMEOUT_SECONDS: Final[float] = 90.0
-_SIGN_IN_OPEN_ARGS: Final[tuple[str, ...]] = ("open", "chat", "--path", _SIGN_IN_CHAT_PATH, "--if-present", "new")
+_SIGN_IN_OPEN_ARGS: Final[tuple[str, ...]] = tuple(
+    workspace_layout_open_arguments("chat", _SIGN_IN_CHAT_PATH, WorkspaceLayoutIfPresent.NEW)
+)
 # CLEANUP: drop this script (and the branch that runs it) once update-self's floor, the oldest
 # release the app updates from, reaches minds-v0.8.6, the first to ship ``workspace-layout``.
 _LEGACY_LAYOUT_SCRIPT: Final[str] = "system/scripts/layout.py"
@@ -288,7 +294,7 @@ def _is_records_run(status: UpdateRunStatus | None, state: UiWorkspaceUpdate) ->
 @pure
 def build_sign_in_chat_open_script() -> str:
     """The in-workspace bash that opens the sign-in chat, retried while the user's client connects."""
-    current = build_in_workspace_command(["uv", "run", "--no-sync", "workspace-layout", *_SIGN_IN_OPEN_ARGS])
+    current = build_in_workspace_command(command_argv(WORKSPACE_LAYOUT, _SIGN_IN_OPEN_ARGS))
     legacy = build_in_workspace_command(["python3", _LEGACY_LAYOUT_SCRIPT, *_SIGN_IN_OPEN_ARGS])
     open_window = f"{{ if [ -f {_LEGACY_LAYOUT_SCRIPT} ]; then {legacy}; else {current}; fi; }}"
     return (

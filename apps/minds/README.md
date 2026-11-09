@@ -53,6 +53,7 @@ contributor needs.
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)
 - [Latchkey permissions](./docs/latchkey-permissions.md)
+- [The workspace command contract](./docs/workspace-command-contract.md)
 - [Behaviors](./docs/behaviors.md)
 
 ## Testing live deployments

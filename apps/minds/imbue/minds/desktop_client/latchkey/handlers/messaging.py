@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.minds.workspace_programs.workspace_command_contract import message_chat_send_arguments
 from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.primitives import AgentId
 
@@ -236,7 +237,7 @@ class MngrMessageSender(MutableModel):
         answer = ask_chat_app(
             self.mngr_caller,
             exec_agent_address,
-            [target, "-m", text],
+            message_chat_send_arguments(target, text),
             fallback_command=build_inner_mngr_message_command(exec_agent_address, text),
             timeout=_DELIVER_TIMEOUT_SECONDS,
         )

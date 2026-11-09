@@ -24,6 +24,7 @@ from imbue.minds.workspace_programs import update_workspace
 from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
 from imbue.minds.workspace_programs.update_dispatcher import ScheduleAction
 from imbue.minds.workspace_programs.update_dispatcher import WatchdogAction
+from imbue.minds.workspace_programs.workspace_command_contract import CONTRACT_VERSION
 
 _LEAD = STAGED_CREATED_CHAT["name"]
 _LEAD_ID = "agent-" + "1" * 32
@@ -607,6 +608,30 @@ def test_a_failed_create_that_made_no_chat_is_tried_again_at_the_next_tick(
     assert len(staged.chat_creates()) == 2
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["marked_chat"] == _LEAD
+
+
+def test_a_messenger_that_rejects_the_contracts_create_is_logged_and_the_bare_create_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [
+            ScriptedToolAnswer(
+                exit_code=2,
+                stderr="usage: message_chat.py [-h]\nmessage_chat.py: error: unrecognized arguments: --message-file\n",
+            )
+        ],
+    )
+
+    _tick(staged, _IN_WINDOW)
+
+    assert len([call for call in staged.recorded_calls() if call[:1] == ["create"]]) == 1
+    rejections = [line for line in _dispatcher_log_lines(staged) if "rejected arguments" in line]
+    assert len(rejections) == 1
+    assert f"workspace command contract (version {CONTRACT_VERSION})" in rejections[0]
+    assert rejections[0].endswith("unrecognized arguments: --message-file")
 
 
 def test_a_chat_a_failed_create_left_behind_is_adopted_rather_than_made_again(

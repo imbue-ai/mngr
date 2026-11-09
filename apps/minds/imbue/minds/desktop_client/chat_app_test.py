@@ -2,6 +2,7 @@ import shlex
 import subprocess
 
 import pytest
+from loguru import logger
 
 from imbue.minds.desktop_client.chat_app import ChatAppVerdict
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
@@ -11,11 +12,13 @@ from imbue.minds.desktop_client.chat_app import build_chat_app_exec_args
 from imbue.minds.desktop_client.chat_app import build_message_chat_command
 from imbue.minds.desktop_client.chat_app import inner_exit_code
 from imbue.minds.desktop_client.chat_app import read_chat_app_answer
+from imbue.minds.desktop_client.chat_app import warn_if_arguments_rejected
 from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import exec_result_stdout
 from imbue.minds.desktop_client.testing import script_exit_stdout
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import CONTRACT_VERSION
 from imbue.mngr.cli.exec import exec_command
 
 _FALLBACK_COMMAND = "echo fallback-out; echo fallback-err >&2; exit 5"
@@ -163,3 +166,39 @@ def test_the_answer_is_read_from_the_scripts_exit_status_and_its_own_last_words(
             "agent-member", build_message_chat_command(["agent-chat", "-m", "hi"], _FALLBACK_COMMAND)
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("script_stderr", "is_rejected"),
+    [
+        ("usage: message_chat.py [-h]\nmessage_chat.py: error: unrecognized arguments: --create\n", True),
+        ("python3: can't open file '/home/user/workspace/system/scripts/message_chat.py': [Errno 2]\n", False),
+    ],
+)
+def test_an_argparse_refusal_reads_as_rejected_arguments_and_a_missing_script_does_not(
+    script_stderr: str, is_rejected: bool
+) -> None:
+    answer = read_chat_app_answer(
+        MngrCallResult(returncode=0, stdout=script_exit_stdout(2, inner_stderr=script_stderr))
+    )
+    warnings: list[str] = []
+    sink_id = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+    try:
+        warn_if_arguments_rejected(answer, "agent-member")
+    finally:
+        logger.remove(sink_id)
+
+    assert answer.verdict is ChatAppVerdict.NO_VERDICT
+    assert answer.is_arguments_rejected is is_rejected
+    assert [f"contract (version {CONTRACT_VERSION})" in warning for warning in warnings] == (
+        [True] if is_rejected else []
+    )
+
+
+def test_a_refusal_with_an_error_line_is_not_read_as_rejected_arguments() -> None:
+    answer = read_chat_app_answer(
+        MngrCallResult(returncode=0, stdout=script_exit_stdout(1, inner_stderr="message_chat.py: error: refused\n"))
+    )
+
+    assert answer.verdict is ChatAppVerdict.REFUSED
+    assert answer.is_arguments_rejected is False

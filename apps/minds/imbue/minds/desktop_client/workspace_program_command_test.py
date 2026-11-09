@@ -29,6 +29,7 @@ def test_archive_holds_the_program_as_main_beside_the_package_modules_it_imports
         "imbue/minds/workspace_programs/backup_protocol.py",
         "imbue/minds/workspace_programs/backup_support.py",
         "imbue/minds/workspace_programs/program_support.py",
+        "imbue/minds/workspace_programs/workspace_command_contract.py",
     ]
     assert texts["__main__.py"] == inspect.getsource(backup_gate_probe)
 

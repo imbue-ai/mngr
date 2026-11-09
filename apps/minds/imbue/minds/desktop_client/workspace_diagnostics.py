@@ -63,6 +63,8 @@ from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.desktop_client.mngr_command import run_mngr_capturing
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
+from imbue.minds.workspace_programs.workspace_command_contract import COLLECT_BUG_REPORT_DIAGNOSTICS
+from imbue.minds.workspace_programs.workspace_command_contract import collect_bug_report_diagnostics_arguments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -71,10 +73,9 @@ from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_LOG_DIR
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 
-# Where the workspace template installs the resident collector. The contract
-# with default-workspace-template's ``system/scripts/collect_bug_report_diagnostics.py``
-# is one line of base64 on stdout, decoding to the archive.
-WORKSPACE_COLLECTOR_PATH: Final[str] = "/home/user/workspace/system/scripts/collect_bug_report_diagnostics.py"
+# The resident collector, by its absolute path; what it takes and answers is declared in
+# ``workspace_programs/workspace_command_contract.py``.
+WORKSPACE_COLLECTOR_PATH: Final[str] = f"/home/user/workspace/{COLLECT_BUG_REPORT_DIAGNOSTICS['target']}"
 
 # Whole-collection budget. Passed to ``mngr exec --timeout`` and used as the
 # outer subprocess timeout, so a wedged workspace cannot hold a bug report's
@@ -267,13 +268,10 @@ def build_diagnostics_argv(
     only tests pass anything else (a shared CI sandbox is several times slower
     than the user machines the budget is policy for).
     """
-    flags = []
-    if include_logs:
-        flags.append("--logs")
-    if include_transcript:
-        flags.append("--transcript")
-    flags.append(f"--scan-timeout={int(timeout_seconds * _SCAN_TIMEOUT_FRACTION_OF_BUDGET)}")
-    command = f"python3 {WORKSPACE_COLLECTOR_PATH} {' '.join(flags)}"
+    arguments = collect_bug_report_diagnostics_arguments(
+        include_logs, include_transcript, int(timeout_seconds * _SCAN_TIMEOUT_FRACTION_OF_BUDGET)
+    )
+    command = f"python3 {WORKSPACE_COLLECTOR_PATH} {' '.join(arguments)}"
     return [
         MNGR_BINARY,
         "exec",

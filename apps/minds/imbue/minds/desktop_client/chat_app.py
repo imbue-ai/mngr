@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from enum import auto
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -32,10 +33,16 @@ from imbue.minds.desktop_client.in_workspace_mngr import inner_stderr_from_exec_
 from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import ARGPARSE_USAGE_ERROR_MARKER
+from imbue.minds.workspace_programs.workspace_command_contract import CONTRACT_VERSION
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_DELIVERED
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_DELIVERED_BEHIND_DIALOG
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_USAGE_ERROR
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
 
-# Relative to the workspace repo root, which is the cwd ``mngr exec`` gives every command
-# there. Its path is the contract; see its docstring in the template for the exit codes.
-MESSAGE_CHAT_SCRIPT: Final[str] = "system/scripts/message_chat.py"
+# Relative to the workspace repo root, which is the cwd ``mngr exec`` gives every command there.
+MESSAGE_CHAT_SCRIPT: Final[str] = MESSAGE_CHAT["target"]
 
 EXIT_SENTINEL: Final[str] = "MNGR_INNER_EXIT="
 
@@ -90,14 +97,19 @@ class ChatAppAnswer(FrozenModel):
     def is_delivered(self) -> bool:
         return self.verdict in (ChatAppVerdict.DELIVERED, ChatAppVerdict.DELIVERED_BEHIND_DIALOG)
 
+    @property
+    def is_arguments_rejected(self) -> bool:
+        """The script is there but refused arguments the contract declares: it predates them, or an edit broke it."""
+        return self.verdict is ChatAppVerdict.NO_VERDICT and ARGPARSE_USAGE_ERROR_MARKER in self.detail
 
-# The script speaks ``mngr message``'s exit codes; any status not listed is a refusal. 2 is
-# what python exits with when it cannot open the script (a template from before it) and
-# what argparse exits with on an argument the script does not know (one from before a mode).
-_NO_VERDICT_EXIT_CODE: Final[int] = 2
+
+# The script speaks ``mngr message``'s exit codes; any status not listed is a refusal. The usage
+# error status is also what python exits with when it cannot open the script (a template from
+# before it), as well as argparse's on an argument the script does not know (one from before a mode).
+_NO_VERDICT_EXIT_CODE: Final[int] = MESSAGE_CHAT_EXIT_USAGE_ERROR
 _VERDICT_BY_EXIT_CODE: Final[dict[int, ChatAppVerdict]] = {
-    0: ChatAppVerdict.DELIVERED,
-    7: ChatAppVerdict.DELIVERED_BEHIND_DIALOG,
+    MESSAGE_CHAT_EXIT_DELIVERED: ChatAppVerdict.DELIVERED,
+    MESSAGE_CHAT_EXIT_DELIVERED_BEHIND_DIALOG: ChatAppVerdict.DELIVERED_BEHIND_DIALOG,
     _NO_VERDICT_EXIT_CODE: ChatAppVerdict.NO_VERDICT,
 }
 
@@ -112,7 +124,7 @@ def build_message_chat_command(argv: Sequence[str], fallback_command: str) -> st
     so an ``exit`` in it cannot skip the echo; its output is fenced by
     :data:`FALLBACK_BEGIN_SENTINEL` and its status echoed behind :data:`FALLBACK_EXIT_SENTINEL`.
     """
-    script = build_in_workspace_command(["python3", MESSAGE_CHAT_SCRIPT, *argv])
+    script = build_in_workspace_command(command_argv(MESSAGE_CHAT, argv))
     return (
         f"{script}; mngr_chat_app_exit=$?; echo {EXIT_SENTINEL}$mngr_chat_app_exit; "
         f'if [ "$mngr_chat_app_exit" -eq {_NO_VERDICT_EXIT_CODE} ]; then '
@@ -217,4 +229,19 @@ def ask_chat_app(
     """
     command = build_message_chat_command(script_args, fallback_command)
     result = mngr_caller.call(build_chat_app_exec_args(exec_agent_address, command), timeout=timeout)
-    return read_chat_app_answer(result)
+    answer = read_chat_app_answer(result)
+    warn_if_arguments_rejected(answer, exec_agent_address)
+    return answer
+
+
+def warn_if_arguments_rejected(answer: ChatAppAnswer, exec_agent_address: str) -> None:
+    """Log a warning when the script refused arguments the contract declares, which its fallback would otherwise hide."""
+    if answer.is_arguments_rejected:
+        logger.warning(
+            "{} in {} rejected arguments the workspace command contract (version {}) declares, so the "
+            "fallback ran; the workspace's template predates them or the script was edited: {}",
+            MESSAGE_CHAT_SCRIPT,
+            exec_agent_address,
+            CONTRACT_VERSION,
+            answer.detail,
+        )

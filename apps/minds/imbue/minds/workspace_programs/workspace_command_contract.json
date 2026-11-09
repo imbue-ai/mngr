@@ -1,0 +1,315 @@
+{
+  "contract_version": 1,
+  "commands": [
+    {
+      "name": "message_chat",
+      "target": "system/scripts/message_chat.py",
+      "runner": "system_python",
+      "invocations": [
+        {
+          "purpose": "send a message to a chat by its id (a latchkey resolution nudge, an update chat's reminder)",
+          "subcommand": [],
+          "value_options": [
+            "-m"
+          ],
+          "flag_options": [],
+          "positional_count": 1,
+          "fixed_values": []
+        },
+        {
+          "purpose": "create a chat through the chat app, its first message given inline (the /assist launch)",
+          "subcommand": [],
+          "value_options": [
+            "--name",
+            "--label",
+            "-m"
+          ],
+          "flag_options": [
+            "--create"
+          ],
+          "positional_count": 0,
+          "fixed_values": []
+        },
+        {
+          "purpose": "create a chat through the chat app, its first message read from a file (the update chat)",
+          "subcommand": [],
+          "value_options": [
+            "--name",
+            "--label",
+            "--message-file"
+          ],
+          "flag_options": [
+            "--create"
+          ],
+          "positional_count": 0,
+          "fixed_values": []
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "delivered or queued, or the chat was created"
+        },
+        {
+          "code": 1,
+          "meaning": "refused; the last stderr line is the reason"
+        },
+        {
+          "code": 7,
+          "meaning": "delivered, but the agent's input is blocked on a dialog; a resend would type it again"
+        },
+        {
+          "code": 8,
+          "meaning": "neither the chat app nor mngr knows the chat, so no later try can deliver it"
+        }
+      ],
+      "output": "a create prints one JSON line on stdout, an object with string keys chat_id, name and display_name; a send prints nothing the app reads",
+      "usage_error_exit_code": 2
+    },
+    {
+      "name": "seed_welcome_chat",
+      "target": "system/scripts/seed_welcome_chat.py",
+      "runner": "system_python",
+      "invocations": [
+        {
+          "purpose": "open the welcome chat on the conversation the app had before the workspace existed",
+          "subcommand": [],
+          "value_options": [
+            "--transcript-base64"
+          ],
+          "flag_options": [],
+          "positional_count": 0,
+          "fixed_values": []
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "seeded"
+        },
+        {
+          "code": 1,
+          "meaning": "not seeded; stderr says why"
+        }
+      ],
+      "output": "one JSON line on stdout, {\"chat_id\": <string>}; the transcript is base64 of the JSON object {\"title\": <string>, \"turns\": [{\"role\": \"user\" | \"assistant\", \"text\": <string>}]}",
+      "usage_error_exit_code": null
+    },
+    {
+      "name": "collect_bug_report_diagnostics",
+      "target": "system/scripts/collect_bug_report_diagnostics.py",
+      "runner": "system_python",
+      "invocations": [
+        {
+          "purpose": "collect the workspace logs and/or recent transcripts for a bug report",
+          "subcommand": [],
+          "value_options": [
+            "--scan-timeout"
+          ],
+          "flag_options": [
+            "--logs",
+            "--transcript"
+          ],
+          "positional_count": 0,
+          "fixed_values": []
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "collected (or nothing was requested)"
+        }
+      ],
+      "output": "one line of base64 on stdout, a zip archive the app stages verbatim; nothing when neither --logs nor --transcript was given",
+      "usage_error_exit_code": null
+    },
+    {
+      "name": "background_tasks",
+      "target": "system/scripts/background_tasks.py",
+      "runner": "system_python",
+      "invocations": [
+        {
+          "purpose": "list the chats waiting on background tasks (the update run probe, its dispatcher, the backup gate)",
+          "subcommand": [
+            "list"
+          ],
+          "value_options": [
+            "--format"
+          ],
+          "flag_options": [],
+          "positional_count": 0,
+          "fixed_values": [
+            "tsv",
+            "json"
+          ]
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "listed; any other status reads as no chat busy"
+        }
+      ],
+      "output": "with --format tsv, one line per chat: chat_id, active_agent_id, active_agent_name, is_busy ('true' or 'false'), task_count, tab-separated; with --format json, an object whose chats list holds objects with chat_id, active_agent_id, active_agent_name, is_busy and background_tasks (objects with source and pid)",
+      "usage_error_exit_code": null
+    },
+    {
+      "name": "update_self",
+      "target": ".agents/skills/update-self/scripts/update_self.py",
+      "runner": "system_python",
+      "invocations": [
+        {
+          "purpose": "record a verdict on the running update (the dispatcher's STUCK when the update chat is gone)",
+          "subcommand": [
+            "run-status",
+            "verdict"
+          ],
+          "value_options": [
+            "--chat",
+            "--detail"
+          ],
+          "flag_options": [],
+          "positional_count": 1,
+          "fixed_values": [
+            "STUCK"
+          ]
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "recorded; any other status is retried on the next tick"
+        }
+      ],
+      "output": "nothing the app reads; the verdict lands in data/.state/update-apply/run.json",
+      "usage_error_exit_code": null
+    },
+    {
+      "name": "workspace_layout",
+      "target": "workspace-layout",
+      "runner": "root_venv_entry_point",
+      "invocations": [
+        {
+          "purpose": "open a new chat window on the provider chooser (the sign-in prompt before an update)",
+          "subcommand": [
+            "open"
+          ],
+          "value_options": [
+            "--path",
+            "--if-present"
+          ],
+          "flag_options": [],
+          "positional_count": 1,
+          "fixed_values": [
+            "new"
+          ]
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "opened; any other status is retried while the client connects"
+        }
+      ],
+      "output": "nothing the app reads",
+      "usage_error_exit_code": null
+    },
+    {
+      "name": "agent_access",
+      "target": "agent-access",
+      "runner": "root_venv_entry_point",
+      "invocations": [
+        {
+          "purpose": "list the visiting agents",
+          "subcommand": [
+            "list"
+          ],
+          "value_options": [],
+          "flag_options": [
+            "--json"
+          ],
+          "positional_count": 0,
+          "fixed_values": []
+        },
+        {
+          "purpose": "mint an invite for a visiting agent",
+          "subcommand": [
+            "invite"
+          ],
+          "value_options": [
+            "--granter",
+            "--scope",
+            "--expires-in-days",
+            "--name-hint"
+          ],
+          "flag_options": [
+            "--json"
+          ],
+          "positional_count": 0,
+          "fixed_values": []
+        },
+        {
+          "purpose": "revoke a visiting agent as the workspace's owner",
+          "subcommand": [
+            "revoke"
+          ],
+          "value_options": [
+            "--revoker"
+          ],
+          "flag_options": [
+            "--owner",
+            "--json"
+          ],
+          "positional_count": 1,
+          "fixed_values": []
+        }
+      ],
+      "exit_statuses": [
+        {
+          "code": 0,
+          "meaning": "done; stdout is the answer"
+        },
+        {
+          "code": 2,
+          "meaning": "refused; the last stderr line is {\"error\": <string>, \"kind\": \"refused\"}"
+        },
+        {
+          "code": 3,
+          "meaning": "misconfigured; the last stderr line is {\"error\": <string>, \"kind\": \"misconfigured\"}"
+        }
+      ],
+      "output": "one JSON object on stdout: list has agents (objects with agent_id, name, fingerprint, scope, granter, created_at, expires_at, last_seen_at); invite has code, expires_at, scope, granter, auth_origin, is_published, instructions; revoke has revoked",
+      "usage_error_exit_code": null
+    }
+  ],
+  "required_paths": [
+    {
+      "path": ".agents/skills/assist/SKILL.md",
+      "reason": "the help modal's /assist launch runs only in a workspace that has the skill"
+    },
+    {
+      "path": ".agents/skills/update-self/SKILL.md",
+      "reason": "the app updates only a workspace that has the skill; without it the workspace is too old to update"
+    },
+    {
+      "path": "system/scripts/require_create_account.py",
+      "reason": "the update dispatcher reads its presence, beside a missing .mngr/settings.local.toml, as no provider account signed in"
+    },
+    {
+      "path": "system/services/share_gateway/src/share_gateway/agent_cli.py",
+      "reason": "the app runs agent-access only where this module exists, and otherwise says the workspace predates it"
+    },
+    {
+      "path": "system/libs/routines/with_agent_env.sh",
+      "reason": "the update dispatcher's cron tick reads an agent's environment through it (bash <path> env -0)"
+    },
+    {
+      "path": "system/services/share_gateway",
+      "reason": "the app publishes only a workspace that has the share gateway, and otherwise says it predates sharing"
+    },
+    {
+      "path": "system/services/host_backup",
+      "reason": "the backup programs find the backup service here, and otherwise read the workspace as an older layout"
+    }
+  ]
+}

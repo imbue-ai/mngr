@@ -73,6 +73,24 @@ from imbue.minds.workspace_programs.update_protocol import UPDATE_STATE_DIR
 from imbue.minds.workspace_programs.update_protocol import WATCHDOG_GONE_LEAD_DETAIL
 from imbue.minds.workspace_programs.update_protocol import WATCHDOG_REMINDER_MESSAGE
 from imbue.minds.workspace_programs.update_protocol import WATCHDOG_REVIVE_MESSAGE_TEMPLATE
+from imbue.minds.workspace_programs.workspace_command_contract import ACCOUNT_GATE_SCRIPT
+from imbue.minds.workspace_programs.workspace_command_contract import AGENT_ENVIRONMENT_WRAPPER
+from imbue.minds.workspace_programs.workspace_command_contract import ARGPARSE_USAGE_ERROR_MARKER
+from imbue.minds.workspace_programs.workspace_command_contract import BACKGROUND_TASKS
+from imbue.minds.workspace_programs.workspace_command_contract import BackgroundTasksFormat
+from imbue.minds.workspace_programs.workspace_command_contract import CONTRACT_VERSION
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_DELIVERED
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_DELIVERED_BEHIND_DIALOG
+from imbue.minds.workspace_programs.workspace_command_contract import MESSAGE_CHAT_EXIT_USAGE_ERROR
+from imbue.minds.workspace_programs.workspace_command_contract import UPDATE_SELF
+from imbue.minds.workspace_programs.workspace_command_contract import UPDATE_SELF_SKILL_DEFINITION
+from imbue.minds.workspace_programs.workspace_command_contract import UpdateSelfVerdict
+from imbue.minds.workspace_programs.workspace_command_contract import background_tasks_list_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
+from imbue.minds.workspace_programs.workspace_command_contract import message_chat_create_from_file_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import message_chat_send_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import update_self_verdict_arguments
 
 DISPATCHER_ARCHIVE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/dispatcher.pyz"
 DISPATCHER_LOG_PATH: Final[str] = f"{UPDATE_STATE_DIR}/dispatcher.log"
@@ -80,22 +98,19 @@ _WATCHDOG_STATE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/watchdog.json"
 # The id the last create of an update chat labelled it with, written before the create runs.
 _DISPATCH_ATTEMPT_PATH: Final[str] = f"{UPDATE_STATE_DIR}/dispatch-attempt.json"
 _DISPATCH_ATTEMPT_LABEL: Final[str] = "update_dispatch_attempt"
-_SKILL_PATH: Final[str] = ".agents/skills/update-self/SKILL.md"
-_UPDATE_SELF_SCRIPT: Final[str] = ".agents/skills/update-self/scripts/update_self.py"
-_MESSAGE_CHAT_SCRIPT: Final[str] = "system/scripts/message_chat.py"
+_MESSAGE_CHAT_SCRIPT: Final[str] = MESSAGE_CHAT["target"]
 # The template's env wrapper, the first that exists.
 # CLEANUP: drop the automations path once update-self's floor, the oldest release the app updates from,
 # keeps the wrapper under system/libs/routines.
 _AGENT_ENV_WRAPPERS: Final[tuple[str, ...]] = (
-    "system/libs/routines/with_agent_env.sh",
+    AGENT_ENVIRONMENT_WRAPPER,
     "system/libs/automations/with_agent_env.sh",
 )
 _HOST_ENV_FILE: Final[str] = "/home/user/.mngr/env"
 _LOCAL_SETTINGS_PATH: Final[str] = ".mngr/settings.local.toml"
-_ACCOUNT_GATE_SCRIPT: Final[str] = "system/scripts/require_create_account.py"
 _ACCOUNT_RESOLVER_SCRIPT: Final[str] = "system/scripts/default_account_args.py"
 _TICKETS_DIR_DEFAULT: Final[str] = "data/.tickets"
-_BACKGROUND_TASKS_SCRIPT: Final[str] = "system/scripts/background_tasks.py"
+_BACKGROUND_TASKS_SCRIPT: Final[str] = BACKGROUND_TASKS["target"]
 _MNGR_LIST_FIELD_SEPARATOR: Final[str] = "|"
 _MNGR_LIST_FIELDS: Final[tuple[str, ...]] = (
     "id",
@@ -158,12 +173,8 @@ _WORKER_OOM_SCORE_ADJ: Final[int] = 600
 # does not look, so it leaves the held value alone.
 _HELD_AGENT_ID_KEY: Final[str] = "agent_id_held_by_update_dispatcher"
 
-# Exit statuses of the template's chat messenger: delivered, refused, and no verdict at all
-# (python's own status for a missing script, argparse's for an argument the script lacks).
-_MESSAGE_CHAT_DELIVERED: Final[int] = 0
-_MESSAGE_CHAT_NO_VERDICT: Final[int] = 2
-# ``mngr message`` delivered the message, but the agent is left on a dialog it could not resolve.
-_MNGR_MESSAGE_DELIVERED_BUT_BLOCKED: Final[int] = 7
+# The messenger's usage-error status is also python's own for a missing script, so it is no verdict at all.
+_MESSAGE_CHAT_NO_VERDICT: Final[int] = MESSAGE_CHAT_EXIT_USAGE_ERROR
 _SIGN_IN_REFUSALS: Final[tuple[str, ...]] = ("no provider accounts exist", "Connect an AI provider")
 _NAME_TAKEN_REFUSAL: Final[str] = "already exists; pick another name"
 _STILL_CREATING_REFUSAL: Final[str] = "is still being created"
@@ -464,7 +475,9 @@ def busy_agents(agent_environment: AgentEnvironment) -> BusyAgents:
         marker_chat_ids = busy_chat_ids()
         return names, set(marker_chat_ids), set(marker_chat_ids)
     listed = run_command(
-        [sys.executable or "python3", _BACKGROUND_TASKS_SCRIPT, "list", "--format", "tsv"],
+        command_argv(
+            BACKGROUND_TASKS, background_tasks_list_arguments(BackgroundTasksFormat.TSV), sys.executable or "python3"
+        ),
         _SHORT_COMMAND_TIMEOUT_SECONDS,
         env=agent_environment.variables(),
     )
@@ -494,7 +507,7 @@ def _is_agent_busy(agent: Mapping[str, str] | None, busy: BusyAgents) -> bool:
 
 
 def is_update_skill_present() -> bool:
-    return os.path.isfile(_SKILL_PATH)
+    return os.path.isfile(UPDATE_SELF_SKILL_DEFINITION)
 
 
 def is_cron_available(live_cron_dir: str) -> bool:
@@ -523,7 +536,7 @@ def resolve_account(agent_environment: AgentEnvironment) -> tuple[bool, list[str
     """
     if os.path.isfile(_LOCAL_SETTINGS_PATH):
         return _do_local_settings_name_a_create_type(), []
-    if os.path.isfile(_ACCOUNT_GATE_SCRIPT):
+    if os.path.isfile(ACCOUNT_GATE_SCRIPT):
         return False, []
     if not os.path.isfile(_ACCOUNT_RESOLVER_SCRIPT):
         return True, []
@@ -758,10 +771,8 @@ def _created_chat_line(stdout: str) -> dict[str, object]:
 def _ask_messenger_to_create(
     name: str, labels: Mapping[str, str], message_path: str, agent_environment: AgentEnvironment
 ) -> subprocess.CompletedProcess[str]:
-    argv = [sys.executable or "python3", _MESSAGE_CHAT_SCRIPT, "--create", "--name", name]
-    for key, value in labels.items():
-        argv += ["--label", "%s=%s" % (key, value)]
-    argv += ["--message-file", message_path]
+    arguments = message_chat_create_from_file_arguments(name, list(labels.items()), message_path)
+    argv = command_argv(MESSAGE_CHAT, arguments, sys.executable or "python3")
     return run_command(argv, _CHAT_CREATE_TIMEOUT_SECONDS, env=agent_environment.variables())
 
 
@@ -772,7 +783,7 @@ def _is_sign_in_refusal(stderr: str) -> bool:
 def _is_name_taken_refusal(created: subprocess.CompletedProcess[str]) -> bool:
     stderr = created.stderr or ""
     return (
-        created.returncode not in (_MESSAGE_CHAT_DELIVERED, _MESSAGE_CHAT_NO_VERDICT)
+        created.returncode not in (MESSAGE_CHAT_EXIT_DELIVERED, _MESSAGE_CHAT_NO_VERDICT)
         and not _is_sign_in_refusal(stderr)
         and _NAME_TAKEN_REFUSAL in stderr
     )
@@ -782,11 +793,18 @@ def _messenger_create_result(created: subprocess.CompletedProcess[str], name: st
     """What the messenger's create of the chat asked for as ``name`` came to; None for the bare create to take over."""
     stderr = created.stderr or ""
     detail = _bounded_detail(stderr)
-    if created.returncode == _MESSAGE_CHAT_DELIVERED:
+    if created.returncode == MESSAGE_CHAT_EXIT_DELIVERED:
         line = _created_chat_line(created.stdout)
         agent_name = str(line.get("name") or _chat_app_agent_name(name))
         return create_result(OUTCOME_CREATED, "", agent_name, str(line.get("chat_id") or ""))
     if created.returncode == _MESSAGE_CHAT_NO_VERDICT:
+        last_stderr_line = detail.rpartition("\n")[2]
+        if ARGPARSE_USAGE_ERROR_MARKER in last_stderr_line:
+            write_log_line(
+                "%s rejected arguments the workspace command contract (version %d) declares, so the bare create "
+                "runs; the template predates them or the script was edited: %s"
+                % (_MESSAGE_CHAT_SCRIPT, CONTRACT_VERSION, last_stderr_line)
+            )
         return None
     if _is_sign_in_refusal(stderr):
         return create_result(OUTCOME_NEEDS_SIGN_IN, detail)
@@ -1221,11 +1239,14 @@ def _send_to_chat(agent: Mapping[str, str], text: str, agent_environment: AgentE
     """Message an agent's chat through the workspace's chat messenger, starting it if it stopped; whether it was
     delivered."""
     if os.path.isfile(_MESSAGE_CHAT_SCRIPT):
-        argv = [sys.executable or "python3", _MESSAGE_CHAT_SCRIPT, chat_id_of(agent), "-m", text]
+        argv = command_argv(
+            MESSAGE_CHAT, message_chat_send_arguments(chat_id_of(agent), text), sys.executable or "python3"
+        )
     else:
         argv = ["mngr", "message", str(agent.get("name")), "--start", "-m", text]
     sent = run_command(argv, _MNGR_CREATE_TIMEOUT_SECONDS, env=agent_environment.variables())
-    if sent.returncode not in (0, _MNGR_MESSAGE_DELIVERED_BUT_BLOCKED):
+    # ``mngr message`` answers in the messenger's vocabulary, so one check reads either.
+    if sent.returncode not in (MESSAGE_CHAT_EXIT_DELIVERED, MESSAGE_CHAT_EXIT_DELIVERED_BEHIND_DIALOG):
         write_log_line("could not message %s: %s" % (agent.get("name"), _bounded_detail(sent.stderr)))
         return False
     return True
@@ -1234,17 +1255,11 @@ def _send_to_chat(agent: Mapping[str, str], text: str, agent_environment: AgentE
 def _record_stuck_verdict(run: Mapping[str, object], detail: str, agent_environment: AgentEnvironment) -> bool:
     """Record STUCK on the run through the template's own recorder, the record's one writer; whether it landed."""
     recorded = run_command(
-        [
+        command_argv(
+            UPDATE_SELF,
+            update_self_verdict_arguments(UpdateSelfVerdict.STUCK, str(run.get("chat_agent_name")), detail),
             sys.executable or "python3",
-            _UPDATE_SELF_SCRIPT,
-            "run-status",
-            "verdict",
-            "STUCK",
-            "--chat",
-            str(run.get("chat_agent_name")),
-            "--detail",
-            detail,
-        ],
+        ),
         _SHORT_COMMAND_TIMEOUT_SECONDS,
         env=agent_environment.variables(),
     )

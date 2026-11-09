@@ -59,7 +59,7 @@ def test_scope_argument_joins_app_names() -> None:
 
 
 def test_agent_access_command_runs_the_cli_behind_a_template_capability_check() -> None:
-    command = agent_access_command(["invite", "--name-hint", "Ada's Codex"])
+    command = agent_access_command(["invite", "--name-hint", "Ada's Codex", "--json"])
     assert command.startswith("if [ -f system/services/share_gateway/src/share_gateway/agent_cli.py ]; then ")
     assert "then uv run --no-sync agent-access invite --name-hint 'Ada'\"'\"'s Codex' --json; else " in command
     refusal = command.split("; else echo ", 1)[1].split(" >&2; exit 3; fi")[0]
@@ -110,7 +110,9 @@ def test_list_visiting_agents_runs_the_cli_without_starting_the_workspace_and_pa
 
     agents = list_visiting_agents(_ADDRESS, caller)
 
-    assert caller.calls == [["exec", _ADDRESS, agent_access_command(["list"]), "--format", "json", "--no-start"]]
+    assert caller.calls == [
+        ["exec", _ADDRESS, agent_access_command(["list", "--json"]), "--format", "json", "--no-start"]
+    ]
     assert [agent.name for agent in agents] == ["Josh Claude", "Ada Codex"]
     assert agents[0].scope == "workspace" and agents[0].last_seen_at == "2026-10-15T19:00:00+00:00"
     assert agents[1].scope == ("chat",) and agents[1].expires_at == "2026-10-23T09:00:00+00:00"
@@ -149,6 +151,7 @@ def test_mint_visiting_agent_invite_passes_the_granter_scope_expiry_and_hint_quo
             "7",
             "--name-hint",
             "Ada's Codex",
+            "--json",
         ]
     )
     assert invite.code == "7K3M-QX9A-2PFH" and invite.scope == ("chat", "files")
@@ -180,7 +183,7 @@ def test_revoke_visiting_agent_revokes_as_the_owner() -> None:
     caller = AgentAccessCaller(answer=exec_envelope(json.dumps({"revoked": "va-" + "1" * 32, "name": "x"})))
     assert revoke_visiting_agent(_ADDRESS, caller, "va-" + "1" * 32, "8c0f") == "va-" + "1" * 32
     (call,) = caller.calls
-    assert call[2] == agent_access_command(["revoke", "va-" + "1" * 32, "--revoker", "user:8c0f", "--owner"])
+    assert call[2] == agent_access_command(["revoke", "va-" + "1" * 32, "--revoker", "user:8c0f", "--owner", "--json"])
 
 
 def test_a_cli_refusal_is_reported_in_the_clis_words_and_other_failures_as_errors() -> None:

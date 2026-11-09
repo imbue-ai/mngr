@@ -23,9 +23,13 @@ from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.workspace_command_contract import AGENT_ACCESS
+from imbue.minds.workspace_programs.workspace_command_contract import AGENT_ACCESS_MODULE
+from imbue.minds.workspace_programs.workspace_command_contract import agent_access_invite_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import agent_access_list_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import agent_access_revoke_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
 
-_AGENT_ACCESS_COMMAND: Final[str] = "uv run --no-sync agent-access"
-_AGENT_CLI_FILE: Final[str] = "system/services/share_gateway/src/share_gateway/agent_cli.py"
 _EXEC_TIMEOUT_SECONDS: Final[float] = 90.0
 UNSUPPORTED_WORKSPACE_MESSAGE: Final[str] = (
     "This workspace predates visiting agents; update it (the update-self skill) before inviting one"
@@ -108,16 +112,16 @@ def _json_object(raw: object) -> dict[str, object] | None:
 
 @pure
 def agent_access_command(arguments: Sequence[str]) -> str:
-    """The shell ``mngr exec`` runs: the CLI with ``--json``, behind a check that the template ships it.
+    """The shell ``mngr exec`` runs: the CLI with ``arguments``, behind a check that the template ships it.
 
     A workspace from a template older than visiting agents has no ``agent-access``
     entry point; running it there fails with uv's own noise, so the command
     first looks for the CLI's module and otherwise answers the same JSON refusal
     the CLI would, with kind ``unsupported``.
     """
-    cli = f"{_AGENT_ACCESS_COMMAND} {' '.join(shlex.quote(argument) for argument in arguments)} --json"
+    cli = shlex.join(command_argv(AGENT_ACCESS, arguments))
     refusal = json.dumps({"error": UNSUPPORTED_WORKSPACE_MESSAGE, "kind": _REFUSAL_KIND_UNSUPPORTED})
-    return f"if [ -f {_AGENT_CLI_FILE} ]; then {cli}; else echo {shlex.quote(refusal)} >&2; exit 3; fi"
+    return f"if [ -f {AGENT_ACCESS_MODULE} ]; then {cli}; else echo {shlex.quote(refusal)} >&2; exit 3; fi"
 
 
 @pure
@@ -185,7 +189,7 @@ def _run_agent_access(
 
 def list_visiting_agents(agent_address: str, mngr_caller: MngrCaller) -> list[VisitingAgent]:
     """The workspace's visiting agents, as its CLI lists them. Raises VisitingAgentsError."""
-    answer = _run_agent_access(agent_address, mngr_caller, ["list"], is_start_allowed=False)
+    answer = _run_agent_access(agent_address, mngr_caller, agent_access_list_arguments(), is_start_allowed=False)
     raw_agents = answer.get("agents")
     if not isinstance(raw_agents, list):
         raise VisitingAgentsError("agent-access list answered no agents array")
@@ -218,11 +222,9 @@ def mint_visiting_agent_invite(
     name_hint: str,
 ) -> VisitingAgentInvite:
     """Mint a one-time code in the workspace with the signed-in account as the granter."""
-    arguments = ["invite", "--granter", f"user:{granter_user_id}", "--scope", scope_argument(scope)]
-    if expires_in_days is not None:
-        arguments.extend(["--expires-in-days", str(expires_in_days)])
-    if name_hint:
-        arguments.extend(["--name-hint", name_hint])
+    arguments = agent_access_invite_arguments(
+        f"user:{granter_user_id}", scope_argument(scope), expires_in_days, name_hint
+    )
     answer = _run_agent_access(agent_address, mngr_caller, arguments, is_start_allowed=True)
     return VisitingAgentInvite(
         code=str(answer.get("code", "")),
@@ -240,7 +242,7 @@ def revoke_visiting_agent(agent_address: str, mngr_caller: MngrCaller, agent_id:
     answer = _run_agent_access(
         agent_address,
         mngr_caller,
-        ["revoke", agent_id, "--revoker", f"user:{revoker_user_id}", "--owner"],
+        agent_access_revoke_arguments(agent_id, f"user:{revoker_user_id}"),
         is_start_allowed=True,
     )
     return str(answer.get("revoked", agent_id))

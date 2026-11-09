@@ -15,18 +15,23 @@ from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import as_json_object_list
 from imbue.minds.workspace_programs.program_support import poll_until
 from imbue.minds.workspace_programs.program_support import run_command
+from imbue.minds.workspace_programs.workspace_command_contract import BACKGROUND_TASKS
+from imbue.minds.workspace_programs.workspace_command_contract import BACKUP_SERVICE_DIRECTORY
+from imbue.minds.workspace_programs.workspace_command_contract import BackgroundTasksFormat
+from imbue.minds.workspace_programs.workspace_command_contract import background_tasks_list_arguments
+from imbue.minds.workspace_programs.workspace_command_contract import command_argv
 
 # The backup-service code inside the workspace: system/services/host_backup on
 # the creation-rename template layout, system/libs/host_backup on the earlier
 # decluttered layout, libs/host_backup on pre-declutter workspaces.
 _BACKUP_CODE_PATH_CANDIDATES: Final[tuple[str, ...]] = (
-    "system/services/host_backup",
+    BACKUP_SERVICE_DIRECTORY,
     "system/libs/host_backup",
     "libs/host_backup",
 )
 RESTIC_ENV_PATH: Final[str] = "data/.secrets/restic.env"
 # The template's background-task CLI; a workspace whose template predates it has no busy chats to report.
-BACKGROUND_TASKS_CLI_PATH: Final[str] = "system/scripts/background_tasks.py"
+BACKGROUND_TASKS_CLI_PATH: Final[str] = BACKGROUND_TASKS["target"]
 GIT_IDENTITY: Final[tuple[str, ...]] = (
     "-c",
     "user.name=minds-backup-update",
@@ -200,7 +205,8 @@ def _read_background_chats() -> list[dict[str, object]]:
     if not os.path.isfile(BACKGROUND_TASKS_CLI_PATH):
         return []
     listed = run_command(
-        [sys.executable, BACKGROUND_TASKS_CLI_PATH, "list", "--format", "json"], SHORT_COMMAND_TIMEOUT_SECONDS
+        command_argv(BACKGROUND_TASKS, background_tasks_list_arguments(BackgroundTasksFormat.JSON), sys.executable),
+        SHORT_COMMAND_TIMEOUT_SECONDS,
     )
     if listed.returncode != 0:
         sys.stderr.write(
