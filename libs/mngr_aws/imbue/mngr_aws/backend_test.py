@@ -35,7 +35,6 @@ from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.backend import ParsedAwsBuildOptions
 from imbue.mngr_aws.client import AwsVpsClient
-from imbue.mngr_aws.client import compress_user_data
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
@@ -1010,7 +1009,7 @@ def test_create_vps_instance_launches_the_newest_debian_ami_when_none_is_configu
             "InstanceType": provider.aws_config.default_instance_type,
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": compress_user_data(""),
+            "UserData": "",
             "BlockDeviceMappings": ANY,
             "InstanceInitiatedShutdownBehavior": ANY,
             "NetworkInterfaces": ANY,

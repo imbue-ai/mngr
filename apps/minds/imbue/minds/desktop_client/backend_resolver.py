@@ -59,11 +59,6 @@ WORKSPACE_DISPLAY_NAME_LABEL: Final[str] = "workspace_display_name"
 # network (Modal's ``--offline`` / ``--cidr-allowlist``); the desktop's relay broker refuses such
 # a workspace a TURN credential (specs/turn-relay/spec.md, section 3).
 NETWORK_RESTRICTED_LABEL: Final[str] = "network_restricted"
-# The compute placement a workspace was created with, stamped on its primary agent by the
-# create command and read back by ``/api/v1/workspaces``: the launch mode, and for the
-# cloud-VM modes the instance type. Absent on workspaces created before they were stamped.
-LAUNCH_MODE_LABEL: Final[str] = "launch_mode"
-INSTANCE_TYPE_LABEL: Final[str] = "instance_type"
 
 # The chat app inside a workspace labels every agent it launches as a member of its
 # chat (``chat_id=<chat id>``, ``chat_seq=<member ordinal>``). A permission request

@@ -79,11 +79,16 @@ export class WorkspacesStore {
     // bridge's own `next`, which the /goto/ handler forwards as a same-origin
     // path, with `reopened=1` beside it for a popout the app reopened (a
     // restore), whose shell then trusts the stored layout at once.
-    const workspaceScoped = this.toAgentScopedId(anyId);
-    const gotoPath = "/goto/" + workspaceScoped + "/";
-    if (soloWindowId === null) return "/forward-bridge?next=" + encodeURIComponent(gotoPath);
+    if (soloWindowId === null) return this.workspacePageUrl(anyId, null);
     const soloPath = "/?solo=" + encodeURIComponent(soloWindowId) + (isSoloReopened ? "&reopened=1" : "");
-    const bridgeNext = gotoPath + "?next=" + encodeURIComponent(soloPath);
+    return this.workspacePageUrl(anyId, soloPath);
+  }
+
+  /** The bridge URL that lands a frame on one page of the workspace's shell (its desktop for a null path). */
+  workspacePageUrl(anyId: string, shellPath: string | null): string {
+    const gotoPath = "/goto/" + this.toAgentScopedId(anyId) + "/";
+    if (shellPath === null) return "/forward-bridge?next=" + encodeURIComponent(gotoPath);
+    const bridgeNext = gotoPath + "?next=" + encodeURIComponent(shellPath);
     return "/forward-bridge?next=" + encodeURIComponent(bridgeNext);
   }
 

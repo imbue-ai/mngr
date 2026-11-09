@@ -413,13 +413,24 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-cc33");
     expect(routeSet).not.toHaveBeenCalled();
 
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=settings&group=updates`);
+    land(
+      shell,
+      `/workspace/${WORKSPACE_ID}/options?tab=settings&group=updates`,
+    );
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-dd44");
-    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, undefined);
+    expect(routeSet).toHaveBeenLastCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      undefined,
+    );
 
     land(shell, `/help?workspace=${WORKSPACE_ID}`);
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-ee55");
-    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+    expect(routeSet).toHaveBeenLastCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
 
     expect(sent).toEqual([
       [WORKSPACE_ID, "agent-cc33"],
@@ -527,14 +538,18 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     const claims = stubClaim(true);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.enterWorkspace(OTHER_ID, { chat: "agent-ee55" });
     await vi.waitFor(() => expect(claims).toHaveLength(1));
     await Promise.resolve();
 
     // Main raised the other window and handed it the route, chat included.
-    expect(claims).toEqual([[OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`]]);
+    expect(claims).toEqual([
+      [OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`],
+    ]);
     expect(routeSet).not.toHaveBeenCalled();
   });
 
@@ -542,12 +557,16 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, "/");
     stubClaim(false);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.routeTo(`/workspace/${OTHER_ID}/options?tab=settings`);
 
     await vi.waitFor(() =>
-      expect(routeSet).toHaveBeenCalledWith(`/workspace/${OTHER_ID}/options?tab=settings`),
+      expect(routeSet).toHaveBeenCalledWith(
+        `/workspace/${OTHER_ID}/options?tab=settings`,
+      ),
     );
   });
 
@@ -555,13 +574,18 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     const claims = stubClaim(true);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.routeTo(`/workspace/${WORKSPACE_ID}/options?tab=share`);
     shell.routeTo("/accounts");
 
     expect(claims).toEqual([]);
-    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}/options?tab=share`], ["/accounts"]]);
+    expect(routeSet.mock.calls).toEqual([
+      [`/workspace/${WORKSPACE_ID}/options?tab=share`],
+      ["/accounts"],
+    ]);
   });
 });
 
@@ -1362,7 +1386,10 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   const RUN_ENDED_AT_MS = Date.parse("2026-09-28T20:14:49.432Z");
 
   it("reloads a page that last loaded before the update ended", () => {
-    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS - 3_600_000);
+    const { shell, reloadCount } = shellWithFrameOn(
+      "agent-aa11",
+      RUN_ENDED_AT_MS - 3_600_000,
+    );
 
     shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
 
@@ -1371,7 +1398,10 @@ describe("ShellState.reloadWorkspaceFrame", () => {
 
   it("leaves a page loaded since the update ended alone", () => {
     // The user reloaded it, or the window was opened after the update.
-    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
+    const { shell, reloadCount } = shellWithFrameOn(
+      "agent-aa11",
+      RUN_ENDED_AT_MS + 17_000,
+    );
 
     shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
 
@@ -1388,7 +1418,10 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   });
 
   it("reloads a freshly loaded page when the refresh names no cutoff", () => {
-    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
+    const { shell, reloadCount } = shellWithFrameOn(
+      "agent-aa11",
+      RUN_ENDED_AT_MS + 17_000,
+    );
 
     shell.reloadWorkspaceFrame("agent-aa11", null);
 
@@ -1619,6 +1652,19 @@ describe("ShellState.handleEscape", () => {
     expect(shell.handleEscape()).toBe(false);
   });
 
+  it("leaves the key to the workspace's shortcut recorder while it listens, closing nothing", () => {
+    displaying(shell, AGENT);
+    shell.isSidebarOpen = true;
+    shell.isWorkspaceShortcutRecording = true;
+
+    expect(shell.handleEscape()).toBe(false);
+    expect(shell.isSidebarOpen).toBe(true);
+
+    shell.isWorkspaceShortcutRecording = false;
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isSidebarOpen).toBe(false);
+  });
+
   it("gives the key to the switcher popover over an open card", () => {
     // The popover (z-[200]) sits over every other surface, the card included,
     // so it has to be asked first -- and the card must survive the keypress.
@@ -1724,12 +1770,20 @@ describe("ShellState updates", () => {
     const shell = outOfDateShell();
     stubAccentPainting();
     land(shell, "/");
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.openUpdatesTab(AGENT);
 
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}/options`, { tab: "settings", group: "updates" });
-    expect(shell.takeUpdatesTabArrival(AGENT)).toMatchObject({ agentId: AGENT, failure: null });
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}/options`, {
+      tab: "settings",
+      group: "updates",
+    });
+    expect(shell.takeUpdatesTabArrival(AGENT)).toMatchObject({
+      agentId: AGENT,
+      failure: null,
+    });
   });
 
   it("replaces the open panel's history entry, and flags a fresh arrival on each request", () => {
@@ -1738,11 +1792,17 @@ describe("ShellState updates", () => {
     const shell = outOfDateShell();
     stubAccentPainting();
     land(shell, `/workspace/${AGENT}/options?tab=settings&group=general`);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.openUpdatesTab(AGENT);
     const first = shell.takeUpdatesTabArrival(AGENT)?.serial ?? 0;
-    const failure = { isOk: false, error: "Couldn't reach this workspace.", detail: "" };
+    const failure = {
+      isOk: false,
+      error: "Couldn't reach this workspace.",
+      detail: "",
+    };
     shell.openUpdatesTab(AGENT, { failure });
 
     expect(routeSet).toHaveBeenLastCalledWith(
@@ -1885,7 +1945,10 @@ describe("pulled-out windows (the popout route)", () => {
   it("displays the popout's workspace, so its accent and its channel state follow the machine", () => {
     const { shell } = popoutShell();
     expect(shell.displayedWorkspaceAnyId).toBe(AGENT);
-    expect(shell.popoutRoute()).toEqual({ workspaceAnyId: AGENT, windowId: "win-0123" });
+    expect(shell.popoutRoute()).toEqual({
+      workspaceAnyId: AGENT,
+      windowId: "win-0123",
+    });
   });
 
   it("takes the window's title from the shell's detached set, and closes when the set lacks it", () => {
@@ -2000,11 +2063,20 @@ describe("pulled-out windows (the popout route)", () => {
     shell.registerReattachWindowSender((windowId) => sends.push(windowId));
     vi.spyOn(m.route, "get").mockImplementation(() => "/workspace/agent-aa11");
     shell.handleRouteChanged("/workspace/agent-aa11");
-    shell.handleReattachPopoutWindow({ workspaceId: "host-bb22", windowId: "win-0123" });
+    shell.handleReattachPopoutWindow({
+      workspaceId: "host-bb22",
+      windowId: "win-0123",
+    });
     vi.spyOn(m.route, "get").mockImplementation(() => "/workspace/host-bb22");
     shell.handleRouteChanged("/workspace/host-bb22");
-    shell.handleReattachPopoutWindow({ workspaceId: "agent-aa11", windowId: "win-4567" });
-    shell.handleReattachPopoutWindow({ workspaceId: "host-0000", windowId: "win-8888" });
+    shell.handleReattachPopoutWindow({
+      workspaceId: "agent-aa11",
+      windowId: "win-4567",
+    });
+    shell.handleReattachPopoutWindow({
+      workspaceId: "host-0000",
+      windowId: "win-8888",
+    });
     expect(sends).toEqual(["win-0123", "win-4567"]);
   });
 
@@ -2016,12 +2088,23 @@ describe("pulled-out windows (the popout route)", () => {
       report(shell, [{ windowId: "win-0123", title: "PRs" }], [], ignored);
       let answer: boolean | null = null;
       const answered = shell
-        .handleReattachPopoutWindow({ workspaceId: AGENT, windowId: "win-0123" })
+        .handleReattachPopoutWindow({
+          workspaceId: AGENT,
+          windowId: "win-0123",
+        })
         .then((isReportedBack) => {
           answer = isReportedBack;
         });
       // Another window's change is not this window's return.
-      report(shell, [{ windowId: "win-0123", title: "PRs" }, { windowId: "win-4567", title: "Chat" }], [], ignored);
+      report(
+        shell,
+        [
+          { windowId: "win-0123", title: "PRs" },
+          { windowId: "win-4567", title: "Chat" },
+        ],
+        [],
+        ignored,
+      );
       await Promise.resolve();
       expect(answer).toBeNull();
       report(shell, [{ windowId: "win-4567", title: "Chat" }], [], ignored);
@@ -2054,7 +2137,11 @@ describe("pulled-out windows (the popout route)", () => {
   it("forwards main's report of a watched title-bar drag to the mounted frame, and nothing without one", () => {
     stubAccentPainting();
     const shell = new ShellState(createEmptyStores());
-    const report = { workspaceId: AGENT, windowId: "win-0123", phase: "out" as const };
+    const report = {
+      workspaceId: AGENT,
+      windowId: "win-0123",
+      phase: "out" as const,
+    };
     shell.handleTearOut(report);
     const forwarded: unknown[] = [];
     const sender = (received: unknown): number => forwarded.push(received);
@@ -2107,15 +2194,27 @@ describe("ShellState's account", () => {
     shell.stores.workspaces.applyWorkspacesMessage(
       workspacesMessage({
         workspaces: [
-          { ...workspacesMessage().workspaces[0], account_user_id: ALICE.user_id },
-          { ...workspacesMessage().workspaces[0], id: "agent-dd01", host_id: "host-dd02", name: "device" },
+          {
+            ...workspacesMessage().workspaces[0],
+            account_user_id: ALICE.user_id,
+          },
+          {
+            ...workspacesMessage().workspaces[0],
+            id: "agent-dd01",
+            host_id: "host-dd02",
+            name: "device",
+          },
         ],
       }),
     );
     const clientStates: [string, string | null, string][] = [];
     shell.channel = {
       clientId: "win-asking",
-      setClientState: (route: string, workspaceAgentId: string | null, accountId: string) => {
+      setClientState: (
+        route: string,
+        workspaceAgentId: string | null,
+        accountId: string,
+      ) => {
         clientStates.push([route, workspaceAgentId, accountId]);
       },
     } as unknown as UiChannelClient;
@@ -2125,10 +2224,13 @@ describe("ShellState's account", () => {
   }
 
   /** A fetch that answers the switch-account route with `route`, or a refusal / failure. */
-  function stubSwitchAnswer(answer: { route: string } | number | Error): ReturnType<typeof vi.fn> {
+  function stubSwitchAnswer(
+    answer: { route: string } | number | Error,
+  ): ReturnType<typeof vi.fn> {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
       if (answer instanceof Error) throw answer;
-      if (typeof answer === "number") return jsonResponse({ error: "no" }, answer);
+      if (typeof answer === "number")
+        return jsonResponse({ error: "no" }, answer);
       return jsonResponse(answer);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -2138,18 +2240,32 @@ describe("ShellState's account", () => {
 
   it("reads the account off the route: the hub segment, a listed workspace's association, ?account=, the start flow", () => {
     const { shell } = shellOnAlice();
-    expect(shell.accountIdForRoute(`/account/${BOB.user_id}/create`, "")).toBe(BOB.user_id);
+    expect(shell.accountIdForRoute(`/account/${BOB.user_id}/create`, "")).toBe(
+      BOB.user_id,
+    );
     expect(shell.accountIdForRoute("/account/local/", "")).toBe("local");
-    expect(shell.accountIdForRoute("/workspace/agent-aa11", "")).toBe(ALICE.user_id);
+    expect(shell.accountIdForRoute("/workspace/agent-aa11", "")).toBe(
+      ALICE.user_id,
+    );
     // By either coordinate, and a workspace associated with no account is the device's.
-    expect(shell.accountIdForRoute("/workspace/host-bb22/options", "")).toBe(ALICE.user_id);
+    expect(shell.accountIdForRoute("/workspace/host-bb22/options", "")).toBe(
+      ALICE.user_id,
+    );
     // The sub-pages that replace the surface are the workspace's pages too.
-    expect(shell.accountIdForRoute("/workspace/agent-aa11/backups", "")).toBe(ALICE.user_id);
-    expect(shell.accountIdForRoute("/workspace/agent-aa11/settings", "")).toBe(ALICE.user_id);
+    expect(shell.accountIdForRoute("/workspace/agent-aa11/backups", "")).toBe(
+      ALICE.user_id,
+    );
+    expect(shell.accountIdForRoute("/workspace/agent-aa11/settings", "")).toBe(
+      ALICE.user_id,
+    );
     expect(shell.accountIdForRoute("/workspace/agent-dd01", "")).toBe("local");
     // A workspace the list does not know says nothing: the window keeps its account.
-    expect(shell.accountIdForRoute(`/workspace/${BOBS_WORKSPACE}`, "")).toBeNull();
-    expect(shell.accountIdForRoute("/settings", `account=${BOB.user_id}`)).toBe(BOB.user_id);
+    expect(
+      shell.accountIdForRoute(`/workspace/${BOBS_WORKSPACE}`, ""),
+    ).toBeNull();
+    expect(shell.accountIdForRoute("/settings", `account=${BOB.user_id}`)).toBe(
+      BOB.user_id,
+    );
     // A value that is not an account id names none, as the backend reads the same parameter.
     expect(shell.accountIdForRoute("/settings", "account=..%2Fetc")).toBeNull();
     expect(shell.accountIdForRoute("/settings", "account=")).toBeNull();
@@ -2161,7 +2277,10 @@ describe("ShellState's account", () => {
     const { shell } = shellOnAlice();
     expect(shell.accountId).toBe(ALICE.user_id);
     expect(shell.hubRoute("/create")).toBe(`/account/${ALICE.user_id}/create`);
-    expect(shell.overlayQuery({ selected: "evt-a" })).toEqual({ selected: "evt-a", account: ALICE.user_id });
+    expect(shell.overlayQuery({ selected: "evt-a" })).toEqual({
+      selected: "evt-a",
+      account: ALICE.user_id,
+    });
 
     land(shell, "/workspace/agent-dd01");
     expect(shell.accountId).toBe("local");
@@ -2170,8 +2289,12 @@ describe("ShellState's account", () => {
 
   it("lands a switch on the answered workspace as that account's window, so the channel brings its rows", async () => {
     const { shell, clientStates } = shellOnAlice();
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    const fetchMock = stubSwitchAnswer({ route: `/workspace/${BOBS_WORKSPACE}` });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const fetchMock = stubSwitchAnswer({
+      route: `/workspace/${BOBS_WORKSPACE}`,
+    });
 
     await shell.switchAccount(BOB.user_id);
 
@@ -2182,7 +2305,9 @@ describe("ShellState's account", () => {
       is_desktop: false,
     });
     expect(shell.accountId).toBe(BOB.user_id);
-    expect(clientStates).toEqual([[`/account/${ALICE.user_id}/`, null, BOB.user_id]]);
+    expect(clientStates).toEqual([
+      [`/account/${ALICE.user_id}/`, null, BOB.user_id],
+    ]);
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${BOBS_WORKSPACE}`);
     // The landing commits before Bob's list arrives: the still-unknown workspace does not undo the switch,
     // and whose it is was settled by the switch, so the backend is not asked.
@@ -2195,20 +2320,29 @@ describe("ShellState's account", () => {
   it.each([
     ["refuses", 503],
     ["cannot be asked", new Error("offline")],
-  ] as const)("lands a switch on the account's hub when the backend %s", async (_name, answer) => {
-    const { shell } = shellOnAlice();
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    stubSwitchAnswer(answer);
+  ] as const)(
+    "lands a switch on the account's hub when the backend %s",
+    async (_name, answer) => {
+      const { shell } = shellOnAlice();
+      const routeSet = vi
+        .spyOn(m.route, "set")
+        .mockImplementation(() => undefined);
+      stubSwitchAnswer(answer);
 
-    await shell.switchAccount(BOB.user_id);
+      await shell.switchAccount(BOB.user_id);
 
-    expect(shell.accountId).toBe(BOB.user_id);
-    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([`/account/${BOB.user_id}/`]);
-  });
+      expect(shell.accountId).toBe(BOB.user_id);
+      expect(routeSet.mock.calls.map((call) => call[0])).toEqual([
+        `/account/${BOB.user_id}/`,
+      ]);
+    },
+  );
 
   it("does not switch to the account the window already shows, nor twice while one switch is out", async () => {
     const { shell } = shellOnAlice();
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     const fetchMock = stubSwitchAnswer({ route: `/account/${BOB.user_id}/` });
 
     await shell.switchAccount(ALICE.user_id);
@@ -2229,13 +2363,17 @@ describe("ShellState's account", () => {
         claimWorkspaceWindow: () => Promise.resolve({ opened_elsewhere: true }),
       },
     });
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     stubSwitchAnswer({ route: `/workspace/${BOBS_WORKSPACE}` });
 
     await shell.switchAccount(BOB.user_id);
     await settle();
 
-    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([`/account/${BOB.user_id}/`]);
+    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([
+      `/account/${BOB.user_id}/`,
+    ]);
     expect(shell.accountId).toBe(BOB.user_id);
   });
 
@@ -2243,15 +2381,23 @@ describe("ShellState's account", () => {
     const { shell, clientStates } = shellOnAlice();
     const replaceState = vi.fn();
     vi.stubGlobal("window", { history: { replaceState } });
-    vi.spyOn(m.route, "get").mockReturnValue(`/account/${ALICE.user_id}/create?git_url=x`);
+    vi.spyOn(m.route, "get").mockReturnValue(
+      `/account/${ALICE.user_id}/create?git_url=x`,
+    );
 
     shell.adoptAccount(ALICE.user_id);
     expect(clientStates).toEqual([]);
 
     shell.adoptAccount(BOB.user_id);
     expect(shell.accountId).toBe(BOB.user_id);
-    expect(replaceState).toHaveBeenCalledWith(null, "", `/account/${BOB.user_id}/create?git_url=x`);
-    expect(clientStates).toEqual([[`/account/${ALICE.user_id}/create`, null, BOB.user_id]]);
+    expect(replaceState).toHaveBeenCalledWith(
+      null,
+      "",
+      `/account/${BOB.user_id}/create?git_url=x`,
+    );
+    expect(clientStates).toEqual([
+      [`/account/${ALICE.user_id}/create`, null, BOB.user_id],
+    ]);
   });
 
   it("keeps an adopted account across a redraw of the unchanged route, and the start flow's too", () => {
@@ -2284,7 +2430,9 @@ describe("ShellState's account", () => {
 
   it("asks the backend whose a workspace route is when the list cannot say, and becomes that account's window", async () => {
     const { shell, clientStates } = shellOnAlice();
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ account_id: BOB.user_id }));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ account_id: BOB.user_id }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     land(shell, `/workspace/${BOBS_WORKSPACE}`);
@@ -2296,7 +2444,9 @@ describe("ShellState's account", () => {
     await settle();
     expect(shell.accountId).toBe(BOB.user_id);
     // The channel is told (after the landing's own report), so Bob's rows (the workspace's among them) follow.
-    expect(clientStates.map(([route, , accountId]) => [route, accountId])).toEqual([
+    expect(
+      clientStates.map(([route, , accountId]) => [route, accountId]),
+    ).toEqual([
       [`/workspace/${BOBS_WORKSPACE}`, ALICE.user_id],
       [`/workspace/${BOBS_WORKSPACE}`, BOB.user_id],
     ]);

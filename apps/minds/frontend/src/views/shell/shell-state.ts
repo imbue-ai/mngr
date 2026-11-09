@@ -173,6 +173,9 @@ export class ShellState {
   displayedWorkspaceAnyId: string | null = null;
   /** The chrome control the displayed workspace's tour is talking about, ringed in the titlebar; null for none. */
   highlightedChromeAnchor: ChromeAnchor | null = null;
+  /** Whether the workspace's keyboard shortcuts page, framed in Workspace settings, is recording a new shortcut:
+   * Escape then closes nothing in the chrome, and the close-tab chord closes no window. */
+  isWorkspaceShortcutRecording = false;
   /** The workspace-options route an app modal was opened over, so the Shell can
    * keep that panel painted (and mounted) beneath the modal: the live route is
    * the modal's, which carries none of the panel's params. Null whenever no
@@ -1137,6 +1140,7 @@ export class ShellState {
    * alone (the route is the popup's) and leaves the panel standing.
    */
   handleEscape(): boolean {
+    if (this.isWorkspaceShortcutRecording) return false;
     if (this.isSidebarOpen) {
       this.closeSidebar();
       return true;

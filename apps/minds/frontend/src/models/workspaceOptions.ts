@@ -238,11 +238,6 @@ export interface MachineSharingResponse {
    * next save or load sends it again), null while the workspace is
    * unpublished, absent from desktops that predate invitations. */
   grants_synced?: boolean | null;
-  /** What the granter may learn about each open user or email grant, as Imbue
-   * Cloud answered it on this operation's push. Null or absent when nothing was
-   * pushed (unpublished, a failed push, a desktop or connector that predates
-   * it): the panel then reads GET .../invitation-outcomes itself. */
-  invitation_outcomes?: InvitationOutcomeEntry[] | null;
 }
 
 /** One row of GET /api/v1/workspace-sharing/<id>/invitation-outcomes: what the
@@ -334,7 +329,8 @@ export function toOptionsTab(raw: string | null | undefined): OptionsTab {
   return OPTIONS_TABS.find((tab) => tab === raw) ?? "share";
 }
 
-export type SettingsGroup = "general" | "account" | "backup" | "updates";
+export type SettingsGroup =
+  "general" | "account" | "backup" | "updates" | "keyboard";
 export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export interface FetchJson {
   (

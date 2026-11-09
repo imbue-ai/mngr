@@ -420,40 +420,6 @@ test('embedder endpoint reads opensLinks and opensCustomSchemeLinks on a readine
   ]);
 });
 
-test('embedder endpoint reads reportsChatOnScreen on a readiness announcement only as a boolean or absent', () => {
-  const frameWin = makeWindowDouble();
-  const seen = [];
-  contract.createEmbedderEndpoint({
-    getFrameWindow: () => frameWin,
-    isExpectedOrigin: () => true,
-    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push(msg.reportsChatOnScreen) },
-  });
-  const announce = (payload) =>
-    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.WORKSPACE_READY, ...payload } });
-  announce({});
-  announce({ reportsChatOnScreen: true });
-  announce({ reportsChatOnScreen: false });
-  announce({ reportsChatOnScreen: 'yes' });
-  assert.deepStrictEqual(seen, [undefined, true, false]);
-});
-
-test('embedder endpoint takes a chat-on-screen report only with a chat id of the agent shape', () => {
-  const frameWin = makeWindowDouble();
-  const seen = [];
-  contract.createEmbedderEndpoint({
-    getFrameWindow: () => frameWin,
-    isExpectedOrigin: () => true,
-    handlers: { [contract.CHAT_ON_SCREEN]: (msg) => seen.push(msg.chatId) },
-  });
-  const report = (payload) =>
-    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.CHAT_ON_SCREEN, ...payload } });
-  report({ chatId: 'agent-0123456789abcdef0123456789abcdef' });
-  report({});
-  report({ chatId: 7 });
-  report({ chatId: 'not an agent id' });
-  assert.deepStrictEqual(seen, ['agent-0123456789abcdef0123456789abcdef']);
-});
-
 test('workspace endpoint accepts an open-link only for an absolute http(s), mailto, tel or custom-scheme URL within the length bound', () => {
   const seen = [];
   contract.createWorkspaceEndpoint({
@@ -680,5 +646,67 @@ test('workspace endpoint never honours a highlight-chrome, which only travels to
   const seen = [];
   contract.createWorkspaceEndpoint({ handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg) } });
   win.deliver({ source: parentWin, origin: 'o', data: { type: contract.HIGHLIGHT_CHROME, anchor: 'share' } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes a keyboard-shortcuts-page from its frame only with a sane height and a recording flag', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push([msg.height, msg.isRecording]) },
+  });
+  const from = (source, fields) =>
+    win.deliver({ source, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, ...fields } });
+  from(makeWindowDouble(), { height: 480, isRecording: false });
+  from(frameWin, { height: 480 });
+  from(frameWin, { height: '480', isRecording: false });
+  from(frameWin, { height: -1, isRecording: false });
+  from(frameWin, { height: Number.POSITIVE_INFINITY, isRecording: false });
+  from(frameWin, { height: contract.MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT + 1, isRecording: false });
+  from(frameWin, { height: 480, isRecording: 'yes' });
+  assert.deepStrictEqual(seen, []);
+  from(frameWin, { height: 0, isRecording: false });
+  from(frameWin, { height: 612.5, isRecording: true });
+  assert.deepStrictEqual(seen, [[0, false], [612.5, true]]);
+});
+
+test('workspace endpoint never honours a keyboard-shortcuts-page, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, height: 1, isRecording: false } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint takes an opensKeyboardShortcuts capability only as a boolean', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.opensKeyboardShortcuts) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, ...fields } });
+  deliver({});
+  deliver({ opensKeyboardShortcuts: true });
+  deliver({ opensKeyboardShortcuts: 'yes' });
+  assert.deepStrictEqual(seen, [undefined, true]);
+});
+
+test('embedder endpoint takes an open-keyboard-shortcuts ask, which carries nothing', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg.type) },
+  });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
+  assert.deepStrictEqual(seen, ['minds:open-keyboard-shortcuts']);
+});
+
+test('workspace endpoint never honours an open-keyboard-shortcuts, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
   assert.deepStrictEqual(seen, []);
 });

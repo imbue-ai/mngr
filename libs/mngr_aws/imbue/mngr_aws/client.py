@@ -1,4 +1,3 @@
-import gzip
 import os
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -40,15 +39,6 @@ from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.published_ports import EVERY_SOURCE_CIDR
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
-
-
-# EC2 caps raw user data at 16 KiB (reported by the API as the 25600-byte
-# encoded cap), which a VPS host's cloud-init script exceeds; cloud-init
-# decompresses gzip user data on the instance. The fixed mtime keeps the
-# compressed bytes deterministic for a given script.
-def compress_user_data(user_data: str) -> bytes:
-    return gzip.compress(user_data.encode("utf-8"), mtime=0)
-
 
 # Tag that ``create_instance`` adds to every EC2 instance launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
@@ -616,7 +606,7 @@ class AwsVpsClient(VpsClientInterface):
             "InstanceType": plan,
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": compress_user_data(user_data),
+            "UserData": user_data,
             "BlockDeviceMappings": block_device_mappings,
             "NetworkInterfaces": network_interfaces,
             # stop (resumable idle-pause) vs terminate (ephemeral / self-cleaning);

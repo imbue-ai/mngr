@@ -59,7 +59,6 @@ from imbue.minds.desktop_client.agent_creator import is_default_workspace_templa
 from imbue.minds.desktop_client.agent_creator import is_network_restricting_build_arg
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
-from imbue.minds.desktop_client.agent_creator import launch_mode_for_provider_name
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
@@ -73,7 +72,6 @@ from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
@@ -649,31 +647,6 @@ def test_build_mngr_create_command_omits_branch_label_when_unset() -> None:
     assert "original_branch=" not in joined
 
 
-def test_build_mngr_create_command_stamps_the_launch_mode_and_instance_type_labels() -> None:
-    """The placement is stamped so the workspace listing can report it to an agent inside,
-    which cannot read the instance type off the sandbox."""
-    command = _build_mngr_create_command(
-        launch_mode=LaunchMode.AWS,
-        host_name=HostName("hello"),
-        region="us-west-2",
-        cloud_account=_AWS_CONNECTION,
-        instance_type="t3.2xlarge",
-    )
-    joined = " ".join(command)
-    assert "--label launch_mode=AWS" in joined
-    assert "--label instance_type=t3.2xlarge" in joined
-
-
-def test_build_mngr_create_command_omits_the_instance_type_label_when_none_was_named() -> None:
-    command = _build_mngr_create_command(
-        launch_mode=LaunchMode.DOCKER,
-        host_name=HostName("hello"),
-    )
-    joined = " ".join(command)
-    assert "--label launch_mode=DOCKER" in joined
-    assert "instance_type=" not in joined
-
-
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
@@ -817,24 +790,6 @@ def test_provider_instance_name_for_launch_local_backends() -> None:
     assert provider_instance_name_for_launch(LaunchMode.DOCKER) == "docker"
     assert provider_instance_name_for_launch(LaunchMode.LIMA) == "lima"
     assert provider_instance_name_for_launch(LaunchMode.VULTR) == "vultr"
-
-
-def test_launch_mode_for_provider_name_inverts_the_create_target() -> None:
-    """The listing reads an unstamped workspace's mode off its provider instance, so every create target maps back."""
-    connection_hex = uuid4().hex
-    assert launch_mode_for_provider_name("docker") is LaunchMode.DOCKER
-    assert launch_mode_for_provider_name("lima") is LaunchMode.LIMA
-    assert launch_mode_for_provider_name("vultr") is LaunchMode.VULTR
-    assert launch_mode_for_provider_name(imbue_cloud_provider_name_for_user("11111111-1111")) is LaunchMode.IMBUE_CLOUD
-    assert launch_mode_for_provider_name(f"aws_{connection_hex}") is LaunchMode.AWS
-    assert launch_mode_for_provider_name(f"gcp_{connection_hex}") is LaunchMode.GCP
-    assert launch_mode_for_provider_name(f"azure_{connection_hex}") is LaunchMode.AZURE
-    assert launch_mode_for_provider_name(f"modal_{connection_hex}") is LaunchMode.MODAL
-
-
-def test_launch_mode_for_provider_name_is_none_for_a_provider_minds_does_not_create_on() -> None:
-    assert launch_mode_for_provider_name("aws-us-west-2") is None
-    assert launch_mode_for_provider_name("ssh") is None
 
 
 @pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.MODAL])

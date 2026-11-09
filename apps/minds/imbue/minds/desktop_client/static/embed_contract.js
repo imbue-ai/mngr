@@ -54,19 +54,14 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
 // the embedder held for it can be sent now. Payload: { opensLinks?,
-// opensCustomSchemeLinks?, reportsChatOnScreen? }. Sent once per page load, after the workspace
+// opensCustomSchemeLinks? }. Sent once per page load, after the workspace
 // registers its handlers. Without it the embedder cannot tell a loaded frame
 // from one whose page has not run its listener yet, since a send into a
 // not-yet-listening document is simply lost. `opensLinks: true` promises the
 // page handles OPEN_LINK, external links included; `false` or absent means it
 // does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme
-// links (`slack:`, `vscode:`) in OPEN_LINK too. `reportsChatOnScreen: true`
-// promises CHAT_ON_SCREEN.
+// links (`slack:`, `vscode:`) in OPEN_LINK too.
 export const WORKSPACE_READY = "minds:workspace-ready";
-// Workspace -> embedder: this chat's transcript is drawn in a window the user
-// can see. Payload: { chatId } (the chat's id, which is its first agent's id).
-// The creation page's wash stays up until the welcome chat says this.
-export const CHAT_ON_SCREEN = "minds:chat-on-screen";
 // workspace -> embedder: a provider sign-in (Claude, ChatGPT) is waiting on
 // the user in a browser; relay its loopback callback into the workspace and
 // open the sign-in page. Payload: { url, flowId } -- the provider's
@@ -132,6 +127,25 @@ export const HIGHLIGHT_CHROME = "minds:highlight-chrome";
 // the gesture's activation for the fullscreen request). The chrome answers
 // with IMMERSIVE_CHANGED.
 export const IMMERSIVE_REQUEST = "minds:immersive-request";
+// workspace -> embedder: the state of the workspace's keyboard shortcuts page,
+// which the chrome's Workspace settings frames. Payload: { height,
+// isRecording }: the page's height in CSS px (the frame takes it, so the
+// settings pane scrolls the page with everything else), and whether its
+// recorder is listening for a new shortcut (while it is, Escape does not
+// close the settings panel and the close-tab chord closes no window). The first
+// one says the page has loaded: the pane keeps the frame hidden until then, as
+// a workspace too old to serve the page answers its path with the whole
+// desktop, which never sends it.
+export const KEYBOARD_SHORTCUTS_PAGE = "minds:keyboard-shortcuts-page";
+// workspace -> embedder: open the shell's workspace-options panel on its
+// Workspace settings tab at the Keyboard shortcuts group. Payload: {}. Sent
+// only to a chrome whose EMBEDDER_CAPABILITIES carried
+// `opensKeyboardShortcuts: true`; without it the workspace opens its own
+// keyboard shortcuts dialog.
+export const OPEN_KEYBOARD_SHORTCUTS = "minds:open-keyboard-shortcuts";
+// The tallest page height the chrome takes: a sanity bound, far above any real
+// list of shortcuts.
+export const MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT = 100000;
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -351,15 +365,7 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return data.serviceName === undefined || (typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName));
   },
   [WORKSPACE_READY]: function (data) {
-    return (
-      isOptionalBoolean(data.opensLinks) &&
-      isOptionalBoolean(data.opensCustomSchemeLinks) &&
-      isOptionalBoolean(data.reportsChatOnScreen)
-    );
-  },
-  [CHAT_ON_SCREEN]: function (data) {
-    // A chat's id is its first agent's id, so it takes the agent-id shape.
-    return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
+    return isOptionalBoolean(data.opensLinks) && isOptionalBoolean(data.opensCustomSchemeLinks);
   },
   [PROVIDER_SIGN_IN]: function (data) {
     return isSignInUrlShapeValid(data.url) && typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
@@ -395,6 +401,18 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [HIGHLIGHT_CHROME]: function (data) {
     return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
+  [OPEN_KEYBOARD_SHORTCUTS]: function () {
+    return true;
+  },
+  [KEYBOARD_SHORTCUTS_PAGE]: function (data) {
+    return (
+      typeof data.height === 'number' &&
+      Number.isFinite(data.height) &&
+      data.height >= 0 &&
+      data.height <= MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT &&
+      typeof data.isRecording === 'boolean'
+    );
+  },
 };
 
 function isResolutionEntryValid(entry) {
@@ -428,6 +446,7 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
+      isOptionalBoolean(data.opensKeyboardShortcuts) &&
       isOptionalBoolean(data.immersive)
     );
   },

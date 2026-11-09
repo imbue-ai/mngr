@@ -416,11 +416,10 @@ export class SharePanelModel {
   // relay" means it changed since, because the stamp survives re-publishing.
   private tunnelLoginSnapshot: TunnelLoginSnapshot = { state: "unseen" };
   private isDisposed = false;
-  // Keyed by target and grantee, as Imbue Cloud lists them.
+  // Keyed by target and grantee, as the outcomes route lists them.
   private outcomeByKey = new Map<string, GrantOutcome>();
-  /** Whether the outcomes are known, from a document that carried them or
-   * from the outcomes route: until they are, no row's missing outcome means
-   * its person never visited. */
+  /** Whether the outcomes route has answered: until it has, no row's missing
+   * outcome means its person never visited. */
   private isOutcomesKnown = false;
   private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
   // What the mobile-link control is doing. One per panel rather than per
@@ -1036,8 +1035,8 @@ export class SharePanelModel {
       return;
     }
     if (data.grants === null) this.isGrantsListKnown = false;
-    this.adoptOrReadOutcomes(data);
     this.maybeAutoInviteGrantedPeople();
+    void this.refreshOutcomes();
     const migratedDomainFrom = data.migrated_domain_from ?? null;
     if (migratedDomainFrom !== null) {
       // The read itself moved the share to a new address: the new link is not
@@ -1129,8 +1128,8 @@ export class SharePanelModel {
 
   /**
    * Invite the person on a row. The row shows its pending state and nothing
-   * else waits (spec P10); the answer replaces it and carries the row's own
-   * outcome (spec P3).
+   * else waits (spec P10); the answer replaces it, and the outcomes route is
+   * read again so the row says what Imbue Cloud now knows (spec P2).
    */
   async invite(target: string, key: GrantKey): Promise<void> {
     const grant = this.mutableGrants(target).find(
@@ -1158,10 +1157,11 @@ export class SharePanelModel {
       this.adoptInviteAnswer(target, grantee, result),
     );
     this.redraw();
+    void this.refreshOutcomes();
   }
 
   /** The row's state after an invite answered, with the outcome the answer
-   * itself carries applied to the row. */
+   * itself carries applied so the row does not wait on the re-read. */
   private adoptInviteAnswer(
     target: string,
     grantee: Grantee,
@@ -1223,24 +1223,6 @@ export class SharePanelModel {
     if (this.isDisposed) return;
     this.mobileLink = adoptMobileLinkAnswer(result, this.granterEmail);
     this.redraw();
-  }
-
-  /** Learn what the granter may learn about every row from a document that
-   * carries it (the push behind every save and load answers it); a document
-   * that does not is from a desktop or a connector that predates that, and
-   * the outcomes route is read instead. */
-  private adoptOrReadOutcomes(data: MachineSharingResponse): void {
-    const carried = data.invitation_outcomes;
-    if (Array.isArray(carried)) this.adoptOutcomes(carried);
-    else void this.refreshOutcomes();
-  }
-
-  /** A document's outcomes are as fresh as the document, so a read still out
-   * answers older ones and is ignored when it lands. */
-  private adoptOutcomes(entries: InvitationOutcomeEntry[]): void {
-    this.adoptedOutcomesSequence = ++this.outcomesRequestCount;
-    this.outcomeByKey = outcomesByKey(entries);
-    this.isOutcomesKnown = true;
   }
 
   /** Read what the granter may learn about every row. Nothing is readable
@@ -1585,16 +1567,12 @@ export class SharePanelModel {
       // Read back before settling: the merge keeps every row still saving, and
       // this write's rows are settled on top of what came back.
       const document = result.body as MachineSharingResponse;
-      if (this.adoptStatusDocument(document, sequence)) {
+      if (this.adoptStatusDocument(document, sequence))
         this.queryClient.setQueryData(this.queryKey, document);
-        this.adoptOrReadOutcomes(document);
-      } else {
-        // An older answer says nothing about the rows as they stand now.
-        void this.refreshOutcomes();
-      }
       this.markCarriedRows(carriedRows, { state: "settled" });
       this.maybeAutoInviteGrantedPeople();
       this.redraw();
+      void this.refreshOutcomes();
       return;
     }
     // A refusal saves nothing, so the rest of the document is sent again
@@ -1793,8 +1771,8 @@ export class SharePanelModel {
       // Only a workspace that now has a link can be invited to; taking the
       // address away leaves the outcomes alone (spec O5).
       if (this.isPublished) {
-        this.adoptOrReadOutcomes(document);
         this.maybeAutoInviteGrantedPeople();
+        void this.refreshOutcomes();
       }
       this.syncReadinessPolling();
     }

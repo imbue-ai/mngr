@@ -1,1 +1,0 @@
-Gave `test_http2_connection_is_not_drained_after_a_thousand_requests` a 30-second timeout (up from the 10-second default) and marked it `@pytest.mark.flaky`. Its 1002 HTTP/2 requests pass back and forth between a client thread and an in-process server thread, so CPU contention multiplies its runtime. It hit the 10-second limit on a heavily loaded machine.

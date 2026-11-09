@@ -85,11 +85,6 @@ name = "josh-laptop"
 public_key = "7Wh3p0l8ITk5S08ZOH4pdlWE607GcliQmpa93tHJPV4="
 address = "10.64.0.6"
 
-[[management_plane.wireguard.operators]]
-name = "danver"
-public_key = "Oe5x7SQdZllefpJScILidnRUgBq54Xocw0zdJTu+3x4="
-address = "10.64.0.7"
-
 # The tier's Modal Proxy: created 2026-09-13 in the minds-production Modal
 # workspace's 'main' environment, in Modal's us-east region.
 [management_plane.modal_proxy]

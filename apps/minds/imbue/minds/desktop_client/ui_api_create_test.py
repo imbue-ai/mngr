@@ -48,7 +48,6 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_create_area_routes_require_a_session_cookie(tmp_path: Path) -> None:
@@ -64,11 +63,6 @@ def test_create_area_routes_require_a_session_cookie(tmp_path: Path) -> None:
         f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat", json=_welcome_chat_body()
     )
     assert seeded.status_code == 401
-    landed = client.post(
-        f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat/landing",
-        json={"landing": "ON_SCREEN", "waited_ms": 1},
-    )
-    assert landed.status_code == 401
 
 
 def _welcome_chat_body() -> dict[str, object]:
@@ -817,14 +811,6 @@ def _done_record(create_attempt_id: str) -> PendingCreateAttemptRecord:
     )
 
 
-def _received_welcome_chat_line(create_attempt_id: str) -> str:
-    """The route's log line for the creating page's post once the attempt is done."""
-    return (
-        f"Received the creating page's welcome chat for finished create attempt {create_attempt_id} "
-        f"(workspace {_WORKSPACE_AGENT_ID})"
-    )
-
-
 def test_the_welcome_chat_is_seeded_in_the_finished_attempts_workspace(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
@@ -835,69 +821,13 @@ def test_the_welcome_chat_is_seeded_in_the_finished_attempts_workspace(
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(_done_record(create_attempt_id))
 
-    with capture_loguru(level="DEBUG") as log_output:
-        response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
+    response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
 
     assert response.status_code == 200
     assert json.loads(response.get_data(as_text=True)) == {"chat_id": "agent-seeded"}
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
     assert "system/scripts/seed_welcome_chat.py" in argv[3]
-    # The post is the moment the page saw the attempt done, which the hand-off is measured from.
-    lines = log_output.getvalue().splitlines()
-    received = _received_welcome_chat_line(create_attempt_id)
-    assert received in lines
-    assert lines.index(received) < lines.index(
-        f"Seeding the welcome chat for create attempt {create_attempt_id} in workspace {_WORKSPACE_AGENT_ID}"
-    )
-
-
-def test_a_landing_with_the_welcome_chat_on_screen_is_logged_with_its_wait(tmp_path: Path) -> None:
-    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
-    create_attempt_id = str(CreateAttemptId.generate())
-
-    with capture_loguru(level="DEBUG") as log_output:
-        response = client.post(
-            f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat/landing",
-            json={"landing": "ON_SCREEN", "waited_ms": 4812},
-        )
-
-    assert response.status_code == 204
-    assert (
-        f"Landed in the new workspace of create attempt {create_attempt_id} with its welcome chat on screen after 4812 ms"
-        in log_output.getvalue().splitlines()
-    )
-
-
-@pytest.mark.parametrize("landing", ["SEED_FAILED", "NO_CHAT_REPORT", "TIMED_OUT"])
-def test_a_landing_without_the_welcome_chat_on_screen_is_a_warning_naming_why(tmp_path: Path, landing: str) -> None:
-    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
-    create_attempt_id = str(CreateAttemptId.generate())
-
-    with capture_loguru(level="WARNING") as log_output:
-        response = client.post(
-            f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat/landing",
-            json={"landing": landing, "waited_ms": 45000},
-        )
-
-    assert response.status_code == 204
-    assert (
-        f"Landed in the new workspace of create attempt {create_attempt_id} without seeing its welcome chat "
-        f"on screen ({landing}) after 45000 ms"
-    ) in log_output.getvalue().splitlines()
-
-
-def test_a_landing_report_of_the_wrong_shape_is_refused(tmp_path: Path) -> None:
-    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
-    path = f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat/landing"
-
-    assert client.post(path, json={"landing": "SOMEHOW", "waited_ms": 1}).status_code == 400
-    assert client.post(path, json={"landing": "ON_SCREEN", "waited_ms": -1}).status_code == 400
-    assert client.post(path, data="not json").status_code == 400
-    bad_id = client.post(
-        "/ui/api/create/attempts/not-an-id/welcome-chat/landing", json={"landing": "ON_SCREEN", "waited_ms": 1}
-    )
-    assert bad_id.status_code == 400
 
 
 def test_the_welcome_chat_is_refused_while_the_attempt_has_no_workspace(
@@ -1011,14 +941,8 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
 
-    with capture_loguru(level="DEBUG") as log_output:
-        asked_after = client.post(
-            f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body()
-        )
+    asked_after = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
 
     assert asked_after.status_code == 200
     assert json.loads(asked_after.get_data(as_text=True)) == {"chat_id": "agent-seeded"}
     assert len(caller.calls) == 1
-    lines = log_output.getvalue().splitlines()
-    assert _received_welcome_chat_line(create_attempt_id) in lines
-    assert not [line for line in lines if line.startswith("Seeding the welcome chat")]

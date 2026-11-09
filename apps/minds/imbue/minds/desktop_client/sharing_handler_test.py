@@ -25,10 +25,8 @@ from imbue.minds.desktop_client.identity_records import now_utc
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
-from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
@@ -45,6 +43,7 @@ from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
 from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
+from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -284,7 +283,7 @@ def test_get_sharing_reports_the_grants_of_an_unpublished_workspace(tmp_path: Pa
     grants_toml = render_grants_toml(
         {"users": [], "emails": ["friend@example.com"], "email_domains": ["partner.org"]}, {}
     )
-    caller = RecordingMngrCaller(result=make_share_probe_result(grants_toml_text=grants_toml))
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=exec_json_envelope(grants_toml)))
     host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
 
     document = get_sharing(host_id, resolver, cli, store, None, None, None)
@@ -296,17 +295,12 @@ def test_get_sharing_reports_the_grants_of_an_unpublished_workspace(tmp_path: Pa
         "emails": ["friend@example.com"],
         "email_domains": ["partner.org"],
     }
-    assert document["grants_synced"] is None
-    assert document["invitation_outcomes"] is None
-    # Unpublished: the one exec, then the status read, and nothing pushed.
-    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
-    assert cli.pushed_grants_documents == []
 
 
 def test_get_sharing_reports_an_empty_document_for_a_workspace_that_has_never_been_published(
     tmp_path: Path,
 ) -> None:
-    caller = RecordingMngrCaller(result=make_share_probe_result())
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=exec_json_envelope("")))
     host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
 
     document = get_sharing(host_id, resolver, cli, store, None, None, None)
@@ -324,67 +318,6 @@ def test_get_sharing_reports_unknown_grants_when_an_unpublished_workspace_cannot
 
     assert document["enabled"] is False
     assert document["grants"] is None
-
-
-def test_get_sharing_of_a_published_workspace_pushes_once_and_carries_what_the_push_answered(tmp_path: Path) -> None:
-    # One exec and one connector call: the push answers the share, the outcomes,
-    # and the grantees' records, which the cache keeps for the reads that push nothing.
-    grants_toml = render_grants_toml({"users": ["user-2"], "emails": ["friend@example.com"], "email_domains": []}, {})
-    caller = RecordingMngrCaller(
-        result=make_share_probe_result(is_share_env_present=True, grants_toml_text=grants_toml)
-    )
-    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
-    cli.add_share("owner@example.com", host_id)
-    cli.invitation_outcomes_to_return = [
-        InvitationOutcomeCliEntry(kind="email", value="friend@example.com", app="system_interface", outcome="invited")
-    ]
-    cli.identities_to_return = [UserIdentityCliInfo(user_id="user-2", email="carol@example.com", display_name="Carol")]
-    cache = IdentityCache(path=tmp_path / "identity_cache.json")
-
-    document = get_sharing(host_id, resolver, cli, store, cache, None, None)
-
-    assert document["enabled"] is True
-    assert document["grants_synced"] is True
-    assert [(entry["value"], entry["outcome"]) for entry in document["invitation_outcomes"]] == [
-        ("friend@example.com", "invited")
-    ]
-    assert document["identities"]["user-2"]["display_name"] == "Carol"
-    cached = cache.get("user-2")
-    assert cached is not None and cached.record.email == "carol@example.com"
-    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
-    assert len(cli.pushed_grants_documents) == 1
-
-
-def test_get_sharing_reads_the_status_when_the_push_fails(tmp_path: Path) -> None:
-    grants_toml = render_grants_toml({"users": [], "emails": ["friend@example.com"], "email_domains": []}, {})
-    caller = RecordingMngrCaller(
-        result=make_share_probe_result(is_share_env_present=True, grants_toml_text=grants_toml)
-    )
-    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
-    cli.add_share("owner@example.com", host_id)
-    cli.is_grants_push_failing = True
-
-    document = get_sharing(host_id, resolver, cli, store, None, None, None)
-
-    # The switch stays on (the status read says so); the document is marked as
-    # not synced, so the panel sends it again, and reads the outcomes itself.
-    assert document["enabled"] is True
-    assert document["grants_synced"] is False
-    assert document["invitation_outcomes"] is None
-    assert document["grants"]["workspace"]["emails"] == ["friend@example.com"]
-
-
-def test_get_sharing_reports_a_share_the_connector_no_longer_holds_as_unpublished(tmp_path: Path) -> None:
-    # Materials still in the workspace, but the share was unpublished elsewhere:
-    # the push is refused as not_published, and that is the answer.
-    caller = RecordingMngrCaller(result=make_share_probe_result(is_share_env_present=True))
-    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
-
-    document = get_sharing(host_id, resolver, cli, store, None, None, None)
-
-    assert document["enabled"] is False
-    assert document["grants_synced"] is None
-    assert cli.pushed_grants_documents == []
 
 
 def test_unpublish_workspace_drops_the_forward_identity_entry_and_requests_a_sync(tmp_path: Path) -> None:
@@ -509,14 +442,11 @@ def _stale_share(host_id: str) -> ShareCliInfo:
 
 
 def _migrate_for_test(host_id: str, agent_id: AgentId, cli: ImbueCloudCli) -> dict[str, Any]:
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
     return migrate_stale_share(
         host_id,
         agent_id,
         str(agent_id),
         _stale_share(host_id),
-        probe_share_state_in_agent(str(agent_id), caller),
         cli,
         "owner@example.com",
         _client_env_config(),
@@ -897,6 +827,18 @@ def test_publish_workspace_cloud_row_skips_the_relay_latency_measurement() -> No
     assert cli.relay_list_call_count == 0
 
 
+class _StatusOrderRecordingCli(SucceedingCreateShareCli):
+    """Records how many execs had run when the connector's share status was read."""
+
+    exec_counts_at_status_read: list[int] = Field(default_factory=list)
+
+    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        caller = self.mngr_caller
+        assert isinstance(caller, RecordingMngrCaller)
+        self.exec_counts_at_status_read.append(len([call for call in caller.calls if call and call[0] == "exec"]))
+        return super().get_share_status(account=account, host_id=host_id)
+
+
 def _save_grants_for_test(
     host_id: str, agent_id: AgentId, grants: SharingGrantsDocument, cli: ImbueCloudCli
 ) -> dict[str, Any]:
@@ -977,106 +919,22 @@ def test_save_grants_writes_what_it_knows_of_the_grantees_beside_the_document(tm
     }
 
 
-class _StatusCountingCli(SucceedingCreateShareCli):
-    """Counts the status reads, which the push is meant to make unnecessary."""
-
-    status_read_count: int = Field(default=0)
-
-    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
-        self.status_read_count += 1
-        return super().get_share_status(account=account, host_id=host_id)
-
-    def share_as_the_connector_holds_it(self, *, account: str, host_id: str) -> ShareCliInfo | None:
-        return super().get_share_status(account=account, host_id=host_id)
-
-
-def test_save_grants_learns_the_share_from_the_push_and_reads_no_status() -> None:
-    # One connector call per save: the push after the write answers the share.
+def test_save_grants_reads_the_connector_before_it_writes() -> None:
+    # A connector hiccup must not be reported after the document landed.
     host_id = "host-" + "d" * 32
-    cli = _StatusCountingCli(connector_url=FAKE_CONNECTOR_URL)
+    cli = _StatusOrderRecordingCli(connector_url=FAKE_CONNECTOR_URL)
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
     cli.add_share("owner@example.com", host_id)
-    cli.invitation_outcomes_to_return = [
-        InvitationOutcomeCliEntry(kind="email", value="friend@example.com", app="system_interface", outcome=None)
-    ]
     grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
 
     document = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
 
     assert document["enabled"] is True
-    assert document["grants_synced"] is True
-    assert [entry["value"] for entry in document["invitation_outcomes"]] == ["friend@example.com"]
-    assert cli.status_read_count == 0
-    assert len(cli.pushed_grants_documents) == 1
-    # The probe, then the write: the document lands before the connector hears of it.
+    # Read once, after the probe and before the write exec.
+    assert cli.exec_counts_at_status_read == [1]
     assert len([call for call in caller.calls if call and call[0] == "exec"]) == 2
-
-
-def test_save_grants_falls_back_to_a_status_read_when_the_push_fails() -> None:
-    host_id = "host-" + "d" * 32
-    cli = _StatusCountingCli(connector_url=FAKE_CONNECTOR_URL)
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
-    cli.add_share("owner@example.com", host_id)
-    cli.is_grants_push_failing = True
-    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
-
-    document = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
-
-    assert document["enabled"] is True
-    assert document["grants_synced"] is False
-    assert document["invitation_outcomes"] is None
-    assert cli.status_read_count == 1
-
-
-def test_save_grants_reports_a_connector_that_refuses_the_push_as_unpublished() -> None:
-    # Materials in the workspace, but the share is inactive at the connector.
-    host_id = "host-" + "d" * 32
-    cli = _StatusCountingCli(connector_url=FAKE_CONNECTOR_URL)
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
-    cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
-    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
-
-    document = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
-
-    assert document["enabled"] is False
-    assert document["grants_synced"] is None
-    assert cli.status_read_count == 0
-    assert cli.pushed_grants_documents == []
-
-
-def test_save_grants_reports_the_identities_the_push_answered_and_caches_them(tmp_path: Path) -> None:
-    # Before the write the sidecar carries what this desktop knows (one lookup
-    # per unknown id); after the push the connector's records win and are
-    # cached, so the next save costs no lookup.
-    host_id = "host-" + "d" * 32
-    cli = _UserShowingCli(
-        connector_url=FAKE_CONNECTOR_URL,
-        identity_by_user_id={"user-gleb": UserIdentityCliInfo(user_id="user-gleb", email="gleb@example.com")},
-        identities_to_return=[UserIdentityCliInfo(user_id="user-gleb", email="gleb@example.com", display_name="Gleb")],
-    )
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
-    cli.add_share("owner@example.com", host_id)
-    cache = IdentityCache(path=tmp_path / "identity_cache.json")
-    grants = SharingGrantsDocument(workspace=SharingGrantList(users=("user-gleb",)))
-
-    first = _save_grants_with_cli(
-        host_id, "agent-" + "c" * 32, grants, cli, "owner@example.com", service_labels={}, identity_cache=cache
-    )
-    second = _save_grants_with_cli(
-        host_id, "agent-" + "c" * 32, grants, cli, "owner@example.com", service_labels={}, identity_cache=cache
-    )
-
-    assert first["identities"]["user-gleb"]["display_name"] == "Gleb"
-    assert second["identities"]["user-gleb"]["display_name"] == "Gleb"
-    assert cli.shown_user_ids == ["user-gleb"]
 
 
 # The grants push behind every save while published (specs/inviting-granted-visitors/spec.md, P7)
@@ -1109,12 +967,9 @@ def test_publish_pushes_the_document_as_its_last_step() -> None:
     )
 
     assert document["grants_synced"] is True
-    assert document["invitation_outcomes"] == []
     ((account, pushed_host_id, pushed),) = cli.pushed_grants_documents
     assert (account, pushed_host_id) == ("owner@example.com", host_id)
     assert pushed["workspace"]["emails"] == ["friend@example.com"]
-    # The connector mirrors the grantees from the push: no launch of its own for them.
-    assert not any("set-grantees" in argv or "contacts" in argv for argv in caller.calls)
 
 
 def test_save_while_published_pushes_the_saved_document_and_reports_a_failed_push() -> None:

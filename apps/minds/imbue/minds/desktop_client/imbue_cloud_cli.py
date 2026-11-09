@@ -421,19 +421,6 @@ class InvitationOutcomeCliEntry(WireModel):
     last_visited_at: str | None = None
 
 
-class ShareGrantsPushCliResult(WireModel):
-    """Result of `mngr imbue_cloud shares push-grants`: what the push appended, and what the connector now knows of the share.
-
-    ``share``, ``outcomes``, and ``identities`` are None against a connector
-    that predates them: not said, never "none".
-    """
-
-    appended: int = 0
-    share: ShareCliInfo | None = None
-    outcomes: tuple[InvitationOutcomeCliEntry, ...] | None = None
-    identities: tuple[UserIdentityCliInfo, ...] | None = None
-
-
 class NotificationPreferencesCliInfo(WireModel):
     """Result of `mngr imbue_cloud account notification-preferences show|set`."""
 
@@ -1065,6 +1052,14 @@ class ImbueCloudCli(MutableModel):
             raise ImbueCloudCliError("Malformed shares list output: expected a list of share objects")
         return [ShareCliInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
 
+    def set_share_grantees(self, *, account: str, host_id: str, grantee_user_ids: Sequence[str]) -> None:
+        """Replace the share's grantee index (discovery only; the grants file stays the authority)."""
+        args = ["shares", "set-grantees", host_id, "--account", account]
+        for user_id in grantee_user_ids:
+            args.extend(["--user-id", user_id])
+        result = self._run(args, cg_name="imbue-cloud-shares-set-grantees")
+        self._expect_success(result, "shares set-grantees")
+
     def _share_refusal_from(self, result: MngrCallResult, command_repr: str) -> ImbueCloudShareRefusedCliError | None:
         """The typed refusal a failed push or invitation carries, or None when the failure is something else."""
         if result.returncode == 0:
@@ -1080,18 +1075,12 @@ class ImbueCloudCli(MutableModel):
         refused.stderr = result.stderr
         return refused
 
-    def push_share_grants(
-        self, *, account: str, host_id: str, document: Mapping[str, Any]
-    ) -> ShareGrantsPushCliResult:
-        """Record the workspace's grants document in the connector's centralized grants table.
+    def push_share_grants(self, *, account: str, host_id: str, document: Mapping[str, Any]) -> int:
+        """Record the workspace's grants document in the connector's centralized grants table; returns the events appended.
 
-        The connector mirrors the granted accounts into the share's index and
-        the owner's contacts itself, and answers the share's status, the
-        invitation outcomes, and the grantees' identities, so a save or a load
-        of the share panel costs this one connector call. Raises
-        :class:`ImbueCloudShareRefusedCliError` (code ``not_published``) while
-        the workspace is unpublished. The document travels via a temp file like
-        a sync record, since it can be long.
+        Raises :class:`ImbueCloudShareRefusedCliError` (code ``not_published``)
+        while the workspace is unpublished. The document travels via a temp
+        file like a sync record, since it can be long.
         """
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
             os.fchmod(handle.fileno(), 0o600)
@@ -1108,9 +1097,8 @@ class ImbueCloudCli(MutableModel):
         if refused is not None:
             raise refused
         body = self._expect_success(result, "shares push-grants")
-        if not isinstance(body, dict):
-            raise ImbueCloudCliError("Malformed shares push-grants output: expected an object")
-        return ShareGrantsPushCliResult.model_validate(body)
+        appended = body.get("appended") if isinstance(body, dict) else None
+        return int(appended) if isinstance(appended, int) else 0
 
     def invite_grantee(
         self,
@@ -1391,6 +1379,14 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-users-show",
         )
         return self._identity_or_none_on_miss(result, "users show")
+
+    def add_contact(self, *, account: str, user_id: str) -> None:
+        """Add ``user_id`` to the account's contacts (idempotent; the contact is never notified)."""
+        result = self._run(
+            ["contacts", "add", user_id, "--account", account],
+            cg_name="imbue-cloud-contacts-add",
+        )
+        self._expect_success(result, "contacts add")
 
     # Account (plan + entitlements + usage)
 

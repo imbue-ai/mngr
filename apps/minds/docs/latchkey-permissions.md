@@ -909,8 +909,7 @@ off: granting goes through the request flow alone. The design is `specs/remote-e
 
 Imbue Studio exposes a cross-workspace management API (`/api/v1/workspaces/...`)
 that lets an agent in one workspace act on *other* workspaces -- listing,
-reading detail/version/size/backup catalog and the cloud connections a
-workspace can be created on, creating, destroying, starting/stopping,
+reading detail/version/backups, creating, destroying, starting/stopping,
 exporting and managing backups, establishing SSH access, updating settings,
 saving a workspace's keyboard-shortcut changes to its account, and recovering
 (health check / restart, and a machine resize, which ends in a restart). It is

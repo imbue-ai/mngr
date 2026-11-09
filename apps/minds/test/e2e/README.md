@@ -7,7 +7,6 @@ UI-driven E2E tests that launch a packaged `Imbue Studio.app` Electron build and
 | Driver | What it asserts | Needs lima? | Runs in |
 |---|---|---|---|
 | `macos-launch.spec.js` (Playwright) | App launches; the window renders; Python backend binds; a real SPA landing page is visible (home settings launcher, the start flow's transcript, consent notice button, or the workspace iframe of a restored session). Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-launch-to-msg.yml` `macos_launch` job on `macos-latest`, twice-daily schedule + dispatch. ~5 min. |
-| `macos-lifecycle.spec.js` (Playwright) | The macOS windowless states (#480-#483): with no window open, a dock reopen, an `imbue-studio://` deeplink, a backend crash, or a window closed mid-startup still leads to a window showing the app's real state. Each case relaunches the app. | no | The same `macos_launch` job, after `macos-launch.spec.js`. |
 | `scripts/launch_to_msg_e2e.py` (Python over CDP) | Drives the full Electron flow: launch → auth → create LIMA workspace → first agent message → assert nonce-verified reply. Also runs the slack-permission-flow sub-scenario (mock Slack via /etc/hosts + cert + socat, see below). | yes (nested virt) | `minds-launch-to-msg.yml` `verify` job on the self-hosted `minds-runner` MacBook. |
 
 ## Running locally
