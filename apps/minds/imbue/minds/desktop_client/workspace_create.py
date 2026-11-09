@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.data_types import ConnectionView
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
@@ -198,14 +199,19 @@ class CloudAccountOption(FrozenModel):
     )
 
 
-def available_cloud_account_options(connection_store: ConnectionStore | None) -> list[CloudAccountOption]:
-    """The create form's connection rows: only connections whose credentials are usable here."""
+def available_connection_views(connection_store: ConnectionStore | None) -> list[ConnectionView]:
+    """The connections a create may target: only those whose credentials are usable here, in the store's order."""
     if connection_store is None:
         return []
+    return [
+        view for view in connection_store.list_all_views() if view.availability is ConnectionAvailability.AVAILABLE
+    ]
+
+
+def available_cloud_account_options(connection_store: ConnectionStore | None) -> list[CloudAccountOption]:
+    """The create form's connection rows, one per usable connection."""
     options: list[CloudAccountOption] = []
-    for view in connection_store.list_all_views():
-        if view.availability is not ConnectionAvailability.AVAILABLE:
-            continue
+    for view in available_connection_views(connection_store):
         backend = connection_backend_from_name(view.backend)
         options.append(
             CloudAccountOption(

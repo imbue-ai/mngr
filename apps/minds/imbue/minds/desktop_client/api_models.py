@@ -400,7 +400,10 @@ class CreateWorkspaceRequest(ApiRequestModel):
     disk_gb: int | None = Field(
         default=None,
         ge=1,
-        description="Data disk in whole GB for the LIMA mode (the btrfs disk the workspace's data lives on); ignored elsewhere",
+        description=(
+            "Disk in whole GB: the root disk of the VM for the AWS / GCP / AZURE modes (the workspace's data "
+            "volume is carved from it, about 20 GB smaller), the btrfs data disk for the LIMA mode; ignored elsewhere"
+        ),
     )
     modal_sandbox_timeout_seconds: int | None = Field(
         default=None,
@@ -415,7 +418,7 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None,
         description=(
             "Cloud connection to create on: the ``<backend>_<hex>`` connection instance name "
-            "(the ``name`` from /desktop/cloud-accounts). When set, launch_mode must match the "
+            "(the ``name`` GET /workspaces/cloud-accounts lists). When set, launch_mode must match the "
             "connection's backend and the create targets that provider instance."
         ),
     )
@@ -863,6 +866,14 @@ class CloudAccountSummary(FrozenModel):
     )
 
 
+class CloudAccountsResponse(FrozenModel):
+    """The cloud connections a workspace can be created on from this device (``GET /workspaces/cloud-accounts``)."""
+
+    cloud_accounts: tuple[CloudAccountSummary, ...] = Field(
+        description="Connections whose credentials are usable here, in the create form's order"
+    )
+
+
 class LocalCredentialProfileResponse(FrozenModel):
     """One login on this machine a local-profile connection can name."""
 
@@ -925,7 +936,40 @@ class WorkspaceSummary(FrozenModel):
         default=None, description="Signed-in account id the workspace is associated with, when any"
     )
     account_email: str | None = Field(default=None, description="Email of the associated signed-in account, when any")
-    provider_name: str | None = Field(default=None, description="Provider backend name")
+    provider_name: str | None = Field(
+        default=None,
+        description=(
+            "The mngr provider instance the workspace runs on: a cloud connection's instance name "
+            "(``<backend>_<hex>``, the value a create request takes as ``cloud_account``), else the backend name"
+        ),
+    )
+    launch_mode: LaunchMode | None = Field(
+        default=None,
+        description=(
+            "The compute provider the workspace was created with, stamped at create or read off the provider "
+            "instance it runs on; null for a provider the app does not create on"
+        ),
+    )
+    instance_type: str | None = Field(
+        default=None,
+        description=(
+            "The cloud instance type the workspace was created with (AWS / GCP / AZURE); null for the other modes, "
+            "for a create that took the connection's default, and for a workspace created before it was stamped"
+        ),
+    )
+    cpu_count: int | None = Field(
+        default=None, description="CPUs of the host, as its provider recorded; null when unknown"
+    )
+    memory_gb: float | None = Field(
+        default=None, description="Memory of the host in GB, as its provider recorded; null when unknown"
+    )
+    disk_gb: float | None = Field(
+        default=None,
+        description=(
+            "Disk of the host in GB, as its provider recorded: the root disk for AWS / GCP / AZURE, the data disk "
+            "for LIMA and IMBUE_CLOUD; null when unknown or uncapped"
+        ),
+    )
     create_time: str | None = Field(default=None, description="Create time (UTC ISO 8601)")
     original_minds_version: str | None = Field(
         default=None, description="Immutable create-time Imbue Studio version label"

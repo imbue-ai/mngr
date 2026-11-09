@@ -93,6 +93,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
+from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
@@ -150,6 +151,7 @@ from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
@@ -7178,3 +7180,156 @@ def test_visiting_agents_routes_require_auth_and_a_known_workspace(tmp_path: Pat
     assert unknown_host.status_code == 404, unknown_host.data
     # Only the resolved coordinate reached the workspace's CLI.
     assert len(_agent_access_exec_commands(caller)) == 1
+
+
+class _PlacementSeededResolver(StaticBackendResolver):
+    """Static resolver carrying the display info and labels the workspace listing reads."""
+
+    display_info_by_agent_id: dict[str, AgentDisplayInfo] = Field(default_factory=dict, frozen=True)
+    labels_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return self.display_info_by_agent_id.get(str(agent_id))
+
+    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
+        return self.labels_by_agent_id.get(str(agent_id), {}).get(label_key)
+
+
+def test_list_workspaces_reports_the_placement_and_size_discovery_recorded(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """An agent inside a workspace reads its own placement and size here rather than off the sandbox."""
+    agent_id = AgentId()
+    host_id = HostId()
+    connection = f"aws_{uuid4().hex}"
+    resolver = _PlacementSeededResolver(
+        url_by_agent_and_service={str(agent_id): {}},
+        display_info_by_agent_id={
+            str(agent_id): AgentDisplayInfo(
+                agent_name="system-services", host_id=str(host_id), provider_name=connection
+            )
+        },
+        labels_by_agent_id={str(agent_id): {"launch_mode": "AWS", "instance_type": "t3.2xlarge"}},
+        host_size_by_host_id={str(host_id): DiscoveredHostSize(cpu_count=8, memory_gb=32.0, disk_gb=300.0)},
+    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver)
+
+    response = client.get("/api/v1/workspaces", headers=_auth_header())
+
+    assert response.status_code == 200
+    (workspace,) = json.loads(response.data)["workspaces"]
+    assert workspace["provider_name"] == connection
+    assert workspace["launch_mode"] == "AWS"
+    assert workspace["instance_type"] == "t3.2xlarge"
+    assert workspace["cpu_count"] == 8
+    assert workspace["memory_gb"] == 32.0
+    assert workspace["disk_gb"] == 300.0
+
+
+@pytest.mark.parametrize(
+    ("labels", "connection_backend", "expected_launch_mode"),
+    [
+        ({}, "gcp", "GCP"),
+        ({"launch_mode": "SPACE"}, "azure", "AZURE"),
+    ],
+    ids=["created-before-the-stamp", "stamped-with-a-value-that-is-not-a-mode"],
+)
+def test_list_workspaces_reads_the_launch_mode_off_the_provider_instance_when_the_stamp_is_unusable(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    labels: dict[str, str],
+    connection_backend: str,
+    expected_launch_mode: str,
+) -> None:
+    """A workspace without a usable ``launch_mode`` label is still placed: its provider instance implies the mode."""
+    agent_id = AgentId()
+    resolver = _PlacementSeededResolver(
+        url_by_agent_and_service={str(agent_id): {}},
+        display_info_by_agent_id={
+            str(agent_id): AgentDisplayInfo(
+                agent_name="system-services", host_id="localhost", provider_name=f"{connection_backend}_{uuid4().hex}"
+            )
+        },
+        labels_by_agent_id={str(agent_id): labels},
+    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver)
+
+    response = client.get("/api/v1/workspaces", headers=_auth_header())
+
+    assert response.status_code == 200
+    (workspace,) = json.loads(response.data)["workspaces"]
+    assert workspace["launch_mode"] == expected_launch_mode
+    assert workspace["instance_type"] is None
+
+
+def test_list_workspaces_reports_null_placement_and_size_when_none_is_recorded(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces", headers=_auth_header())
+
+    assert response.status_code == 200
+    (workspace,) = json.loads(response.data)["workspaces"]
+    assert workspace["launch_mode"] is None
+    assert workspace["instance_type"] is None
+    assert workspace["cpu_count"] is None
+    assert workspace["memory_gb"] is None
+    assert workspace["disk_gb"] is None
+
+
+def test_list_cloud_accounts_names_each_usable_connection_without_its_credentials(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The listing is the create form's connection picker: the ``cloud_account`` value, a masked hint, no secret.
+
+    A connection whose account is locked on this device cannot be created on, so it is left out.
+    """
+    owner_user_id = "11111111-1111-1111-1111-111111111111"
+    locked_user_id = "22222222-2222-2222-2222-222222222222"
+    data_dir = tmp_path / "sessions"
+    paths = InstallationPaths(data_dir=data_dir)
+    unlock_account_with_master_password_for_test(paths, owner_user_id)
+    unlock_account_with_master_password_for_test(paths, locked_user_id)
+    connection_store = make_connection_store_for_test(data_dir)
+    connection_id = ConnectionId.generate()
+    connection_store.add_connection(
+        owner_user_id,
+        connection_id,
+        ConnectionBackend.AWS,
+        "Work AWS",
+        "AKIA…PLE9",
+        {"default_region": "us-west-2", "default_instance_type": "t3.large"},
+        ConnectionCredentials(aws_access_key_id="AKIA1234EXAMPLE9", aws_secret_access_key=SecretStr("very-secret")),
+    )
+    add_modal_connection_for_test(connection_store, locked_user_id, "Locked Modal")
+    delete_dek(paths, locked_user_id)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, connection_store=connection_store)
+
+    response = client.get("/api/v1/workspaces/cloud-accounts", headers=_auth_header())
+
+    assert response.status_code == 200
+    (account,) = json.loads(response.data)["cloud_accounts"]
+    assert account["name"] == provider_instance_name_for_connection(ConnectionBackend.AWS, connection_id)
+    assert account["alias"] == "Work AWS"
+    assert account["backend"] == "aws"
+    assert account["region"] == "us-west-2"
+    assert account["is_region_pinned"] is True
+    assert account["identifier"] == "AKIA…PLE9"
+    assert "very-secret" not in response.get_data(as_text=True)
+    assert "AKIA1234EXAMPLE9" not in response.get_data(as_text=True)
+
+
+def test_list_cloud_accounts_is_empty_without_a_connection_store(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces/cloud-accounts", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"cloud_accounts": []}
+
+
+def test_list_cloud_accounts_requires_bearer(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces/cloud-accounts")
+
+    assert response.status_code == 401
