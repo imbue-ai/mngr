@@ -1335,6 +1335,46 @@ def test_offload_version_pinned_consistently() -> None:
     )
 
 
+# A tag or branch can be moved to new code by whoever controls the action's repo
+# (the 2025 tj-actions/changed-files compromise repointed tags), and that code
+# then runs with the job's secrets and OIDC token. Only a full commit SHA, or a
+# digest for a Docker image, names fixed code.
+_PINNED_ACTION_REF = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}|docker://[^@\s]+@sha256:[0-9a-f]{64}|\./\S+")
+
+
+def _iter_uses_values(node: object) -> list[str]:
+    if isinstance(node, dict):
+        found = [node["uses"]] if isinstance(node.get("uses"), str) else []
+        return found + [value for child in node.values() for value in _iter_uses_values(child)]
+    if isinstance(node, list):
+        return [value for child in node for value in _iter_uses_values(child)]
+    return []
+
+
+def test_every_github_action_is_pinned_to_a_commit_sha() -> None:
+    """Every ``uses:`` in a workflow or composite action names a commit SHA, a Docker digest, or a path in this repo.
+
+    Write the pin as ``owner/repo@<40-hex sha> # vX.Y.Z`` so a reader can see which
+    release it is. This covers GitHub's own ``actions/*`` too.
+    """
+    workflow_files = [
+        path
+        for path in _tracked_present_files()
+        if ".github" in Path(path).parts and Path(path).suffix in (".yml", ".yaml")
+    ]
+    assert workflow_files, "no workflow files were found"
+    unpinned = [
+        f"{path}: {uses}"
+        for path in workflow_files
+        for uses in _iter_uses_values(yaml.safe_load((_REPO_ROOT / path).read_text()))
+        if not _PINNED_ACTION_REF.fullmatch(uses)
+    ]
+    assert not unpinned, (
+        "These actions are referenced by a tag or branch, which can be moved to new code; "
+        "pin each to a full commit SHA (`owner/repo@<sha> # vX.Y.Z`):\n" + "\n".join(f"  {u}" for u in unpinned)
+    )
+
+
 def _transitive_subclass_names(base_names_by_class: dict[str, set[str]], seed_names: set[str]) -> set[str]:
     """Every class name that (transitively, by bare name) inherits one of ``seed_names``, seeds included."""
     subclass_names = set(seed_names)

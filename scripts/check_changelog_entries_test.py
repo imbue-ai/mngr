@@ -156,4 +156,5 @@ def test_main_skips_on_main_branch(tmp_path: Path) -> None:
 
 def test_is_exempt_branch() -> None:
     assert is_exempt_branch("mngr/changelog-consolidation-2026-06-13")
+    assert is_exempt_branch("dependabot/github_actions/github-actions-abc123")
     assert not is_exempt_branch("mngr/some-feature")
