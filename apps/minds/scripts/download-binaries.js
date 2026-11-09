@@ -1111,25 +1111,12 @@ function assertTreeFitsUploadBudget(rootDir, { uploadSizeLimitMb, label }) {
  * - Icons / entitlements: individual small files; the icon is counted for
  *   completeness, the rest is noise.
  *
- * Only the appFiles shapes this repo uses are supported: a positive `**`
- * plus `!<dir>/**` exclusions. Any other shape throws, so the estimate can
+ * Only the appFiles shapes this repo uses are supported (see
+ * parseAppFilesExclusions). Any other shape throws, so the estimate can
  * never silently diverge from the real zip's selection semantics.
  */
 function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
-  const appFilesGlobs = todesktopConfig.appFiles || ['**'];
-  const excludedPrefixes = [];
-  for (const glob of appFilesGlobs) {
-    if (glob === '**') continue;
-    const exclusionMatch = /^!([A-Za-z0-9._/-]+)\/\*\*$/.exec(glob);
-    if (exclusionMatch) {
-      excludedPrefixes.push(exclusionMatch[1] + '/');
-      continue;
-    }
-    throw new Error(
-      `estimateToDesktopUploadBytes only understands '**' and '!<dir>/**' appFiles ` +
-      `patterns; got ${JSON.stringify(glob)}. Extend the estimator alongside todesktop.js.`,
-    );
-  }
+  const exclusions = parseAppFilesExclusions(todesktopConfig.appFiles || ['**']);
 
   let appFilesBytes = 0;
   const walkAppFiles = (dir, relativePrefix) => {
@@ -1138,11 +1125,11 @@ function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
       const relativePath = relativePrefix + entry.name;
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
-        if (excludedPrefixes.some((prefix) => (relativePath + '/').startsWith(prefix))) continue;
+        if (exclusions.isExcludedDirectory(relativePath)) continue;
         walkAppFiles(path.join(dir, entry.name), relativePath + '/');
       } else if (entry.isFile()) {
         if (entry.name === '.gitignore') continue;
-        if (excludedPrefixes.some((prefix) => relativePath.startsWith(prefix))) continue;
+        if (exclusions.isExcludedFile(relativePath)) continue;
         appFilesBytes += fs.lstatSync(path.join(dir, entry.name)).size;
       }
     }
@@ -1163,6 +1150,56 @@ function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
     extraBytes += fs.lstatSync(path.resolve(appRoot, todesktopConfig.icon)).size;
   }
   return { appFilesBytes, extraBytes, totalBytes: appFilesBytes + extraBytes };
+}
+
+/**
+ * Turn todesktop.js's `appFiles` globs into the two exclusion tests the
+ * estimator's walk applies, with fast-glob's semantics (the CLI globs with
+ * it): a pattern without a slash is matched against the top-level entry
+ * only, so `!.env` drops the root `.env` and leaves a nested one in.
+ *
+ * Only the shapes this repo uses are understood: the positive `**`,
+ * `!<dir>/**` directory exclusions, and the root-level file exclusions
+ * `!<file>` and `!<name>.*`. Any other shape throws, so a todesktop.js edit
+ * that the estimator cannot price fails the build instead of skewing it.
+ */
+function parseAppFilesExclusions(appFilesGlobs) {
+  const excludedDirectoryPrefixes = [];
+  const excludedRootFileNames = [];
+  const excludedRootFilePrefixes = [];
+  for (const glob of appFilesGlobs) {
+    if (glob === '**') continue;
+    const directoryMatch = /^!([A-Za-z0-9._/-]+)\/\*\*$/.exec(glob);
+    if (directoryMatch) {
+      excludedDirectoryPrefixes.push(directoryMatch[1] + '/');
+      continue;
+    }
+    const rootFileMatch = /^!([A-Za-z0-9._-]+)$/.exec(glob);
+    if (rootFileMatch) {
+      excludedRootFileNames.push(rootFileMatch[1]);
+      continue;
+    }
+    const rootPrefixMatch = /^!([A-Za-z0-9._-]+)\.\*$/.exec(glob);
+    if (rootPrefixMatch) {
+      excludedRootFilePrefixes.push(rootPrefixMatch[1] + '.');
+      continue;
+    }
+    throw new Error(
+      `estimateToDesktopUploadBytes only understands '**', '!<dir>/**', '!<file>' and '!<name>.*' ` +
+      `appFiles patterns; got ${JSON.stringify(glob)}. Extend the estimator alongside todesktop.js.`,
+    );
+  }
+  const isExcludedDirectory = (relativePath) =>
+    excludedDirectoryPrefixes.some((prefix) => (relativePath + '/').startsWith(prefix));
+  const isExcludedFile = (relativePath) => {
+    if (excludedDirectoryPrefixes.some((prefix) => relativePath.startsWith(prefix))) return true;
+    if (relativePath.includes('/')) return false;
+    return (
+      excludedRootFileNames.includes(relativePath) ||
+      excludedRootFilePrefixes.some((prefix) => relativePath.startsWith(prefix))
+    );
+  };
+  return { isExcludedDirectory, isExcludedFile };
 }
 
 /**
@@ -1400,6 +1437,7 @@ module.exports = {
   convertGitPayloadSymlinksToShims,
   measureTreeAsArchived,
   assertTreeFitsUploadBudget,
+  parseAppFilesExclusions,
   estimateToDesktopUploadBytes,
   assertUploadFitsToDesktopLimit,
 };
