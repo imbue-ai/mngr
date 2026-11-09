@@ -94,6 +94,19 @@ deploy-apt-mirror:
 test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
+# The backup store Worker is deployed per environment by `minds-admin env deploy`
+# (it renders the per-env wrangler config, creates the bucket, and sets the admin
+# secret); there is no standalone deploy. See apps/backup_store/README.md.
+[group("backup-store ops")]
+deploy-backup-store env:
+  @echo "error: the backup store is deployed by 'minds-admin env deploy' for {{env}} (see apps/backup_store/README.md); there is no standalone deploy recipe" >&2
+  @exit 1
+
+# Run the backup store Worker's vitest suite (workerd runtime, local R2 + Durable Objects).
+[group("backup-store test")]
+test-backup-store-worker:
+  cd apps/backup_store/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
+
 # Run the minds JS suites (Electron shell node:test units + SPA frontend vitest).
 [group("minds test")]
 test-minds-js:

@@ -265,7 +265,7 @@ def test_read_share_grants_returns_none_when_absent(tmp_path: Path) -> None:
     # inside the envelope -- and mngr's own status line must not read as content.
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
 
-    assert read_share_grants_from_agent(AgentId(), caller) is None
+    assert read_share_grants_from_agent(AgentId(), caller, 5.0) is None
 
 
 @_requires_flock
@@ -278,7 +278,7 @@ def test_read_share_grants_round_trips_the_document_through_the_exec_envelope(tm
     agent_id = AgentId()
     provision_share_files_in_agent(agent_id, grants_text, None, None, caller)
 
-    assert read_share_grants_from_agent(agent_id, caller) == grants_text
+    assert read_share_grants_from_agent(agent_id, caller, 5.0) == grants_text
 
 
 def test_read_share_grants_requests_the_json_envelope() -> None:
@@ -290,7 +290,7 @@ def test_read_share_grants_requests_the_json_envelope() -> None:
         )
     )
 
-    assert read_share_grants_from_agent(AgentId(), recording) == grants_text
+    assert read_share_grants_from_agent(AgentId(), recording, 5.0) == grants_text
     assert recording.calls[0][-2:] == ["--format", "json"]
 
 
@@ -300,7 +300,7 @@ def test_read_share_grants_raises_on_exec_failure() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
 
     with pytest.raises(ShareInjectionError):
-        read_share_grants_from_agent(AgentId(), caller)
+        read_share_grants_from_agent(AgentId(), caller, 5.0)
 
 
 def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
@@ -309,7 +309,7 @@ def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="[workspace]\nnot an envelope"))
 
     with pytest.raises(ShareInjectionError):
-        read_share_grants_from_agent(AgentId(), caller)
+        read_share_grants_from_agent(AgentId(), caller, 5.0)
 
 
 def test_clear_share_publication_keeps_the_grants_document_and_is_best_effort() -> None:

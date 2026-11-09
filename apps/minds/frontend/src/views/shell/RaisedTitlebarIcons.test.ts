@@ -1,6 +1,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShellState } from "./shell-state";
+import type { AccountSwitcherLabel } from "./AccountSwitcher";
 import type { TitlebarPopupId } from "./RaisedTitlebarIcons";
 import {
   RaisedTitlebarIcons,
@@ -12,6 +13,7 @@ import type { AnyVnode } from "../../testing";
 import { allText, attrsOf, classTokensOf, collectVnodes } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
+const NO_ACCOUNT_LABEL: AccountSwitcherLabel = { name: "", isSignedOut: false };
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,7 +44,7 @@ function renderStrip(
   onSelect: (id: TitlebarPopupId) => void = () => undefined,
   onDismiss: () => void = () => undefined,
   hasWorkspaceRequestDot = false,
-  accountLabel = "",
+  accountLabel: AccountSwitcherLabel = NO_ACCOUNT_LABEL,
   status: TitlebarStatus | null = null,
 ): AnyVnode {
   stubTitlebar(ids);
@@ -197,15 +199,36 @@ describe("the raised titlebar icon strip", () => {
       undefined,
       undefined,
       false,
-      "Alice Nguyen",
+      { name: "Alice Nguyen", isSignedOut: false },
     );
     const switcher = icon(strip, "account");
 
     expect(attrsOf(switcher).id).toBe("account-switcher-btn-raised");
     expect(attrsOf(switcher)["aria-label"]).toBe("Switch account");
     expect(allText(switcher)).toContain("Alice Nguyen");
+    expect(allText(switcher)).not.toContain("(signed out)");
     // The name is the switcher's alone: the other icons stay bare.
     expect(allText(icon(strip, "notifications"))).not.toContain("Alice Nguyen");
+  });
+
+  it("marks the switcher's copy signed out as the real button does, without taking the real name span's id", () => {
+    const strip = renderStrip(
+      ["account-switcher-btn"],
+      "notifications",
+      undefined,
+      undefined,
+      false,
+      { name: "carol@example.com", isSignedOut: true },
+    );
+    const switcher = icon(strip, "account");
+
+    expect(allText(switcher)).toContain("carol@example.com");
+    expect(allText(switcher)).toContain("(signed out)");
+    expect(
+      collectVnodes(switcher).some(
+        (vnode) => attrsOf(vnode).id === "account-switcher-name",
+      ),
+    ).toBe(false);
   });
 
   it("raises the status pill over the real one, still clickable, and only while the titlebar shows one", () => {
@@ -225,7 +248,7 @@ describe("the raised titlebar icon strip", () => {
       );
 
     const withPill = raisedPill(
-      renderStrip(["titlebar-status-pill", "help-toggle"], "help", undefined, undefined, false, "", status),
+      renderStrip(["titlebar-status-pill", "help-toggle"], "help", undefined, undefined, false, NO_ACCOUNT_LABEL, status),
     );
     expect(withPill, "no raised status pill").toBeDefined();
     expect(String(attrsOf(withPill as AnyVnode).style)).toContain("left: 100px; top: 5px");
@@ -236,7 +259,7 @@ describe("the raised titlebar icon strip", () => {
     expect(clicks).toBe(1);
 
     expect(
-      raisedPill(renderStrip(["help-toggle"], "help", undefined, undefined, false, "", status)),
+      raisedPill(renderStrip(["help-toggle"], "help", undefined, undefined, false, NO_ACCOUNT_LABEL, status)),
     ).toBeUndefined();
   });
 });

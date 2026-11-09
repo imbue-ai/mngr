@@ -1,13 +1,14 @@
-"""Client-side backup trim flow: free storage for an over-quota account.
+"""Client-side backup trim flow: free storage for an account over its backup quota.
 
-An account over its storage quota has read-only bucket keys, and restic's
-space reclaim (``forget`` + ``prune``) needs write access, so the flow runs
-under a connector cleanup grant: request the grant (temporarily restoring
-readwrite), forget the oldest half of every reachable repository's snapshots
-(never the latest), prune, recheck (settling the grant and re-measuring live
-usage), and repeat until the account is under quota or nothing is left to
-trim. Repositories whose canonical ``restic.env`` is not on this machine are
-skipped and reported by name.
+The backup store refuses new backup data once an account is past its hard
+limit, which sits a headroom above the soft quota so restic can still reclaim
+space (prune repacks, which writes new packs before it deletes the old ones).
+The flow is: forget the oldest half of every reachable repository's snapshots
+(never the latest), prune with a repack cap of half that headroom, re-read the
+account's usage, and repeat until the account is under its soft quota or
+nothing is left to trim. Repositories whose canonical ``restic.env`` is not on
+this machine are reported by name; workspaces still on legacy bucket storage
+are counted and left alone, since the store's usage does not include them.
 
 The flow runs on a detached daemon thread (like backup provisioning); the
 Accounts page polls its progress from :class:`BackupTrimManager`.
@@ -29,7 +30,11 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import backup_env_dir
+from imbue.minds.desktop_client.backup_env_store import is_legacy_bucket_repository
+from imbue.minds.desktop_client.backup_env_store import parse_backup_store_repository
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
+from imbue.minds.desktop_client.backup_env_store import split_backup_bucket_name_from_env
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupStorageUsage
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -37,6 +42,7 @@ from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
+from imbue.minds.desktop_client.restic_cli import prune_repository
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import BackupProvisioningError
 
@@ -66,26 +72,40 @@ class BackupTrimStatus(FrozenModel):
 
 
 class TrimmableRepo(FrozenModel):
-    """One locally-reachable restic repository, keyed by its full bucket name."""
+    """One locally-reachable backup-store repository, keyed by its workspace id."""
 
-    bucket_name: str = Field(description="Full R2 bucket name the repository lives in")
-    repository: str = Field(description="restic repository URL (s3:<endpoint>/<bucket>)")
+    workspace_id: str = Field(description="The workspace whose repository this is")
+    repository: str = Field(description="restic repository URL (rest:<store>/<user>/<workspace>/)")
     password: str = Field(description="The workspace's RESTIC_PASSWORD (may be empty)")
-    backend_env: dict[str, str] = Field(description="Backend credential env vars (AWS_* etc.)")
+    backend_env: dict[str, str] = Field(description="Backend credential env vars (RESTIC_REST_* etc.)")
+
+
+class TrimmableRepoCollection(FrozenModel):
+    """What this machine's canonical envs hold for one account: trimmable store repositories and legacy leftovers."""
+
+    repo_by_workspace_id: dict[str, TrimmableRepo] = Field(description="Backup-store repositories, by workspace id")
+    legacy_repository_count: int = Field(
+        description="This account's envs still on a legacy bucket (not yet migrated, so not counted by the store)"
+    )
 
 
 @pure
-def bucket_name_from_repository(repository: str) -> str | None:
-    """Extract the bucket name from a restic S3 repository URL (``s3:<endpoint>/<bucket>[/...]``)."""
-    if not repository.startswith("s3:"):
-        return None
-    remainder = repository[len("s3:") :]
-    scheme_split = remainder.split("://", 1)
-    path_part = scheme_split[1] if len(scheme_split) == 2 else scheme_split[0]
-    segments = [segment for segment in path_part.split("/") if segment]
-    if len(segments) < 2:
-        return None
-    return segments[1]
+def user_segment_for(user_id: str) -> str:
+    """The backup store's user path segment: the SuperTokens user id with hyphens stripped."""
+    return user_id.replace("-", "")
+
+
+@pure
+def legacy_owner_prefix_for(user_segment: str) -> str:
+    """The legacy bucket owner prefix of the same account: the segment's first 16 characters."""
+    return user_segment[:16]
+
+
+@pure
+def max_repack_bytes_for(usage: BackupStorageUsage) -> int | None:
+    """Half the hard-limit headroom, the repack cap that keeps one prune's transient growth inside it."""
+    headroom = max(usage.hard_limit_bytes - usage.quota_bytes, 0)
+    return headroom // 2 if headroom > 0 else None
 
 
 @pure
@@ -100,17 +120,21 @@ def select_snapshot_ids_to_forget(snapshots: Sequence[ResticSnapshot]) -> list[s
     return [snapshot.snapshot_id for snapshot in ordered[:forget_count]]
 
 
-def collect_trimmable_repos(paths: InstallationPaths) -> dict[str, TrimmableRepo]:
-    """Parse every canonical restic env on this machine, keyed by full bucket name.
+def collect_trimmable_repos(paths: InstallationPaths, *, user_segment: str) -> TrimmableRepoCollection:
+    """Parse every canonical restic env on this machine into the account's trimmable repositories.
 
-    Only S3-style repositories (the imbue_cloud backup shape) are included;
-    an unreadable env file is skipped with a warning rather than failing the
+    Only backup-store repositories owned by ``user_segment`` are trimmable;
+    the account's legacy bucket repositories (workspaces the store migration
+    has not reached yet) are counted, and everything else is another
+    account's or a bring-your-own backend that is not ours to trim. An
+    unreadable env file is skipped with a warning rather than failing the
     whole trim.
     """
     env_dir = backup_env_dir(paths)
     if not env_dir.is_dir():
-        return {}
+        return TrimmableRepoCollection(repo_by_workspace_id={}, legacy_repository_count=0)
     repos: dict[str, TrimmableRepo] = {}
+    legacy_count = 0
     for env_path in sorted(env_dir.glob("*.env")):
         try:
             content = env_path.read_text()
@@ -119,24 +143,30 @@ def collect_trimmable_repos(paths: InstallationPaths) -> dict[str, TrimmableRepo
             continue
         parsed = parse_restic_env(content)
         repository = parsed.get("RESTIC_REPOSITORY", "")
-        bucket_name = bucket_name_from_repository(repository)
-        if bucket_name is None:
+        if is_legacy_bucket_repository(repository):
+            legacy_bucket = split_backup_bucket_name_from_env(content)
+            if legacy_bucket is not None and legacy_bucket[0] == legacy_owner_prefix_for(user_segment):
+                legacy_count += 1
+            continue
+        store = parse_backup_store_repository(repository)
+        if store is None or store.user_segment != user_segment:
             continue
         backend_env = {
             key: value for key, value in parsed.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")
         }
-        repos[bucket_name] = TrimmableRepo(
-            bucket_name=bucket_name,
+        repos[store.workspace_id] = TrimmableRepo(
+            workspace_id=store.workspace_id,
             repository=repository,
             password=parsed.get("RESTIC_PASSWORD", ""),
             backend_env=backend_env,
         )
-    return repos
+    return TrimmableRepoCollection(repo_by_workspace_id=repos, legacy_repository_count=legacy_count)
 
 
 def run_backup_trim(
     *,
     account_email: str,
+    user_id: str,
     cli: ImbueCloudCli,
     paths: InstallationPaths,
     report_progress: Callable[[str], None],
@@ -144,40 +174,35 @@ def run_backup_trim(
     # functions of the same names.
     list_snapshots_fn: Callable[..., tuple[ResticSnapshot, ...]],
     forget_snapshots_fn: Callable[..., None],
+    prune_fn: Callable[..., None],
 ) -> tuple[bool, str]:
-    """Trim old snapshots in rounds until the account is under its storage quota.
+    """Trim old snapshots in rounds until the account is under its backup quota.
 
     Returns ``(is_under_quota, human-readable outcome detail)``. Raises
     ``ImbueCloudCliError`` / ``BackupProvisioningError`` on a failed
     connector call or restic invocation; the caller records those as the
     run's failure outcome.
     """
-    initial = cli.recheck_storage(account_email)
-    if not bool(initial.get("is_over_quota")):
-        return True, "Backup storage is already under its limit; backups are writable."
+    usage = cli.get_backup_usage(account_email)
+    if usage.used_bytes <= usage.quota_bytes:
+        return True, "Backup storage is already under its limit."
+    max_repack_bytes = max_repack_bytes_for(usage)
 
-    repos = collect_trimmable_repos(paths)
-    untrimmable_names: list[str] = []
+    collection = collect_trimmable_repos(paths, user_segment=user_segment_for(user_id))
+    repos = collection.repo_by_workspace_id
+    server_workspace_ids = sorted({info.workspace_id for info in cli.list_backup_repositories(account_email)})
+    untrimmable_ids = [workspace_id for workspace_id in server_workspace_ids if workspace_id not in repos]
+    # A local env whose repository the store no longer lists (reaped
+    # elsewhere, or re-keyed by another device) cannot be opened, so only the
+    # repositories known on both sides are trimmed.
+    trimmable_ids = [workspace_id for workspace_id in server_workspace_ids if workspace_id in repos]
+
     for round_idx in range(_MAX_TRIM_ROUNDS):
-        # The grant restores the downgraded keys (idempotent while active)
-        # and tells us which buckets the account has keys for.
-        grant = cli.create_storage_cleanup_grant(account_email)
-        raw_keys = grant.get("keys") or []
-        bucket_names = sorted(
-            {
-                str(entry.get("bucket_name"))
-                for entry in raw_keys
-                if isinstance(entry, dict) and entry.get("bucket_name")
-            }
-        )
-        untrimmable_names = [name for name in bucket_names if name not in repos]
-
-        # Forget the oldest half of each reachable repo's snapshots and prune.
+        # Forget the oldest half of each reachable repo's snapshots, then
+        # reclaim the space with a repack cap that fits the headroom.
         is_any_forgotten = False
-        for bucket_name in bucket_names:
-            repo = repos.get(bucket_name)
-            if repo is None:
-                continue
+        for workspace_id in trimmable_ids:
+            repo = repos[workspace_id]
             snapshots = list_snapshots_fn(
                 repository=repo.repository, backend_env=repo.backend_env, password=repo.password
             )
@@ -186,35 +211,44 @@ def run_backup_trim(
                 continue
             report_progress(
                 f"Round {round_idx + 1}: removing {len(snapshot_ids_to_forget)} of {len(snapshots)} "
-                f"old backups from {bucket_name}..."
+                f"old backups from {workspace_id}..."
             )
             forget_snapshots_fn(
                 repository=repo.repository,
                 backend_env=repo.backend_env,
                 password=repo.password,
                 snapshot_ids=snapshot_ids_to_forget,
-                is_pruning=True,
+            )
+            prune_fn(
+                repository=repo.repository,
+                backend_env=repo.backend_env,
+                password=repo.password,
+                max_repack_bytes=max_repack_bytes,
             )
             is_any_forgotten = True
 
-        # Re-measure and settle: restores keys when under, re-downgrades when
-        # still over (which also settles the grant against its baseline).
         report_progress(f"Round {round_idx + 1}: re-measuring storage usage...")
-        rechecked = cli.recheck_storage(account_email)
-        if not bool(rechecked.get("is_over_quota")):
-            return True, "Backup storage is back under its limit; backups are writable again."
+        usage = cli.get_backup_usage(account_email)
+        if usage.used_bytes <= usage.quota_bytes:
+            return True, "Backup storage is back under its limit; new backups will resume."
         if not is_any_forgotten:
             break
 
     untrimmable_suffix = (
         f" Backups not reachable from this computer (delete their workspaces or clean them up elsewhere): "
-        f"{', '.join(untrimmable_names)}."
-        if untrimmable_names
+        f"{', '.join(untrimmable_ids)}."
+        if untrimmable_ids
+        else ""
+    )
+    legacy_suffix = (
+        f" {collection.legacy_repository_count} backup(s) are still on legacy storage, which the backup store does"
+        " not count, and were not trimmed."
+        if collection.legacy_repository_count
         else ""
     )
     return False, (
         "Still over the storage limit after trimming old backups "
-        "(each workspace keeps at least its latest backup)." + untrimmable_suffix
+        "(each workspace keeps at least its latest backup)." + untrimmable_suffix + legacy_suffix
     )
 
 
@@ -287,6 +321,7 @@ class BackupTrimManager(MutableModel):
         try:
             is_under_quota, detail = run_backup_trim(
                 account_email=account_email,
+                user_id=user_id,
                 cli=cli,
                 paths=paths,
                 report_progress=lambda progress_detail: self._set_status(
@@ -294,6 +329,7 @@ class BackupTrimManager(MutableModel):
                 ),
                 list_snapshots_fn=list_snapshots,
                 forget_snapshots_fn=forget_snapshots,
+                prune_fn=prune_repository,
             )
             self._set_status(user_id, BackupTrimState.SUCCEEDED if is_under_quota else BackupTrimState.FAILED, detail)
         except (BackupProvisioningError, ImbueCloudCliError) as exc:

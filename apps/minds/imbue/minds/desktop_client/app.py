@@ -120,6 +120,7 @@ from imbue.minds.desktop_client.minds_config import effective_auto_update
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.program_resolution import LoginShellPath
 from imbue.minds.desktop_client.provider_display import connection_backend_label_for_name
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
@@ -3026,6 +3027,11 @@ def create_desktop_client(
         mngr_forward_browser_bridge_token=mngr_forward_browser_bridge_token,
         auth_output_format=output_format or OutputFormat.JSONL,
         root_concurrency_group=root_concurrency_group,
+        login_shell_path=(
+            None
+            if root_concurrency_group is None
+            else LoginShellPath(concurrency_group=root_concurrency_group, environment=os.environ)
+        ),
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_binary=mngr_binary,
         mngr_host_dir=resolved_mngr_host_dir,

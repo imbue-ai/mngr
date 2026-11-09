@@ -126,6 +126,16 @@ user id or `local` for the device. Every window is for one account, and sees tha
     the share alone is deleted at the connector, ``outcome: removed``. Idempotent: a share already
     gone answers ``removed``. The same 404, 503 and 502 answers as the GET.
 
+`/api/v1/remote-execution/<device_id>?program=<program>` (POST, bearer or local-socket auth; the session cookie is refused):
+    runs the program named by the query parameter (a bare name or a ``~``-rooted or absolute path, given
+    exactly once; the body carries ``args``, ``cwd`` and ``timeout_seconds``) on this computer as the user
+    and streams its output as NDJSON (``stdout`` / ``stderr`` lines, ``keepalive`` lines, one final
+    ``exit``). Refused with 400 ``invalid_program`` for any other program, with 403
+    ``remote_execution_disabled`` while this device's switch (Settings > This computer) is off, with 404
+    ``unknown_device`` for any other device id, and reachable through the gateway only for a workspace
+    holding a ``remote-execution`` grant for this device (see ``docs/latchkey-permissions.md``). Every
+    command is recorded under ``events/remote_execution/events.jsonl``.
+
 `/api/v1/desktop/cloud-accounts` (POST, cookie or bearer auth):
     registers a cloud connection: body carries the backend (aws / gcp / azure / modal), an alias,
     the credentials, the region for the pinned backends, and the owner (an account's user id, or

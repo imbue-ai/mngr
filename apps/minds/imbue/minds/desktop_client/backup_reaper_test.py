@@ -3,36 +3,43 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 
+from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
 from imbue.minds.desktop_client.backup_env_store import canonical_env_path
+from imbue.minds.desktop_client.backup_env_store import list_archived_envs
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_export import _export_in_flight
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
+from imbue.minds.desktop_client.backup_reaper import BackupTarget
+from imbue.minds.desktop_client.backup_reaper import BackupTargetKind
 from imbue.minds.desktop_client.backup_reaper import ReapCandidate
 from imbue.minds.desktop_client.backup_reaper import _is_bucket_not_found_error
-from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
-from imbue.minds.desktop_client.backup_reaper import bucket_short_name_from_env
-from imbue.minds.desktop_client.backup_reaper import candidate_bucket_short_names
+from imbue.minds.desktop_client.backup_reaper import backup_owner_key_from_env
+from imbue.minds.desktop_client.backup_reaper import backup_target_from_env
+from imbue.minds.desktop_client.backup_reaper import candidate_backup_targets
 from imbue.minds.desktop_client.backup_reaper import collect_destroyed_candidates
+from imbue.minds.desktop_client.backup_reaper import emails_by_backup_owner_key
 from imbue.minds.desktop_client.backup_reaper import evict_oldest_reapable_backup
+from imbue.minds.desktop_client.backup_reaper import is_backup_target_present
 from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
 from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.backup_reaper import user_id_prefix_for
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.testing import FAKE_BACKUP_USER_SEGMENT
+from imbue.minds.desktop_client.testing import legacy_restic_env
+from imbue.minds.desktop_client.testing import store_restic_env
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.mngr.primitives import AgentId
 
-_R2_ENV = (
-    "RESTIC_REPOSITORY=s3:https://acct.r2.cloudflarestorage.com/{prefix}--{host_id}\n"
-    "RESTIC_PASSWORD=pw\nAWS_ACCESS_KEY_ID=k\nAWS_SECRET_ACCESS_KEY=s\n"
-)
 _BYO_ENV = "RESTIC_REPOSITORY=s3:https://s3.amazonaws.com/my-own-bucket\nRESTIC_PASSWORD=pw\n"
 
 _AGENT_OLD = "agent-" + "a" * 32
@@ -47,13 +54,17 @@ _AGENT_LIVE = "agent-" + "2" * 32
 
 
 class _RecordingReaperCli(FakeImbueCloudCli):
-    """FakeImbueCloudCli that records force-destroys and simulates configurable outcomes."""
+    """FakeImbueCloudCli that records destroys (legacy buckets and store repositories) and simulates outcomes."""
 
     destroyed_names: list[str] = Field(default_factory=list)
     failing_bucket_names: set[str] = Field(default_factory=set)
     existing_bucket_names: set[str] | None = Field(
         default=None, description="When set, only these buckets exist; every other name is missing"
     )
+
+    def destroy_backup_repository(self, account: str, workspace_id: str) -> None:
+        super().destroy_backup_repository(account, workspace_id)
+        self.destroyed_names.append(workspace_id)
 
     def destroy_bucket_force(self, account: str, name: str) -> None:
         if name in self.failing_bucket_names:
@@ -110,6 +121,31 @@ def test_a_missing_bucket_is_recognized_from_the_plugin_cli_error_class() -> Non
     assert _is_bucket_not_found_error(other) is False
 
 
+def test_is_backup_target_present_asks_the_connector_about_both_target_kinds() -> None:
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.backup_repositories = [
+        BackupRepositoryInfo(
+            workspace_id="agent-kept", repository_url="rest:x", used_bytes=1, created_at="2026-01-01T00:00:00+00:00"
+        )
+    ]
+    cli.legacy_bucket_names = ["host-kept"]
+    store_kept = BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name="agent-kept")
+    store_gone = BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name="agent-gone")
+    bucket_kept = BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name="host-kept")
+    bucket_gone = BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name="host-gone")
+    assert is_backup_target_present(cli, "a@b.com", store_kept) is True
+    assert is_backup_target_present(cli, "a@b.com", store_gone) is False
+    assert is_backup_target_present(cli, "a@b.com", bucket_kept) is True
+    assert is_backup_target_present(cli, "a@b.com", bucket_gone) is False
+
+
+def test_is_backup_target_present_raises_when_the_connector_cannot_answer() -> None:
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.is_backup_repository_listing_failing = True
+    with pytest.raises(ImbueCloudCliError):
+        is_backup_target_present(cli, "a@b.com", BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name="agent-x"))
+
+
 def test_parse_destroyed_at_handles_iso_z_and_garbage() -> None:
     parsed = parse_destroyed_at("2026-07-01T00:00:00Z")
     assert parsed is not None and parsed.tzinfo is not None
@@ -119,19 +155,28 @@ def test_parse_destroyed_at_handles_iso_z_and_garbage() -> None:
     assert parse_destroyed_at("") is None
 
 
-def test_bucket_name_parsing_from_env_identifies_imbue_cloud_and_byo() -> None:
-    env = _R2_ENV.format(prefix="abc123", host_id="host-9c35")
-    assert bucket_short_name_from_env(env) == "host-9c35"
-    assert bucket_owner_prefix_from_env(env) == "abc123"
-    assert bucket_short_name_from_env(_BYO_ENV) is None
-    assert bucket_owner_prefix_from_env(_BYO_ENV) is None
+def test_backup_target_parsing_from_env_identifies_store_legacy_and_byo() -> None:
+    legacy_env = legacy_restic_env("abc123--host-9c35")
+    assert backup_target_from_env(legacy_env) == BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name="host-9c35")
+    assert backup_owner_key_from_env(legacy_env) == "abc123"
+    store_env = store_restic_env(_AGENT_OLD, is_with_rest_credentials=True)
+    assert backup_target_from_env(store_env) == BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name=_AGENT_OLD)
+    assert backup_owner_key_from_env(store_env) == FAKE_BACKUP_USER_SEGMENT
+    assert backup_target_from_env(_BYO_ENV) is None
+    assert backup_owner_key_from_env(_BYO_ENV) is None
 
 
 def test_user_id_prefix_matches_connector_derivation() -> None:
     assert user_id_prefix_for("12345678-1234-5678-1234-567812345678") == "1234567812345678"
 
 
-def test_candidate_bucket_short_names_resolution_order() -> None:
+def test_emails_by_backup_owner_key_maps_both_key_shapes() -> None:
+    emails = emails_by_backup_owner_key({"12345678-1234-5678-1234-567812345678": "a@b.com"})
+    assert emails["1234567812345678"] == "a@b.com"
+    assert emails["12345678123456781234567812345678"] == "a@b.com"
+
+
+def test_candidate_backup_targets_resolution_order() -> None:
     def _candidate(backup_bucket: str | None) -> ReapCandidate:
         return ReapCandidate(
             user_id="user-1",
@@ -143,16 +188,30 @@ def test_candidate_bucket_short_names_resolution_order() -> None:
             destroyed_at=datetime.now(timezone.utc),
         )
 
-    env = _R2_ENV.format(prefix="abc123", host_id="host-from-env")
-    # The record's explicit bucket wins over a divergent env.
-    assert candidate_bucket_short_names(_candidate(f"abc123--{_AGENT_OLD}"), env) == (_AGENT_OLD,)
+    legacy = BackupTargetKind.LEGACY_BUCKET
+    store = BackupTargetKind.STORE_REPOSITORY
+    env = legacy_restic_env("abc123--host-from-env")
+    # The record's explicit location wins over a divergent env: a store path or a legacy bucket name.
+    assert candidate_backup_targets(_candidate(f"{FAKE_BACKUP_USER_SEGMENT}/{_AGENT_OLD}"), env) == (
+        BackupTarget(kind=store, name=_AGENT_OLD),
+    )
+    assert candidate_backup_targets(_candidate(f"abc123--{_AGENT_OLD}"), env) == (
+        BackupTarget(kind=legacy, name=_AGENT_OLD),
+    )
     # A bucket name without the owner separator is unusable; fall through to the env.
-    assert candidate_bucket_short_names(_candidate("separatorless-bucket"), env) == ("host-from-env",)
-    # No explicit bucket: the env decides, and a BYO env means no bucket at all.
-    assert candidate_bucket_short_names(_candidate(None), env) == ("host-from-env",)
-    assert candidate_bucket_short_names(_candidate(None), _BYO_ENV) is None
-    # No bucket and no env: the name is derived, workspace-keyed first, then the legacy host-keyed one.
-    assert candidate_bucket_short_names(_candidate(None), None) == (_AGENT_OLD, "host-legacy")
+    assert candidate_backup_targets(_candidate("separatorless-bucket"), env) == (
+        BackupTarget(kind=legacy, name="host-from-env"),
+    )
+    # No explicit location: the env decides, and a BYO env means no target at all.
+    assert candidate_backup_targets(_candidate(None), env) == (BackupTarget(kind=legacy, name="host-from-env"),)
+    store_env = store_restic_env(_AGENT_OLD, is_with_rest_credentials=True)
+    assert candidate_backup_targets(_candidate(None), store_env) == (BackupTarget(kind=store, name=_AGENT_OLD),)
+    assert candidate_backup_targets(_candidate(None), _BYO_ENV) is None
+    # No location and no env: the legacy bucket name is derived, workspace-keyed first, then host-keyed.
+    assert candidate_backup_targets(_candidate(None), None) == (
+        BackupTarget(kind=legacy, name=_AGENT_OLD),
+        BackupTarget(kind=legacy, name="host-legacy"),
+    )
 
 
 def test_collect_destroyed_candidates_sorts_oldest_first_and_skips_unstamped(tmp_path: Path) -> None:
@@ -175,7 +234,7 @@ def test_reap_candidate_deletes_bucket_record_and_env(tmp_path: Path) -> None:
     manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-old1", _AGENT_OLD, destroyed_days_ago=40)
     agent_id = AgentId(_AGENT_OLD)
-    write_canonical_env(record_store.paths, agent_id, _R2_ENV.format(prefix="user1", host_id="host-old1"))
+    write_canonical_env(record_store.paths, agent_id, legacy_restic_env("user1--host-old1"))
 
     is_reaped = manager.reap_candidate(
         ReapCandidate(
@@ -193,6 +252,37 @@ def test_reap_candidate_deletes_bucket_record_and_env(tmp_path: Path) -> None:
     assert cli.destroyed_names == ["host-old1"]
     assert record_store.list_records("user-1") == []
     assert not canonical_env_path(record_store.paths, agent_id).exists()
+
+
+def test_reap_candidate_deletes_a_store_repository_through_the_backup_repo_command(tmp_path: Path) -> None:
+    manager, cli, record_store = _make_reaper_fixture(tmp_path)
+    _tombstone(record_store, "user-1", "host-old1", _AGENT_OLD, destroyed_days_ago=40)
+    agent_id = AgentId(_AGENT_OLD)
+    # A migrated workspace: the legacy env was archived before the store env
+    # became canonical, and goes with it.
+    write_canonical_env(record_store.paths, agent_id, legacy_restic_env("user1--host-old1"))
+    archive_canonical_env(record_store.paths, agent_id, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    write_canonical_env(record_store.paths, agent_id, store_restic_env(_AGENT_OLD, is_with_rest_credentials=True))
+
+    is_reaped = manager.reap_candidate(
+        ReapCandidate(
+            user_id="user-1",
+            account_email="a@b.com",
+            agent_id=_AGENT_OLD,
+            host_id="host-old1",
+            backup_bucket=f"{FAKE_BACKUP_USER_SEGMENT}/{_AGENT_OLD}",
+            display_name="ws",
+            destroyed_at=datetime.now(timezone.utc) - timedelta(days=40),
+        ),
+        reason="retention_expired",
+    )
+
+    assert is_reaped is True
+    assert cli.destroyed_backup_repositories == [_AGENT_OLD]
+    assert cli.destroyed_names == [_AGENT_OLD]
+    assert record_store.list_records("user-1") == []
+    assert not canonical_env_path(record_store.paths, agent_id).exists()
+    assert list_archived_envs(record_store.paths, agent_id) == []
 
 
 def test_reap_candidate_tolerates_already_missing_bucket(tmp_path: Path) -> None:
@@ -220,7 +310,7 @@ def test_reap_candidate_keeps_record_when_bucket_destroy_fails(tmp_path: Path) -
     manager, cli, record_store = _make_reaper_fixture(tmp_path)
     _tombstone(record_store, "user-1", "host-old1", _AGENT_OLD, destroyed_days_ago=40)
     agent_id = AgentId(_AGENT_OLD)
-    write_canonical_env(record_store.paths, agent_id, _R2_ENV.format(prefix="user1", host_id="host-old1"))
+    write_canonical_env(record_store.paths, agent_id, legacy_restic_env("user1--host-old1"))
     cli.failing_bucket_names = {"host-old1"}
 
     is_reaped = manager.reap_candidate(

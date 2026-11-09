@@ -540,6 +540,97 @@ mngr imbue_cloud keys litellm delete [OPTIONS] KEY_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud backup-repo
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud backup-repo create
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo create [OPTIONS] WORKSPACE_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud backup-repo list
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud backup-repo roll-token
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo roll-token [OPTIONS] WORKSPACE_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud backup-repo destroy
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo destroy [OPTIONS] WORKSPACE_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--yes`, `-y` | boolean | Skip the confirmation prompt | `False` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud backup-repo usage
+
+**Usage:**
+
+```text
+mngr imbue_cloud backup-repo usage [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud bucket
 
 **Usage:**
@@ -623,6 +714,22 @@ mngr imbue_cloud bucket destroy [OPTIONS] NAME
 
 ```text
 mngr imbue_cloud bucket roll-key [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket freeze
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket freeze [OPTIONS] NAME
 ```
 **Options:**
 

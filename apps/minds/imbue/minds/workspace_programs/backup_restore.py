@@ -22,8 +22,12 @@ legacy /mngr workspaces). Parameterized via argv: --agent-id, --snapshot-id,
 backup root, resolved by Imbue Studio from its own view of the repository) and
 --source-time, plus the optional flags --stop-chats, --skip-chat-gate (an
 explicit user "force restore" on a workspace that can no longer answer
-`mngr list`) and --skip-safety-snapshot (an explicit user "restore without
-backing up first" after the safety snapshot failed). The program never queries
+`mngr list`), --skip-safety-snapshot (an explicit user "restore without
+backing up first" after the safety snapshot failed) and --source-env-path (a
+restore from a previous backup destination: the restore step reads its
+repository from that env file, without a lock when the credentials are
+read-only, while the safety and restored-state snapshots still go to the
+current destination; the file is removed once read). The program never queries
 restic for metadata Imbue Studio already holds. Verdict: ok | blocked (running
 chats) | failed, on one ``RESTORE_RESULT_MARKER`` line.
 
@@ -81,6 +85,9 @@ _UV_SYNC_TIMEOUT_SECONDS: Final[float] = 900.0
 # and installed persistently.
 _MINIMUM_RESTIC_VERSION: Final[tuple[int, int, int]] = (0, 17, 0)
 _PINNED_RESTIC_VERSION: Final[str] = "0.18.1"
+# restic's default target pack size, pinned so the safety and restored-state
+# snapshots never upload a pack near the backup store's request body limit.
+_PACK_SIZE_MIB: Final[int] = 16
 _PINNED_RESTIC_SHA256_BY_ARCH: Final[dict[str, str]] = {
     "amd64": "680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d",
     "arm64": "87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45",
@@ -161,6 +168,9 @@ class _RestoreObligations(TypedDict):
     # On right after `stop all`, off once the success path has brought the
     # services back and is verifying them.
     is_resume_owed: bool
+    # The `--source-env-path` file (a previous destination's credentials),
+    # removed once the restore step has read it, or on any earlier exit.
+    source_env_path_to_remove: str | None
 
 
 def _all_service_states() -> dict[str, str]:
@@ -276,11 +286,25 @@ def _finish(
     if obligations["is_resume_owed"]:
         _resume_services(result)
         obligations["is_resume_owed"] = False
+    _remove_source_env(obligations)
     result["status"] = status.value
     if detail:
         result["detail"] = detail
     emit_marker_json(RESTORE_RESULT_MARKER, result)
     sys.exit(0)
+
+
+def _remove_source_env(obligations: _RestoreObligations) -> None:
+    path = obligations["source_env_path_to_remove"]
+    if path is None:
+        return
+    obligations["source_env_path_to_remove"] = None
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        write_progress_line("The previous storage's credentials file %s was already gone." % path)
+    except OSError as e:
+        write_progress_line("Could not remove the previous storage's credentials file %s: %s" % (path, e))
 
 
 def _parse_env_lines(content: str) -> dict[str, str]:
@@ -410,7 +434,7 @@ def _read_snapshot_excludes(code_dir: str) -> list[str]:
 def _snapshot_backup_args(backup_root: str, tags: Sequence[str], excludes: Sequence[str]) -> list[str]:
     # `restic backup` args for the safety/restored snapshots, leaving out what
     # the hourly backups leave out.
-    args = ["backup", backup_root]
+    args = ["backup", backup_root, "--pack-size", str(_PACK_SIZE_MIB)]
     for tag in tags:
         args += ["--tag", tag]
     args += ["--exclude-if-present", _NO_BACKUP_MARKER_FILENAME]
@@ -549,6 +573,24 @@ def _restic_step_with_unlock_retry(
     return _restic_streaming(args, env_map, restic_binary, _RESTIC_TIMEOUT_SECONDS)
 
 
+def _restore_step_with_no_lock_fallback(
+    args: Sequence[str], env_map: Mapping[str, str], restic_binary: str
+) -> tuple[int, str]:
+    # A restore only reads, but restic still writes a (non-exclusive) lock
+    # for it, which a read-only credential refuses: a previous destination's
+    # frozen legacy bucket, for one. When the lock write is what fails even
+    # after the unlock retry, run the restore without the lock.
+    returncode, output = _restic_step_with_unlock_retry(args, env_map, restic_binary)
+    if returncode == 0 or not _is_lock_write_failure(output):
+        return returncode, output
+    write_progress_line("The repository refuses lock writes (read-only credentials); restoring without a lock...")
+    return _restic_streaming(["--no-lock", *args], env_map, restic_binary, _RESTIC_TIMEOUT_SECONDS)
+
+
+def _is_lock_write_failure(output: str) -> bool:
+    return "unable to create lock" in output
+
+
 def _resolve_backup_root() -> str:
     # The restore target is the BACKUP ROOT -- the whole persistent tree the
     # host-backup service snapshots. Current layout: /home/user, of which
@@ -603,7 +645,7 @@ def _restore_snapshot_in_place(
     # directory, since a directory the snapshot lacks is deleted whole.
     for pattern in _RESTORE_PRESERVED_PATHS:
         restore_args += ["--exclude", pattern]
-    restored, restore_output = _restic_step_with_unlock_retry(restore_args, env_map, restic_binary)
+    restored, restore_output = _restore_step_with_no_lock_fallback(restore_args, env_map, restic_binary)
     if restored != 0:
         detail = (
             "the in-place restore failed (%s); the workspace may be mixed between versions -- "
@@ -667,6 +709,10 @@ def main(argv: Sequence[str]) -> None:
     is_stop_chats = has_argv_flag(argv, "--stop-chats")
     is_chat_gate_skipped = has_argv_flag(argv, "--skip-chat-gate")
     is_safety_snapshot_skipped = has_argv_flag(argv, "--skip-safety-snapshot")
+    # A restore from a previous backup destination: the restore step reads
+    # its repository from this file (relative to the code dir), while the
+    # safety and restored-state snapshots keep going to the current one.
+    source_env_relpath = argv_value(argv, "--source-env-path", "")
     service_verify_timeout = _service_verify_timeout_seconds(argv)
     result: dict[str, object] = {
         "schema": 2,
@@ -677,7 +723,7 @@ def main(argv: Sequence[str]) -> None:
         "restored_snapshot_taken": False,
         "restic_downloaded": False,
     }
-    obligations: _RestoreObligations = {"is_resume_owed": False}
+    obligations: _RestoreObligations = {"is_resume_owed": False, "source_env_path_to_remove": None}
     if not snapshot_id:
         _finish(result, obligations, BackupProgramStatus.FAILED, "no --snapshot-id provided")
     if not snapshot_subpath:
@@ -708,6 +754,19 @@ def main(argv: Sequence[str]) -> None:
     env_map = _parse_env_lines(env_content.decode("utf-8", "replace"))
     if not env_map.get("RESTIC_REPOSITORY"):
         _finish(result, obligations, BackupProgramStatus.FAILED, "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
+    source_env_map = env_map
+    if source_env_relpath:
+        source_env_path = os.path.join(code_dir, source_env_relpath)
+        obligations["source_env_path_to_remove"] = source_env_path
+        try:
+            with open(source_env_path, "rb") as source_env_file:
+                source_env_map = _parse_env_lines(source_env_file.read().decode("utf-8", "replace"))
+        except OSError as e:
+            _finish(result, obligations, BackupProgramStatus.FAILED, "cannot read %s: %s" % (source_env_relpath, e))
+        if not source_env_map.get("RESTIC_REPOSITORY"):
+            _finish(
+                result, obligations, BackupProgramStatus.FAILED, "%s has no RESTIC_REPOSITORY" % source_env_relpath
+            )
 
     # Resolve a usable restic (downloading the pinned build if the installed
     # one is too old) and the snapshot excludes before anything is stopped or
@@ -747,7 +806,10 @@ def main(argv: Sequence[str]) -> None:
             )
         result["safety_snapshot_taken"] = True
 
-    _restore_snapshot_in_place(result, obligations, snapshot_id, snapshot_subpath, backup_root, env_map, restic_binary)
+    _restore_snapshot_in_place(
+        result, obligations, snapshot_id, snapshot_subpath, backup_root, source_env_map, restic_binary
+    )
+    _remove_source_env(obligations)
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
     # none); the current credentials must keep working, so write them back.

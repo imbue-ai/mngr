@@ -117,6 +117,16 @@ class DevEnvName(NonEmptyStr):
             )
         return super().__new__(cls, stripped)
 
+    def as_dns_label(self) -> str:
+        """The name as a DNS label, Worker name, or bucket name allows it.
+
+        Env names allow ``_`` (Modal and Neon accept it) but those alphabets
+        do not, so underscores map to hyphens. Collisions (``dev-a_b`` vs
+        ``dev-a-b``) are theoretically possible and acceptable on the dev/ci
+        tiers this feeds.
+        """
+        return str(self).replace("_", "-").lower()
+
 
 class DevEnvNotFoundError(MindError):
     """Raised when the operator references a dev env that has no local file."""

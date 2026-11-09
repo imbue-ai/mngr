@@ -85,6 +85,7 @@ from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import RemoteExecutionRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
@@ -105,6 +106,7 @@ from imbue.minds.desktop_client.api_transport import ApiTransport
 from imbue.minds.desktop_client.api_transport import transport_for_environ
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
+from imbue.mngr_latchkey.remote_execution import REMOTE_EXECUTION_PROGRAM_QUERY_PARAMETER
 
 # The path the schema document is served at (version-agnostic: it describes every
 # ``/api/v*`` version). Must match the gateway baseline grant in
@@ -159,6 +161,9 @@ class _RouteModels(FrozenModel):
     request_model: type[BaseModel] | None = Field(default=None, description="Request body model, if any")
     response_model: type[BaseModel] | None = Field(default=None, description="Primary success response model, if any")
     success_status: int = Field(default=200, description="HTTP status of the primary success response")
+    query_parameters: tuple[str, ...] = Field(
+        default=(), description="Query parameters the route requires, published beside its path parameters"
+    )
 
 
 # Maps (HTTP method, OpenAPI path) -> the body/response models to publish for it.
@@ -186,6 +191,10 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         response_model=AccountShareRemovedResponse
     ),
     ("GET", "/api/v1/timezone"): _RouteModels(response_model=TimezoneResponse),
+    # The response is an NDJSON stream, which the request model's docstring describes; no body model.
+    ("POST", "/api/v1/remote-execution/{device_id}"): _RouteModels(
+        request_model=RemoteExecutionRequest, query_parameters=(REMOTE_EXECUTION_PROGRAM_QUERY_PARAMETER,)
+    ),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
     ),
@@ -395,11 +404,15 @@ def _build_operation(
         operation["summary"] = summary
     if description is not None:
         operation["description"] = description
-    if path_parameter_names:
-        operation["parameters"] = [
-            {"name": name, "in": "path", "required": True, "schema": {"type": "string"}}
-            for name in path_parameter_names
-        ]
+    query_parameter_names = models.query_parameters if models is not None else ()
+    parameters: list[dict[str, object]] = [
+        {"name": name, "in": "path", "required": True, "schema": {"type": "string"}} for name in path_parameter_names
+    ]
+    parameters.extend(
+        {"name": name, "in": "query", "required": True, "schema": {"type": "string"}} for name in query_parameter_names
+    )
+    if parameters:
+        operation["parameters"] = parameters
     if models is not None and models.request_model is not None:
         operation["requestBody"] = {
             "required": True,

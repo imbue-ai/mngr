@@ -11,6 +11,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_env_store import canonical_env_path
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -375,6 +376,39 @@ def test_build_record_stamps_backup_bucket_from_canonical_env(paths: Installatio
 
     assert record is not None
     assert record.backup_bucket == f"abc123--{agent_id}"
+
+
+def test_reconcile_follows_the_canonical_env_to_a_new_backup_location(paths: InstallationPaths) -> None:
+    # The backup-store migration (and any destination change) rewrites the
+    # canonical env; the record's backup_bucket must follow it, since the
+    # connector's reapers and legacy sweep read the location from the record.
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="migrating-ws"))
+    write_canonical_env(
+        paths,
+        agent_id,
+        f"RESTIC_REPOSITORY=s3:https://acct.r2.cloudflarestorage.com/abc123--{agent_id}\nRESTIC_PASSWORD=pw\n",
+    )
+    store.associate_workspace_or_raise(user_id, _EMAIL, str(agent_id), resolver)
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["backup_bucket"] == f"abc123--{agent_id}"
+
+    user_segment = user_id.replace("-", "")
+    write_canonical_env(
+        paths,
+        agent_id,
+        f"RESTIC_REPOSITORY=rest:https://backups.example.com/{user_segment}/{agent_id}/\nRESTIC_PASSWORD=pw\n",
+    )
+    store.reconcile({user_id: _EMAIL}, resolver)
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["backup_bucket"] == f"{user_segment}/{agent_id}"
+
+    # A device without the canonical env does not know the location and
+    # must not clear what was recorded.
+    canonical_env_path(paths, agent_id).unlink()
+    store.reconcile({user_id: _EMAIL}, resolver)
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["backup_bucket"] == f"{user_segment}/{agent_id}"
 
 
 def test_build_record_without_canonical_env_has_no_backup_bucket(paths: InstallationPaths) -> None:

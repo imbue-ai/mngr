@@ -106,6 +106,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     closeAppOverlay: () => true,
     displayedWorkspaceAgentId: () => WORKSPACE_ID,
     accountId: "local",
+    isAccountSignedOut: () => false,
     stores: {
       requests: { hasPendingForWorkspace: () => false },
       accounts: { labelFor: () => "This device" },

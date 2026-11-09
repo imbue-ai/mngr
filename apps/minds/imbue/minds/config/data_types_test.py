@@ -180,6 +180,21 @@ def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
     assert all(value == 0 for value in plan_blocks_by_tier["dev"]["guest"].to_plan_row().values())
 
 
+def test_committed_deploy_tomls_reap_legacy_buckets_only_where_one_env_owns_the_cloudflare_account() -> None:
+    """Dev and ci envs share one Cloudflare account, so only staging and production may reap legacy buckets."""
+    envs_dir = Path(__file__).parent / "envs"
+    reaping_by_tier = {
+        path.parent.name: DeployEnvConfig.model_validate(tomllib.loads(path.read_text())).legacy_backup_buckets
+        for path in sorted(envs_dir.glob("*/deploy.toml"))
+    }
+    assert {tier: config is not None and config.is_reaped for tier, config in reaping_by_tier.items()} == {
+        "ci": False,
+        "dev": False,
+        "production": True,
+        "staging": True,
+    }
+
+
 def test_committed_deploy_tomls_waitlist_only_the_shared_tiers() -> None:
     """Production and staging waitlist new accounts; dev and ci stay open so signup tests run unchanged."""
     envs_dir = Path(__file__).parent / "envs"

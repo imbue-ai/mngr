@@ -5,6 +5,12 @@ Cloudflare refuses to delete a non-empty bucket, so every force-destroy path
 eviction, the CI env sweep) empties the bucket first over R2's S3-compatible
 API and then calls the ordinary destroy. This module is the single shared
 implementation of that emptying.
+
+CLEANUP: `empty_bucket_for_destroy` goes with the legacy bucket CLI group once
+the legacy-bucket reap reports nothing left on production (see
+``cli/buckets.py``); the S3 helpers below move to the operator tool's
+``envs/r2_cleanup.py``, which still needs them for the analytics and
+backup-store teardowns.
 """
 
 import hashlib

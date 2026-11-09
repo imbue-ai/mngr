@@ -49,7 +49,7 @@ from imbue.imbue_common.secret_wrapping import encrypt_secrets
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.backup_env_store import full_backup_bucket_name_from_env
+from imbue.minds.desktop_client.backup_env_store import backup_location_from_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
@@ -234,8 +234,8 @@ class ReplicaRecord(FrozenModel):
     backup_bucket: str | None = Field(
         default=None,
         description=(
-            "Full R2 bucket name holding this workspace's backups (from the canonical env); "
-            "consumed server-side by the retention reaper"
+            "Where this workspace's backups live (from the canonical env): the backup-store repository path "
+            "<user>/<workspace>, or a legacy bucket's full R2 name; consumed server-side by the retention reaper"
         ),
     )
     encrypted_secrets: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
@@ -729,11 +729,12 @@ class WorkspaceRecordStore(MutableModel):
             provider_kind,
             previous.encrypted_secrets if previous is not None else None,
         )
-        # The explicit backup-bucket association rides on the record (the
-        # server-side reaper consumes it); derived from the canonical env, the
+        # The explicit backup-location association rides on the record (the
+        # server-side reaper consumes it): a backup-store repository path, or
+        # a legacy bucket's full name. Derived from the canonical env, the
         # single source of truth for where this workspace's backups live.
         env_content = read_canonical_env(self.paths, AgentId(agent_id))
-        backup_bucket = full_backup_bucket_name_from_env(env_content) if env_content is not None else None
+        backup_bucket = backup_location_from_env(env_content) if env_content is not None else None
         return ReplicaRecord(
             host_id=info.host_id,
             agent_id=str(agent_id),
@@ -1602,11 +1603,19 @@ class WorkspaceRecordStore(MutableModel):
                     )
                 )
             )
+            # Where the backups live follows the canonical env (a destination
+            # change or the backup-store migration rewrites it). Only a device
+            # holding that env knows the location, so a rebuilt None means
+            # "unknown here" and never clears what another device recorded.
+            is_backup_location_changed = (
+                rebuilt.backup_bucket is not None and rebuilt.backup_bucket != record.backup_bucket
+            )
             is_changed = (
                 rebuilt.display_name != record.display_name
                 or rebuilt.color != record.color
                 or rebuilt.provider_kind != record.provider_kind
                 or rebuilt.hosting_device_id != record.hosting_device_id
+                or is_backup_location_changed
                 or is_secrets_changed
             )
             if not is_changed:
@@ -1616,6 +1625,10 @@ class WorkspaceRecordStore(MutableModel):
                 to_update(record.field_ref().color, rebuilt.color),
                 to_update(record.field_ref().provider_kind, rebuilt.provider_kind),
                 to_update(record.field_ref().hosting_device_id, rebuilt.hosting_device_id),
+                to_update(
+                    record.field_ref().backup_bucket,
+                    rebuilt.backup_bucket if is_backup_location_changed else record.backup_bucket,
+                ),
                 to_update(
                     record.field_ref().encrypted_secrets,
                     rebuilt.encrypted_secrets if is_secrets_changed else record.encrypted_secrets,

@@ -19,6 +19,8 @@ import { Badge } from "../components/Badge";
 import { Icon16 } from "../components/Icon";
 import type { IconName } from "../components/icons";
 import type { ShellState } from "./shell-state";
+import type { AccountSwitcherLabel } from "./AccountSwitcher";
+import { accountSwitcherLabelNodes } from "./AccountSwitcher";
 import { isTitlebarPopupRoutePath } from "./classify";
 import type { TitlebarStatus } from "./titlebar-status";
 import { titlebarStatusPillClass, titlebarStatusPillContent } from "./titlebar-status";
@@ -186,7 +188,7 @@ export interface RaisedTitlebarIconsAttrs {
    * on a hub page, where those tabs are not shown at all. */
   agentId: string | null;
   /** What the account switcher's copy says: the window's account, as the real button names it. */
-  accountLabel: string;
+  accountLabel: AccountSwitcherLabel;
   /** The titlebar's status pill, raised with the icons so it stays readable
    * (and clickable) over the dimmed titlebar; null for none. */
   status: TitlebarStatus | null;
@@ -259,13 +261,10 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
             },
             [
               m(Icon16, { name: entry.icon }),
-              // The switcher's copy carries its label too: its box is as wide as the name it shows.
+              // The switcher's copy carries its label too, drawn as the real
+              // button draws it: its box is as wide as the name it shows.
               entry.id === "account"
-                ? m(
-                    "span",
-                    { class: "type-label truncate max-w-[160px]" },
-                    accountLabel,
-                  )
+                ? accountSwitcherLabelNodes(accountLabel, null)
                 : null,
               entry.id === "notifications" && unresolvedCount > 0
                 ? m(

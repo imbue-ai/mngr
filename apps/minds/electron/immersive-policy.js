@@ -12,6 +12,11 @@
 // (the loading document, a stray popup) can take the window's keyboard.
 const LOCK_PERMISSIONS = Object.freeze(['fullscreen', 'keyboardLock', 'pointerLock']);
 
+// A page launching another app (a custom-scheme link) is never granted here:
+// main refuses the request and hands it to the link router, whose opener asks
+// first and remembers the answer per workspace and scheme.
+const OPEN_EXTERNAL_PERMISSION = 'openExternal';
+
 /**
  * The origin of a URL, or null when it has none (an opaque origin such as
  * `file:` or `about:blank`, or no URL at all).
@@ -34,10 +39,11 @@ function originOf(url) {
  * Whether a permission request is granted.
  *
  * Electron's default with no handler installed is to grant everything, and
- * that stays the policy for every permission but the three a remote-desktop
- * frame takes, which are granted when the requesting frame's top-level page
- * is the chrome's own (the workspace iframe, cross-origin as it is, counts:
- * its top-level page is the chrome).
+ * that stays the policy for every permission but two kinds: the three a
+ * remote-desktop frame takes, which are granted when the requesting frame's
+ * top-level page is the chrome's own (the workspace iframe, cross-origin as
+ * it is, counts: its top-level page is the chrome), and `openExternal`, which
+ * is always refused so the link router can ask the user instead.
  *
  * @param {object} request
  * @param {string} request.permission  Electron's permission name.
@@ -46,6 +52,7 @@ function originOf(url) {
  * @returns {boolean}
  */
 function decidePermissionRequest({ permission, topLevelOrigin, chromeOrigin }) {
+  if (permission === OPEN_EXTERNAL_PERMISSION) return false;
   if (!LOCK_PERMISSIONS.includes(permission)) return true;
   return topLevelOrigin !== null && chromeOrigin !== null && topLevelOrigin === chromeOrigin;
 }
@@ -66,6 +73,7 @@ function isKeyRelaySilenced({ isImmersive }) {
 
 module.exports = {
   LOCK_PERMISSIONS,
+  OPEN_EXTERNAL_PERMISSION,
   decidePermissionRequest,
   isKeyRelaySilenced,
   originOf,

@@ -49,6 +49,7 @@ function render(stripX: number | null, tab: OptionsTab = "permissions"): AnyVnod
     // count off the shell; nothing else in these geometry cases needs one.
     shell: {
       accountId: "local",
+      isAccountSignedOut: () => false,
       stores: {
         ...createEmptyStores(),
         requests: { hasPendingForWorkspace: () => false },

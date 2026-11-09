@@ -1,0 +1,1 @@
+The generated `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) now documents the `backup-repo {create, list, roll-token, destroy, usage}` group and the compat `bucket freeze` command that the Imbue Cloud plugin gained for the backup store.

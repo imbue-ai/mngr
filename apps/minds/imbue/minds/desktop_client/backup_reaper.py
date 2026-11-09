@@ -1,16 +1,16 @@
 """Client-side reaper for destroyed workspaces' backups, plus quota-pressure eviction.
 
-Destroyed workspaces keep their backup (R2 bucket + workspace record + local
-``restic.env``) for a retention window (served by the connector, 30 days) and
-are then reaped: bucket first (emptied client-side via the CLI's force
-destroy), then the record, then the local env. The reaper runs on its own
-cadence inside the sync scheduler's reconcile loop, on a background thread
-under the app's concurrency group, guarded by a lock so only one pass is ever
-in flight. The connector runs a server-side backstop hourly; every step here
-is idempotent so the two never conflict.
+Destroyed workspaces keep their backup (backup-store repository or legacy R2
+bucket + workspace record + local ``restic.env``) for a retention window
+(served by the connector, 30 days) and are then reaped: repository first
+(deleted server-side through the CLI), then the record, then the local env.
+The reaper runs on its own cadence inside the sync scheduler's reconcile
+loop, on a background thread under the app's concurrency group, guarded by a
+lock so only one pass is ever in flight. The connector runs a server-side
+backstop hourly; every step here is idempotent so the two never conflict.
 
 Quota-pressure eviction reuses the same candidate set: when backup
-provisioning hits a bucket-count or storage quota, the oldest destroyed
+provisioning hits a repository-count or storage quota, the oldest destroyed
 workspace's backup -- something that would age out anyway -- is evicted and
 provisioning retries.
 
@@ -25,7 +25,9 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
+from enum import auto
 from typing import Final
+from typing import assert_never
 from uuid import uuid4
 
 import httpx2
@@ -35,13 +37,15 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import backup_env_dir
-from imbue.minds.desktop_client.backup_env_store import canonical_env_path
+from imbue.minds.desktop_client.backup_env_store import backup_store_repository_from_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_env_store import remove_canonical_env_and_archives
 from imbue.minds.desktop_client.backup_env_store import split_backup_bucket_name_from_env
 from imbue.minds.desktop_client.backup_export import is_export_in_flight
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -86,7 +90,10 @@ class ReapCandidate(FrozenModel):
     account_email: str = Field(description="Owning account's email (CLI --account)")
     agent_id: str = Field(description="Workspace id (keys the record and the local env file)")
     host_id: str = Field(description="The workspace's machine id (names legacy backup buckets)")
-    backup_bucket: str | None = Field(default=None, description="Full backup bucket name from the record, when known")
+    backup_bucket: str | None = Field(
+        default=None,
+        description="The record's backup location, when known: a store repository path or a legacy bucket name",
+    )
     display_name: str = Field(description="Workspace display name (for logs/events)")
     destroyed_at: datetime = Field(description="When the workspace was tombstoned")
 
@@ -103,30 +110,64 @@ def parse_destroyed_at(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
+class BackupTargetKind(UpperCaseStrEnum):
+    """Where a workspace's imbue_cloud backup lives."""
+
+    # A repository in the per-environment backup store (restic REST).
+    STORE_REPOSITORY = auto()
+    # A per-workspace R2 bucket from before the backup store, read-only until
+    # the migration's legacy reap.
+    # CLEANUP: remove with the legacy bucket surface once that reap has run on production.
+    LEGACY_BUCKET = auto()
+
+
+class BackupTarget(FrozenModel):
+    """One reapable imbue_cloud backup: a store repository (by workspace id) or a legacy bucket (by short name)."""
+
+    kind: BackupTargetKind = Field(description="Store repository or legacy bucket")
+    name: str = Field(description="The workspace id (store) or the bucket's short name (legacy)")
+
+
 @pure
-def bucket_short_name_from_env(env_content: str) -> str | None:
-    """The backup bucket's short name from a canonical env, or None for BYO backends."""
+def backup_target_from_env(env_content: str) -> BackupTarget | None:
+    """The backup target a canonical env points at, or None for BYO backends."""
+    store = backup_store_repository_from_env(env_content)
+    if store is not None:
+        return BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name=store.workspace_id)
     parsed = split_backup_bucket_name_from_env(env_content)
-    return parsed[1] if parsed is not None else None
+    if parsed is not None:
+        return BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name=parsed[1])
+    return None
 
 
 @pure
-def bucket_owner_prefix_from_env(env_content: str) -> str | None:
-    """The backup bucket's owner prefix from a canonical env, or None for BYO backends."""
+def backup_owner_key_from_env(env_content: str) -> str | None:
+    """The owner key of a canonical env's backup (store user segment or legacy bucket prefix), or None for BYO."""
+    store = backup_store_repository_from_env(env_content)
+    if store is not None:
+        return store.user_segment
     parsed = split_backup_bucket_name_from_env(env_content)
     return parsed[0] if parsed is not None else None
 
 
 @pure
 def user_id_prefix_for(user_id: str) -> str:
-    """Derive the bucket owner prefix from a user id, exactly as the connector does."""
+    """Derive the legacy bucket owner prefix from a user id, exactly as the connector does."""
     return user_id.replace("-", "")[:16]
 
 
 @pure
-def emails_by_bucket_owner_prefix(accounts: Mapping[str, str]) -> dict[str, str]:
-    """Map each account's bucket owner prefix to its email (``accounts``: user_id -> email)."""
-    return {user_id_prefix_for(user_id): email for user_id, email in accounts.items()}
+def emails_by_backup_owner_key(accounts: Mapping[str, str]) -> dict[str, str]:
+    """Map each account's backup owner keys to its email (``accounts``: user_id -> email).
+
+    Both key shapes are mapped: the backup store's hyphen-stripped user id and
+    the legacy bucket prefix (its first 16 characters).
+    """
+    emails: dict[str, str] = {}
+    for user_id, email in accounts.items():
+        emails[user_id.replace("-", "")] = email
+        emails[user_id_prefix_for(user_id)] = email
+    return emails
 
 
 def fetch_retention_seconds(connector_url: str) -> float | None:
@@ -195,42 +236,86 @@ def collect_destroyed_candidates(
 
 
 @pure
-def candidate_bucket_short_names(candidate: ReapCandidate, env_content: str | None) -> tuple[str, ...] | None:
-    """The short names the candidate's backup bucket may have, most likely first; None for BYO backends.
+def candidate_backup_targets(candidate: ReapCandidate, env_content: str | None) -> tuple[BackupTarget, ...] | None:
+    """The locations the candidate's backup may be at, most likely first; None for BYO backends.
 
-    A known name is the only candidate: the record's explicit
-    ``backup_bucket``, else the local canonical env's repository. Without
-    either the name is derived, workspace-keyed (the workspace id) first and
-    then machine-keyed (the host id) for grandfathered buckets.
+    A known location is the only candidate: the record's explicit
+    ``backup_bucket`` (a store repository path ``<user>/<workspace>`` or a
+    legacy bucket's full name), else the local canonical env's repository.
+    Without either the legacy bucket name is derived, workspace-keyed (the
+    workspace id) first and then machine-keyed (the host id) for
+    grandfathered buckets.
     """
+    if candidate.backup_bucket and "/" in candidate.backup_bucket:
+        return (BackupTarget(kind=BackupTargetKind.STORE_REPOSITORY, name=candidate.backup_bucket.rsplit("/", 1)[1]),)
     if candidate.backup_bucket and "--" in candidate.backup_bucket:
-        return (candidate.backup_bucket.split("--", 1)[1],)
+        return (BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name=candidate.backup_bucket.split("--", 1)[1]),)
     if env_content is not None:
-        short_name = bucket_short_name_from_env(env_content)
-        return (short_name,) if short_name is not None else None
-    return tuple(dict.fromkeys((candidate.agent_id, candidate.host_id)))
+        target = backup_target_from_env(env_content)
+        return (target,) if target is not None else None
+    return tuple(
+        BackupTarget(kind=BackupTargetKind.LEGACY_BUCKET, name=short_name)
+        for short_name in dict.fromkeys((candidate.agent_id, candidate.host_id))
+    )
 
 
 def _is_bucket_not_found_error(error: ImbueCloudCliError) -> bool:
     return _BUCKET_NOT_FOUND_SIGNAL.lower() in f"{error.stderr} {error}".lower()
 
 
-def _destroy_first_existing_bucket(
-    imbue_cloud_cli: ImbueCloudCli, account_email: str, bucket_short_names: tuple[str, ...]
-) -> str | None:
-    """Force-destroy the first of the candidate buckets that exists; returns its name, or None when none does.
+def destroy_backup_target(cli: ImbueCloudCli, account_email: str, target: BackupTarget) -> None:
+    """Delete a backup target's data server-side: a store repository, or a legacy bucket (emptied first).
 
-    Raises ``ImbueCloudCliError`` for any failure other than a missing bucket,
-    so a reachable bucket is never mistaken for an absent one.
+    A store repository that no longer exists is reported as deleted by the
+    connector; a legacy bucket that is already gone raises the CLI's
+    not-found error, which callers treat the same way.
     """
-    for bucket_short_name in bucket_short_names:
+    match target.kind:
+        case BackupTargetKind.STORE_REPOSITORY:
+            cli.destroy_backup_repository(account_email, target.name)
+        case BackupTargetKind.LEGACY_BUCKET:
+            cli.destroy_bucket_force(account_email, target.name)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def is_backup_target_present(cli: ImbueCloudCli, account_email: str, target: BackupTarget) -> bool:
+    """Whether the connector still has the target: a store repository of the account, or a legacy bucket.
+
+    Raises ``ImbueCloudCliError`` when the connector cannot answer, so an
+    unreachable connector never reads as a reaped backup.
+    """
+    match target.kind:
+        case BackupTargetKind.STORE_REPOSITORY:
+            return any(info.workspace_id == target.name for info in cli.list_backup_repositories(account_email))
+        case BackupTargetKind.LEGACY_BUCKET:
+            try:
+                cli.get_bucket_info(account_email, target.name)
+            except ImbueCloudCliError as e:
+                if _is_bucket_not_found_error(e):
+                    return False
+                raise
+            return True
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _destroy_first_existing_backup_target(
+    imbue_cloud_cli: ImbueCloudCli, account_email: str, targets: tuple[BackupTarget, ...]
+) -> BackupTarget | None:
+    """Destroy the first of the candidate targets that exists; returns it, or None when none does.
+
+    Raises ``ImbueCloudCliError`` for any failure other than a missing legacy
+    bucket, so a reachable backup is never mistaken for an absent one.
+    """
+    for target in targets:
         try:
-            imbue_cloud_cli.destroy_bucket_force(account_email, bucket_short_name)
+            destroy_backup_target(imbue_cloud_cli, account_email, target)
         except ImbueCloudCliError as e:
             if not _is_bucket_not_found_error(e):
                 raise
             continue
-        return bucket_short_name
+        return target
     return None
 
 
@@ -255,7 +340,7 @@ class BackupReaperManager(MutableModel):
     paths: InstallationPaths = Field(frozen=True, description="The Imbue Studio data-dir layout")
     record_store: WorkspaceRecordStore = Field(frozen=True, description="The workspace-record replica")
     imbue_cloud_cli: ImbueCloudCli | None = Field(
-        frozen=True, default=None, description="CLI for bucket destroys; None disables bucket reaping"
+        frozen=True, default=None, description="CLI for repository and bucket destroys; None disables backup reaping"
     )
     connector_url: str = Field(
         frozen=True, default="", description="Connector base URL for the retention policy fetch"
@@ -352,23 +437,23 @@ class BackupReaperManager(MutableModel):
         self._cleanup_orphan_envs(accounts)
 
     def reap_candidate(self, candidate: ReapCandidate, reason: str) -> bool:
-        """Reap one destroyed workspace's backup in strict order: bucket, record, env.
+        """Reap one destroyed workspace's backup in strict order: repository, record, env.
 
         Any failure leaves the remaining steps untouched (the next pass
-        retries); a missing bucket just means another reaper got there first.
-        Returns whether the candidate was fully reaped.
+        retries); a missing repository just means another reaper got there
+        first. Returns whether the candidate was fully reaped.
         """
         agent_id = AgentId(candidate.agent_id)
         if is_export_in_flight(agent_id):
             logger.debug("Backup reaper: skipping {} (export in flight)", candidate.agent_id)
             return False
         env_content = read_canonical_env(self.paths, agent_id)
-        bucket_short_names = candidate_bucket_short_names(candidate, env_content)
-        if bucket_short_names is not None and self.imbue_cloud_cli is not None:
+        targets = candidate_backup_targets(candidate, env_content)
+        if targets is not None and self.imbue_cloud_cli is not None:
             try:
-                _destroy_first_existing_bucket(self.imbue_cloud_cli, candidate.account_email, bucket_short_names)
+                _destroy_first_existing_backup_target(self.imbue_cloud_cli, candidate.account_email, targets)
             except ImbueCloudCliError as e:
-                logger.debug("Backup reaper: bucket destroy for {} failed: {}", candidate.agent_id, e)
+                logger.debug("Backup reaper: backup destroy for {} failed: {}", candidate.agent_id, e)
                 append_reaper_event(
                     self.paths,
                     "reap_failed",
@@ -385,7 +470,7 @@ class BackupReaperManager(MutableModel):
                 {"agent_id": candidate.agent_id, "host_id": candidate.host_id, "error": str(e)},
             )
             return False
-        canonical_env_path(self.paths, agent_id).unlink(missing_ok=True)
+        remove_canonical_env_and_archives(self.paths, agent_id)
         logger.info(
             "Reaped destroyed machine backup: {} ({}), destroyed {}",
             candidate.display_name,
@@ -406,64 +491,86 @@ class BackupReaperManager(MutableModel):
         return True
 
     def delete_orphan_backup_now(self, agent_id: AgentId, accounts: Mapping[str, str]) -> bool:
-        """Delete an orphan env's backup on user request: bucket (when its owner is signed in), then env.
+        """Delete an orphan env's backup on user request: repository (when its owner is signed in), then env.
 
         Returns False when the owning account is not signed in here or the
-        bucket destroy failed; True once the local env is gone.
+        repository destroy failed; True once the local env is gone.
         """
         env_content = read_canonical_env(self.paths, agent_id)
         if env_content is None:
             return True
-        bucket_short_name = bucket_short_name_from_env(env_content)
-        owner_prefix = bucket_owner_prefix_from_env(env_content)
-        if bucket_short_name is not None and owner_prefix is not None:
-            account_email = emails_by_bucket_owner_prefix(accounts).get(owner_prefix)
+        target = backup_target_from_env(env_content)
+        owner_key = backup_owner_key_from_env(env_content)
+        if target is not None and owner_key is not None:
+            account_email = emails_by_backup_owner_key(accounts).get(owner_key)
             if account_email is None or self.imbue_cloud_cli is None:
                 return False
             try:
-                self.imbue_cloud_cli.destroy_bucket_force(account_email, bucket_short_name)
+                destroy_backup_target(self.imbue_cloud_cli, account_email, target)
             except ImbueCloudCliError as e:
                 if not _is_bucket_not_found_error(e):
-                    logger.warning("Could not destroy orphan backup bucket for {}: {}", agent_id, e)
+                    logger.warning("Could not destroy orphan backup for {}: {}", agent_id, e)
                     return False
-        canonical_env_path(self.paths, agent_id).unlink(missing_ok=True)
+        remove_canonical_env_and_archives(self.paths, agent_id)
         append_reaper_event(
             self.paths, "backup_reaped", {"agent_id": str(agent_id), "reason": "user_requested_orphan"}
         )
         return True
 
-    def _cleanup_orphan_envs(self, accounts: Mapping[str, str]) -> None:
-        """Delete local env files whose bucket no longer exists (reaped elsewhere).
+    def _is_target_gone(self, account_email: str, target: BackupTarget) -> bool:
+        """Whether the target's data no longer exists server-side (reaped elsewhere).
 
-        The server reaper owns *aging* orphan buckets (it holds the first-seen
-        stamps); this pass only cleans up the local leftovers once the bucket
-        is gone, and only for accounts signed in here (bucket lookups are
-        owner-scoped).
+        An unanswerable lookup (a connector hiccup) reads as "still there", so
+        a local env is never dropped on a transient failure.
+        """
+        if self.imbue_cloud_cli is None:
+            return False
+        match target.kind:
+            case BackupTargetKind.STORE_REPOSITORY:
+                try:
+                    repositories = self.imbue_cloud_cli.list_backup_repositories(account_email)
+                except ImbueCloudCliError as e:
+                    logger.debug("Backup reaper: orphan repository check for {} failed: {}", target.name, e)
+                    return False
+                return all(info.workspace_id != target.name for info in repositories)
+            case BackupTargetKind.LEGACY_BUCKET:
+                try:
+                    self.imbue_cloud_cli.get_bucket_info(account_email, target.name)
+                except ImbueCloudCliError as e:
+                    if _is_bucket_not_found_error(e):
+                        return True
+                    logger.debug("Backup reaper: orphan bucket check for {} failed: {}", target.name, e)
+                return False
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _cleanup_orphan_envs(self, accounts: Mapping[str, str]) -> None:
+        """Delete local env files whose repository no longer exists (reaped elsewhere).
+
+        The server reaper owns *aging* orphan repositories (it holds the
+        first-seen stamps); this pass only cleans up the local leftovers once
+        the repository is gone, and only for accounts signed in here
+        (lookups are owner-scoped).
         """
         if self.imbue_cloud_cli is None:
             return
-        email_by_prefix = emails_by_bucket_owner_prefix(accounts)
+        email_by_owner_key = emails_by_backup_owner_key(accounts)
         for agent_id in list_orphan_env_agent_ids(self.paths, self.record_store)[:_REAP_CAP_PER_PASS]:
             env_content = read_canonical_env(self.paths, agent_id)
             if env_content is None:
                 continue
-            bucket_short_name = bucket_short_name_from_env(env_content)
-            owner_prefix = bucket_owner_prefix_from_env(env_content)
-            if bucket_short_name is None or owner_prefix is None:
+            target = backup_target_from_env(env_content)
+            owner_key = backup_owner_key_from_env(env_content)
+            if target is None or owner_key is None:
                 # BYO backend: the repository is not ours to check or delete;
                 # leave the env for the user.
                 continue
-            account_email = email_by_prefix.get(owner_prefix)
+            account_email = email_by_owner_key.get(owner_key)
             if account_email is None:
                 continue
-            try:
-                self.imbue_cloud_cli.get_bucket_info(account_email, bucket_short_name)
-            except ImbueCloudCliError as e:
-                if not _is_bucket_not_found_error(e):
-                    logger.debug("Backup reaper: orphan bucket check for {} failed: {}", agent_id, e)
-                    continue
-                canonical_env_path(self.paths, agent_id).unlink(missing_ok=True)
-                logger.info("Removed orphan restic.env for {}: its bucket is gone", agent_id)
+            if self._is_target_gone(account_email, target):
+                remove_canonical_env_and_archives(self.paths, agent_id)
+                logger.info("Removed orphan restic.env for {}: its backup repository is gone", agent_id)
                 append_reaper_event(self.paths, "orphan_env_cleaned", {"agent_id": str(agent_id)})
 
 
@@ -479,10 +586,10 @@ def evict_oldest_reapable_backup(
 
     Candidates are the same set the reapers act on -- tombstoned records
     (oldest destroyed first, past-window before within-window by ordering) --
-    scoped to this account. Returns True when a bucket was actually destroyed
-    (quota was freed); False when there is nothing left to evict. Raises
-    ``ImbueCloudCliError`` on a destroy failure so the provisioning attempt
-    aborts rather than looping.
+    scoped to this account. Returns True when a repository was actually
+    destroyed (quota was freed); False when there is nothing left to evict.
+    Raises ``ImbueCloudCliError`` on a destroy failure so the provisioning
+    attempt aborts rather than looping.
     """
     manager = BackupReaperManager(
         paths=paths, record_store=record_store, imbue_cloud_cli=imbue_cloud_cli, connector_url=""
@@ -490,26 +597,26 @@ def evict_oldest_reapable_backup(
     for candidate in collect_destroyed_candidates(record_store, {user_id: account_email}):
         agent_id = AgentId(candidate.agent_id)
         if is_export_in_flight(agent_id):
-            # The backup is mid-download; destroying its bucket would corrupt
-            # the export. Fall through to the next-oldest candidate.
+            # The backup is mid-download; destroying its repository would
+            # corrupt the export. Fall through to the next-oldest candidate.
             logger.debug("Quota eviction: skipping {} (export in flight)", candidate.agent_id)
             continue
         env_content = read_canonical_env(paths, agent_id)
-        bucket_short_names = candidate_bucket_short_names(candidate, env_content)
-        if bucket_short_names is None:
+        targets = candidate_backup_targets(candidate, env_content)
+        if targets is None:
             # BYO backend: destroying it would not free imbue_cloud quota.
             continue
-        if _destroy_first_existing_bucket(imbue_cloud_cli, account_email, bucket_short_names) is None:
-            # No bucket under any candidate name: clean up the leftovers and
+        if _destroy_first_existing_backup_target(imbue_cloud_cli, account_email, targets) is None:
+            # No backup at any candidate location: clean up the leftovers and
             # keep looking for a candidate that actually frees quota.
             manager.reap_candidate(candidate, reason="quota_eviction_leftover")
             continue
-        # Bucket destroyed: finish the atomic early-delete (record + env).
+        # Repository destroyed: finish the atomic early-delete (record + env).
         try:
             record_store.remove_record_or_raise(user_id, account_email, candidate.agent_id)
         except WorkspaceSyncError as e:
-            logger.warning("Evicted {}'s bucket but could not remove its record: {}", candidate.agent_id, e)
-        canonical_env_path(paths, agent_id).unlink(missing_ok=True)
+            logger.warning("Evicted {}'s backup but could not remove its record: {}", candidate.agent_id, e)
+        remove_canonical_env_and_archives(paths, agent_id)
         logger.info(
             "Evicted destroyed machine backup to free quota: {} ({}), destroyed {}",
             candidate.display_name,

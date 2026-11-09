@@ -169,6 +169,20 @@ def test_build_openapi_document_includes_request_and_response_schemas() -> None:
     assert "ApiErrorResponse" in schemas
 
 
+def test_build_openapi_document_publishes_a_routes_required_query_parameters() -> None:
+    """The remote-execution route's program lives in the URL, so the document lists it beside the path parameter."""
+    rules = [("/api/v1/remote-execution/<device_id>", frozenset({"POST"}), ("device_id",), "api_v1.remote")]
+
+    document = build_openapi_document(rules, {}, ApiTransport.GATEWAY)
+    validate(document)
+
+    parameters = document["paths"]["/api/v1/remote-execution/{device_id}"]["post"]["parameters"]
+    assert parameters == [
+        {"name": "device_id", "in": "path", "required": True, "schema": {"type": "string"}},
+        {"name": "program", "in": "query", "required": True, "schema": {"type": "string"}},
+    ]
+
+
 def test_api_schema_route_returns_valid_openapi_for_the_real_routes(tmp_path: Path) -> None:
     client = _schema_client(tmp_path)
 

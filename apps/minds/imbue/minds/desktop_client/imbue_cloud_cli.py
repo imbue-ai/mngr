@@ -489,6 +489,36 @@ class R2BucketCreateResult(WireModel):
     key: R2BucketKeyMaterial
 
 
+class BackupRepositoryCredentials(WireModel):
+    """A backup-store repository and its token, as emitted by `mngr imbue_cloud backup-repo create|roll-token`.
+
+    The token is revealed once per mint and never persisted by the connector.
+    """
+
+    workspace_id: str
+    repository_url: str
+    rest_username: str
+    rest_password: SecretStr
+
+
+class BackupRepositoryInfo(WireModel):
+    """One backup-store repository of the account, as emitted by `mngr imbue_cloud backup-repo list`."""
+
+    workspace_id: str
+    repository_url: str
+    used_bytes: int
+    created_at: str
+
+
+class BackupStorageUsage(WireModel):
+    """The account's backup storage usage, as emitted by `mngr imbue_cloud backup-repo usage`."""
+
+    used_bytes: int
+    quota_bytes: int
+    hard_limit_bytes: int
+    mode: str
+
+
 class ImbueCloudCli(MutableModel):
     """Run ``mngr imbue_cloud …`` subcommands via a :class:`MngrCaller`.
 
@@ -1176,7 +1206,9 @@ class ImbueCloudCli(MutableModel):
             raise ImbueCloudCliError("Malformed shares relays output: expected an endpoint list per region")
         return {str(region): tuple(str(endpoint) for endpoint in endpoints) for region, endpoints in relays.items()}
 
-    # R2 buckets (one per workspace; used to back up the host_dir via restic)
+    # Legacy R2 buckets (one per workspace before the backup store; reaped, frozen,
+    # and checked through these until the migration's legacy reap has run).
+    # CLEANUP: remove with the bucket group once that reap has run on production.
 
     def create_bucket(
         self,
@@ -1215,8 +1247,7 @@ class ImbueCloudCli(MutableModel):
     def destroy_bucket_force(self, account: str, name: str) -> None:
         """Empty and destroy the bucket ``name`` (short name) under ``account``.
 
-        The plugin CLI empties the bucket client-side (batched S3 deletes,
-        taking a cleanup grant when the account's keys are storage-downgraded)
+        The plugin CLI empties the bucket client-side (batched S3 deletes)
         and then destroys it. The connector refuses to destroy a
         workspace-backup bucket whose workspace record is still ACTIVE, so a
         live workspace's backups can never be deleted through this.
@@ -1247,6 +1278,74 @@ class ImbueCloudCli(MutableModel):
         )
         body = self._expect_success(result, "bucket roll-key")
         return R2BucketKeyMaterial.model_validate(body)
+
+    def freeze_bucket(self, account: str, name: str) -> None:
+        """Rewrite a legacy backup bucket's S3 key read-only (the migration's post-switch step).
+
+        CLEANUP: remove with the legacy bucket surface once the backup-store
+        migration's legacy reap has run on production.
+        """
+        result = self._run(
+            ["bucket", "freeze", name, "--account", account],
+            cg_name="imbue-cloud-bucket-freeze",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        self._expect_success(result, "bucket freeze")
+
+    # Backup-store repositories (one per workspace; restic REST over the per-env Worker)
+
+    def create_backup_repository(self, *, account: str, workspace_id: str) -> BackupRepositoryCredentials:
+        """Create the workspace's backup-store repository (or re-mint its token) and return the credentials.
+
+        Idempotent on the server: a repository that already exists gets a fresh
+        token and the old one is revoked. Raises ``ImbueCloudQuotaExceededCliError``
+        on the connector's structured quota refusal and ``ImbueCloudCliError``
+        on every other failure.
+        """
+        result = self._run(
+            ["backup-repo", "create", workspace_id, "--account", account],
+            cg_name="imbue-cloud-backup-repo-create",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "backup-repo create")
+        return BackupRepositoryCredentials.model_validate(body)
+
+    def list_backup_repositories(self, account: str) -> list[BackupRepositoryInfo]:
+        """List the account's backup-store repositories with their usage."""
+        result = self._run(
+            ["backup-repo", "list", "--account", account],
+            cg_name="imbue-cloud-backup-repo-list",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "backup-repo list")
+        if not isinstance(body, list):
+            raise ImbueCloudCliError("Malformed backup-repo list output: expected a list")
+        return [BackupRepositoryInfo.model_validate(entry) for entry in body]
+
+    def destroy_backup_repository(self, account: str, workspace_id: str) -> None:
+        """Delete the workspace's repository and every object in it.
+
+        The plugin CLI loops on the connector's bounded deletion until the
+        server reports nothing remaining; a repository that no longer exists
+        is reported as deleted. The connector refuses to delete the repository
+        of a workspace whose record is still ACTIVE.
+        """
+        result = self._run(
+            ["backup-repo", "destroy", workspace_id, "-y", "--account", account],
+            cg_name="imbue-cloud-backup-repo-destroy",
+            timeout_seconds=_BUCKET_DESTROY_TIMEOUT_SECONDS,
+        )
+        self._expect_success(result, "backup-repo destroy")
+
+    def get_backup_usage(self, account: str) -> BackupStorageUsage:
+        """The account's backup storage usage, soft quota, hard limit, and enforcement mode."""
+        result = self._run(
+            ["backup-repo", "usage", "--account", account],
+            cg_name="imbue-cloud-backup-repo-usage",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "backup-repo usage")
+        return BackupStorageUsage.model_validate(body)
 
     # Users + contacts (identity records)
 
@@ -1308,33 +1407,6 @@ class ImbueCloudCli(MutableModel):
             timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
         )
         return self._expect_success(result, "account set-plan")
-
-    def create_storage_cleanup_grant(self, account: str) -> dict[str, Any]:
-        """Temporarily restore storage-downgraded bucket keys so restic cleanup can run.
-
-        Returns the connector's grant body (``status``, ``expires_at``,
-        ``baseline_bytes``, ``keys``). Idempotent while a grant is active.
-        """
-        result = self._run(
-            ["account", "cleanup-grant", "--account", account],
-            cg_name="imbue-cloud-account-cleanup-grant",
-            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._expect_success(result, "account cleanup-grant")
-
-    def recheck_storage(self, account: str) -> dict[str, Any]:
-        """Re-measure live storage usage and apply enforcement immediately.
-
-        Returns the connector's recheck body (``usage_bytes``, ``limit_bytes``,
-        ``is_over_quota``, ``is_grant_settled``, ``keys``); settles any
-        outstanding cleanup grant.
-        """
-        result = self._run(
-            ["account", "recheck-storage", "--account", account],
-            cg_name="imbue-cloud-account-recheck-storage",
-            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._expect_success(result, "account recheck-storage")
 
     # Workspace sync (records + key bundle)
 

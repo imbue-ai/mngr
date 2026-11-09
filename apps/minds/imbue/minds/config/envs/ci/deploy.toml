@@ -144,3 +144,20 @@ is_enabled = false
 # with the sticky `minds env deploy --with-analytics` flag.
 [analytics]
 is_deployed = false
+
+# Whether this tier deploys the backup store: the per-environment
+# backup-store-<env> Cloudflare Worker and its backups-<env> R2 bucket, which
+# hold every Imbue Cloud workspace backup (specs/backup-store/spec.md). The
+# deploy stamps the Worker's URL and admin secret into the connector; off is
+# only for an environment whose Cloudflare account is not ready yet.
+[backup_store]
+is_deployed = true
+
+# Whether the connector reaps the pre-backup-store per-workspace R2 buckets
+# (the retention reaper's orphan phase and the legacy-bucket sweep). Both list
+# every reserved-name bucket on the Cloudflare account and consult only this
+# env's records; every env of this tier shares one account, so left on each
+# env would reap the others' buckets. Pushed to the connector as
+# MINDS_LEGACY_BUCKET_REAPING_ENABLED; dry runs still list the candidates.
+[legacy_backup_buckets]
+is_reaped = false

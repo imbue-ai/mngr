@@ -503,3 +503,41 @@ def test_an_unusable_stored_workspace_setting_reads_as_following_the_app(tmp_pat
     assert config.get_workspace_auto_update_overrides() == {}
     assert config.get_workspace_auto_update_override("agent-a") is None
     assert config.get_workspace_auto_update_override("agent-c") is None
+
+
+@pytest.mark.witnesses(
+    "remote-execution.switch-off-by-default", partial="does not cover that the switch belongs to one device"
+)
+def test_allow_agent_command_execution_defaults_to_off(tmp_path: Path) -> None:
+    config = WriteCountingMindsConfig(data_dir=tmp_path)
+
+    assert config.get_allow_agent_command_execution() is False
+    assert config.write_count == 0
+
+
+def test_set_allow_agent_command_execution_if_version_matches_applies_on_a_matching_version(tmp_path: Path) -> None:
+    config = WriteCountingMindsConfig(data_dir=tmp_path)
+
+    new_version = config.set_allow_agent_command_execution_if_version_matches(
+        expected_version="False", compute_version=str, enabled=True
+    )
+
+    assert new_version == "True"
+    assert config.write_count == 1
+    assert config.get_allow_agent_command_execution() is True
+
+
+def test_set_allow_agent_command_execution_if_version_matches_refuses_a_stale_version(tmp_path: Path) -> None:
+    config = WriteCountingMindsConfig(data_dir=tmp_path)
+
+    first = config.set_allow_agent_command_execution_if_version_matches(
+        expected_version="False", compute_version=str, enabled=True
+    )
+    second = config.set_allow_agent_command_execution_if_version_matches(
+        expected_version="False", compute_version=str, enabled=False
+    )
+
+    assert first == "True"
+    assert second is None
+    assert config.write_count == 1
+    assert config.get_allow_agent_command_execution() is True

@@ -61,7 +61,7 @@ SHARE_IDENTITIES_FILE_VERSION: Final[int] = 1
 # readiness poll to explain a share that is not live yet.
 _SHARE_GATEWAY_STATUS_FILE: Final[str] = "data/.state/share_gateway/status.json"
 
-_SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
+SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
 # How long one gateway-status read is reused by the readiness poll (which
 # fires every ~2 seconds; each read is an exec into the workspace).
@@ -241,7 +241,7 @@ def provision_share_files_in_agent(
         raise ShareInjectionError(f"Nothing to write into agent {agent_address}: no grants and no share.env given")
     result = mngr_caller.call(
         ["exec", agent_address, " && ".join(clauses)],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise ShareInjectionError(f"Failed to write share files into agent {agent_address}: {result.stderr.strip()}")
@@ -317,7 +317,7 @@ def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> S
     """
     result = mngr_caller.call(
         ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         logger.debug("Share state probe failed for agent {}: {}", agent_address, result.stderr.strip())
@@ -384,7 +384,7 @@ def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[
     """
     result = mngr_caller.call(
         ["exec", agent_address, f"rm -f {' '.join(relative_paths)}", "--no-start"],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         logger.warning("Failed to clear share files from agent {}: {}", agent_address, result.stderr.strip())
@@ -392,7 +392,7 @@ def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[
     return True
 
 
-def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) -> str | None:
+def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller, timeout_seconds: float) -> str | None:
     """Read the grants document back from the agent; None when absent.
 
     The exec rides ``--format json`` and the document is unwrapped from the
@@ -409,7 +409,7 @@ def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) ->
     """
     result = mngr_caller.call(
         ["exec", agent_address, f"cat {_SHARE_GRANTS_FILE} 2>/dev/null || true", "--no-start", "--format", "json"],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+        timeout=timeout_seconds,
     )
     if result.returncode != 0:
         raise ShareInjectionError(
@@ -465,7 +465,7 @@ def read_share_gateway_status_from_agent(agent_address: str, mngr_caller: MngrCa
             "--format",
             "json",
         ],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         logger.debug("Share gateway status read failed for agent {}: {}", agent_address, result.stderr.strip())

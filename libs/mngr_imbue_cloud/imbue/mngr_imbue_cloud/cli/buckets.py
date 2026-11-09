@@ -1,8 +1,16 @@
-"""`mngr imbue_cloud bucket ...` subcommands.
+"""`mngr imbue_cloud bucket ...` subcommands (legacy).
 
-Manage R2 buckets (one per host the user makes) and their scoped S3 keys.
-Credentials are emitted as JSON; the secret access key is shown only once at
-creation time and is never persisted by the connector.
+Manage the legacy per-workspace R2 buckets and their scoped S3 keys. New
+backups live on the backup store (`mngr imbue_cloud backup-repo`); this group
+exists for the migration window only.
+
+CLEANUP: remove this module (and the bucket client methods, wire types, and
+r2_objects.py's legacy emptying path) once `minds-admin backups
+reap-legacy-buckets` reports nothing left on production. r2_objects.py's S3
+helpers (`derive_s3_secret_from_token_value`, `make_r2_s3_client`,
+`wait_for_s3_credentials`, `empty_bucket_via_s3`) outlive the group: minds_admin's
+`envs/r2_cleanup.py` imports them for the analytics and backup-store teardowns, so
+they move there before the file goes.
 """
 
 from collections.abc import Callable
@@ -33,7 +41,7 @@ def _key_material_to_json(material: R2KeyMaterial) -> dict[str, str]:
 
 @click.group(name="bucket")
 def bucket() -> None:
-    """Manage R2 buckets and their scoped S3 keys."""
+    """Manage legacy R2 buckets and their scoped S3 keys (new backups use `backup-repo`)."""
 
 
 @bucket.command(name="create")
@@ -173,6 +181,25 @@ def roll_key(name: str, account: str | None, connector_url: str | None) -> None:
     token = get_active_token(store, client, parsed_account)
     material = client.roll_bucket_key(access_token=token, name=name)
     emit_json(_key_material_to_json(material))
+
+
+@bucket.command(name="freeze")
+@click.argument("name")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def freeze_bucket(name: str, account: str | None, connector_url: str | None) -> None:
+    """Make the bucket's key read-only in place: reads keep working, nothing can write to it again.
+
+    The backup migration freezes a workspace's legacy bucket once its new
+    repository on the backup store is in place.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    client.freeze_bucket(access_token=token, name=name)
+    emit_json({"status": "frozen"})
 
 
 @bucket.group(name="keys")

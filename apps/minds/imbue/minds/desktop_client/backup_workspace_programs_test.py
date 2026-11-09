@@ -677,6 +677,62 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
     assert payload["backup_tick_in_flight"] is True
 
 
+def test_gate_probe_treats_an_over_quota_skip_as_the_end_of_its_tick(tmp_path: Path) -> None:
+    # An over-quota tick ends with BACKUP_SKIPPED_OVER_QUOTA and then runs
+    # forget + prune (whose events are not terminal); the gate must read that
+    # tick as finished, or restores and updates would wait out the whole gate
+    # timeout exactly while a user is over quota.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    _backup_events_log(host_dir).write_text(
+        _backup_event_lines(
+            ("BACKUP_STARTED", "t1"),
+            ("BACKUP_SKIPPED_OVER_QUOTA", "t1"),
+            ("FORGET_COMPLETED", "t1"),
+            ("PRUNE_COMPLETED", "t1"),
+        )
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+
+    run = _run_program(
+        repo,
+        backup_gate_probe,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
+    )
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["backup_tick_in_flight"] is False
+
+
+def test_gate_probe_treats_an_abandoned_tick_as_finished(tmp_path: Path) -> None:
+    # A restarted backup service records the tick it was killed in as
+    # TICK_ABANDONED; nothing is running, so the gate must not wait for it.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    _backup_events_log(host_dir).write_text(
+        _backup_event_lines(
+            ("BACKUP_STARTED", "t1"),
+            ("TICK_ABANDONED", "t1"),
+        )
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+
+    run = _run_program(
+        repo,
+        backup_gate_probe,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
+    )
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["backup_tick_in_flight"] is False
+
+
 def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_path: Path) -> None:
     # A tick killed mid-flight (e.g. by a service restart) never writes its
     # completion event. Once a newer tick has started and finished, the dead
@@ -1496,6 +1552,52 @@ def test_restore_script_clears_a_stale_repository_lock_and_retries(tmp_path: Pat
     assert payload["safety_snapshot_taken"] is True
     assert "unlock" in _supervisorctl_calls(unlock_calls)
     assert (code / "file.txt").read_text() == "version 1\n"
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_restores_from_a_previous_destination_without_writing_to_it(tmp_path: Path) -> None:
+    # A restore from "previous storage": the snapshot lives in a repository
+    # whose credentials are read-only (a frozen legacy bucket refuses even the
+    # lock write), so the restore step reads it from --source-env-path without
+    # a lock, while the safety and restored-state snapshots go to the current
+    # repository in restic.env.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    previous_repo = (tmp_path / "previous-repo").resolve()
+    _restic_for_test(previous_repo, "init")
+    _restic_for_test(previous_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(previous_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+    source_env = code / "data" / ".secrets" / "restic.previous.env"
+    source_env.write_text(f"RESTIC_REPOSITORY={previous_repo}\nRESTIC_PASSWORD={_RESTIC_TEST_PASSWORD}\n")
+    restic_wrapper = (
+        "#!/bin/bash\n"
+        'if [ "$1" = "restore" ]; then\n'
+        '  echo "Fatal: unable to create lock in backend: AccessDenied: Access Denied" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        f'exec "{_real_restic_path()}" "$@"\n'
+    )
+
+    stub_bin = _stub_bin_with_restic(tmp_path, restic_script=restic_wrapper)
+    run = _run_program(
+        code,
+        backup_restore,
+        _restore_args(previous_repo, snapshot_id, extra=("--source-env-path", "data/.secrets/restic.previous.env")),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["safety_snapshot_taken"] is True
+    assert payload["restored_snapshot_taken"] is True
+    assert (code / "file.txt").read_text() == "version 1\n"
+    assert not source_env.exists()
+    # Nothing was written to the previous destination; both bookkeeping
+    # snapshots landed in the current one.
+    assert len(_snapshot_entries(previous_repo)) == 1
+    current_tags = {tag for entry in _snapshot_entries(restic_repo) for tag in (entry.get("tags") or [])}
+    assert {"pre-restore", "restored"} <= current_tags
 
 
 @pytest.mark.timeout(120)

@@ -1,8 +1,11 @@
+from typing import Any
+
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.account_plan_view import format_gb
+from imbue.minds.desktop_client.account_plan_view import with_backup_storage_usage
 
 
-def _account_info() -> dict[str, object]:
+def _account_info() -> dict[str, Any]:
     return {
         "plan_name": "explorer",
         "available_plans": ["ally", "explorer"],
@@ -82,6 +85,18 @@ def test_build_account_plan_view_flags_over_storage_quota() -> None:
     }
     over = build_account_plan_view(over_info)
     assert over["is_over_storage_quota"] is True
+
+
+def test_with_backup_storage_usage_overlays_the_stores_exact_numbers() -> None:
+    overlaid = with_backup_storage_usage(_account_info(), used_bytes=60 * 1024**3, quota_bytes=50 * 1024**3)
+    view = build_account_plan_view(overlaid)
+    rows_by_label = {row["label"]: row for row in view["usage_rows"]}
+    assert rows_by_label["Backup storage"]["used"] == "60.0 GB"
+    assert rows_by_label["Backup storage"]["limit"] == "50.0 GB"
+    assert view["is_over_storage_quota"] is True
+    # Everything else in the summary is untouched, and the input is not mutated.
+    assert rows_by_label["Backup repositories"]["used"] == "2"
+    assert _account_info()["usage"]["total_bucket_bytes"] == int(1.5 * 1024**3)
 
 
 def test_build_account_plan_view_tolerates_missing_fields() -> None:

@@ -69,7 +69,12 @@ const {
   isBareWorkspaceRoute,
   resolveDuplicateWorkspaceLanding,
 } = require('./window-policy');
-const { decidePermissionRequest, isKeyRelaySilenced, originOf } = require('./immersive-policy');
+const {
+  OPEN_EXTERNAL_PERMISSION,
+  decidePermissionRequest,
+  isKeyRelaySilenced,
+  originOf,
+} = require('./immersive-policy');
 const {
   shouldWriteSessionState,
   createDebouncedSaver,
@@ -2288,16 +2293,6 @@ async function onReady() {
   app.on('web-contents-created', (_event, contents) => {
     linkRouter.install(contents);
   });
-  // Every permission is granted, as with no handler, but openExternal: a page
-  // launching another app goes through the link router's ask-first opener.
-  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
-    if (permission !== 'openExternal') {
-      callback(true);
-      return;
-    }
-    callback(false);
-    linkRouter.openExternalRequested(wc, details);
-  });
   registerAppImageDesktopEntry();
   installApplicationMenu();
   installPermissionHandlers();
@@ -3240,12 +3235,14 @@ ipcMain.on('set-immersive', (event, on) => {
 
 // Which permission requests the default session grants. Electron grants
 // everything when no handler is installed; this keeps that and writes down
-// the one narrowing: fullscreen, keyboard lock and pointer lock go only to a
+// the two narrowings: fullscreen, keyboard lock and pointer lock go only to a
 // page whose top-level origin is the chrome's own (the workspace frame's
 // requests count, its top-level page being the chrome), so no Chrome lock
-// prompt can appear inside the app and a future narrowing has one place to
-// go. The check handler answers the same way, so a page that asks whether it
-// may before it requests hears one answer.
+// prompt can appear inside the app, and openExternal is refused so a page
+// launching another app goes through the link router's ask-first opener. The
+// session holds one handler, so both live here. The check handler answers
+// the same way, so a page that asks whether it may before it requests hears
+// one answer.
 function installPermissionHandlers() {
   const decide = (contents, permission) =>
     decidePermissionRequest({
@@ -3253,8 +3250,9 @@ function installPermissionHandlers() {
       topLevelOrigin: originOf(contents && !contents.isDestroyed() ? contents.getURL() : null),
       chromeOrigin: originOf(backendBaseUrl),
     });
-  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
     callback(decide(contents, permission));
+    if (permission === OPEN_EXTERNAL_PERMISSION) linkRouter.openExternalRequested(contents, details);
   });
   session.defaultSession.setPermissionCheckHandler((contents, permission) => decide(contents, permission));
 }

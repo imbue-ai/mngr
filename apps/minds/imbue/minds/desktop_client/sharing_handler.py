@@ -59,6 +59,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
 from imbue.minds.desktop_client.share_grant_validation import normalized_grants_document
 from imbue.minds.desktop_client.share_grant_validation import validate_grants_document
+from imbue.minds.desktop_client.share_materials_injection import SHARE_EXEC_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
@@ -714,6 +715,19 @@ def _readable_grants_document(grants_toml_text: str | None) -> SharingGrantsDocu
     )
 
 
+def does_grants_document_admit_anyone(grants_toml_text: str | None) -> bool:
+    """Whether a grants document read back from the workspace names any user, email, or domain, at any scope.
+
+    An absent or unparseable document admits nobody, as :func:`_readable_grants_document` reads it.
+    """
+    grants = _readable_grants_document(grants_toml_text)
+    if grants is None:
+        return False
+    return any(
+        scope.users or scope.emails or scope.email_domains for scope in (grants.workspace, *grants.services.values())
+    )
+
+
 def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> ShareCliInfo | None:
     """The machine's connector share when it is active, else None.
 
@@ -1024,7 +1038,7 @@ def get_sharing(
         )
     try:
         grants_toml_text = read_share_grants_from_agent(
-            build_agent_address(agent_id, backend_resolver), cli.mngr_caller
+            build_agent_address(agent_id, backend_resolver), cli.mngr_caller, SHARE_EXEC_TIMEOUT_SECONDS
         )
     except ShareInjectionError as exc:
         logger.debug("Sharing grants read: {}", exc)

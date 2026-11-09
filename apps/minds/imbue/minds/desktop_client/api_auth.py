@@ -42,14 +42,18 @@ def json_error(message: str, status_code: int, code: str | None = None) -> Respo
     return json_response(body, status_code=status_code)
 
 
-def json_field_error(message: str, field: str, status_code: int = 400) -> Response:
+def json_field_error(message: str, field: str, status_code: int = 400, code: str | None = None) -> Response:
     """A 400-style validation error that also names the offending form field.
 
     The browser create page reads the ``field`` key to render the message inline
     next to the right input; agents (the other caller of this route) simply
-    ignore the extra key, so it stays backward compatible.
+    ignore the extra key, so it stays backward compatible. ``code``, when given,
+    names the failure like :func:`json_error` does.
     """
-    return json_response({"error": message, "field": field}, status_code=status_code)
+    body: dict[str, object] = {"error": message, "field": field}
+    if code is not None:
+        body["code"] = code
+    return json_response(body, status_code=status_code)
 
 
 def handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
@@ -97,6 +101,29 @@ def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callabl
     def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
         if is_local_trusted_environ(request.environ) or _is_bearer_authenticated() or _is_cookie_authenticated():
             return view(*args, **kwargs)
+        return json_error("Not authenticated", 401)
+
+    return wrapper
+
+
+AGENTS_ONLY_CODE = "agents_only"
+
+
+def require_api_or_local_socket_auth(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
+    """Allow the central bearer key (agents, via the gateway) or the local socket, but never the session cookie.
+
+    For a route only an agent has any business calling: the browser UI is
+    refused outright (403, not 401, since the caller is authenticated and
+    still not allowed), which keeps the route out of every browser-side
+    reasoning about what a page could trigger.
+    """
+
+    @wraps(view)
+    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
+        if is_local_trusted_environ(request.environ) or _is_bearer_authenticated():
+            return view(*args, **kwargs)
+        if _is_cookie_authenticated():
+            return json_error("This route is for agents; the browser UI may not call it", 403, code=AGENTS_ONLY_CODE)
         return json_error("Not authenticated", 401)
 
     return wrapper

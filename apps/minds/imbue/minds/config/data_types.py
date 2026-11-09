@@ -444,6 +444,23 @@ class WaitlistDeployConfig(FrozenModel):
     is_enabled: bool = Field(description="Whether new accounts without a signup code are waitlisted on this tier")
 
 
+class LegacyBackupBucketsDeployConfig(FrozenModel):
+    """The ``[legacy_backup_buckets]`` block of a ``deploy.toml``: whether this tier reaps the pre-backup-store buckets.
+
+    Pushed into the connector's per-deploy Modal Secret as
+    ``MINDS_LEGACY_BUCKET_REAPING_ENABLED``. The retention reaper's orphan-bucket
+    phase and the legacy-bucket sweep list every reserved-name bucket on the
+    tier's Cloudflare account and consult only this env's records, so on an
+    account several envs share (dev, ci) each env would reap the others'
+    buckets; those tiers turn it off and the shared tiers, one env per account,
+    keep it on. Off (and an absent block) still lists candidates on a dry run.
+    """
+
+    is_reaped: bool = Field(
+        description="Whether the retention reaper and the legacy sweep may delete pre-backup-store buckets on this tier"
+    )
+
+
 class WebWorkspacesConfig(FrozenModel):
     """The ``[web_workspaces]`` block of a ``deploy.toml`` -- the tier's pinned web-create template.
 
@@ -864,6 +881,20 @@ class SshCaConfig(FrozenModel):
         return self
 
 
+class BackupStoreDeployConfig(FrozenModel):
+    """Whether the tier deploys the backup store (the ``backup-store-<env>`` Worker, specs/backup-store).
+
+    On for every committed tier: the connector's backup routes need the store,
+    and the deployment tests exercise it on the ci tier. Off is a bring-up
+    escape hatch for an environment whose Cloudflare account is not ready.
+    """
+
+    is_deployed: bool = Field(
+        default=True,
+        description="Deploy the backup-store Worker and its bucket, and stamp its URL + admin secret into the connector.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds-admin env create`.
 
@@ -939,6 +970,13 @@ class DeployEnvConfig(FrozenModel):
             "envs override via the sticky --with-analytics deploy flag."
         ),
     )
+    backup_store: BackupStoreDeployConfig = Field(
+        default_factory=BackupStoreDeployConfig,
+        description=(
+            "Whether this tier deploys the backup store (Worker + R2 bucket per environment). "
+            "On everywhere by default; see specs/backup-store/spec.md."
+        ),
+    )
     paid: PaidDefaultsConfig = Field(
         default_factory=PaidDefaultsConfig,
         description=(
@@ -965,6 +1003,13 @@ class DeployEnvConfig(FrozenModel):
         default=None,
         description=(
             "Whether new accounts without a signup code are waitlisted (the guest plan). None (the default) means off."
+        ),
+    )
+    legacy_backup_buckets: LegacyBackupBucketsDeployConfig | None = Field(
+        default=None,
+        description=(
+            "Whether the connector reaps pre-backup-store buckets on this tier's Cloudflare account. None (the "
+            "default) means off, which is what an account shared by several envs needs."
         ),
     )
     storage: StorageDeployConfig | None = Field(

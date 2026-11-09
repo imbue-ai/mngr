@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.account_settings_store import AccountSettingsSto
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_store_migration import BackupStoreMigrationManager
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
@@ -50,6 +51,7 @@ from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.program_resolution import LoginShellPath
 from imbue.minds.desktop_client.provider_relay import ProviderRelayRegistry
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -243,6 +245,15 @@ class DesktopClientState(MutableModel):
     root_concurrency_group: ConcurrencyGroup | None = Field(
         default=None, frozen=True, description="Root concurrency group owning background strands"
     )
+    login_shell_path: LoginShellPath | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The user's login-shell PATH, read on demand: where a remote command's bare program name resolves, "
+            "for the approval dialog and the executor alike. None when the app has no concurrency group to run "
+            "the shell under, in which case the desktop's own PATH is used"
+        ),
+    )
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = Field(
         default=None, frozen=True, description="System-interface health tracker"
     )
@@ -321,6 +332,11 @@ class DesktopClientState(MutableModel):
         default_factory=BackupTrimManager,
         frozen=True,
         description="Runs the over-quota backup trim flow on detached threads and tracks per-account progress",
+    )
+    backup_store_migration_manager: BackupStoreMigrationManager = Field(
+        default_factory=BackupStoreMigrationManager,
+        frozen=True,
+        description="Moves legacy bucket-backed backups into the backup store, a few workspaces per status batch",
     )
     ssh_tunnel_manager: SSHTunnelManager = Field(
         default_factory=SSHTunnelManager,

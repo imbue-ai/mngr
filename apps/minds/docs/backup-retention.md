@@ -8,13 +8,13 @@ The retention window is a fixed constant served by the connector (`GET /policies
 
 A destroyed workspace's backup consists of three things:
 
-- its R2 **bucket** (imbue_cloud backups only; named `<account-prefix>--<workspace-id>` -- buckets provisioned before workspace-keyed naming carry `<account-prefix>--<host-id>` and are grandfathered),
+- its **repository** in the backup store (imbue_cloud backups only; the `<user>/<workspace-id>/` prefix of the tier's `backups-<tier>` R2 bucket, served by the `backup-store-<tier>` Worker -- see `specs/backup-store/spec.md`), or, for a workspace that has not migrated off the pre-backup-store layout yet, its own legacy R2 **bucket** (`<account-prefix>--<workspace-id>`, or `<account-prefix>--<host-id>` for the oldest ones),
 
 - its synced **workspace record** (the tombstone, `state = destroyed`, stamped with `destroyed_at` by the connector),
 
 - the local canonical **`restic.env`** under the Imbue Studio data dir.
 
-Reaping deletes them in strict order -- bucket first (emptied client-side, then destroyed), then the record, then the env -- so a failed bucket delete always leaves the row for a retry, and nothing is ever half-deleted from the user's point of view.
+Reaping deletes them in strict order -- repository first (the store deletes its objects in bounded, resumable passes; a legacy bucket is emptied client-side, then destroyed), then the record, then the env -- so a failed repository delete always leaves the row for a retry, and nothing is ever half-deleted from the user's point of view.
 
 Bring-your-own backends (your own S3 bucket via an API key) are never reaped at the repository level: only the record and the local env are cleaned up; your data stays until you remove it.
 
@@ -22,7 +22,7 @@ Bring-your-own backends (your own S3 bucket via an API key) are never reaped at 
 
 - **Client-side** (all workspace types: docker, lima, imbue_cloud, BYO-cloud): a reap pass runs every 30 minutes inside the desktop client's sync loop (plus once shortly after startup), capped at a handful of reaps per pass. It skips any backup with an in-flight download. Reap and eviction events are recorded under `events/backup_reaper/events.jsonl` in the Imbue Studio data dir.
 
-- **Server-side backstop** (imbue_cloud only): the connector runs an hourly reap cron so leftovers are reclaimed even when no client is running. It also ages *orphan* buckets (workspace-backup buckets no record references) from a first-seen stamp -- which doubles as a rollout grace period for pre-existing leftovers.
+- **Server-side backstop** (imbue_cloud only): the connector runs an hourly reap cron so leftovers are reclaimed even when no client is running. It also ages *orphan* repositories (repositories in the store that no record references, and legacy buckets likewise) from a first-seen stamp -- which doubles as a rollout grace period for pre-existing leftovers.
 
 Both reapers are idempotent, so they never conflict; whoever runs first wins.
 
@@ -30,11 +30,11 @@ Both reapers are idempotent, so they never conflict; whoever runs first wins.
 
 Any record tombstoned for longer than the window is reapable regardless of how it was tombstoned (explicit destroy or absence detection) -- the window itself is the safety margin for local workspaces, and a workspace that reappears in discovery is resurrected (clearing the clock) before it can ever be reaped.
 
-The one exception is an imbue_cloud workspace whose pool lease still exists: its record is never removed (and cannot be removed from the list) until the lease is released, because that tombstone is what the connector's lease-vs-record sweep acts on to finish a destroy whose release failed. The connector's reaper skips such a tombstone entirely; the client-side reaper has no view of the lease, so it may still reap the backup bucket at the window, but the connector refuses the record's removal (`lease_active`) and the reaper retries it on later passes. Releasing the lease -- through destroy, or the operator's `minds-admin workspaces release` -- is what frees the record for the reaper.
+The one exception is an imbue_cloud workspace whose pool lease still exists: its record is never removed (and cannot be removed from the list) until the lease is released, because that tombstone is what the connector's lease-vs-record sweep acts on to finish a destroy whose release failed. The connector's reaper skips such a tombstone entirely; the client-side reaper has no view of the lease, so it may still reap the backup repository at the window, but the connector refuses the record's removal (`lease_active`) and the reaper retries it on later passes. Releasing the lease -- through destroy, or the operator's `minds-admin workspaces release` -- is what frees the record for the reaper.
 
 ## Quota-pressure eviction
 
-Backup provisioning for a new workspace can hit the account's bucket-count or storage quota. Instead of failing, the client **evicts**: it force-destroys the oldest destroyed workspace's backup (something the reapers would delete anyway -- past-window first, then within-window early if needed) and retries, looping until provisioning succeeds or nothing is left to evict. Eviction is silent (the Recently destroyed page reflects it); live workspaces' data is never touched automatically. A destroy failure aborts the attempt with the usual "Backup setup failed" notification.
+Backup provisioning for a new workspace can hit the account's repository-count or storage quota. Instead of failing, the client **evicts**: it force-destroys the oldest destroyed workspace's backup (something the reapers would delete anyway -- past-window first, then within-window early if needed) and retries, looping until provisioning succeeds or nothing is left to evict. Eviction is silent (the Recently destroyed page reflects it); live workspaces' data is never touched automatically. A destroy failure aborts the attempt with the usual "Backup setup failed" notification.
 
 The same eviction applies when enabling backups later from workspace settings, so a quota-stuck workspace self-heals through the existing "enable backups" action.
 
@@ -56,4 +56,8 @@ Restoring is not offered -- these workspaces no longer exist; the download is th
 
 - The mngr profiles Imbue Studio manages set `default_destroyed_host_persisted_seconds = 30 days` (mngr's own default is 7), so destroyed mngr host records age out together with the backups.
 
-- Ops: `POST /admin/sweep/backup-retention` on the connector runs a reap pass on demand (`?dry_run=1` lists candidates; `?window_seconds=0` reaps fresh tombstones -- used by the deployment test). `mngr imbue_cloud bucket destroy <name> --force` is the manual per-bucket lever.
+- Ops: `POST /admin/sweep/backup-retention` on the connector runs a reap pass on demand (`?dry_run=1` lists candidates; `?window_seconds=0` reaps fresh tombstones -- used by the deployment test). `mngr imbue_cloud backup-repo destroy <workspace-id>` is the manual per-repository lever (`mngr imbue_cloud bucket destroy <name> --force` for a legacy bucket).
+
+## Legacy buckets
+
+Workspaces backed up before the backup store each had their own R2 bucket with its own Cloudflare API token. A desktop migrates such a workspace to the store the next time it sees it online (the old bucket is frozen read-only and stays listed as "previous storage" for restores until the reap removes it, after which the desktop drops the row and the archived credentials); ninety days after the store ships, `minds-admin backups reap-legacy-buckets` (`--dry-run` first) runs the connector's `POST /admin/sweep/legacy-buckets`, which empties and deletes every legacy bucket whose record is destroyed, absent, or already migrated and revokes its token. A bucket an ACTIVE record still names (a desktop that has not been online since) is left alone so that workspace migrates normally when its desktop returns.

@@ -37,8 +37,8 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_reaper import BACKUP_RETENTION_FALLBACK_SECONDS
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import ReapCandidate
-from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
-from imbue.minds.desktop_client.backup_reaper import emails_by_bucket_owner_prefix
+from imbue.minds.desktop_client.backup_reaper import backup_owner_key_from_env
+from imbue.minds.desktop_client.backup_reaper import emails_by_backup_owner_key
 from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
 from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
@@ -195,24 +195,22 @@ def _collect_destroyed_rows() -> list[DestroyedWorkspaceRow]:
     dated_record_rows.sort(key=lambda pair: pair[0], reverse=True)
 
     # Orphan envs this device holds with no record at all, newest file first.
-    email_by_prefix = emails_by_bucket_owner_prefix(accounts)
+    email_by_owner_key = emails_by_backup_owner_key(accounts)
     orphan_rows: list[DestroyedWorkspaceRow] = []
     for agent_id in reversed(list_orphan_env_agent_ids(paths, record_store)):
         env_content = read_canonical_env(paths, agent_id)
-        owner_prefix = bucket_owner_prefix_from_env(env_content) if env_content is not None else None
-        owner_email = email_by_prefix.get(owner_prefix) if owner_prefix is not None else None
-        is_owner_signed_in = owner_email is not None or owner_prefix is None
+        owner_key = backup_owner_key_from_env(env_content) if env_content is not None else None
+        owner_email = email_by_owner_key.get(owner_key) if owner_key is not None else None
+        is_owner_signed_in = owner_email is not None or owner_key is None
         orphan_rows.append(
             DestroyedWorkspaceRow(
                 agent_id=str(agent_id),
                 display_name=f"unknown workspace ({agent_id})",
                 account_label="this device",
                 destroyed_at_display="",
-                # Only imbue_cloud (R2) orphans are ever cleaned automatically;
+                # Only imbue_cloud orphans are ever cleaned automatically;
                 # BYO envs stay until the user deletes them here.
-                days_left_display=(
-                    "scheduled for cleanup" if owner_prefix is not None else "kept until you delete it"
-                ),
+                days_left_display=("scheduled for cleanup" if owner_key is not None else "kept until you delete it"),
                 has_backup=True,
                 can_download=True,
                 is_locked=False,

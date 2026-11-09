@@ -6,6 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   LOCK_PERMISSIONS,
+  OPEN_EXTERNAL_PERMISSION,
   decidePermissionRequest,
   isKeyRelaySilenced,
   originOf,
@@ -36,8 +37,14 @@ test('the lock permissions are refused to any other top-level page, and before t
   }
 });
 
+test('openExternal is refused whatever the origins, so the link router asks instead', () => {
+  assert.equal(OPEN_EXTERNAL_PERMISSION, 'openExternal');
+  assert.equal(decidePermissionRequest({ permission: 'openExternal', topLevelOrigin: CHROME, chromeOrigin: CHROME }), false);
+  assert.equal(decidePermissionRequest({ permission: 'openExternal', topLevelOrigin: null, chromeOrigin: null }), false);
+});
+
 test('every other permission keeps the grant-everything default, whatever the origins', () => {
-  for (const permission of ['media', 'notifications', 'clipboard-read', 'geolocation', 'openExternal', 'unknown']) {
+  for (const permission of ['media', 'notifications', 'clipboard-read', 'geolocation', 'unknown']) {
     assert.equal(decidePermissionRequest({ permission, topLevelOrigin: CHROME, chromeOrigin: CHROME }), true);
     assert.equal(decidePermissionRequest({ permission, topLevelOrigin: null, chromeOrigin: null }), true);
     assert.equal(
