@@ -466,8 +466,10 @@ errors the journey before the app launches. A dispatch of the workflow sets it
 through the `skip_dwt_tests` input, where `true` skips and the default is
 `false`. The dispatch `minds-admin env deploy` starts after a production deploy
 passes `skip_dwt_tests=true`: a services deploy changes neither the template
-nor the pool hosts, which is what these tests exercise. The hand dispatch after
-a channel publish leaves it at `false`, so that run includes them.
+nor the pool hosts, which is what these tests exercise. These tests run in
+exactly one situation, a new desktop release deployed to staging, and every other
+run sets the variable to `1` explicitly, the hand dispatch after a channel publish
+included (`docs/deploy/ops/services.md`, *Which smoke run a deploy gets*).
 
 **Running it locally.** The suite also runs from a developer laptop against
 staging or production with nothing but this checkout, so a developer can see
@@ -517,7 +519,8 @@ A run leases one pool row at the build's template tag, in the region the
 create form already points at (and fails when the tier's pool has none to lease
 there, which is a true thing to report about the tier), mints one LiteLLM key
 for the persistent account, runs default-workspace-template's CI suites in the
-workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them), and
+workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them, which
+every run except a new desktop release on staging should), and
 has a real agent build the hello-world app; a
 passing journey destroys its workspace and turns its share off itself. After a
 failed run, `just minds-smoke-teardown` releases whatever the manifest and the
