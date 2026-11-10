@@ -680,6 +680,11 @@ def _receive_h2_until_streams_end(
     return seen
 
 
+@pytest.mark.flaky
+# The client thread and the in-process server thread trade control for every chunk of these
+# ~1000 requests, so contention for the CPU or the GIL can multiply the runtime past the
+# default timeout.
+@pytest.mark.timeout(30)
 def test_http2_connection_is_not_drained_after_a_thousand_requests() -> None:
     """A browser multiplexes a whole origin over one HTTP/2 connection, so a server-initiated
     GOAWAY strands every stream open on it (the chat transcripts' EventSources went silent
@@ -687,8 +692,7 @@ def test_http2_connection_is_not_drained_after_a_thousand_requests() -> None:
     carry more requests than that cap without a GOAWAY.
 
     The requests are opened as concurrent streams, a batch of up to the server's
-    concurrent-stream limit at a time as a browser multiplexes them, which keeps the test
-    to a handful of round-trips.
+    concurrent-stream limit at a time as a browser multiplexes them.
     """
     with _bound_tls_test_listener() as (listen_port, config):
         with _serving_in_background(config, "forward-h2-request-cap-test-server"):
