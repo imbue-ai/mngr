@@ -6,8 +6,11 @@ and wraps it in a stubber so each test can declaratively queue expected
 requests and canned responses.
 """
 
+import base64
+import gzip
 from collections.abc import Iterator
 from typing import Any
+from typing import Final
 
 import boto3
 import pytest
@@ -17,12 +20,16 @@ from botocore.stub import Stubber
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
+from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
 from imbue.mngr_aws.client import AwsAmiResolutionError
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.client import compress_user_data
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import DEBIAN_AMI_OWNER_ID
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
+from imbue.mngr_vps.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -143,7 +150,7 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             # Default terminate_on_shutdown is False, so an OS shutdown STOPS
             # (resumable idle-pause) rather than terminating the instance.
@@ -179,7 +186,7 @@ def test_create_instance_sizes_the_root_volume_from_the_override(stubbed_client:
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": [
                 {
                     "DeviceName": "/dev/xvda",
@@ -221,7 +228,7 @@ def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "stop",
@@ -253,7 +260,7 @@ def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tup
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "stop",
@@ -282,7 +289,7 @@ def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "stop",
@@ -320,7 +327,7 @@ def test_create_instance_no_spot_omits_instance_market_options(
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "stop",
@@ -349,7 +356,7 @@ def test_create_instance_terminate_on_shutdown_sets_terminate_behavior() -> None
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "terminate",
@@ -382,7 +389,7 @@ def test_create_instance_attaches_explicit_iam_instance_profile() -> None:
             "InstanceType": "t3.small",
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": "test-user-data",
+            "UserData": compress_user_data("test-user-data"),
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
             "InstanceInitiatedShutdownBehavior": "stop",
@@ -1454,3 +1461,27 @@ def test_ensure_security_group_opens_published_ports_even_with_no_ssh_cidrs() ->
         stubber.assert_no_pending_responses()
     finally:
         stubber.deactivate()
+
+
+# What RunInstances rejects: the base64-encoded user data, as the API reports it
+# ("Encoded User data is limited to 25600 bytes").
+_EC2_ENCODED_USER_DATA_CAP_BYTES: Final[int] = 25600
+
+
+def test_compress_user_data_round_trips_the_real_cloud_init_script_and_fits_the_ec2_cap() -> None:
+    """The largest VPS cloud-init script fits EC2's encoded cap once compressed, and decompresses to itself."""
+    host_private_key, host_public_key = generate_ed25519_host_keypair()
+    _, authorized_user_public_key = generate_ssh_keypair()
+    script = generate_cloud_init_user_data(
+        host_private_key=host_private_key,
+        host_public_key=host_public_key,
+        install_gvisor_runtime=True,
+        auto_shutdown_seconds=3600,
+        authorized_user_public_key=authorized_user_public_key,
+    )
+
+    compressed = compress_user_data(script)
+
+    assert gzip.decompress(compressed).decode("utf-8") == script
+    assert len(base64.b64encode(compressed)) < _EC2_ENCODED_USER_DATA_CAP_BYTES
+    assert compress_user_data(script) == compressed

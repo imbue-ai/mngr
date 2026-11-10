@@ -1,0 +1,1 @@
+An AWS host's EC2 user data is gzip-compressed before `RunInstances`, so the VPS cloud-init script no longer fails the create with `Encoded User data is limited to 25600 bytes` once it outgrows EC2's 16 KiB raw cap. cloud-init decompresses it on the instance; nothing on the host changes.
