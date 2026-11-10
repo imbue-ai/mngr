@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Key probe</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; color: #222; background: #fafafa; }
+      h1 { font-size: 16px; margin: 0 0 8px; }
+      p { margin: 0 0 12px; max-width: 70ch; }
+      .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #666; margin: 0 0 6px; }
+      ol { margin: 0; padding: 0 0 0 1.6em; font-family: ui-monospace, monospace; font-size: 12px; }
+      li { margin: 2px 0; }
+      .hint { color: #888; }
+      button { margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Key probe</h1>
+    <p>
+      Press the shortcuts under test, one at a time. A key the OS keeps for itself appears in neither list;
+      one the browser keeps from pages appears in neither list in a browser; one that reaches the app is
+      listed under "Main" (the desktop app only) and, unless main intercepted it, under "Page".
+    </p>
+    <p id="mode" class="hint"></p>
+    <div class="columns">
+      <section>
+        <h2>Main (before-input-event)</h2>
+        <ol id="main"></ol>
+      </section>
+      <section>
+        <h2>Page (keydown)</h2>
+        <ol id="page"></ol>
+      </section>
+    </div>
+    <button id="copy" type="button">Copy both lists</button>
+    <script>
+      const lists = { main: document.getElementById("main"), page: document.getElementById("page") };
+      const entries = { main: [], page: [] };
+      const params = new URLSearchParams(location.search);
+      const platform = params.get("platform") ?? navigator.platform;
+      const isIntercepting = params.get("intercept") === "1";
+      document.getElementById("mode").textContent = params.has("platform")
+        ? `Desktop app on ${platform}${isIntercepting ? ", main intercepts every key" : ", keys go on to the page"}`
+        : `Browser: ${navigator.userAgent}`;
+
+      function spell(entry) {
+        const held = [entry.control && "Ctrl", entry.alt && "Alt", entry.shift && "Shift", entry.meta && "Meta"]
+          .filter(Boolean)
+          .join("+");
+        return `${held ? held + "+" : ""}${entry.key} (${entry.code})`;
+      }
+
+      function record(list, entry) {
+        entries[list].push(entry);
+        const item = document.createElement("li");
+        item.textContent = spell(entry);
+        lists[list].appendChild(item);
+      }
+
+      window.__keyProbe = { recordMain: (entry) => record("main", entry) };
+
+      window.addEventListener(
+        "keydown",
+        (event) => {
+          // Every keydown is taken, so a browser's own action for an interceptable key does not run
+          // and the list shows exactly what arrived.
+          event.preventDefault();
+          event.stopPropagation();
+          if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+          record("page", {
+            key: event.key,
+            code: event.code,
+            control: event.ctrlKey,
+            alt: event.altKey,
+            shift: event.shiftKey,
+            meta: event.metaKey,
+          });
+        },
+        { capture: true },
+      );
+
+      document.getElementById("copy").addEventListener("click", () => {
+        const text = ["main", "page"]
+          .map((list) => `${list}:\n${entries[list].map(spell).join("\n")}`)
+          .join("\n\n");
+        void navigator.clipboard.writeText(`${document.getElementById("mode").textContent}\n\n${text}`);
+      });
+    </script>
+  </body>
+</html>

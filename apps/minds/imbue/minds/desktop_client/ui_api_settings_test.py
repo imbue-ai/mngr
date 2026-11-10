@@ -296,6 +296,7 @@ def test_each_account_id_reads_and_writes_its_own_record(tmp_path: Path) -> None
         "auto_update_workspaces": False,
         "auto_update_prompt_decision": None,
         "notifications_enabled": True,
+        "keybindings": {},
     }
     assert (for_device["update_window_start_hour"], for_device["update_window_end_hour"]) == DEFAULT_UPDATE_WINDOW
 
@@ -356,6 +357,124 @@ def test_the_master_notifications_toggle_is_written_through_the_account_settings
     assert minds_config.get_notification_style_with_choice() == (NotificationStyle.BOTH, False)
     prefs = json.loads(client.get("/ui/api/settings").data)["notification_prefs"]
     assert (prefs["is_enabled"], prefs["has_chosen"]) == (False, True)
+
+
+def test_imbue_studio_shortcuts_are_merged_per_action_and_leave_workspace_apps_alone(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    account_id = "6f1d2c3b-6a4e-4f0e-9d7a-41c2b9e86a17"
+    settings_store.apply_settings_values(
+        account_id,
+        {"keybindings": {"files": {"rename": ["f2"]}, "imbue-studio": {"quit": ["shift+meta+q"]}}},
+    )
+
+    response = client.put(
+        f"/ui/api/settings/{account_id}",
+        json={"keybindings": {"imbue-studio": {"quit": None, "new-window": ["alt+meta+n"], "zoom-in": []}}},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["keybindings"] == {"imbue-studio": {"new-window": ["alt+meta+n"], "zoom-in": []}}
+    assert settings_store.read_settings(account_id).keybindings == {
+        "files": {"rename": ("f2",)},
+        "imbue-studio": {"new-window": ("alt+meta+n",), "zoom-in": ()},
+    }
+    record = settings_store.get_record(account_id, "default")
+    assert record is not None and record.is_dirty
+
+
+def test_the_account_settings_get_answers_only_the_imbue_studio_shortcuts(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values(
+        "local", {"keybindings": {"chat": {"send-message": ["meta+enter"]}, "imbue-studio": {"quit": []}}}
+    )
+
+    served = json.loads(client.get("/ui/api/settings/local").data)
+
+    assert served["keybindings"] == {"imbue-studio": {"quit": []}}
+
+
+def test_the_account_settings_get_answers_no_keybindings_when_imbue_studio_has_none_saved(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values("local", {"keybindings": {"chat": {"send-message": ["meta+enter"]}}})
+
+    served = json.loads(client.get("/ui/api/settings/local").data)
+
+    assert served["keybindings"] == {}
+
+
+def test_removing_the_last_imbue_studio_shortcut_drops_its_entry(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values("local", {"keybindings": {"imbue-studio": {"quit": ["shift+meta+q"]}}})
+
+    response = client.put("/ui/api/settings/local", json={"keybindings": {"imbue-studio": {"quit": None}}})
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["keybindings"] == {}
+    assert settings_store.read_settings("local").keybindings == {}
+
+
+@pytest.mark.parametrize(
+    ("keybindings", "problem_fragment"),
+    [
+        ({"chat": {"send-message": ["meta+enter"]}}, "Only Imbue Studio's own shortcuts"),
+        ({"imbue-studio": {"quit": ["Meta+Q"]}}, "not a canonical chord"),
+        ({"imbue-studio": {"quit": ["alt+meta+delete"]}}, "belongs to the operating system"),
+        ({"imbue-studio": {"Quit!": ["meta+q"]}}, "not an action id"),
+    ],
+    ids=["workspace-app", "non-canonical-chord", "refused-chord", "bad-action-id"],
+)
+def test_a_refused_keybindings_write_is_rejected_with_400_and_stores_nothing(
+    tmp_path: Path, keybindings: dict[str, Any], problem_fragment: str
+) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+
+    response = client.put("/ui/api/settings/local", json={"keybindings": keybindings})
+
+    assert response.status_code == 400
+    assert problem_fragment in json.loads(response.data)["error"]
+    assert settings_store.read_settings("local").keybindings == {}
+
+
+def test_a_keybindings_write_not_shaped_as_apps_and_actions_is_rejected_with_400(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+
+    response = client.put("/ui/api/settings/local", json={"keybindings": {"imbue-studio": ["meta+q"]}})
+
+    assert response.status_code == 400
+    assert settings_store.read_settings("local").keybindings == {}
+
+
+def test_an_imbue_studio_write_drops_a_stored_chord_no_binding_can_use(tmp_path: Path) -> None:
+    # A record saved before Ctrl+Alt+Del was refused can still hold it, for a workspace app or Imbue Studio itself.
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values(
+        "local",
+        {
+            "keybindings": {
+                "files": {"rename": ["f2", "alt+meta+delete"]},
+                "imbue-studio": {"quit": ["alt+meta+delete"]},
+            }
+        },
+    )
+
+    response = client.put("/ui/api/settings/local", json={"keybindings": {"imbue-studio": {"new-window": []}}})
+
+    assert response.status_code == 200
+    assert settings_store.read_settings("local").keybindings == {
+        "files": {"rename": ("f2",)},
+        "imbue-studio": {"quit": (), "new-window": ()},
+    }
+
+
+def test_the_account_settings_get_leaves_out_an_imbue_studio_chord_no_binding_can_use(tmp_path: Path) -> None:
+    client, _minds_config, settings_store = _build_settings_client(tmp_path)
+    settings_store.apply_settings_values(
+        "local", {"keybindings": {"imbue-studio": {"quit": ["alt+meta+delete", "meta+q"]}}}
+    )
+
+    served = json.loads(client.get("/ui/api/settings/local").data)
+
+    assert served["keybindings"] == {"imbue-studio": {"quit": ["meta+q"]}}
 
 
 def test_error_reporting_write_with_a_malformed_body_is_rejected_with_400(tmp_path: Path) -> None:

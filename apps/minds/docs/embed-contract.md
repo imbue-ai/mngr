@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 15 (tracks `CONTRACT_VERSION` in
+Version: 16 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v15)
+## Message inventory (v16)
 
 ### workspace -> embedder
 
@@ -69,17 +69,25 @@ see the `*_PATTERN` constants in the module.
 | `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
 | `minds:highlight-chrome` | `{ anchor }` | Pulse a ring around one of the chrome's own controls while the workspace's tour talks about it: `anchor` is one of `workspace-switcher`, `permissions`, `settings`, `share`, `help`, or `null` to clear the ring. Fire-and-forget (no ack); the tour's words never depend on the ring, so a chrome that ignores it reads the same. |
 | `minds:immersive-request` | `{ windowId, on }` | Enter (`on: true`) or leave (`on: false`) immersive mode for this window: the chrome takes the workspace frame Fullscreen-API fullscreen, locks the keyboard so every key reaches the frame (Escape included; holding Escape is Chromium's own way out), and silences its own accelerators and key relays while it lasts (`specs/screen-studio-integration/spec.md`). Sent only to a chrome whose `minds:embedder-capabilities` carried `immersive: true`, and synchronously from the user's click when entering, so the chrome receives it inside the gesture's transient activation. The chrome answers with `minds:immersive-changed`. |
+| `minds:keyboard-shortcuts-page` | `{ height, isRecording }` | The state of the workspace's keyboard shortcuts page (`/keyboard-shortcuts`), which the chrome's Workspace settings frames in its Keyboard shortcuts group: `height` is the page's height in CSS px (at most `MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT`), which the frame takes so the settings pane scrolls the page with everything else, and `isRecording` says its recorder is listening for a new shortcut, while which the chrome does not close the panel on Escape and the desktop app runs no shortcut and hands the recorder every key itself (`minds:record-chord`), so that nothing acts on it. Sent when either changes. The first one says the page has loaded: the group keeps the frame hidden until then, as a workspace too old to serve the page answers its path with the whole desktop, which never sends it, and the group then says the workspace needs an update. |
+| `minds:open-keyboard-shortcuts` | `{}` | Open the shell's workspace-options panel on its Workspace settings tab at the Keyboard shortcuts group. Sent only to a chrome whose `minds:embedder-capabilities` carried `opensKeyboardShortcuts: true` (the workspace's "Keyboard shortcuts..." menu item; without it the workspace opens its own dialog). |
+| `minds:shell-shortcuts` | `{ chords_by_action, claimed_chords }` | The workspace's shortcuts (`specs/keyboard-shortcuts/spec.md`, section 6): `chords_by_action` maps each workspace-wide action's id to its active chords (at most `MAX_SHELL_SHORTCUT_ACTIONS` actions of `MAX_CHORDS_PER_ACTION` chords), and `claimed_chords` lists every active chord of every app of the workspace (at most `MAX_CLAIMED_CHORDS`), both without the chords that cannot arrive where the workspace runs. A chord is a string of the keybinding grammar's shape (modifiers `ctrl`, `alt`, `shift`, `meta` joined with `+` before one key, at most `MAX_CHORD_LENGTH` characters). Sent once the chrome's `minds:embedder-capabilities` has arrived, and again on every keybindings change. The desktop app then runs a workspace-wide chord before any page sees the key (`minds:run-shortcut`), takes from the OS a key it would act on (Alt+F4 and Alt+Space on Windows) for an app that claims it (`minds:run-chord`), and stops taking the close-tab chord itself (`minds:close-active-tab`). A browser chrome ignores it. |
+| `minds:save-chrome-shortcut` | `{ id, chords }` | From the keyboard shortcuts page the chrome frames: save Imbue Studio's shortcut `id` (one of the ids of `minds:chrome-shortcuts`) as `chords` (an empty list for Off) to the window's account. The chrome answers with `minds:chrome-shortcuts`, carrying `error` when the save failed. |
 
 ### embedder -> workspace
 
 | Type | Payload | Meaning |
 |---|---|---|
-| `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. |
+| `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. Sent only until the workspace reports `minds:shell-shortcuts`, so a workspace too old to report them keeps its close-tab chord, and only while Imbue Studio's own Close window does not hold that chord: it does by default (`Cmd+W` / `Ctrl+W`), and the desktop app runs it first. |
+| `minds:run-shortcut` | `{ action }` | Run the workspace-wide action `action` (its id, the app manifest's rule), whose chord the desktop app took before any page saw it, wherever focus was (inside the terminal, the Screen, a pulled-out window included). A pulled-out window's own Close window closes that desktop window instead, which returns the window to the desktop. |
+| `minds:run-chord` | `{ chord }` | A chord the desktop app took from the OS, which would otherwise act on it, because an app of the workspace claims it; the workspace hands it to its focused window's page. |
+| `minds:record-chord` | `{ chord }` | To the keyboard shortcuts page the chrome frames: a key the desktop app took while the page's recorder was listening, so that nothing (the OS, a menu, Imbue Studio itself) acted on it; the recorder takes it as pressed. |
+| `minds:chrome-shortcuts` | `{ actions: [{ id, label, defaultChords, chords }], error? }` | To the keyboard shortcuts page the chrome frames: Imbue Studio's own shortcuts (new window, close window, quit, zoom; the keyboard-shortcuts spec, section 8), each action's id, label, default chords and the chords it has now (at most `MAX_CHROME_SHORTCUT_ACTIONS` actions, labels of at most `MAX_CHROME_SHORTCUT_LABEL_LENGTH` characters, `MAX_CHORDS_PER_ACTION` chords each), and, after a save that failed, `error`, a sentence saying so (at most `MAX_CHROME_SHORTCUTS_ERROR_LENGTH` characters). Only the desktop app sends it, once the page's first `minds:keyboard-shortcuts-page` arrives and after every `minds:save-chrome-shortcut`; a page that never receives it (in a browser, or framed by an older chrome) shows no Imbue Studio section. |
 | `minds:open-ai-keys-ack` | `{}` | An Imbue Studio chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:provider-sign-in-ack` | `{ relay, reason? }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. `reason` says why not: `port_taken` (something already answers on the callback port), `no_forward_channel`, or `no_browser`. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
-| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, and never asks for immersive mode. |
+| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, opensKeyboardShortcuts?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `opensKeyboardShortcuts: true` says it takes `minds:open-keyboard-shortcuts`; `false` or absent means the workspace opens its own keyboard shortcuts dialog. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, opens its own keyboard shortcuts dialog, and never asks for immersive mode. The chrome sends it to the keyboard shortcuts page it frames as well, with `canPopOut` alone, once the page's first `minds:keyboard-shortcuts-page` arrives: `canPopOut` says the page runs in the desktop app, where a browser's own shortcuts reach the workspace. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when given, else at its kept frame. This desktop app sends no `frame`. |
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:`, `tel:` or custom-scheme URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`; a custom-scheme link, only to one that announced `opensCustomSchemeLinks: true` too. |
@@ -307,3 +315,27 @@ payloads -- to the console.
   workspace from before v15 announces no `reportsChatOnScreen`, so a v15 chrome
   knows the report will never come and lifts the wash once the seed has
   answered rather than waiting out its bound.
+- **16** -- added `keyboard-shortcuts-page` and `open-keyboard-shortcuts`
+  (workspace -> embedder) and the optional `opensKeyboardShortcuts` field on
+  `embedder-capabilities`. The workspace's keyboard shortcuts page reports its
+  height and whether its recorder is listening, so Workspace settings can show
+  it in a frame that grows to fit, leave the recorder the keys it is recording,
+  and tell a workspace too old to serve the page from one still loading; and
+  the workspace's "Keyboard shortcuts..." menu item asks a chrome that says it
+  can for that settings group. A chrome from before v16 never frames the page
+  and never says `opensKeyboardShortcuts`, so the workspace keeps its own
+  dialog; an older workspace never sends either message, and the chrome says
+  it needs an update. Also added `shell-shortcuts` (workspace -> embedder) and
+  `run-shortcut`, `run-chord` and `record-chord` (embedder -> workspace), and
+  `embedder-capabilities` gained a second recipient, the framed keyboard
+  shortcuts page: the workspace reports its shortcuts so the desktop app runs
+  them before any page or the OS sees the key, and hands the recorder every
+  key while it listens, so that nothing acts on it. A chrome from before v16
+  drops `shell-shortcuts` and keeps its close-tab chord; an older workspace
+  never sends it, and the chrome keeps sending `close-active-tab` for a
+  close-tab chord Imbue Studio's own Close window does not hold. Also added
+  `chrome-shortcuts` (embedder -> the framed keyboard shortcuts page) and
+  `save-chrome-shortcut` (the page -> embedder): the desktop app lists its own
+  shortcuts on the same page, which saves them to the account through the
+  chrome. A page that never receives `chrome-shortcuts` shows no section for
+  them.

@@ -125,6 +125,31 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // close-active-tab) pause, so every key reaches the frame.
   setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
 
+  // The shortcuts main runs before any page sees the key (the
+  // keyboard-shortcuts spec, sections 6 and 8): the displayed workspace's
+  // chords, Imbue Studio's own chords for an account (every action, already
+  // resolved), and whether this window's shortcut recorder is listening,
+  // during which main runs none and hands the recorder every key instead.
+  setAppShortcuts: (accountId, chordsByAction) => ipcRenderer.send('set-app-shortcuts', accountId, chordsByAction),
+  setShellShortcuts: (workspaceId, shortcuts) =>
+    ipcRenderer.send('set-shell-shortcuts', { workspaceId, shortcuts }),
+  setShortcutRecording: (isRecording) => ipcRenderer.send('set-shortcut-recording', Boolean(isRecording)),
+  onRunShortcut: (callback) => {
+    ipcRenderer.on('run-shortcut', (_event, action) => {
+      if (typeof action === 'string') callback(action);
+    });
+  },
+  onRunChord: (callback) => {
+    ipcRenderer.on('run-chord', (_event, chord) => {
+      if (typeof chord === 'string') callback(chord);
+    });
+  },
+  onRecordChord: (callback) => {
+    ipcRenderer.on('record-chord', (_event, chord) => {
+      if (typeof chord === 'string') callback(chord);
+    });
+  },
+
   // Link routing (electron/link-routing.js).
   reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
   openExternalLink: (url) => ipcRenderer.send('open-external-link', url),
@@ -140,10 +165,20 @@ contextBridge.exposeInMainWorld('mindsNative', {
     ipcRenderer.send('notification-listener-ready');
   },
 
-  // Display zoom (Settings > Display). Desktop-only: only the shell can scale
-  // a window, so the browser build leaves this to the browser's own zoom.
+  // The chrome's own New window entry (Windows and Linux have no app menu).
+  openNewWindow: () => ipcRenderer.send('open-new-window'),
+
+  // Display zoom (Settings > Display, the zoom shortcuts). Desktop-only: only
+  // the shell can scale a window, so the browser build leaves this to the
+  // browser's own zoom.
   getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
   setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
+  stepDisplayZoom: (step) => ipcRenderer.invoke('step-display-zoom', step),
+  onDisplayZoomChanged: (callback) => {
+    ipcRenderer.on('display-zoom-changed', (_event, percent) => {
+      if (typeof percent === 'number') callback(percent);
+    });
+  },
 
   // Whether this is the first launch into a new app version (the auto-update
   // prompt's first trigger); recorded by main once at startup.
@@ -174,8 +209,10 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onOpenOverlay: (callback) => {
     ipcRenderer.on('open-overlay', (_event, cmd) => callback(cmd));
   },
-  // Cmd/Ctrl+W while the workspace iframe has focus: seen by main's
-  // before-input-event, relayed into the workspace via the embed contract.
+  // The close-tab chord (Cmd/Ctrl+W) for a workspace too old to report its
+  // shortcuts, when Imbue Studio's own Close window does not hold the chord:
+  // seen by main's before-input-event, relayed into the workspace via the
+  // embed contract.
   onCloseActiveTab: (callback) => {
     ipcRenderer.on('close-active-tab', () => callback());
   },

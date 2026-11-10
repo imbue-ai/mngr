@@ -120,6 +120,34 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("shows a display zoom changed elsewhere while it is open, and stops listening once closed", async () => {
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    vi.spyOn(m.route, "param").mockReturnValue("display");
+    const zoomListeners: ((percent: number) => void)[] = [];
+    await withUnreachableGlobalFetch(async () => {
+      await withMindsNative(
+        {
+          getDisplayZoom: () => Promise.resolve(100),
+          stepDisplayZoom: () => Promise.resolve(100),
+          onDisplayZoomChanged: (callback: (percent: number) => void) => void zoomListeners.push(callback),
+        },
+        async () => {
+          const page = openPage() as Page & { onremove: () => void };
+          page.oninit();
+          await settle();
+          const model = shownModel(page);
+          for (const listener of zoomListeners) listener(125);
+          const percentWhileOpen = model.displayZoomPercent;
+          page.onremove();
+          for (const listener of zoomListeners) listener(150);
+
+          expect(percentWhileOpen).toBe(125);
+          expect(model.displayZoomPercent).toBe(125);
+        },
+      );
+    });
+  });
+
   it("ignores a section name it does not know", async () => {
     // A stale or mistyped deep link would otherwise land on a panel that
     // renders nothing and has no nav entry to leave it by.

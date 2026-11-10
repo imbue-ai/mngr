@@ -54,6 +54,23 @@ function writeZoomPercent(dataDir, percent) {
   fs.writeFileSync(preferencePath(dataDir), JSON.stringify({ percent }, null, 2) + '\n');
 }
 
+/**
+ * The percent one step of the zoom shortcuts lands on: the next or previous
+ * offered size (staying put at either end), or the default for a reset. A
+ * current value the panel does not offer steps from the default.
+ *
+ * @param {number} percent
+ * @param {'in'|'out'|'reset'} step
+ * @returns {number}
+ */
+function stepZoomPercent(percent, step) {
+  if (step === 'reset') return DEFAULT_ZOOM_PERCENT;
+  if (step !== 'in' && step !== 'out') throw new Error(`Unknown zoom step ${JSON.stringify(step)}`);
+  const index = ZOOM_PERCENTS.indexOf(normalizeZoomPercent(percent) ?? DEFAULT_ZOOM_PERCENT);
+  const next = step === 'in' ? Math.min(index + 1, ZOOM_PERCENTS.length - 1) : Math.max(index - 1, 0);
+  return ZOOM_PERCENTS[next];
+}
+
 function zoomFactorForPercent(percent) {
   return percent / 100;
 }
@@ -65,5 +82,6 @@ module.exports = {
   normalizeZoomPercent,
   readZoomPercent,
   writeZoomPercent,
+  stepZoomPercent,
   zoomFactorForPercent,
 };

@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
+import { subscribeToDisplayZoom } from "../../models/displayZoom";
 import { SettingsModel } from "../../models/settings";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
@@ -17,6 +18,7 @@ export function SettingsPage(): m.Component {
   // re-applying it would drag the panel back off whatever the nav was just
   // clicked to.
   let appliedSection: string | null = null;
+  let unsubscribeDisplayZoom: (() => void) | null = null;
 
   // `?section=` lets something outside the page open a specific panel -- the
   // menu bar's "Check for Updates..." lands on Updates rather than answering in
@@ -46,6 +48,14 @@ export function SettingsPage(): m.Component {
       void model.loadUpdateState();
       // Desktop-only as well: the zoom lives in the Electron main process.
       void model.loadDisplayZoom();
+      // A zoom shortcut, or another window, can change it while the page is up.
+      unsubscribeDisplayZoom = subscribeToDisplayZoom((percent) => {
+        model.displayZoomPercent = percent;
+        m.redraw();
+      });
+    },
+    onremove(): void {
+      unsubscribeDisplayZoom?.();
     },
     // Before the diff, not after it, so the section it picks is in the render
     // this redraw produces.

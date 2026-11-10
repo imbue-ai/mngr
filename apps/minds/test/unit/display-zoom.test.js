@@ -63,3 +63,13 @@ test('zoomFactorForPercent is the percent as a factor', () => {
   assert.equal(zoom.zoomFactorForPercent(125), 1.25);
   assert.equal(zoom.zoomFactorForPercent(80), 0.8);
 });
+
+test('stepZoomPercent moves one offered size, stays put at either end, and resets to the default', () => {
+  assert.equal(zoom.stepZoomPercent(100, 'in'), 110);
+  assert.equal(zoom.stepZoomPercent(110, 'out'), 100);
+  assert.equal(zoom.stepZoomPercent(200, 'in'), 200);
+  assert.equal(zoom.stepZoomPercent(80, 'out'), 80);
+  assert.equal(zoom.stepZoomPercent(175, 'reset'), zoom.DEFAULT_ZOOM_PERCENT);
+  assert.equal(zoom.stepZoomPercent(137, 'in'), 110);
+  assert.throws(() => zoom.stepZoomPercent(100, 'sideways'), /Unknown zoom step "sideways"/);
+});

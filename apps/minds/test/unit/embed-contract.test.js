@@ -557,8 +557,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 15', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '15');
+test('the contract is at version 16', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '16');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {
@@ -680,5 +680,211 @@ test('workspace endpoint never honours a highlight-chrome, which only travels to
   const seen = [];
   contract.createWorkspaceEndpoint({ handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg) } });
   win.deliver({ source: parentWin, origin: 'o', data: { type: contract.HIGHLIGHT_CHROME, anchor: 'share' } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes a keyboard-shortcuts-page from its frame only with a sane height and a recording flag', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push([msg.height, msg.isRecording]) },
+  });
+  const from = (source, fields) =>
+    win.deliver({ source, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, ...fields } });
+  from(makeWindowDouble(), { height: 480, isRecording: false });
+  from(frameWin, { height: 480 });
+  from(frameWin, { height: '480', isRecording: false });
+  from(frameWin, { height: -1, isRecording: false });
+  from(frameWin, { height: Number.POSITIVE_INFINITY, isRecording: false });
+  from(frameWin, { height: contract.MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT + 1, isRecording: false });
+  from(frameWin, { height: 480, isRecording: 'yes' });
+  assert.deepStrictEqual(seen, []);
+  from(frameWin, { height: 0, isRecording: false });
+  from(frameWin, { height: 612.5, isRecording: true });
+  assert.deepStrictEqual(seen, [[0, false], [612.5, true]]);
+});
+
+test('workspace endpoint never honours a keyboard-shortcuts-page, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, height: 1, isRecording: false } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint takes an opensKeyboardShortcuts capability only as a boolean', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.opensKeyboardShortcuts) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, ...fields } });
+  deliver({});
+  deliver({ opensKeyboardShortcuts: true });
+  deliver({ opensKeyboardShortcuts: 'yes' });
+  assert.deepStrictEqual(seen, [undefined, true]);
+});
+
+test('embedder endpoint takes an open-keyboard-shortcuts ask, which carries nothing', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg.type) },
+  });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
+  assert.deepStrictEqual(seen, ['minds:open-keyboard-shortcuts']);
+});
+
+test('workspace endpoint never honours an open-keyboard-shortcuts, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes shell shortcuts only as chords by action id and a bounded list of chords', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.SHELL_SHORTCUTS]: (msg) => seen.push([msg.chords_by_action, msg.claimed_chords]) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: frameWin, origin: 'o', data: { type: contract.SHELL_SHORTCUTS, ...fields } });
+  const tooMany = Array.from({ length: contract.MAX_CLAIMED_CHORDS + 1 }, () => 'f2');
+  deliver({ chords_by_action: { 'close-window': ['alt+meta+w'] } });
+  deliver({ chords_by_action: [], claimed_chords: [] });
+  deliver({ chords_by_action: { 'Close Window': ['alt+meta+w'] }, claimed_chords: [] });
+  deliver({ chords_by_action: { 'close-window': 'alt+meta+w' }, claimed_chords: [] });
+  deliver({ chords_by_action: { 'close-window': ['alt+meta+w w'] }, claimed_chords: [] });
+  deliver({ chords_by_action: {}, claimed_chords: ['hyper+k'] });
+  deliver({ chords_by_action: {}, claimed_chords: tooMany });
+  assert.deepStrictEqual(seen, []);
+  deliver({
+    chords_by_action: { 'close-window': ['alt+meta+w'], 'open-overview': [] },
+    claimed_chords: ['enter', 'shift+meta+#', 'meta+plus', 'f2'],
+  });
+  assert.deepStrictEqual(seen, [
+    [{ 'close-window': ['alt+meta+w'], 'open-overview': [] }, ['enter', 'shift+meta+#', 'meta+plus', 'f2']],
+  ]);
+});
+
+test('workspace endpoint takes run-shortcut, run-chord and record-chord only with a well-formed action or chord', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: {
+      [contract.RUN_SHORTCUT]: (msg) => seen.push(['run-shortcut', msg.action]),
+      [contract.RUN_CHORD]: (msg) => seen.push(['run-chord', msg.chord]),
+      [contract.RECORD_CHORD]: (msg) => seen.push(['record-chord', msg.chord]),
+    },
+  });
+  const deliver = (data) => win.deliver({ source: parentWin, origin: 'http://chrome', data });
+  deliver({ type: contract.RUN_SHORTCUT, action: 'Close Window' });
+  deliver({ type: contract.RUN_SHORTCUT });
+  deliver({ type: contract.RUN_CHORD, chord: 'alt+f4 ' });
+  deliver({ type: contract.RECORD_CHORD, chord: 'x'.repeat(contract.MAX_CHORD_LENGTH + 1) });
+  assert.deepStrictEqual(seen, []);
+  deliver({ type: contract.RUN_SHORTCUT, action: 'close-window' });
+  deliver({ type: contract.RUN_CHORD, chord: 'alt+f4' });
+  deliver({ type: contract.RECORD_CHORD, chord: 'alt+space' });
+  assert.deepStrictEqual(seen, [
+    ['run-shortcut', 'close-window'],
+    ['run-chord', 'alt+f4'],
+    ['record-chord', 'alt+space'],
+  ]);
+});
+
+test('the shortcut relays each travel one way only', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.SHELL_SHORTCUTS]: (msg) => seen.push(msg.type) } });
+  win.deliver({
+    source: parentWin,
+    origin: 'o',
+    data: { type: contract.SHELL_SHORTCUTS, chords_by_action: {}, claimed_chords: [] },
+  });
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: {
+      [contract.RUN_SHORTCUT]: (msg) => seen.push(msg.type),
+      [contract.RUN_CHORD]: (msg) => seen.push(msg.type),
+      [contract.RECORD_CHORD]: (msg) => seen.push(msg.type),
+    },
+  });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.RUN_SHORTCUT, action: 'close-window' } });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.RUN_CHORD, chord: 'alt+f4' } });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.RECORD_CHORD, chord: 'alt+f4' } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint takes chrome shortcuts only as a bounded list of well-formed actions and an optional short error', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.CHROME_SHORTCUTS]: (msg) => seen.push([msg.actions, msg.error]) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.CHROME_SHORTCUTS, ...fields } });
+  const action = { id: 'quit', label: 'Quit', defaultChords: ['meta+q'], chords: ['meta+q'] };
+  const tooMany = Array.from({ length: contract.MAX_CHROME_SHORTCUT_ACTIONS + 1 }, () => action);
+  deliver({});
+  deliver({ actions: {} });
+  deliver({ actions: tooMany });
+  deliver({ actions: [{ ...action, id: 'Quit' }] });
+  deliver({ actions: [{ ...action, label: '' }] });
+  deliver({ actions: [{ ...action, label: 'x'.repeat(contract.MAX_CHROME_SHORTCUT_LABEL_LENGTH + 1) }] });
+  deliver({ actions: [{ ...action, defaultChords: 'meta+q' }] });
+  deliver({ actions: [{ ...action, chords: ['hyper+q'] }] });
+  deliver({ actions: [action], error: 42 });
+  deliver({ actions: [action], error: 'x'.repeat(contract.MAX_CHROME_SHORTCUTS_ERROR_LENGTH + 1) });
+  assert.deepStrictEqual(seen, []);
+  deliver({ actions: [action, { ...action, id: 'zoom-in', label: 'Zoom in', chords: [] }] });
+  deliver({ actions: [], error: "Couldn't save the shortcut." });
+  assert.deepStrictEqual(seen, [
+    [[action, { ...action, id: 'zoom-in', label: 'Zoom in', chords: [] }], undefined],
+    [[], "Couldn't save the shortcut."],
+  ]);
+});
+
+test('embedder endpoint takes a save-chrome-shortcut only with an action id and a bounded list of chords', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.SAVE_CHROME_SHORTCUT]: (msg) => seen.push([msg.id, msg.chords]) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: frameWin, origin: 'o', data: { type: contract.SAVE_CHROME_SHORTCUT, ...fields } });
+  const tooMany = Array.from({ length: contract.MAX_CHORDS_PER_ACTION + 1 }, () => 'meta+n');
+  deliver({ chords: ['meta+n'] });
+  deliver({ id: 'New Window', chords: ['meta+n'] });
+  deliver({ id: 'new-window' });
+  deliver({ id: 'new-window', chords: 'meta+n' });
+  deliver({ id: 'new-window', chords: tooMany });
+  assert.deepStrictEqual(seen, []);
+  deliver({ id: 'new-window', chords: ['shift+meta+n'] });
+  deliver({ id: 'quit', chords: [] });
+  assert.deepStrictEqual(seen, [
+    ['new-window', ['shift+meta+n']],
+    ['quit', []],
+  ]);
+});
+
+test('the chrome shortcut messages each travel one way only', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.SAVE_CHROME_SHORTCUT]: (msg) => seen.push(msg.type) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.SAVE_CHROME_SHORTCUT, id: 'quit', chords: [] } });
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.CHROME_SHORTCUTS]: (msg) => seen.push(msg.type) },
+  });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.CHROME_SHORTCUTS, actions: [] } });
   assert.deepStrictEqual(seen, []);
 });

@@ -144,6 +144,12 @@ interface MindsNativeSurface {
   // setting shipped lacks them, and the browser build scales with the browser.
   getDisplayZoom?(): Promise<number>;
   setDisplayZoom?(percent: number): Promise<number>;
+  // Imbue Studio's zoom shortcuts and menu entries: one step through the
+  // offered sizes, or back to 100%; resolves the stored percent. Every window
+  // hears the new percent, whoever changed it. Optional: older preloads lack
+  // them.
+  stepDisplayZoom?(step: DisplayZoomStep): Promise<number>;
+  onDisplayZoomChanged?(callback: (percent: number) => void): void;
   // Which app version the previous launch ran. Optional: a preload from before
   // it lacks it, and the browser build has no app version of its own.
   getLaunchVersionChange?(): Promise<LaunchVersionChange>;
@@ -198,10 +204,40 @@ interface MindsNativeSurface {
   // Optional: a preload from before immersive mode lacks it, and the browser
   // build has no accelerators or relays to silence.
   setImmersive?(on: boolean): void;
+  // The workspace's shortcuts (the keyboard-shortcuts spec, section 6).
+  // Optional: a preload from before them lacks them, and the browser build
+  // has no main process to run them.
+  setShellShortcuts?(
+    workspaceId: string,
+    shortcuts: ShellShortcutsReport,
+  ): void;
+  setShortcutRecording?(isRecording: boolean): void;
+  onRunShortcut?(callback: (action: string) => void): void;
+  onRunChord?(callback: (chord: string) => void): void;
+  onRecordChord?(callback: (chord: string) => void): void;
+  // Imbue Studio's own shortcuts (the keyboard-shortcuts spec, section 8.4):
+  // every action's chords for this window's account, which main runs before
+  // any page sees the key. Optional: a preload from before them lacks them,
+  // and the browser build has no main process to run them.
+  setAppShortcuts?(
+    accountId: string,
+    chordsByAction: Record<string, readonly string[]>,
+  ): void;
+  // Open a new Imbue Studio window (the sidebar menu's New window).
+  openNewWindow?(): void;
   // This window's renderer process id, which names its lane in a profiling
   // trace beside Chromium's own. Optional: a preload from before profiling
   // lacks it, and the browser build has no process of its own to name.
   rendererPid?: number;
+}
+
+/** A step of Imbue Studio's zoom: one size larger or smaller, or back to 100%. */
+export type DisplayZoomStep = "in" | "out" | "reset";
+
+/** The workspace-wide actions' chords and every app's, as a workspace reports them (minds:shell-shortcuts). */
+export interface ShellShortcutsReport {
+  chords_by_action: Record<string, string[]>;
+  claimed_chords: string[];
 }
 
 /** This launch's app version against the previous launch's, as main recorded
@@ -404,6 +440,18 @@ export const electronBridge = {
   async setDisplayZoom(percent: number): Promise<number | null> {
     return (await native()?.setDisplayZoom?.(percent)) ?? null;
   },
+  /** Whether main steps the display zoom (the zoom shortcuts' menu entries). */
+  get stepsDisplayZoom(): boolean {
+    return typeof native()?.stepDisplayZoom === "function";
+  },
+  /** Step the display zoom; resolves the stored percent, or null where the shell cannot scale windows. */
+  async stepDisplayZoom(step: DisplayZoomStep): Promise<number | null> {
+    return (await native()?.stepDisplayZoom?.(step)) ?? null;
+  },
+  /** The display zoom changed, from any window or shortcut. */
+  onDisplayZoomChanged(callback: (percent: number) => void): void {
+    native()?.onDisplayZoomChanged?.(callback);
+  },
 
   /** Whether this is the first launch into a new app version. False in the
    * browser, which has no app version of its own to have updated. */
@@ -515,6 +563,51 @@ export const electronBridge = {
    * menu shortcuts and key relays stay out of the way while it lasts. */
   setImmersive(on: boolean): void {
     native()?.setImmersive?.(on);
+  },
+  /** Whether main runs the workspace's shortcuts: the desktop app, with a preload that knows them. */
+  get runsShellShortcuts(): boolean {
+    return typeof native()?.setShellShortcuts === "function";
+  },
+  /** Tell main the displayed workspace's shortcuts, which it runs before any page sees the key. */
+  setShellShortcuts(
+    workspaceId: string,
+    shortcuts: ShellShortcutsReport,
+  ): void {
+    native()?.setShellShortcuts?.(workspaceId, shortcuts);
+  },
+  /** Tell main whether this window's shortcut recorder is listening. */
+  setShortcutRecording(isRecording: boolean): void {
+    native()?.setShortcutRecording?.(isRecording);
+  },
+  /** Whether main runs Imbue Studio's own shortcuts: the desktop app, with a preload that knows them. */
+  get runsAppShortcuts(): boolean {
+    return typeof native()?.setAppShortcuts === "function";
+  },
+  /** Tell main this account's chords for every one of Imbue Studio's own actions. */
+  setAppShortcuts(
+    accountId: string,
+    chordsByAction: Record<string, readonly string[]>,
+  ): void {
+    native()?.setAppShortcuts?.(accountId, chordsByAction);
+  },
+  /** Whether main opens a new Imbue Studio window on request. */
+  get opensNewWindow(): boolean {
+    return typeof native()?.openNewWindow === "function";
+  },
+  openNewWindow(): void {
+    native()?.openNewWindow?.();
+  },
+  /** A workspace-wide action main took the chord of, to run in the displayed workspace. */
+  onRunShortcut(callback: (action: string) => void): void {
+    native()?.onRunShortcut?.(callback);
+  },
+  /** A chord main took from the OS for an app of the displayed workspace, to hand to its focused page. */
+  onRunChord(callback: (chord: string) => void): void {
+    native()?.onRunChord?.(callback);
+  },
+  /** A key main took while the shortcut recorder listened, so nothing else acted on it, to record. */
+  onRecordChord(callback: (chord: string) => void): void {
+    native()?.onRecordChord?.(callback);
   },
   /** This window's renderer process id; null in the browser, and on a
    * desktop build older than profiling. */

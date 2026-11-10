@@ -7,9 +7,10 @@ revokes, connector add/disconnect, plan switch, trim, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
 The account-keyed settings (the update window, the auto-update toggle and its
-one-time offer's answer, the master notifications toggle) are edited through
-one route pair, ``GET``/``PUT /ui/api/settings/<account_id>`` (spec section
-7.3). Each account id reads and writes its own replica of the synced
+one-time offer's answer, the master notifications toggle, Imbue Studio's own
+keyboard shortcuts) are edited through one route pair,
+``GET``/``PUT /ui/api/settings/<account_id>`` (spec section 7.3). Each
+account id reads and writes its own replica of the synced
 ``settings`` document (phase 3A of ``specs/user-profile-state/spec.md``);
 the PUT marks the replica dirty and kicks the sync scheduler, whose next
 pass pushes it. The overview takes the window's account as a query
@@ -55,10 +56,15 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.session_store import AccountSession
+from imbue.minds.desktop_client.settings.keybindings import IMBUE_STUDIO_KEYBINDINGS_APP
+from imbue.minds.desktop_client.settings.keybindings import describe_keybindings_write_problem
+from imbue.minds.desktop_client.settings.keybindings import merge_keybindings_write
+from imbue.minds.desktop_client.settings.keybindings import usable_keybindings
 from imbue.minds.desktop_client.settings.resolve import SettingsResolutionContext
 from imbue.minds.desktop_client.settings.resolve import resolve_allow_agent_command_execution
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_prompt_decision
 from imbue.minds.desktop_client.settings.resolve import resolve_auto_update_workspaces
+from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
 from imbue.minds.desktop_client.settings.resolve import resolve_notification_style
 from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
 from imbue.minds.desktop_client.settings.resolve import resolve_report_unexpected_errors
@@ -222,6 +228,12 @@ class UiAccountSettings(FrozenModel):
         description="How the one-time auto-update offer was answered; None while it never was"
     )
     notifications_enabled: bool = Field(description="Master notifications toggle")
+    keybindings: dict[str, dict[str, list[str]]] = Field(
+        description=(
+            "Imbue Studio's own saved shortcuts, by action id under the imbue-studio app; "
+            "empty when none differs from its defaults"
+        )
+    )
 
 
 class UiAccountSettingsWrite(FrozenModel):
@@ -230,6 +242,8 @@ class UiAccountSettingsWrite(FrozenModel):
     The window hours come as a pair or not at all -- half a window is not a
     preference anyone holds. ``auto_update_prompt_decision`` can only be set
     (never cleared), so an absent field and a null field read the same.
+    ``keybindings`` is merged per action into the stored map rather than
+    replacing it, and names only the imbue-studio app.
     """
 
     update_window_start_hour: int | None = Field(default=None, ge=0, le=23, description="Local hour the window opens")
@@ -239,6 +253,13 @@ class UiAccountSettingsWrite(FrozenModel):
         default=None, description="How the one-time offer was answered"
     )
     notifications_enabled: bool | None = Field(default=None, description="New master notifications toggle value")
+    keybindings: dict[str, dict[str, list[str] | None]] | None = Field(
+        default=None,
+        description=(
+            "Imbue Studio's shortcuts to change, by app then action id: a list of chords sets an action "
+            "(an empty list turns it off), null brings back its defaults"
+        ),
+    )
 
 
 class UiNotificationChannels(FrozenModel):
@@ -698,6 +719,7 @@ def _resolved_account_settings(account_id: str) -> UiAccountSettings:
     """The account's record as the routes serve it, through the resolution path."""
     context = load_settings_context(get_state().minds_config, get_state().account_settings_store, account_id)
     update_window = resolve_update_window(context)
+    imbue_studio_chords = usable_keybindings(resolve_keybindings(context)).get(IMBUE_STUDIO_KEYBINDINGS_APP)
     return UiAccountSettings(
         settings_format=context.account.settings_format,
         update_window_start_hour=update_window[0],
@@ -705,7 +727,19 @@ def _resolved_account_settings(account_id: str) -> UiAccountSettings:
         auto_update_workspaces=resolve_auto_update_workspaces(context),
         auto_update_prompt_decision=resolve_auto_update_prompt_decision(context),
         notifications_enabled=resolve_notifications_enabled(context),
+        keybindings={} if imbue_studio_chords is None else {IMBUE_STUDIO_KEYBINDINGS_APP: imbue_studio_chords},
     )
+
+
+def _describe_imbue_studio_keybindings_write_problem(write: dict[str, dict[str, list[str] | None]]) -> str | None:
+    """Why the account-settings PUT refuses this keybindings write, or None when it takes it."""
+    other_apps = sorted(app_name for app_name in write if app_name != IMBUE_STUDIO_KEYBINDINGS_APP)
+    if other_apps:
+        return (
+            f"Only Imbue Studio's own shortcuts ({IMBUE_STUDIO_KEYBINDINGS_APP}) are saved here, not "
+            f"{', '.join(other_apps)}: a workspace saves its apps' shortcuts itself"
+        )
+    return describe_keybindings_write_problem(write)
 
 
 def _handle_account_settings(account_id: str) -> Response:
@@ -716,6 +750,10 @@ def _handle_account_settings(account_id: str) -> Response:
     pass pushes it. The PUT is partial (any subset of the record's fields) and
     unguarded, like the plain-preference writes it replaced: each field is
     independent, so the last write to a field is simply the newest choice.
+    Keybindings are the exception to whole-field writes: the stored map also
+    holds every workspace app's shortcuts, so a write changes only the actions
+    it names, and drops any stored chord no binding can use rather than
+    refusing the write over it.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -733,10 +771,18 @@ def _handle_account_settings(account_id: str) -> Response:
         return _error_response("The update window needs both its start and end hours", 400)
     if write.update_window_start_hour is not None and write.update_window_start_hour == write.update_window_end_hour:
         return _empty_update_window_response()
+    # Only the explicitly-sent fields land: a key never chosen stays absent
+    # from the record, which is what "never chosen" means to it.
+    value_by_key: dict[str, object] = write.model_dump(mode="json", exclude_none=True, exclude={"keybindings"})
+    if write.keybindings is not None:
+        problem = _describe_imbue_studio_keybindings_write_problem(write.keybindings)
+        if problem is not None:
+            return _error_response(problem, 400)
+        value_by_key["keybindings"] = merge_keybindings_write(
+            usable_keybindings(settings_store.read_settings(account_id).keybindings), write.keybindings
+        )
     try:
-        # Only the explicitly-sent fields land: a key never chosen stays
-        # absent from the record, which is what "never chosen" means to it.
-        settings_store.apply_settings_values(account_id, write.model_dump(mode="json", exclude_none=True))
+        settings_store.apply_settings_values(account_id, value_by_key)
     except SettingsRecordTooNewError:
         return _error_response(
             f"These settings were saved by a newer version of Imbue Studio "

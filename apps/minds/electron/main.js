@@ -75,6 +75,8 @@ const {
   isKeyRelaySilenced,
   originOf,
 } = require('./immersive-policy');
+const { chordFromInput, chordPlatformOf, decideChord, readShellShortcuts } = require('./shell-chords');
+const { APP_SHORTCUT_DEFAULTS, menuAcceleratorOf, readAppShortcuts } = require('./app-shortcuts');
 const {
   shouldWriteSessionState,
   createDebouncedSaver,
@@ -249,6 +251,7 @@ if (app.isPackaged) {
 }
 
 const isMac = process.platform === 'darwin';
+const CHORD_PLATFORM = chordPlatformOf(process.platform);
 // Resolved once, before any window: a bad setting fails the launch outright.
 const windowControls = resolveWindowControls(process.platform, process.env);
 
@@ -276,7 +279,10 @@ const CHROME_LOAD_RETRY_DELAY_MS = 500;
 
 const bundles = new Set();
 const mruWindows = []; // most recently focused first
-let appMenuInstalled = false;
+// Imbue Studio's own chords by account id (a user id, or 'local' for the
+// device), as each account's windows last reported them (set-app-shortcuts);
+// a window whose account reported none runs the catalog defaults.
+const appShortcutsByAccountId = new Map();
 
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
@@ -560,8 +566,8 @@ function computeTitleFor(bundle) {
 }
 
 // The display zoom preference (Settings > Display), applied to every window.
-// Read from disk once and kept here for the app's life; `set-display-zoom` is
-// the only writer. Chromium keys zoom by origin and each window moves between
+// Read from disk once and kept here for the app's life; setDisplayZoomPercent
+// is the only writer. Chromium keys zoom by origin and each window moves between
 // the file:// loading document and the backend origin, so the factor is
 // re-applied on every main-frame navigation rather than set once.
 let displayZoomPercent = null;
@@ -586,9 +592,32 @@ function applyDisplayZoomTo(webContents) {
   }
 }
 
-function applyDisplayZoomToAllWindows() {
+/** Store a new display zoom, apply it to every window, and tell every
+ *  window's page (an open Settings > Display follows along). */
+function setDisplayZoomPercent(percent) {
+  displayZoom.writeZoomPercent(paths.getStateDir(), percent);
+  displayZoomPercent = percent;
   for (const bundle of bundles) {
-    if (!bundle.window.isDestroyed()) applyDisplayZoomTo(bundle.window.webContents);
+    if (bundle.window.isDestroyed()) continue;
+    applyDisplayZoomTo(bundle.window.webContents);
+    if (bundle.window.webContents.isDestroyed()) continue;
+    try { bundle.window.webContents.send('display-zoom-changed', percent); } catch { /* noop */ }
+  }
+  return percent;
+}
+
+/** One step of the zoom shortcuts and menu items: in, out, or reset. */
+function stepDisplayZoom(step) {
+  return setDisplayZoomPercent(displayZoom.stepZoomPercent(currentDisplayZoomPercent(), step));
+}
+
+/** A zoom step from a shortcut or a menu item, whose listener has no caller
+ *  to hand a failed write to. */
+function stepDisplayZoomOrWarn(step) {
+  try {
+    stepDisplayZoom(step);
+  } catch (err) {
+    console.warn(`[display-zoom] could not step the zoom ${step}: ${err.message}`);
   }
 }
 
@@ -739,6 +768,13 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     // integration spec, section 5): menu shortcuts are off and the
     // before-input-event relays are silenced while it is.
     isImmersive: false,
+    // The shortcuts the displayed workspace reported (minds:shell-shortcuts,
+    // electron/shell-chords.js), with the workspace that reported them; null
+    // until one does, which keeps the hard-coded close-tab chord in force.
+    shellShortcuts: null,
+    // Whether the page's keyboard shortcuts recorder is listening, during
+    // which main matches no shortcut and hands every key to it.
+    isShortcutRecording: false,
     // The URL this window's content is "at" for session persistence and
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
@@ -827,6 +863,7 @@ function wireBundleWindowEvents(bundle) {
     const idx = mruWindows.indexOf(bundle);
     if (idx >= 0) mruWindows.splice(idx, 1);
     mruWindows.unshift(bundle);
+    if (isApplicationMenuShown()) installApplicationMenu();
     // See activation-diagnostics.js for why the relay is bracketed.
     const isWindowDestroyed = win.isDestroyed();
     console.log(formatFocusRelayStart({
@@ -1003,6 +1040,8 @@ function wireBundleNavigationEvents(bundle) {
     // the old page too (fullscreen ends with the document).
     linkRouter.forgetMount(wc);
     setImmersiveFor(bundle, false);
+    bundle.shellShortcuts = null;
+    bundle.isShortcutRecording = false;
     onTopLevelNavigate(url);
   });
   // Unlike did-navigate, this one also fires for the frames inside the page
@@ -1115,6 +1154,53 @@ function wireBundleNavigationEvents(bundle) {
   });
 }
 
+/** The shortcuts the window's displayed workspace reported, or null when it
+ *  has reported none (or the window now shows another workspace). */
+function shellShortcutsOfDisplayedWorkspace(bundle) {
+  const reported = bundle.shellShortcuts;
+  if (reported === null) return null;
+  return sameWorkspaceId(bundle.currentWorkspaceId, reported.workspaceId) ? reported.shortcuts : null;
+}
+
+/** Imbue Studio's chords for the window: its account's, as a renderer
+ *  reported them, else the catalog defaults. */
+function appShortcutsOf(bundle) {
+  return (bundle.accountId !== null && appShortcutsByAccountId.get(bundle.accountId)) || APP_SHORTCUT_DEFAULTS;
+}
+
+/** Whether a held key repeats the decision: zooming does, nothing else. */
+function isRepeatableDecision(decision) {
+  return decision.kind === 'run-app-shortcut' && decision.action.startsWith('zoom-');
+}
+
+const ZOOM_STEP_BY_APP_ACTION = Object.freeze({ 'zoom-in': 'in', 'zoom-out': 'out', 'zoom-reset': 'reset' });
+
+/** Run one of Imbue Studio's own actions (the keyboard-shortcuts spec, section 8) for the window. */
+function runAppShortcut(bundle, action) {
+  if (action === 'new-window') openOrFocusWindow();
+  else if (action === 'close-window') bundle.window.close();
+  else if (action === 'quit') initiateFullQuit();
+  else if (action in ZOOM_STEP_BY_APP_ACTION) stepDisplayZoomOrWarn(ZOOM_STEP_BY_APP_ACTION[action]);
+  else throw new Error(`Unknown Imbue Studio shortcut action ${JSON.stringify(action)}`);
+}
+
+/** Act on a shortcut decision (electron/shell-chords.js) for the window. */
+function runChordDecision(bundle, wc, decision) {
+  if (decision.kind === 'run-app-shortcut') {
+    runAppShortcut(bundle, decision.action);
+    return;
+  }
+  if (decision.kind === 'run-shortcut' && decision.action === 'close-window' && isPopoutBundle(bundle)) {
+    // A popout's Close window closes the popout, which returns its window to
+    // the desktop (the close handshake), rather than closing the workspace
+    // window for everyone.
+    bundle.window.close();
+    return;
+  }
+  const value = decision.kind === 'run-shortcut' ? decision.action : decision.chord;
+  try { wc.send(decision.kind, value); } catch { /* noop */ }
+}
+
 function registerShortcutsFor(bundle, wc) {
   // The release of a watched title-bar drag reaches this window wherever the
   // cursor is by then, which the workspace shell's own pointer events do not
@@ -1128,16 +1214,33 @@ function registerShortcutsFor(bundle, wc) {
     // In immersive mode every key is the remote desktop's; the held Escape
     // that ends it is Chromium's, handled before any page or relay sees it.
     if (isKeyRelaySilenced(bundle)) return;
-    const key = input.key ? input.key.toLowerCase() : '';
-    const modifier = isMac ? input.meta : input.control;
+    // The shortcuts (the keyboard-shortcuts spec, section 6.6):
+    // before-input-event sees the keystroke even when focus is inside the
+    // workspace iframe or a frame the shell cannot hear (the terminal, the
+    // Screen), and preventDefault here also keeps the menu from acting on it,
+    // so a bound chord wins over the page, the menu and the OS. The dev-tools
+    // key wins over every shortcut except a listening recorder, which takes it.
+    const shortcuts = shellShortcutsOfDisplayedWorkspace(bundle);
+    const decision = decideChord({
+      chord: chordFromInput(input, CHORD_PLATFORM),
+      platform: CHORD_PLATFORM,
+      isRecording: bundle.isShortcutRecording,
+      appShortcuts: appShortcutsOf(bundle),
+      shortcuts,
+    });
     // Match on `input.code` (physical key): on macOS, Option transforms
     // `input.key` into the composed character.
     const devTools =
       (isMac && input.meta && input.alt && input.code === 'KeyI') ||
       (!isMac && input.control && input.shift && input.code === 'KeyC');
-    if (devTools) {
+    if (devTools && decision?.kind !== 'record-chord') {
       event.preventDefault();
       if (!wc.isDestroyed()) wc.toggleDevTools();
+      return;
+    }
+    if (decision !== null) {
+      event.preventDefault();
+      if (!input.isAutoRepeat || isRepeatableDecision(decision)) runChordDecision(bundle, wc, decision);
       return;
     }
     // Escape backstop for the in-DOM overlay: keydowns inside the workspace
@@ -1147,14 +1250,15 @@ function registerShortcutsFor(bundle, wc) {
       try { wc.send('escape-pressed'); } catch { /* noop */ }
       return;
     }
-    // Cmd+W (macOS) / Ctrl+W closes the focused window INSIDE the
-    // displayed workspace, not the Electron window. before-input-event sees the
-    // keystroke even when focus is inside the workspace iframe; the chrome
-    // page relays it into the workspace through the embed contract.
+    // Until the displayed workspace reports its shortcuts (one too old to),
+    // Cmd+W (macOS) / Ctrl+W closes the focused window INSIDE it, not the
+    // Electron window; the chrome page relays it into the workspace through
+    // the embed contract.
+    const key = input.key ? input.key.toLowerCase() : '';
     const closeTabCombo = isMac
       ? input.meta && !input.shift && !input.alt && !input.control
       : input.control && !input.shift && !input.alt && !input.meta;
-    if (closeTabCombo && key === 'w' && bundle.currentWorkspaceId) {
+    if (shortcuts === null && closeTabCombo && key === 'w' && bundle.currentWorkspaceId) {
       event.preventDefault();
       if (isPopoutBundle(bundle)) {
         // In a popout the chord closes the popout, which returns its window
@@ -1164,19 +1268,6 @@ function registerShortcutsFor(bundle, wc) {
         return;
       }
       try { wc.send('close-active-tab'); } catch { /* noop */ }
-      return;
-    }
-    // When the app menu is installed, it owns cmd+Q / cmd+N.
-    if (appMenuInstalled) return;
-    if (modifier && !input.shift && !input.alt && key === 'q') {
-      event.preventDefault();
-      initiateFullQuit();
-      return;
-    }
-    if (modifier && !input.shift && !input.alt && key === 'n') {
-      event.preventDefault();
-      openOrFocusWindow();
-      return;
     }
   });
 }
@@ -2387,13 +2478,31 @@ async function triggerUpdateCheck() {
   await updater.check();
 }
 
+// The accelerators the menu last showed, so a focus change that moves to a
+// window of the same account leaves the menu alone.
+let applicationMenuAcceleratorsKey = null;
+
+function isApplicationMenuShown() {
+  return isMac && process.env.MINDS_HIDE_MENU !== '1';
+}
+
 function installApplicationMenu() {
-  if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
+  if (!isApplicationMenuShown()) {
     Menu.setApplicationMenu(null);
-    appMenuInstalled = false;
     return;
   }
-  appMenuInstalled = true;
+  // Imbue Studio's own items show the frontmost window's chords. macOS
+  // registers them as accelerators whatever registerAccelerator says (it
+  // applies on Windows and Linux only); main runs those chords itself in
+  // before-input-event, whose preventDefault keeps the menu from acting on
+  // them too. Clicking still works when a shortcut is Off.
+  const frontmost = getMostRecentWindow({ includePopouts: true });
+  const chords = frontmost ? appShortcutsOf(frontmost) : APP_SHORTCUT_DEFAULTS;
+  const acceleratorOf = (id) => menuAcceleratorOf(chords[id]);
+  const acceleratorsKey = JSON.stringify(Object.keys(chords).map(acceleratorOf));
+  if (acceleratorsKey === applicationMenuAcceleratorsKey) return;
+  applicationMenuAcceleratorsKey = acceleratorsKey;
+  const appShortcutItem = (id, item) => ({ ...item, accelerator: acceleratorOf(id), registerAccelerator: false });
   const template = [
     {
       label: PRODUCT_DISPLAY_NAME,
@@ -2408,27 +2517,21 @@ function installApplicationMenu() {
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { role: 'quit' },
+        appShortcutItem('quit', { label: `Quit ${PRODUCT_DISPLAY_NAME}`, click: () => initiateFullQuit() }),
       ],
     },
     {
       label: 'File',
       submenu: [
-        {
-          label: 'New Window',
-          accelerator: 'CmdOrCtrl+N',
-          click: () => openOrFocusWindow(),
-        },
+        appShortcutItem('new-window', { label: 'New Window', click: () => openOrFocusWindow() }),
         { type: 'separator' },
-        {
-          // Deliberately NO Cmd+W accelerator: inside a workspace the desktop
-          // closes its focused window with it (via the embed contract).
+        appShortcutItem('close-window', {
           label: 'Close Window',
           click: () => {
             const target = getMostRecentWindow({ includePopouts: true });
             if (target && !target.window.isDestroyed()) target.window.close();
           },
-        },
+        }),
       ],
     },
     { role: 'editMenu' },
@@ -2447,9 +2550,9 @@ function installApplicationMenu() {
           },
         },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        appShortcutItem('zoom-reset', { label: 'Actual Size', click: () => stepDisplayZoomOrWarn('reset') }),
+        appShortcutItem('zoom-in', { label: 'Zoom In', click: () => stepDisplayZoomOrWarn('in') }),
+        appShortcutItem('zoom-out', { label: 'Zoom Out', click: () => stepDisplayZoomOrWarn('out') }),
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
@@ -3173,10 +3276,21 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   if (normalized === null) {
     throw new Error(`Unknown display zoom ${JSON.stringify(percent)}`);
   }
-  displayZoom.writeZoomPercent(paths.getStateDir(), normalized);
-  displayZoomPercent = normalized;
-  applyDisplayZoomToAllWindows();
-  return normalized;
+  return setDisplayZoomPercent(normalized);
+});
+
+// The zoom entries of the chrome's own menu on Windows and Linux, which have
+// no application menu.
+ipcMain.handle('step-display-zoom', (_event, step) => {
+  if (step !== 'in' && step !== 'out' && step !== 'reset') {
+    throw new Error(`Unknown zoom step ${JSON.stringify(step)}`);
+  }
+  return stepDisplayZoom(step);
+});
+
+// The chrome's own New window entry on Windows and Linux.
+ipcMain.on('open-new-window', () => {
+  openOrFocusWindow();
 });
 
 ipcMain.handle('get-launch-version-change', () => launchVersionChange);
@@ -3218,7 +3332,7 @@ ipcMain.handle('install-update', async () => {
 });
 
 // Immersive mode, as the page reports it (electron/immersive-policy.js): the
-// application-menu accelerators (Cmd+W, Cmd+N, F11 and the rest) stop firing
+// application-menu accelerators (Cmd+H, Cmd+M, F11 and the rest) stop firing
 // for this window and its before-input-event relays go quiet, so every key
 // reaches the fullscreen workspace frame. Fullscreen itself is the page's
 // Fullscreen-API request, never a setFullScreen from here: the keyboard lock
@@ -3236,6 +3350,43 @@ ipcMain.on('set-immersive', (event, on) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   setImmersiveFor(bundle, on);
+});
+
+// The displayed workspace's shortcuts, as its shell reported them
+// (minds:shell-shortcuts): main runs them before any page sees the key.
+ipcMain.on('set-shell-shortcuts', (event, report) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed() || !report || typeof report !== 'object') return;
+  const { workspaceId } = report;
+  if (!isWorkspaceIdArgument(workspaceId)) return;
+  const shortcuts = readShellShortcuts(report.shortcuts);
+  if (shortcuts === null) return;
+  // Kept as reported (agent-scoped) and compared through the alias maps at
+  // match time, since the alias may not be known yet when the report lands.
+  bundle.shellShortcuts = { workspaceId, shortcuts };
+});
+
+// Whether the window's keyboard shortcuts recorder is listening
+// (minds:keyboard-shortcuts-page): main matches no shortcut while it is.
+ipcMain.on('set-shortcut-recording', (event, isRecording) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed()) return;
+  bundle.isShortcutRecording = isRecording === true;
+});
+
+// Imbue Studio's own chords for an account, as a window of it resolved them
+// (at its start and after each save on the shortcuts screen): every window of
+// that account runs them, and the menu labels follow.
+ipcMain.on('set-app-shortcuts', (event, accountId, chordsByAction) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed() || typeof accountId !== 'string' || accountId === '') return;
+  const chords = readAppShortcuts(chordsByAction);
+  if (chords === null) {
+    console.warn('[app-shortcuts] ignored a malformed report');
+    return;
+  }
+  appShortcutsByAccountId.set(accountId, chords);
+  if (isApplicationMenuShown()) installApplicationMenu();
 });
 
 // Which permission requests the default session grants. Electron grants

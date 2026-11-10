@@ -1619,6 +1619,19 @@ describe("ShellState.handleEscape", () => {
     expect(shell.handleEscape()).toBe(false);
   });
 
+  it("leaves the key to the workspace's shortcut recorder while it listens, closing nothing", () => {
+    displaying(shell, AGENT);
+    shell.isSidebarOpen = true;
+    shell.isWorkspaceShortcutRecording = true;
+
+    expect(shell.handleEscape()).toBe(false);
+    expect(shell.isSidebarOpen).toBe(true);
+
+    shell.isWorkspaceShortcutRecording = false;
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isSidebarOpen).toBe(false);
+  });
+
   it("gives the key to the switcher popover over an open card", () => {
     // The popover (z-[200]) sits over every other surface, the card included,
     // so it has to be asked first -- and the card must survive the keypress.

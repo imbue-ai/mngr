@@ -114,8 +114,9 @@ class AccountSettings(FrozenModel):
     keybindings: dict[str, dict[str, tuple[str, ...]]] = Field(
         default_factory=dict,
         description=(
-            "Keyboard shortcut assignments for the workspace's built-in apps, by app name then action id; "
-            "only assignments that differ from the app's defaults are stored (spec section 10.1)"
+            "Keyboard shortcut assignments by app name then action id: the workspace's built-in apps' (spec "
+            "section 10.1), and Imbue Studio's own under the imbue-studio app; only assignments that differ "
+            "from the defaults are stored"
         ),
     )
 

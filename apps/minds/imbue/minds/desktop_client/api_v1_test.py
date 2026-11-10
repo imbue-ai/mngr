@@ -2594,7 +2594,7 @@ def test_put_account_keybindings_refuses_an_unassociated_workspace(tmp_path: Pat
     assert "not associated" in json.loads(response.data)["error"]
 
 
-def test_put_account_keybindings_refuses_a_non_canonical_chord(tmp_path: Path) -> None:
+def test_put_account_keybindings_drops_a_chord_no_binding_can_use(tmp_path: Path) -> None:
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
@@ -2609,11 +2609,15 @@ def test_put_account_keybindings_refuses_a_non_canonical_chord(tmp_path: Path) -
     response = client.put(
         _account_keybindings_url(agent_id),
         headers=_auth_header(),
-        json={"keybindings": {"chat": {"send-message": ["Ctrl+Enter"]}}},
+        json={
+            "keybindings": {"chat": {"send-message": ["Ctrl+Enter", "meta+enter"], "stop-agent": ["alt+meta+delete"]}}
+        },
     )
 
-    assert response.status_code == 400
-    assert "not a canonical chord" in json.loads(response.data)["error"]
+    assert response.status_code == 200
+    assert settings_store.read_settings("33333333-3333-3333-3333-333333333333").keybindings == {
+        "chat": {"send-message": ("meta+enter",), "stop-agent": ()}
+    }
 
 
 def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_snapshot_stale(tmp_path: Path) -> None:
@@ -2655,6 +2659,33 @@ def test_put_account_keybindings_applies_to_the_owning_account_and_marks_the_sna
     assert settings_store.read_settings(user_id).keybindings == {"chat": {"send-message": ("ctrl+enter",)}}
     # ...and the workspace's snapshot hash was dropped, so the next sync pass rewrites it.
     assert not (hashes_dir / str(agent_id)).exists()
+
+
+def test_put_account_keybindings_keeps_the_stored_imbue_studio_entry_over_a_stale_body(tmp_path: Path) -> None:
+    # Only the chrome edits Imbue Studio's own shortcuts; a workspace builds its body
+    # from a snapshot that may predate the chrome's latest save.
+    agent_id = AgentId()
+    user_id = "66666666-6666-6666-6666-666666666666"
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
+    settings_store = AccountSettingsStore(data_dir=tmp_path / "settings-data", cli=None)
+    settings_store.apply_settings_values(user_id, {"keybindings": {"imbue-studio": {"quit": ["shift+meta+q"]}}})
+    client = _build_client(
+        tmp_path, resolver, imbue_cloud_cli=cli, session_store=store, account_settings_store=settings_store
+    )
+
+    response = client.put(
+        _account_keybindings_url(agent_id),
+        headers=_auth_header(),
+        json={"keybindings": {"chat": {"send-message": ["meta+enter"]}, "imbue-studio": {"quit": ["meta+q"]}}},
+    )
+
+    assert response.status_code == 200
+    assert settings_store.read_settings(user_id).keybindings == {
+        "chat": {"send-message": ("meta+enter",)},
+        "imbue-studio": {"quit": ("shift+meta+q",)},
+    }
 
 
 def test_put_account_keybindings_refuses_a_too_new_settings_record(tmp_path: Path) -> None:

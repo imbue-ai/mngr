@@ -248,7 +248,8 @@ from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.settings.keybindings import describe_keybindings_value_problem
+from imbue.minds.desktop_client.settings.keybindings import usable_keybindings
+from imbue.minds.desktop_client.settings.keybindings import with_stored_imbue_studio_keybindings
 from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
 from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
@@ -3458,8 +3459,12 @@ def _handle_put_account_keybindings(agent_id: str) -> AccountKeybindingsResponse
 
     The one account-keyed setting a workspace may change. The body replaces the
     account's stored keybindings whole (a save is a full replica push, so the
-    later of two computers' saves wins); every chord must already be in the
-    canonical grammar. The push to the connector and the snapshot rewrite ride
+    later of two computers' saves wins), except Imbue Studio's own entry, which
+    only the chrome edits: the stored one is kept and the body's ignored, since
+    the workspace builds the body from a snapshot that may predate the chrome's
+    latest save. A chord no binding can use (off the grammar or refused, as a
+    snapshot saved before a refusal can still hold) is dropped rather than
+    refusing the save. The push to the connector and the snapshot rewrite ride
     the next sync pass rather than holding this request on the network.
     """
     parsed_id = AgentId(agent_id)
@@ -3469,11 +3474,7 @@ def _handle_put_account_keybindings(agent_id: str) -> AccountKeybindingsResponse
     settings_store = state.account_settings_store
     if settings_store is None:
         return _json_error("Account settings storage is unavailable in this configuration", 503)
-    body = request.get_json(silent=True, force=True) or {}
-    raw_keybindings = body.get("keybindings")
-    problem = describe_keybindings_value_problem(raw_keybindings)
-    if problem is not None:
-        return _json_error(problem, 400)
+    body = AccountKeybindingsPutRequest.model_validate(request.get_json(silent=True, force=True) or {})
     # The account comes from the association itself: a workspace with none has no
     # account to write to, and the device pseudo-account would never sync.
     owning_account_id = (
@@ -3483,8 +3484,13 @@ def _handle_put_account_keybindings(agent_id: str) -> AccountKeybindingsResponse
     )
     if owning_account_id is None:
         return _json_error(f"Workspace {agent_id} is not associated with an account", 409)
+    keybindings = usable_keybindings(
+        with_stored_imbue_studio_keybindings(
+            body.keybindings, settings_store.read_settings(owning_account_id).keybindings
+        )
+    )
     try:
-        settings_store.apply_settings_values(owning_account_id, {"keybindings": raw_keybindings})
+        settings_store.apply_settings_values(owning_account_id, {"keybindings": keybindings})
     except SettingsRecordTooNewError:
         return _json_error(
             f"These settings were saved by a newer version of Imbue Studio "

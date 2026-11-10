@@ -130,6 +130,12 @@ function makeContract() {
     IMMERSIVE_CHANGED: "minds:immersive-changed",
     OPEN_LOCAL_FILES: "minds:open-local-files",
     HIGHLIGHT_CHROME: "minds:highlight-chrome",
+    KEYBOARD_SHORTCUTS_PAGE: "minds:keyboard-shortcuts-page",
+    OPEN_KEYBOARD_SHORTCUTS: "minds:open-keyboard-shortcuts",
+    SHELL_SHORTCUTS: "minds:shell-shortcuts",
+    RUN_SHORTCUT: "minds:run-shortcut",
+    RUN_CHORD: "minds:run-chord",
+    RECORD_CHORD: "minds:record-chord",
     CHROME_ANCHORS: [
       "workspace-switcher",
       "permissions",
@@ -149,6 +155,7 @@ function makeHandlers(
     relayAnswer?: ProviderRelayAnswer;
     opensExternalLinks?: boolean;
     canImmerse?: boolean;
+    runsShellShortcuts?: boolean;
   } = {},
 ) {
   const contract = makeContract();
@@ -167,6 +174,7 @@ function makeHandlers(
   const externalLinks: string[] = [];
   const immersiveRequests: boolean[] = [];
   const highlights: (string | null)[] = [];
+  const shellShortcutReports: unknown[] = [];
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -217,6 +225,10 @@ function makeHandlers(
       options.canImmerse === false
         ? null
         : { request: (on) => immersiveRequests.push(on) },
+    shellShortcuts:
+      options.runsShellShortcuts === true
+        ? (report) => shellShortcutReports.push(report)
+        : null,
   });
   return {
     contract,
@@ -236,10 +248,27 @@ function makeHandlers(
     externalLinks,
     immersiveRequests,
     highlights,
+    shellShortcutReports,
   };
 }
 
 describe("buildEmbedHandlers", () => {
+  it("hands main the shortcuts a workspace reports, only in a chrome that runs them", () => {
+    const desktop = makeHandlers({ runsShellShortcuts: true });
+    const report = {
+      chords_by_action: { "close-window": ["alt+meta+w"] },
+      claimed_chords: ["f2"],
+    };
+    desktop.handlers[desktop.contract.SHELL_SHORTCUTS]({
+      type: "minds:shell-shortcuts",
+      ...report,
+    });
+    expect(desktop.shellShortcutReports).toEqual([report]);
+
+    const browser = makeHandlers();
+    expect(browser.handlers[browser.contract.SHELL_SHORTCUTS]).toBeUndefined();
+  });
+
   it("passes on a chat reported on screen, and whether the workspace promises that report", () => {
     const { contract, handlers, chatReportingAnswers, chatsOnScreen } = makeHandlers();
     handlers[contract.CHAT_ON_SCREEN]({ chatId: "agent-0123abcd" });
@@ -294,6 +323,7 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: false,
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
+        opensKeyboardShortcuts: true,
         immersive: true,
       },
     ]);
@@ -305,6 +335,7 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: true,
         opensCustomSchemeLinks: true,
         opensLocalFiles: true,
+        opensKeyboardShortcuts: true,
         immersive: true,
       },
     ]);
@@ -316,6 +347,7 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: false,
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
+        opensKeyboardShortcuts: true,
         immersive: false,
       },
     ]);
@@ -340,6 +372,18 @@ describe("buildEmbedHandlers", () => {
       {
         path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
         params: { tab: "permissions", section: "local-files" },
+      },
+    ]);
+    expect(sent).toEqual([]);
+  });
+
+  it("opens Workspace settings at Keyboard shortcuts when the workspace asks, and answers nothing", () => {
+    const { contract, handlers, navigations, sent } = makeHandlers();
+    handlers[contract.OPEN_KEYBOARD_SHORTCUTS]({});
+    expect(navigations).toEqual([
+      {
+        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
+        params: { tab: "settings", group: "keyboard" },
       },
     ]);
     expect(sent).toEqual([]);

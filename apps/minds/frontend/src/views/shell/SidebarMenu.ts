@@ -9,8 +9,10 @@
 import m from "mithril";
 import { Icon16 } from "../components/Icon";
 import type { UiWorkspaceEntry } from "../../channel/messages";
-import { electronBridge } from "../../electron-bridge";
+import { type DisplayZoomStep, electronBridge } from "../../electron-bridge";
+import { chordLabelOffMac } from "../../models/appShortcuts";
 import { MIND_LIVENESS_LABELS } from "../../models/create";
+import { subscribeToDisplayZoom } from "../../models/displayZoom";
 import type { ShellState } from "./shell-state";
 
 // Lines a row's workspace-name text up under the breadcrumb name: the row
@@ -169,6 +171,98 @@ export interface SidebarMenuAttrs {
   shell: ShellState;
 }
 
+const MENU_ACTION_CLASS =
+  "sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left";
+const ZOOM_STEP_CLASS =
+  "flex items-center justify-center h-6 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0";
+
+/**
+ * The menu's New window and Zoom entries, on Windows and Linux only: there the
+ * app has no menu bar, so these are the ways to reach Imbue Studio's own
+ * actions without their shortcuts (the keyboard-shortcuts spec, section 8.4).
+ * A Mac's menu bar has them.
+ */
+export function SidebarAppActions(): m.Component<SidebarMenuAttrs> {
+  let zoomPercent: number | null = null;
+  let unsubscribe: (() => void) | null = null;
+
+  function showPercent(percent: number | null): void {
+    if (percent === null) return;
+    zoomPercent = percent;
+    m.redraw();
+  }
+
+  return {
+    oninit() {
+      if (electronBridge.isMacPlatform || !electronBridge.stepsDisplayZoom) return;
+      unsubscribe = subscribeToDisplayZoom(showPercent);
+      void electronBridge.getDisplayZoom().then(showPercent, (error: unknown) =>
+        console.warn("Could not read the display zoom", error),
+      );
+    },
+    onremove() {
+      unsubscribe?.();
+    },
+    view(vnode) {
+      const { shell } = vnode.attrs;
+      if (electronBridge.isMacPlatform) return null;
+      const newWindowChord = shell.appShortcuts.chordsFor("new-window")[0];
+      const step = (zoomStep: DisplayZoomStep) => () => {
+        void electronBridge.stepDisplayZoom(zoomStep).then(showPercent, (error: unknown) =>
+          console.warn("Could not change the display zoom", error),
+        );
+      };
+      return [
+        electronBridge.opensNewWindow
+          ? m(
+              "button#sidebar-new-window",
+              {
+                type: "button",
+                class: MENU_ACTION_CLASS,
+                onclick: () => {
+                  shell.closeSidebar();
+                  electronBridge.openNewWindow();
+                },
+              },
+              [
+                m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
+                m("span", { class: "flex-1" }, "New window"),
+                newWindowChord === undefined
+                  ? null
+                  : m("span", { class: "type-helper text-tertiary" }, chordLabelOffMac(newWindowChord)),
+              ],
+            )
+          : null,
+        electronBridge.stepsDisplayZoom
+          ? m("div#sidebar-zoom", { class: "flex items-center gap-2 h-8 pl-2 pr-1 type-body text-secondary" }, [
+              m("span", { class: "flex-1" }, "Zoom"),
+              m(
+                "button",
+                { type: "button", class: ZOOM_STEP_CLASS + " w-7", "aria-label": "Zoom out", onclick: step("out") },
+                "\u2212",
+              ),
+              m(
+                "button#sidebar-zoom-reset",
+                {
+                  type: "button",
+                  class: ZOOM_STEP_CLASS + " w-12",
+                  title: "Reset zoom",
+                  onclick: step("reset"),
+                },
+                zoomPercent === null ? "" : `${zoomPercent}%`,
+              ),
+              m(
+                "button",
+                { type: "button", class: ZOOM_STEP_CLASS + " w-7", "aria-label": "Zoom in", onclick: step("in") },
+                "+",
+              ),
+            ])
+          : null,
+      ];
+    },
+  };
+}
+
 export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
   return {
     view(vnode) {
@@ -211,8 +305,7 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
               "button#sidebar-new-workspace",
               {
                 type: "button",
-                class:
-                  "sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+                class: MENU_ACTION_CLASS,
                 onclick: () => {
                   shell.closeSidebar();
                   shell.routeToHub("/create");
@@ -220,6 +313,7 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
               },
               [m(Icon16, { name: "plus", extra: "shrink-0" }), m("span", "New workspace")],
             ),
+            m(SidebarAppActions, { shell }),
           ],
         ),
       );

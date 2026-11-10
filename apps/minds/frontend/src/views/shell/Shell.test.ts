@@ -9,6 +9,7 @@ import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
+import { AppShortcutsModel } from "../../models/appShortcuts";
 import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
@@ -130,6 +131,8 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     isRecoveryModalOpenFor: () => false,
     // Never loaded, so it never offers: suites not about it see no prompt.
     autoUpdatePrompt: new AutoUpdatePromptModel(),
+    // Outside the desktop app it reads nothing.
+    appShortcuts: new AppShortcutsModel(),
     ...overrides,
   } as unknown as ShellState;
   return { state };

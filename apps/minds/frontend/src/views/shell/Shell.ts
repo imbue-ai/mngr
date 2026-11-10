@@ -185,9 +185,13 @@ export function Shell(): m.Component<ShellAttrs> {
     oncreate(vnode) {
       watchUpdateStatus(() => m.redraw());
       loadAutoUpdatePrompt(vnode.attrs);
+      vnode.attrs.shell.appShortcuts.followAccount(vnode.attrs.shell.accountId);
     },
     onupdate(vnode) {
       loadAutoUpdatePrompt(vnode.attrs);
+      // The window's account can change without a navigation (a switch, an
+      // adoption), so it is compared on every draw; only a change reads.
+      vnode.attrs.shell.appShortcuts.followAccount(vnode.attrs.shell.accountId);
     },
     view(vnode) {
       const {
