@@ -56,6 +56,11 @@ CHORD_NAMED_KEYS: Final[tuple[str, ...]] = (
     "f12",
 )
 
+# The chords no binding may claim: Ctrl+Alt+Del, which Windows keeps for itself, refused on every
+# platform so one account's bindings mean the same everywhere (the Windows key needs no entry:
+# it is not a modifier of the grammar).
+REFUSED_CHORDS: Final[tuple[str, ...]] = ("alt+meta+delete",)
+
 # A single printable character key: anything but whitespace and "+" (spelled "plus").
 _SINGLE_CHARACTER_KEY_RE: Final[re.Pattern[str]] = re.compile(r"^[^\s+]$")
 
@@ -91,11 +96,17 @@ def is_canonical_chord(chord: str) -> bool:
 
 
 @pure
+def is_refused_chord(chord: str) -> bool:
+    """Whether the chord is one no binding may claim (``REFUSED_CHORDS``)."""
+    return chord in REFUSED_CHORDS
+
+
+@pure
 def describe_keybindings_value_problem(value: object) -> str | None:
     """Why the value is not a valid keybindings map, or None when it is.
 
     The valid shape is app name, then action id, then a list of canonical
-    chords (an empty list unbinds the action).
+    chords none of which is refused (an empty list unbinds the action).
     """
     if not isinstance(value, Mapping):
         return f"keybindings must be an object of apps, not {type(value).__name__}"
@@ -112,4 +123,6 @@ def describe_keybindings_value_problem(value: object) -> str | None:
             for chord in chords:
                 if not isinstance(chord, str) or not is_canonical_chord(chord):
                     return f"{chord!r} is not a canonical chord"
+                if is_refused_chord(chord):
+                    return f"{chord!r} belongs to the operating system"
     return None

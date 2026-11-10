@@ -17,14 +17,6 @@ delete`` (the relay token dies, so the tunnel's next reconnect is rejected
 even if the materials linger), leaving the grants document in place. Saving
 grants rewrites that document alone, published or not; the gateway re-reads it
 per request, so a save takes effect with no token rotation and no restart.
-
-While the workspace is published, every save and every load of the share
-panel ends in one connector call, the grants push (``shares push-grants``):
-the connector records the document in its centralized grants table, mirrors
-the granted accounts into the share's index and the owner's contacts, and
-answers the share's status, the invitation outcomes, and the grantees'
-identities. The sharing document the routes answer carries all of that, so
-the panel reads nothing else.
 """
 
 import socket
@@ -38,7 +30,6 @@ from typing import Final
 
 import httpx2
 from loguru import logger
-from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -62,14 +53,13 @@ from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import MobileAccessLinkCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.imbue_cloud_cli import ShareGrantsPushCliResult
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
 from imbue.minds.desktop_client.share_grant_validation import normalized_grants_document
 from imbue.minds.desktop_client.share_grant_validation import validate_grants_document
-from imbue.minds.desktop_client.share_materials_injection import ShareAgentProbe
+from imbue.minds.desktop_client.share_materials_injection import SHARE_EXEC_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
@@ -78,7 +68,7 @@ from imbue.minds.desktop_client.share_materials_injection import clear_share_pub
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
-from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
+from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
@@ -361,109 +351,51 @@ def _resolve_grant_identities(
     return identities
 
 
-class _GrantsSync(FrozenModel):
-    """What one push of the grants document to Imbue Cloud established."""
+def _publish_grantees(cli: ImbueCloudCli, account_email: str, host_id: str, user_ids: Sequence[str]) -> None:
+    """Mirror the user-id grants to the connector's index and the owner's contacts (best effort).
 
-    is_synced: bool | None = Field(
-        description="Whether the document reached the centralized grants table; None when nothing was pushed"
-    )
-    is_share_known: bool = Field(
-        description=(
-            "Whether the connector said what the share is: False when the push failed, or when an older "
-            "connector answered without the share"
-        )
-    )
-    share: ShareCliInfo | None = Field(
-        description="The active share as the connector reports it; None when known to be unpublished, or not known"
-    )
-    outcomes: tuple[InvitationOutcomeCliEntry, ...] | None = Field(
-        description="The granter-visible outcome per open user or email grant; None when the connector did not say"
-    )
-    identities: tuple[IdentityRecord, ...] | None = Field(
-        description="The granted accounts' identity records; None when the connector did not say"
-    )
-
-
-_NOTHING_PUSHED: Final[_GrantsSync] = _GrantsSync(
-    is_synced=None, is_share_known=False, share=None, outcomes=None, identities=None
-)
-_PUSH_FAILED: Final[_GrantsSync] = _GrantsSync(
-    is_synced=False, is_share_known=False, share=None, outcomes=None, identities=None
-)
-# The connector's ``not_published`` refusal: the share is known to be unpublished.
-_UNPUBLISHED: Final[_GrantsSync] = _GrantsSync(
-    is_synced=None, is_share_known=True, share=None, outcomes=None, identities=None
-)
-
-
-def _sync_grants_with_connector(
-    cli: ImbueCloudCli, account_email: str, host_id: str, grants: SharingGrantsDocument
-) -> _GrantsSync:
-    """Push the document to Imbue Cloud's centralized grants table, which invitations are made from.
-
-    The one connector call of a save or a load while the workspace is
-    published: the connector mirrors the granted accounts into the share's
-    index and the owner's contacts, and answers the share's status, the
-    outcomes, and the grantees' identities. The table never admits anyone, so
-    a push that did not land changes no access: the document is reported as
-    not yet synced, and the next save or load retries. A ``not_published``
-    refusal is the connector saying the workspace is unpublished.
+    Neither write affects who may visit -- the grants file inside the
+    workspace stays the only authority -- so a failure is logged and the next
+    grants save simply retries.
     """
     try:
-        result = cli.push_share_grants(account=account_email, host_id=host_id, document=grants.model_dump(mode="json"))
-    except ImbueCloudShareRefusedCliError as exc:
-        if exc.code == "not_published":
-            return _UNPUBLISHED
-        logger.warning("Could not push the grants document for {} to Imbue Cloud: {}", host_id, exc)
-        return _PUSH_FAILED
+        cli.set_share_grantees(account=account_email, host_id=host_id, grantee_user_ids=user_ids)
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not update the share's grantee index for {}: {}", host_id, exc)
+    for user_id in user_ids:
+        try:
+            cli.add_contact(account=account_email, user_id=user_id)
+        except ImbueCloudCliError as exc:
+            logger.warning("Could not add grantee {} to the owner's contacts: {}", user_id[:8], exc)
+
+
+def _push_grants_document(cli: ImbueCloudCli, account_email: str, host_id: str, grants: SharingGrantsDocument) -> bool:
+    """Record the document in Imbue Cloud's centralized grants table, which invitations are made from.
+
+    Part of every save while the workspace is published, and of every load of
+    the panel. False when the push did not land: the panel then shows the
+    grants as not yet synced and offers no Invite, and the next save or load
+    retries. The table never admits anyone, so a lost push changes no access.
+    """
+    try:
+        cli.push_share_grants(account=account_email, host_id=host_id, document=grants.model_dump(mode="json"))
     except ImbueCloudCliError as exc:
         logger.warning("Could not push the grants document for {} to Imbue Cloud: {}", host_id, exc)
-        return _PUSH_FAILED
-    return _grants_sync_from_push(result)
+        return False
+    return True
 
 
-def _grants_sync_from_push(result: ShareGrantsPushCliResult) -> _GrantsSync:
-    # CLEANUP: drop the share-less branch (and the status read callers fall
-    # back to) once every tier's connector answers the share on the push.
-    return _GrantsSync(
-        is_synced=True,
-        is_share_known=result.share is not None,
-        share=result.share,
-        outcomes=result.outcomes,
-        identities=(
-            tuple(record_from_cli_identity(info) for info in result.identities)
-            if result.identities is not None
-            else None
-        ),
-    )
-
-
-def _share_after_sync(sync: _GrantsSync, read_share: Callable[[], ShareCliInfo | None]) -> ShareCliInfo | None:
-    """The share the push established, else what a status read says."""
-    return sync.share if sync.is_share_known else read_share()
-
-
-def _identities_after_sync(
-    sync: _GrantsSync,
-    identity_cache: IdentityCache | None,
-    resolve_known_identities: Callable[[], dict[str, IdentityRecord]],
-) -> dict[str, IdentityRecord]:
-    """The granted accounts' records as the connector answered them, else as this desktop knows them.
-
-    The connector's records go into the identity cache, so the unpublished
-    reads (which push nothing) render the same names without a lookup.
-    """
-    if sync.identities is None:
-        return resolve_known_identities()
-    if identity_cache is not None:
-        identity_cache.put_all(sync.identities, now_utc())
-    return {record.user_id: record for record in sync.identities}
-
-
-def _mark_shared_on_forward(
-    agent_id: AgentId, forward_identity: ForwardIdentityPublisher | None, owner_account: AccountSession | None
+def _record_saved_grants(
+    cli: ImbueCloudCli,
+    account_email: str,
+    host_id: str,
+    agent_id: AgentId,
+    user_ids: Sequence[str],
+    forward_identity: ForwardIdentityPublisher | None,
+    owner_account: AccountSession | None,
 ) -> None:
-    """Put the owner's account on the forward's local requests while the workspace is shared."""
+    """After a grants write landed: mirror the grantees to the connector, and put the owner's account on the forward's local requests."""
+    _publish_grantees(cli, account_email, host_id, user_ids)
     if forward_identity is not None and owner_account is not None:
         forward_identity.mark_shared(str(agent_id), str(owner_account.user_id))
 
@@ -709,18 +641,9 @@ def _publish_workspace_with_cli(
             identities_json_text=identities_json,
         )
 
-    _mark_shared_on_forward(agent_id, forward_identity, owner_account)
-    # The create (or the status read above) is the authority on the share, not the push.
-    sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
-    return _share_status_document(
-        host_id,
-        share,
-        saved_grants,
-        service_labels,
-        _identities_after_sync(sync, identity_cache, lambda: identities),
-        sync.is_synced,
-        sync.outcomes,
-    )
+    _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
+    is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
 def _save_grants_with_cli(
@@ -746,26 +669,22 @@ def _save_grants_with_cli(
     if refusals:
         raise GrantsRefusedError(refusals)
     saved_grants = normalized_grants_document(grants)
+    # The connector is read BEFORE the write, and not again: a hiccup after the
+    # document landed would otherwise be reported as a failed save.
+    share = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
     user_ids = _granted_user_ids(saved_grants)
     identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
     _write_grants_document(
         agent_address, _render_grants_document_toml(saved_grants), render_share_identities_json(identities), cli
     )
-    # An unpublished workspace's save never reaches the connector: the next
-    # publish pushes whatever the document holds by then.
-    if not probe.has_share_env:
-        return _share_status_document(host_id, None, saved_grants, service_labels, identities, None, None)
-    # Materials present means the workspace believes itself published; the push says what the share is.
-    sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
-    return _share_status_document(
-        host_id,
-        _share_after_sync(sync, lambda: _read_active_share(cli, account_email, host_id)),
-        saved_grants,
-        service_labels,
-        _identities_after_sync(sync, identity_cache, lambda: identities),
-        sync.is_synced,
-        sync.outcomes,
-    )
+    # The connector's grantee index only describes a live share, so an
+    # unpublished workspace's save does not touch it; the next publish mirrors
+    # whatever the document holds by then.
+    is_synced: bool | None = None
+    if share is not None:
+        _publish_grantees(cli, account_email, host_id, user_ids)
+        is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
 def _write_grants_document(
@@ -821,16 +740,6 @@ def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> 
         raise SharingError(
             f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
         ) from exc
-    return share if share is not None and share.state == "active" else None
-
-
-def _read_active_share_or_none(cli: ImbueCloudCli, account_email: str, host_id: str) -> ShareCliInfo | None:
-    """The machine's connector share when it is active, else None -- a connector failure reads as unshared (logged)."""
-    try:
-        share = cli.get_share_status(account=account_email, host_id=host_id)
-    except ImbueCloudCliError as exc:
-        logger.warning("Failed to read share status for {}: {}", host_id, exc)
-        return None
     return share if share is not None and share.state == "active" else None
 
 
@@ -903,8 +812,6 @@ def migrate_stale_share(
     agent_address: str,
     # The active share as the connector reports it, still on the retired domain.
     stale_share: ShareCliInfo,
-    # The workspace's share state, as the read that found the share stale saw it.
-    probe: ShareAgentProbe,
     cli: ImbueCloudCli,
     account_email: str,
     client_env_config: ClientEnvConfig,
@@ -921,11 +828,15 @@ def migrate_stale_share(
     access changes with the address. Raises :class:`SharingError` when the
     workspace cannot take the move; the panel then shows it with a retry.
     """
+    try:
+        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        raise SharingError(str(exc)) from exc
     if not probe.has_gateway:
         raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
-    # The move rewrites share.env alone and leaves the document exactly as it
-    # is, so a document nothing can parse costs the move nothing; it is read
-    # for the push that answers what the panel shows of its grantees.
+    # The grants are read only for the grantee bookkeeping below; the move
+    # rewrites share.env alone and leaves the document exactly as it is, so a
+    # document nothing can parse costs the move nothing.
     grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
     try:
         share = _create_share_and_write_materials(
@@ -948,16 +859,10 @@ def migrate_stale_share(
             f"its shared links stay down until publishing is turned off and on again for it: {exc}"
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
-    _mark_shared_on_forward(agent_id, forward_identity, owner_account)
-    sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
-    identities = _identities_after_sync(
-        sync,
-        identity_cache,
-        lambda: _resolve_grant_identities(_granted_user_ids(grants), identity_cache, cli, account_email),
-    )
-    document = _share_status_document(
-        host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes
-    )
+    user_ids = _granted_user_ids(grants)
+    _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    document = _share_status_document(host_id, share, grants, service_labels, identities, None)
     document["migrated_domain_from"] = stale_share.workspace_domain
     return document
 
@@ -1016,9 +921,6 @@ def _share_status_document(
     # Whether the document reached Imbue Cloud's centralized grants table;
     # None while unpublished (nothing is pushed) or when no push was attempted.
     grants_synced: bool | None,
-    # The granter-visible outcome per open user or email grant, as the push
-    # answered it; None when nothing was pushed or the connector did not say.
-    invitation_outcomes: Sequence[InvitationOutcomeCliEntry] | None,
 ) -> dict[str, Any]:
     workspace_domain = share.workspace_domain if share is not None else None
     return {
@@ -1037,11 +939,6 @@ def _share_status_document(
         # renders a name, email, and profile picture instead of a bare id.
         "identities": {user_id: record.model_dump(mode="json") for user_id, record in identities.items()},
         "grants_synced": grants_synced,
-        "invitation_outcomes": (
-            [entry.model_dump(mode="json") for entry in invitation_outcomes]
-            if invitation_outcomes is not None
-            else None
-        ),
     }
 
 
@@ -1103,78 +1000,59 @@ def get_sharing(
     keeps the document, so the panel goes on listing it (and removing from it)
     while off. The document also carries the current origin label per share
     target, from which the panel builds every link (a target absent from it has
-    no link yet). One exec reads the workspace's share state; while it holds
-    share materials, one grants push is the only connector call, and it answers
-    the share, the invitation outcomes, and the grantees' identities (spec P7:
-    every load pushes). A share the connector flags ``needs_reshare`` (active on
-    a content domain the tier moved away from) is repaired here, on the read,
-    so opening the share panel is what moves it; that read raises
+    no link yet). A share the connector flags ``needs_reshare`` (active on a
+    content domain the tier moved away from) is repaired here, on the read, so
+    opening the share panel is what moves it; that read raises
     :class:`SharingError` when the move fails.
     """
-    # Discovery is concurrently updated, so the coordinate can be unresolvable;
-    # degrade to UNKNOWN grants rather than failing the whole read. The grants
-    # must not degrade to "empty": the pane would render every grantee as
-    # revoked, and a save from that state would replace a policy nobody ever saw.
+    share = get_active_share(host_id, backend_resolver, cli, session_store)
+    # Resolution is repeated here (a cheap local lookup), but discovery is
+    # concurrently updated, so the coordinate can become unresolvable between
+    # the two calls; degrade to UNKNOWN grants rather than failing the whole
+    # read. The grants must not degrade to "empty": the pane would render every
+    # grantee as revoked, and a save from that state would replace a policy
+    # nobody ever saw.
     try:
         agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     except SharingError as exc:
         logger.debug("Sharing grants read: {}", exc)
-        return _unknown_grants_document(host_id, None, {})
+        return _unknown_grants_document(host_id, share, {})
     if cli is None:
-        return _unknown_grants_document(host_id, None, {})
+        return _unknown_grants_document(host_id, share, {})
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
-    agent_address = build_agent_address(agent_id, backend_resolver)
-    account_email = _account_email_or_none(session_store, agent_id)
-    try:
-        probe = read_share_state_from_agent(agent_address, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        logger.debug("Sharing grants read: {}", exc)
-        share_without_grants = (
-            _read_active_share_or_none(cli, account_email, host_id) if account_email is not None else None
-        )
-        return _unknown_grants_document(host_id, share_without_grants, service_labels)
-    # A document nothing can parse reads back as an empty one; ``grants: null``
-    # is reserved for a read that never landed, above.
-    grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
-    if account_email is None:
-        # Without a signed-in account there is nothing to ask the connector with.
-        return _share_status_document(host_id, None, grants, service_labels, {}, None, None)
-    # Materials present means the workspace believes itself published, so the
-    # push says what the share is. Without them the status read does, since a
-    # share can be active on the connector with the materials gone (a publish
-    # that failed between the create and the injection); such a share still
-    # gets its document pushed.
-    if probe.has_share_env:
-        sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
-        share = _share_after_sync(sync, lambda: _read_active_share_or_none(cli, account_email, host_id))
-    else:
-        share = _read_active_share_or_none(cli, account_email, host_id)
-        sync = (
-            _sync_grants_with_connector(cli, account_email, host_id, grants) if share is not None else _NOTHING_PUSHED
-        )
     if share is not None and share.needs_reshare:
         if client_env_config is None:
             raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
         return migrate_stale_share(
             host_id,
             agent_id,
-            agent_address,
+            build_agent_address(agent_id, backend_resolver),
             share,
-            probe,
             cli,
-            account_email,
+            resolve_account_email_for_workspace(session_store, agent_id),
             client_env_config,
             service_labels,
             identity_cache,
             forward_identity,
             owner_account_for_workspace(session_store, agent_id),
         )
-    identities = _identities_after_sync(
-        sync,
-        identity_cache,
-        lambda: _resolve_grant_identities(_granted_user_ids(grants), identity_cache, cli, account_email),
+    try:
+        grants_toml_text = read_share_grants_from_agent(
+            build_agent_address(agent_id, backend_resolver), cli.mngr_caller, SHARE_EXEC_TIMEOUT_SECONDS
+        )
+    except ShareInjectionError as exc:
+        logger.debug("Sharing grants read: {}", exc)
+        return _unknown_grants_document(host_id, share, service_labels)
+    # A document nothing can parse reads back as an empty one; ``grants: null``
+    # is reserved for a read that never landed, above.
+    grants = _readable_grants_document(grants_toml_text) or SharingGrantsDocument()
+    user_ids = _granted_user_ids(grants)
+    account_email = _account_email_or_none(session_store, agent_id)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    is_synced = (
+        _push_grants_document(cli, account_email, host_id, grants) if share is not None and account_email else None
     )
-    return _share_status_document(host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes)
+    return _share_status_document(host_id, share, grants, service_labels, identities, is_synced)
 
 
 def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
@@ -1190,7 +1068,7 @@ def _unknown_grants_document(
     host_id: str, share: ShareCliInfo | None, service_labels: Mapping[str, str]
 ) -> dict[str, Any]:
     """The machine's document with ``grants: None``: the read never landed (not "the workspace grants nobody")."""
-    document = _share_status_document(host_id, share, SharingGrantsDocument(), service_labels, {}, None, None)
+    document = _share_status_document(host_id, share, SharingGrantsDocument(), service_labels, {}, None)
     document["grants"] = None
     return document
 
@@ -1249,7 +1127,14 @@ def get_active_share(
     except SharingError as exc:
         logger.debug("Sharing status: {}", exc)
         return None
-    return _read_active_share_or_none(cli, account_email, host_id)
+    try:
+        share = cli.get_share_status(account=account_email, host_id=host_id)
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to read share status for {}: {}", host_id, exc)
+        return None
+    if share is None or share.state != "active":
+        return None
+    return share
 
 
 def get_share_gateway_status_cached(
@@ -1353,7 +1238,7 @@ def _push_current_document(cli: ImbueCloudCli, account_email: str, host_id: str,
         probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-    _sync_grants_with_connector(
+    _push_grants_document(
         cli, account_email, host_id, _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
     )
 

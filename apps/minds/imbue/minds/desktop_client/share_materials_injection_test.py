@@ -18,7 +18,6 @@ from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
-from imbue.minds.desktop_client.share_materials_injection import ShareStateUnreadError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
@@ -28,10 +27,8 @@ from imbue.minds.desktop_client.share_materials_injection import probe_share_sta
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
-from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
-from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -318,86 +315,6 @@ def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
 
     with pytest.raises(ShareInjectionError):
         read_share_grants_from_agent(AgentId(), caller, 5.0)
-
-
-def test_read_share_state_reports_no_document_when_absent(tmp_path: Path) -> None:
-    # An absent file is a negative answer inside the envelope -- and mngr's own
-    # status line must not read as content.
-    caller = _ExecutingMngrCaller(work_dir=tmp_path)
-
-    state = read_share_state_from_agent(AgentId(), caller)
-
-    assert state.grants_toml_text is None
-    assert state.has_share_env is False
-
-
-@_requires_flock
-def test_read_share_state_round_trips_the_document_through_the_exec_envelope(tmp_path: Path) -> None:
-    # The read rides --format json precisely because human-format mngr exec
-    # appends "Command succeeded on agent <name>" to stdout, which a raw read
-    # would take for part of the document.
-    grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
-    caller = _ExecutingMngrCaller(work_dir=tmp_path)
-    agent_id = AgentId()
-    provision_share_files_in_agent(agent_id, grants_text, None, "export A=b\n", caller)
-
-    state = read_share_state_from_agent(agent_id, caller)
-
-    assert state.grants_toml_text == grants_text
-    assert state.has_share_env is True
-
-
-def test_read_share_state_requests_the_json_envelope_without_starting_the_workspace() -> None:
-    envelope = json.dumps(
-        {
-            "results": [
-                {
-                    "agent": "a",
-                    "stdout": "MNGR_SHARE_GATEWAY=1\nMNGR_SHARE_ENV=0\nMNGR_SHARE_GRANTS_B64=ABSENT\n",
-                    "stderr": "",
-                    "success": True,
-                }
-            ]
-        }
-    )
-    recording = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
-
-    state = read_share_state_from_agent(AgentId(), recording)
-
-    assert state.has_gateway is True
-    assert state.has_share_env is False
-    assert state.grants_toml_text is None
-    assert recording.calls[0][-3:] == ["--no-start", "--format", "json"]
-
-
-def test_read_share_state_raises_on_exec_failure() -> None:
-    # A failed exec must stay distinguishable from an absent document, or a
-    # caller could mistake an unreadable policy for an empty one.
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
-
-    with pytest.raises(ShareStateUnreadError):
-        read_share_state_from_agent(AgentId(), caller)
-
-
-def test_read_share_state_raises_on_an_unrecognized_exec_envelope() -> None:
-    # rc 0 with stdout that is not the JSON envelope (e.g. an mngr that
-    # ignored --format) is "the read never landed", never file content.
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="[workspace]\nnot an envelope"))
-
-    with pytest.raises(ShareStateUnreadError):
-        read_share_state_from_agent(AgentId(), caller)
-
-
-def test_read_share_state_raises_when_the_probe_markers_are_missing() -> None:
-    # A well-formed envelope around output that is not the probe's (a shell
-    # that printed something else) says nothing about the share state.
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=exec_json_envelope("[workspace]\n")))
-
-    with pytest.raises(ShareStateUnreadError):
-        read_share_state_from_agent(AgentId(), caller)
-    # The conservative probe reads the same answer as everything absent.
-    probe = probe_share_state_in_agent(AgentId(), caller)
-    assert (probe.has_gateway, probe.has_share_env, probe.grants_toml_text) == (False, False, None)
 
 
 def test_clear_share_publication_keeps_the_grants_document_and_is_best_effort() -> None:

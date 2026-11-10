@@ -13,11 +13,10 @@
 // The whole conversation is handed over as the new workspace's first chat
 // (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
 // it is seeded even if the page is left before the workspace is ready. When
-// the attempt is ready the agent says so and the wash comes up: the workspace
-// mounts behind it, and it lifts once the workspace reports the welcome chat on
-// screen (models/welcomeChatArrival.ts). A failure or an interrupted record
-// becomes an agent turn with Retry and Dismiss / Discard, the retry reopening
-// the create form as a modal prefilled from the attempt's record.
+// the attempt is ready the agent says so, the page waits for that seed, and
+// the wash carries the app in; a failure or an interrupted record becomes an
+// agent turn with Retry and Dismiss / Discard, the retry reopening the create
+// form as a modal prefilled from the attempt's record.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -51,8 +50,7 @@ import {
   streamDurationMs,
 } from "../../models/startFlow";
 import { wash } from "../../models/wash";
-import { postWelcomeChat, postWelcomeChatLanding, welcomeChatBody } from "../../models/welcomeChat";
-import { welcomeChatArrival } from "../../models/welcomeChatArrival";
+import { postWelcomeChat, welcomeChatBody } from "../../models/welcomeChat";
 import { Button } from "../components/Button";
 import { ImageLightbox } from "../components/ImageLightbox";
 import { Notice } from "../components/Notice";
@@ -62,6 +60,8 @@ import { createFormModal } from "./CreatePage";
 import { TRANSCRIPT_COLUMN_CLASS, agentTurn, answerRow, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
 import { transcriptTurns } from "./StartPage";
 
+/** How long the ready line is left alone before the wash starts. */
+const READY_HOLD_MS = 900;
 /** The space over the ready heading: twice a turn's, so it reads as the conversation's close. */
 const READY_MARGIN_CLASS = "mt-20";
 /** The one bold line of the loading box, over its bar. */
@@ -94,10 +94,10 @@ interface CreatingState {
   /** The manifesto points the reader has opened. */
   openManifestoIds: Set<string>;
   isReportingMoreOpen: boolean;
-  /** Settles when the wash over the new workspace may lift. */
-  coverUntil: Promise<void>;
-  /** Set once the wash is up, from when the page going away is the entry working rather than the user leaving. */
-  isEntryStarted: boolean;
+  /** The hand-off of the conversation to the new workspace, settled either way before the wash. */
+  welcomeChat: Promise<void> | null;
+  /** Set once the page is left or a later attempt takes it over, so a pending entry never fires. */
+  isEntryCancelled: boolean;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
   /** Whether the showcase recording is open enlarged over the page. */
@@ -108,15 +108,12 @@ interface CreatingState {
   isFromStartFlow: boolean;
 }
 
-/** The workspace id in a /goto/<workspace-id>/ URL; the shell resolves either coordinate. */
-function workspaceIdFromRedirect(redirectUrl: string): string | null {
-  return redirectUrl.match(/\/goto\/((?:agent|host)-[a-f0-9]+)\//i)?.[1] ?? null;
-}
-
 export function enterWorkspaceFromRedirect(redirectUrl: string): void {
-  const workspaceId = workspaceIdFromRedirect(redirectUrl);
-  if (workspaceId !== null) {
-    getAppContext().shell.enterWorkspace(workspaceId);
+  // redirect_url is the /goto/<workspace-id>/ URL; the shell resolves either
+  // coordinate, so extract the id and enter in-app.
+  const match = redirectUrl.match(/\/goto\/((?:agent|host)-[a-f0-9]+)\//i);
+  if (match) {
+    getAppContext().shell.enterWorkspace(match[1]);
   } else {
     window.location.href = redirectUrl;
   }
@@ -188,8 +185,8 @@ function freshState(createAttemptId: string): CreatingState {
     isSummaryDetailsOpen: false,
     openManifestoIds: new Set<string>(),
     isReportingMoreOpen: false,
-    coverUntil: Promise.resolve(),
-    isEntryStarted: false,
+    welcomeChat: null,
+    isEntryCancelled: false,
     isActionPending: false,
     isRetryFormOpen: false,
     isShowcaseLightboxOpen: false,
@@ -226,25 +223,30 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
   }
 
-  /** When the ready line that starts streaming at ``readyStartAtMs`` has landed, and the entry begins. */
+  /** When the ready line that starts streaming at ``readyStartAtMs`` has landed, and the hold before the entry begins. */
   function readyLandedAtMs(readyStartAtMs: number): number {
     return readyStartAtMs + streamDurationMs(READY_LINE);
   }
 
-  // The workspace's color takes the window, the shell enters the workspace while
-  // the cover is whole, and the cover stays until the welcome chat is on screen.
+  // The conversation reaches the workspace, then the workspace's color takes
+  // the window and the shell enters the workspace while the cover is whole.
   function startEntry(): void {
-    state.isEntryStarted = true;
-    const isInstant = isReducedMotion();
-    wash.start(
-      accentForAttempt(),
-      // Nothing grows under reduced motion, so the corner covers the window as well as the box would.
-      isInstant ? { x: 0, y: 0 } : washOrigin(),
-      { width: window.innerWidth, height: window.innerHeight },
-      enter,
-      state.coverUntil,
-      isInstant,
-    );
+    const own = state;
+    void (own.welcomeChat ?? Promise.resolve()).then(() => {
+      // The page was left, or a later attempt took it over, while the hand-off was in flight.
+      if (own.isEntryCancelled) return;
+      if (isReducedMotion()) {
+        enter();
+        return;
+      }
+      const accent = accentForAttempt();
+      wash.start(
+        accent,
+        washOrigin(),
+        { width: window.innerWidth, height: window.innerHeight },
+        enter,
+      );
+    });
   }
 
   /** The ready turn, streaming from ``readyStartAtMs``, gets its moment, then the entry begins. */
@@ -253,7 +255,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     state.washTimer = setTimeout(() => {
       own.washTimer = null;
       startEntry();
-    }, readyLandedAtMs(readyStartAtMs));
+    }, readyLandedAtMs(readyStartAtMs) + READY_HOLD_MS);
   }
 
   /** Whether the attempt is an onboarding create, which shows the recording under the setup line. */
@@ -265,47 +267,23 @@ export const CreatingPage: m.ClosureComponent = () => {
    * Hand the conversation so far to the new workspace as its first chat: posted once the page knows
    * the attempt's settings, while the workspace is still being built, so the desktop client seeds it
    * when the attempt finishes even if this page has been left by then. Posted again once the attempt
-   * is done, which starts the seed at once and answers with the chat's id. Answers null when the
-   * page has no settings to send or the hand-over failed, with the reason in the console.
+   * is done, which waits for that seed. Best effort: a workspace that cannot take it (its chat app
+   * still down, an older template) is entered all the same, with the reason in the console.
    */
-  function handOverWelcomeChat(): Promise<string | null> {
+  function handOverWelcomeChat(): Promise<void> {
     const request = state.detail?.live?.request;
-    if (request === undefined || request === null) return Promise.resolve(null);
+    if (request === undefined || request === null) return Promise.resolve();
     const entries = state.isFromStartFlow ? startFlow.state.entries : [];
     const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
     return postWelcomeChat(
       state.createAttemptId,
       welcomeChatBody(entries, request, isCloudPreset, isShowcaseShown()),
     ).then(
-      (chatId) => (chatId === "" ? null : chatId),
+      () => undefined,
       (error: unknown) => {
         console.warn("The conversation could not be handed to the new workspace:", error);
-        return null;
       },
     );
-  }
-
-  /**
-   * Seed the welcome chat and wait for it to be on screen; settles when the wash may lift. A chat
-   * the workspace knows about is asked for at once, since left alone its app only looks for the
-   * workspace's page every few seconds.
-   */
-  function awaitWelcomeChatOnScreen(redirectUrl: string): Promise<void> {
-    const createAttemptId = state.createAttemptId;
-    const startedAtMs = Date.now();
-    const seed = handOverWelcomeChat();
-    const workspaceId = workspaceIdFromRedirect(redirectUrl);
-    void seed.then((chatId) => {
-      if (chatId === null || workspaceId === null) return;
-      const { shell } = getAppContext();
-      shell.requestFocusChat(shell.stores.workspaces.toAgentScopedId(workspaceId), chatId);
-    });
-    return welcomeChatArrival.begin(seed).then((landing) => {
-      if (landing === null) return;
-      void postWelcomeChatLanding(createAttemptId, landing, Date.now() - startedAtMs).catch((error: unknown) => {
-        console.warn("The landing in the new workspace could not be recorded:", error);
-      });
-    });
   }
 
   function accentForAttempt(): string {
@@ -316,9 +294,12 @@ export const CreatingPage: m.ClosureComponent = () => {
   function startWatching(): void {
     state.watcher = new CreateAttemptWatcher(state.createAttemptId, {
       onDone(redirectUrl) {
+        // A poll already in flight when the interval was cleared can report
+        // the same DONE again; the ready turn and the wash happen once.
+        if (state.isDone) return;
         state.isDone = true;
         state.redirectUrl = redirectUrl;
-        state.coverUntil = awaitWelcomeChatOnScreen(redirectUrl);
+        state.welcomeChat = handOverWelcomeChat();
         scheduleEntry(FLOW_THINK_MS);
       },
       onFailed(error, errorKind) {
@@ -338,7 +319,7 @@ export const CreatingPage: m.ClosureComponent = () => {
       },
     });
     state.watcher.start();
-    // Keep the bar moving between polls (a poll redraws only when it answers).
+    // Keep the bar moving between polls (the poll only redraws every 2s).
     state.progressTimer = setInterval(() => m.redraw(), 250);
   }
 
@@ -697,7 +678,7 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */
   function stopWatching(): void {
-    if (state.isDone && !state.isEntryStarted) welcomeChatArrival.cancel();
+    state.isEntryCancelled = true;
     state.watcher?.stop();
     if (state.progressTimer !== null) clearInterval(state.progressTimer);
     if (state.washTimer !== null) clearTimeout(state.washTimer);

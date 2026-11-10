@@ -1194,13 +1194,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def push_share_grants(
         self, access_token: SecretStr, host_id: str, document: Mapping[str, Any]
     ) -> ShareGrantsPushResult:
-        """Record the workspace's parsed grants document in the centralized grants table; idempotent.
-
-        The answer carries the share's status, the invitation outcomes, and the
-        granted accounts' identity records beside the appended count (None
-        each against a connector that predates them), so a desktop that pushed
-        needs no further read.
-        """
+        """Record the workspace's parsed grants document in the centralized grants table; idempotent."""
         response = self._send(
             "PUT",
             self._url(f"/shares/{host_id}/grants"),

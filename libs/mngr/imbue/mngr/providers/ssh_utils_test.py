@@ -12,11 +12,7 @@ from pathlib import Path
 import paramiko
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 from cryptography.hazmat.primitives.serialization import Encoding
-from cryptography.hazmat.primitives.serialization import NoEncryption
-from cryptography.hazmat.primitives.serialization import PrivateFormat
 from cryptography.hazmat.primitives.serialization import PublicFormat
 from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 from paramiko.common import AUTH_FAILED
@@ -26,8 +22,6 @@ from paramiko.common import OPEN_SUCCEEDED
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SSHPrivateKeyEncryptedError
-from imbue.mngr.errors import SSHPrivateKeyUnparseableError
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import has_host_key_store
@@ -41,13 +35,11 @@ from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
 from imbue.mngr.providers.ssh_utils import get_ssh_public_key_fingerprint
-from imbue.mngr.providers.ssh_utils import is_passphrase_protected_private_key
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import load_private_key_with_certificate_or_none
-from imbue.mngr.providers.ssh_utils import load_ssh_private_key_file
 from imbue.mngr.providers.ssh_utils import parse_openssh_public_key_blob
 from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import read_host_public_key_with_legacy_fallback
@@ -210,104 +202,6 @@ def test_load_or_create_ssh_keypair_concurrent_first_creation_is_consistent(tmp_
         private_key.public_key().public_bytes(encoding=Encoding.OpenSSH, format=PublicFormat.OpenSSH).decode("utf-8")
     )
     assert public_contents[0] == expected_public
-
-
-# load_ssh_private_key_file
-
-
-def _write_key(
-    private_key_path: Path,
-    key: rsa.RSAPrivateKey | ed25519.Ed25519PrivateKey,
-    key_format: PrivateFormat,
-    passphrase: bytes | None,
-) -> Path:
-    """Serialize a cryptography private key to a file in the requested format."""
-    encryption = NoEncryption() if passphrase is None else BestAvailableEncryption(passphrase)
-    private_key_path.write_bytes(
-        key.private_bytes(
-            encoding=Encoding.PEM,
-            format=key_format,
-            encryption_algorithm=encryption,
-        )
-    )
-    return private_key_path
-
-
-def test_load_ssh_private_key_file_reads_the_openssh_ed25519_key_mngr_generates(tmp_path: Path) -> None:
-    """The key `generate_ssh_keypair` writes loads, with its type detected."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    loaded = load_ssh_private_key_file(private_key_path)
-    assert isinstance(loaded, paramiko.Ed25519Key)
-
-
-def test_load_ssh_private_key_file_reads_a_legacy_rsa_pem_key(tmp_path: Path) -> None:
-    """An RSA TraditionalOpenSSL PEM key loads: keypairs generated before mngr switched to Ed25519 are kept."""
-    private_key_path = _write_key(
-        tmp_path / "legacy_rsa",
-        rsa.generate_private_key(public_exponent=65537, key_size=2048),
-        PrivateFormat.TraditionalOpenSSL,
-        passphrase=None,
-    )
-    loaded = load_ssh_private_key_file(private_key_path)
-    assert isinstance(loaded, paramiko.RSAKey)
-
-
-def test_load_ssh_private_key_file_reads_an_openssh_ed25519_key(tmp_path: Path) -> None:
-    """A user-supplied Ed25519 key (the `ssh` provider's `key_file`) loads too."""
-    private_key_path = _write_key(
-        tmp_path / "id_ed25519",
-        ed25519.Ed25519PrivateKey.generate(),
-        PrivateFormat.OpenSSH,
-        passphrase=None,
-    )
-    loaded = load_ssh_private_key_file(private_key_path)
-    assert isinstance(loaded, paramiko.Ed25519Key)
-
-
-def test_load_ssh_private_key_file_raises_unparseable_for_a_malformed_key(tmp_path: Path) -> None:
-    """A malformed key file raises SSHPrivateKeyUnparseableError, not cryptography's own error."""
-    bad_path = tmp_path / "not_a_key"
-    bad_path.write_text("this is not an SSH private key\n")
-    with pytest.raises(SSHPrivateKeyUnparseableError, match="Could not parse SSH private key"):
-        load_ssh_private_key_file(bad_path)
-
-
-def test_load_ssh_private_key_file_raises_unparseable_for_a_missing_key(tmp_path: Path) -> None:
-    """A missing key file raises SSHPrivateKeyUnparseableError too."""
-    with pytest.raises(SSHPrivateKeyUnparseableError, match="Could not parse SSH private key"):
-        load_ssh_private_key_file(tmp_path / "does_not_exist")
-
-
-# The three encodings a passphrase-protected key can arrive in. `ssh-keygen`
-# writes the first by default and the second with `-m PEM`.
-_ENCRYPTED_KEY_FORMATS = [PrivateFormat.OpenSSH, PrivateFormat.TraditionalOpenSSL, PrivateFormat.PKCS8]
-
-
-@pytest.mark.parametrize("key_format", _ENCRYPTED_KEY_FORMATS)
-def test_load_ssh_private_key_file_raises_encrypted_for_a_passphrase_protected_key(
-    tmp_path: Path, key_format: PrivateFormat
-) -> None:
-    """A passphrase-protected key gets its own error, distinct from an unparseable one."""
-    private_key_path = _write_key(
-        tmp_path / "encrypted_key",
-        rsa.generate_private_key(public_exponent=65537, key_size=2048),
-        key_format,
-        passphrase=b"a passphrase mngr does not have",
-    )
-    with pytest.raises(SSHPrivateKeyEncryptedError, match="protected by a passphrase"):
-        load_ssh_private_key_file(private_key_path)
-
-
-@pytest.mark.parametrize("key_format", _ENCRYPTED_KEY_FORMATS)
-def test_is_passphrase_protected_private_key_reads_the_encryption_marker(
-    tmp_path: Path, key_format: PrivateFormat
-) -> None:
-    """The same key is reported protected or not purely on whether it was encrypted."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    encrypted = _write_key(tmp_path / "enc", key, key_format, passphrase=b"secret")
-    clear = _write_key(tmp_path / "clear", key, key_format, passphrase=None)
-    assert is_passphrase_protected_private_key(encrypted.read_bytes())
-    assert not is_passphrase_protected_private_key(clear.read_bytes())
 
 
 # generate_ed25519_host_keypair

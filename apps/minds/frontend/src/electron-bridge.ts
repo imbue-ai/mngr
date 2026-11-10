@@ -198,6 +198,23 @@ interface MindsNativeSurface {
   // Optional: a preload from before immersive mode lacks it, and the browser
   // build has no accelerators or relays to silence.
   setImmersive?(on: boolean): void;
+  // The workspace's shortcuts (the keyboard-shortcuts spec, section 6).
+  // Optional: a preload from before them lacks them, and the browser build
+  // has no main process to run them.
+  setShellShortcuts?(
+    workspaceId: string,
+    shortcuts: ShellShortcutsReport,
+  ): void;
+  setShortcutRecording?(isRecording: boolean): void;
+  onRunShortcut?(callback: (action: string) => void): void;
+  onRunChord?(callback: (chord: string) => void): void;
+  onRecordChord?(callback: (chord: string) => void): void;
+}
+
+/** The workspace-wide actions' chords and every app's, as a workspace reports them (minds:shell-shortcuts). */
+export interface ShellShortcutsReport {
+  chords_by_action: Record<string, string[]>;
+  claimed_chords: string[];
 }
 
 /** This launch's app version against the previous launch's, as main recorded
@@ -330,7 +347,9 @@ export const electronBridge = {
   /** Whether this chrome can open macOS's Full Disk Access list: the desktop
    * app on a Mac, on a preload that knows how. */
   get canOpenFullDiskAccessSettings(): boolean {
-    return this.isMacPlatform && native()?.openFullDiskAccessSettings !== undefined;
+    return (
+      this.isMacPlatform && native()?.openFullDiskAccessSettings !== undefined
+    );
   },
   /** Resolves to whether the list actually opened. */
   async openFullDiskAccessSettings(): Promise<boolean> {
@@ -404,7 +423,10 @@ export const electronBridge = {
   /** Whether this is the first launch into a new app version. False in the
    * browser, which has no app version of its own to have updated. */
   async isFirstLaunchAfterAppUpdate(): Promise<boolean> {
-    return (await native()?.getLaunchVersionChange?.())?.isFirstLaunchAfterUpdate ?? false;
+    return (
+      (await native()?.getLaunchVersionChange?.())?.isFirstLaunchAfterUpdate ??
+      false
+    );
   },
 
   /** Null in the browser, and on a desktop build older than release channels. */
@@ -511,5 +533,32 @@ export const electronBridge = {
    * menu shortcuts and key relays stay out of the way while it lasts. */
   setImmersive(on: boolean): void {
     native()?.setImmersive?.(on);
+  },
+  /** Whether main runs the workspace's shortcuts: the desktop app, with a preload that knows them. */
+  get runsShellShortcuts(): boolean {
+    return typeof native()?.setShellShortcuts === "function";
+  },
+  /** Tell main the displayed workspace's shortcuts, which it runs before any page sees the key. */
+  setShellShortcuts(
+    workspaceId: string,
+    shortcuts: ShellShortcutsReport,
+  ): void {
+    native()?.setShellShortcuts?.(workspaceId, shortcuts);
+  },
+  /** Tell main whether this window's shortcut recorder is listening. */
+  setShortcutRecording(isRecording: boolean): void {
+    native()?.setShortcutRecording?.(isRecording);
+  },
+  /** A workspace-wide action main took the chord of, to run in the displayed workspace. */
+  onRunShortcut(callback: (action: string) => void): void {
+    native()?.onRunShortcut?.(callback);
+  },
+  /** A chord main took from the OS for an app of the displayed workspace, to hand to its focused page. */
+  onRunChord(callback: (chord: string) => void): void {
+    native()?.onRunChord?.(callback);
+  },
+  /** A chord main took from the OS while the shortcut recorder listened, to record. */
+  onRecordChord(callback: (chord: string) => void): void {
+    native()?.onRecordChord?.(callback);
   },
 };

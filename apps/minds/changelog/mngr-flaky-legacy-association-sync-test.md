@@ -1,1 +1,0 @@
-`test_legacy_association_files_migrate_into_synced_records` carries the flaky mark: in the minds-v0.10.2 release-tier run it failed once on `Electron CDP attach failed after 3 relaunch attempts`, the same attach error three sibling tests recovered from on retry, and it was the only test of the stage to get no retry.

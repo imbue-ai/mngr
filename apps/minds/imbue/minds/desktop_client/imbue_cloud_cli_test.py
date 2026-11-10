@@ -565,72 +565,20 @@ def _refusal_result(code: str) -> MngrCallResult:
     return MngrCallResult(returncode=1, stdout="", stderr=body)
 
 
-def test_push_share_grants_hands_the_document_over_a_temp_file_and_reads_what_the_connector_answered(
-    tmp_path: Path,
-) -> None:
-    stdout = json.dumps(
-        {
-            "host_id": "host-1",
-            "appended": 3,
-            "share": {
-                "host_id": "host-1",
-                "workspace_domain": "host-1.owner.us1.shares.example",
-                "region": "us1",
-                "state": "active",
-                "relay_endpoints": [{"relay_id": "relay-1", "endpoint": "relay-us1.example:7000"}],
-                "relays": [],
-                "cert_not_after": "2026-12-30T00:00:00+00:00",
-                "needs_reshare": False,
-            },
-            "outcomes": [
-                {"kind": "email", "value": "bob@example.com", "app": "system_interface", "outcome": "invited"}
-            ],
-            "identities": [{"user_id": "u-2", "email": "carol@example.com", "display_name": "Carol"}],
-        }
+def test_push_share_grants_hands_the_document_over_a_temp_file_and_reads_the_count(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"host_id": "host-1", "appended": 3}))
     )
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=stdout))
     cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
     document = {"workspace": {"users": [], "emails": ["bob@example.com"], "email_domains": []}, "services": {}}
 
-    result = cli.push_share_grants(account="owner@example.com", host_id="host-1", document=document)
+    appended = cli.push_share_grants(account="owner@example.com", host_id="host-1", document=document)
 
-    assert result.appended == 3
-    assert result.share is not None
-    assert result.share.workspace_domain == "host-1.owner.us1.shares.example"
-    assert result.share.state == "active"
-    assert result.share.cert_not_after == "2026-12-30T00:00:00+00:00"
-    assert result.outcomes is not None
-    assert [(entry.value, entry.outcome) for entry in result.outcomes] == [("bob@example.com", "invited")]
-    assert result.identities is not None
-    assert [(record.user_id, record.email, record.display_name) for record in result.identities] == [
-        ("u-2", "carol@example.com", "Carol")
-    ]
+    assert appended == 3
     (argv,) = caller.calls
     assert argv[:4] == ["imbue_cloud", "shares", "push-grants", "host-1"]
     document_path = Path(argv[argv.index("--document-file") + 1])
     assert not document_path.exists()
-
-
-def test_push_share_grants_leaves_what_an_older_connector_did_not_say_unset() -> None:
-    # A connector that answers only the count says nothing about the share, the
-    # outcomes, or the identities, and None (not an empty answer) is how the
-    # flow learns to read them the old way.
-    caller = RecordingMngrCaller(
-        result=MngrCallResult(
-            returncode=0,
-            stdout=json.dumps(
-                {"host_id": "host-1", "appended": 0, "share": None, "outcomes": None, "identities": None}
-            ),
-        )
-    )
-    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
-
-    result = cli.push_share_grants(account="owner@example.com", host_id="host-1", document={})
-
-    assert result.appended == 0
-    assert result.share is None
-    assert result.outcomes is None
-    assert result.identities is None
 
 
 def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() -> None:

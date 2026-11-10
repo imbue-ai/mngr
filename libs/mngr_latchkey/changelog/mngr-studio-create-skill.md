@@ -1,1 +1,0 @@
-The `minds-workspaces-read` verb's dialog text now says it also reads a workspace's recorded size and lists the cloud connections a workspace can be created on (`GET /api/v1/workspaces/cloud-accounts`, which Imbue Studio added under the workspaces tree the verb already covers). The grant itself is unchanged.

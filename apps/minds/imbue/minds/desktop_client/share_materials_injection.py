@@ -78,10 +78,6 @@ class ShareInjectionError(RuntimeError):
     """Raised when the share materials could not be written into the agent."""
 
 
-class ShareStateUnreadError(ShareInjectionError):
-    """Raised when a read of the workspace's share state never landed (a failed exec, or output that is not the probe's)."""
-
-
 class MachineSharingLockRegistry(MutableModel):
     """Per-machine locks serializing the desktop backend's sharing writes.
 
@@ -313,38 +309,33 @@ class ShareAgentProbe(FrozenModel):
     )
 
 
-def read_share_state_from_agent(agent_address: str, mngr_caller: MngrCaller) -> ShareAgentProbe:
+def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> ShareAgentProbe:
     """Read the workspace's share state (gateway, share.env, grants) in one exec.
 
-    A failed exec, or output that is not the probe's, raises
-    :class:`ShareStateUnreadError`: "no document exists" and "the read never
-    landed" must stay distinguishable, or a caller could mistake an unreadable
-    policy for an empty one. A document that exists but could not be read (the
-    script's UNREADABLE marker), or whose payload cannot be decoded, raises
-    :class:`ShareInjectionError` for the same reason.
+    Conservative on exec failure: everything reports absent, so the caller
+    refuses with the actionable update-your-workspace message rather than
+    provisioning a share that cannot work (a retry after the transient failure
+    clears is cheap, and nothing has been written or created). A successful
+    exec whose grants document exists but could not be read (the script's
+    UNREADABLE marker), or whose grants payload cannot be decoded, raises
+    :class:`ShareInjectionError` -- an unreadable existing policy must never
+    be mistaken for an absent one.
     """
     result = mngr_caller.call(
         ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
         timeout=SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        raise ShareStateUnreadError(
-            f"Could not read the share state of agent {agent_address}: {result.stderr.strip() or 'exec failed'}"
-        )
+        logger.debug("Share state probe failed for agent {}: {}", agent_address, result.stderr.strip())
+        return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
     stdout = extract_exec_stdout(result.stdout)
     if stdout is None:
-        raise ShareStateUnreadError(
-            f"Could not read the share state of agent {agent_address}: unrecognized exec output"
-        )
+        return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
     value_by_prefix: dict[str, str] = {}
     for line in stdout.splitlines():
         for prefix in (_PROBE_GATEWAY_PREFIX, _PROBE_SHARE_ENV_PREFIX, _PROBE_GRANTS_B64_PREFIX):
             if line.startswith(prefix):
                 value_by_prefix[prefix] = line[len(prefix) :].strip()
-    if _PROBE_GATEWAY_PREFIX not in value_by_prefix or _PROBE_SHARE_ENV_PREFIX not in value_by_prefix:
-        raise ShareStateUnreadError(
-            f"Could not read the share state of agent {agent_address}: the probe's markers are missing from its output"
-        )
     grants_value = value_by_prefix.get(_PROBE_GRANTS_B64_PREFIX, _PROBE_ABSENT_VALUE)
     if grants_value == _PROBE_UNREADABLE_VALUE:
         raise ShareInjectionError(f"The share grants document in agent {agent_address} exists but could not be read")
@@ -365,24 +356,6 @@ def read_share_state_from_agent(agent_address: str, mngr_caller: MngrCaller) -> 
         has_share_env=value_by_prefix.get(_PROBE_SHARE_ENV_PREFIX) == "1",
         grants_toml_text=grants_toml_text,
     )
-
-
-def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> ShareAgentProbe:
-    """Read the workspace's share state in one exec, reporting everything absent when the read never landed.
-
-    Conservative by design for the writes that follow it: the caller then
-    refuses with the actionable update-your-workspace message rather than
-    provisioning a share that cannot work (a retry after the transient
-    failure clears is cheap, and nothing has been written or created). An
-    existing document that could not be read or decoded still raises
-    :class:`ShareInjectionError` -- an unreadable existing policy must never
-    be mistaken for an absent one.
-    """
-    try:
-        return read_share_state_from_agent(agent_address, mngr_caller)
-    except ShareStateUnreadError as exc:
-        logger.debug("Share state probe failed for agent {}: {}", agent_address, exc)
-        return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
 
 
 def clear_share_publication_from_agent(agent_address: str, mngr_caller: MngrCaller) -> bool:

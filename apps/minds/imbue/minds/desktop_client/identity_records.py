@@ -9,7 +9,6 @@ connector round trip (entries older than a day are refreshed lazily).
 
 import threading
 from collections.abc import Callable
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -97,15 +96,10 @@ class IdentityCache(MutableModel):
             return self._load().entries_by_user_id.get(user_id)
 
     def put(self, record: IdentityRecord, now: datetime) -> None:
-        self.put_all((record,), now)
-
-    def put_all(self, records: Sequence[IdentityRecord], now: datetime) -> None:
-        """Store every record as fetched now, in one rewrite of the file."""
         with self._lock:
             document = self._load()
             entries = dict(document.entries_by_user_id)
-            for record in records:
-                entries[record.user_id] = CachedIdentityRecord(record=record, fetched_at=now)
+            entries[record.user_id] = CachedIdentityRecord(record=record, fetched_at=now)
             self._save(IdentityCacheDocument(entries_by_user_id=entries))
 
     def get_or_fetch(

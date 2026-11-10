@@ -93,7 +93,6 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
-from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
@@ -108,7 +107,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
 from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
@@ -152,7 +150,6 @@ from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
@@ -2280,9 +2277,6 @@ class FakeSharingCli(FakeImbueCloudCli):
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         self.share_status_call_count += 1
-        return self.share_as_the_connector_holds_it(account=account, host_id=host_id)
-
-    def share_as_the_connector_holds_it(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         if self.share is None:
             return None
         # The status document never carries the relay token (only create does).
@@ -2861,7 +2855,7 @@ def test_machine_sharing_status_disabled_when_no_share(tmp_path: Path) -> None:
 def test_machine_sharing_status_lists_the_grants_of_an_unpublished_machine(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = ["partner.org"]\n'
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(grants_stdout=grants_toml))
+    cli = _fake_sharing_cli(mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
@@ -2872,23 +2866,12 @@ def test_machine_sharing_status_lists_the_grants_of_an_unpublished_machine(tmp_p
     assert body["url"] is None
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
     assert body["grants"]["workspace"]["email_domains"] == ["partner.org"]
-    # Unpublished: nothing is pushed, so the panel has nothing to learn about invitations.
-    assert body["invitation_outcomes"] is None
-    assert cli.pushed_grants_documents == []
 
 
 def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
-    cli = _fake_sharing_cli(
-        share=_active_share(),
-        mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml),
-        invitation_outcomes_to_return=[
-            InvitationOutcomeCliEntry(
-                kind="email", value="viewer@example.com", app="system_interface", outcome="invited"
-            )
-        ],
-    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -2900,13 +2883,6 @@ def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
     assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     # The grants document survives the exec envelope round trip.
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
-    # One connector call: the push, which answered the share and the outcomes.
-    assert cli.share_status_call_count == 0
-    assert len(cli.pushed_grants_documents) == 1
-    assert body["grants_synced"] is True
-    assert [(entry["value"], entry["outcome"]) for entry in body["invitation_outcomes"]] == [
-        ("viewer@example.com", "invited")
-    ]
 
 
 def test_machine_sharing_status_repairs_a_share_left_on_a_retired_content_domain(tmp_path: Path) -> None:
@@ -3032,13 +3008,36 @@ class _ShareProbeCaller(RecordingMngrCaller):
         return result
 
 
+class _GrantsReadCaller(RecordingMngrCaller):
+    """Recording caller that answers the grants read with a proper exec JSON envelope.
+
+    The real read unwraps ``mngr exec --format json`` output, so a canned raw
+    string cannot stand in for it; ``grants_stdout`` is the remote ``cat``'s
+    own output ('' plays the absent-file case, unparseable text a corrupted
+    document). Every other call keeps the canned default result.
+    """
+
+    grants_stdout: str = Field(default="", description="The remote cat's stdout inside the envelope")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if any("cat" in part and "share_grants.toml" in part for part in argv):
+            envelope = {"results": [{"agent": "a", "stdout": self.grants_stdout, "stderr": "", "success": True}]}
+            return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
+        return result
+
+
 def test_machine_sharing_status_reports_a_malformed_document_as_an_empty_one(tmp_path: Path) -> None:
     # ``grants: null`` is kept for a read that never landed, which is a
     # different thing.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout="not toml [[")
-    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout="not toml [["))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -3137,18 +3136,12 @@ def test_machine_sharing_put_publishes_with_a_document_that_grants_nobody(tmp_pa
     assert base64.b64encode(empty_toml.encode()).decode("ascii") in write_command
 
 
-def test_machine_sharing_put_with_user_grants_pushes_them_once_and_reports_the_identities_it_answered(
-    tmp_path: Path,
-) -> None:
-    # A user-id grant is written into the grants file and pushed once; the
-    # connector mirrors it into the share's grantee index and the owner's
-    # contacts itself, and answers the grantee's record, so the desktop
-    # launches nothing else. Neither mirror affects who may visit.
+def test_machine_sharing_put_with_user_grants_mirrors_them_to_the_connector(tmp_path: Path) -> None:
+    # A user-id grant is written into the grants file AND mirrored (best
+    # effort) to the connector: the share's grantee index and the owner's
+    # contacts. Neither mirror affects who may visit.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        mngr_caller=_ShareProbeCaller(),
-        identities_to_return=[UserIdentityCliInfo(user_id="user-2", email="carol@example.com", display_name="Carol")],
-    )
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -3160,20 +3153,24 @@ def test_machine_sharing_put_with_user_grants_pushes_them_once_and_reports_the_i
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["grants"]["workspace"]["users"] == ["user-2"]
-    # No identity cache in this app, and still a name: the push answered it.
-    assert body["identities"] == {
-        "user-2": {
-            "user_id": "user-2",
-            "email": "carol@example.com",
-            "display_name": "Carol",
-            "profile_picture_url": None,
-        }
-    }
-    ((_account, pushed_host_id, pushed),) = cli.pushed_grants_documents
-    assert pushed_host_id == _TEST_HOST_ID
-    assert pushed["workspace"]["users"] == ["user-2"]
+    # No identity cache in this app: the grantee renders as a bare id.
+    assert body["identities"] == {}
     recorded = _recorded_mngr_calls(cli)
-    assert not any("set-grantees" in argv or "contacts" in argv or "users" in argv for argv in recorded)
+    grantee_calls = [argv for argv in recorded if "set-grantees" in argv]
+    assert grantee_calls == [
+        [
+            "imbue_cloud",
+            "shares",
+            "set-grantees",
+            _TEST_HOST_ID,
+            "--account",
+            "owner@example.com",
+            "--user-id",
+            "user-2",
+        ]
+    ]
+    contact_calls = [argv for argv in recorded if "contacts" in argv]
+    assert contact_calls == [["imbue_cloud", "contacts", "add", "user-2", "--account", "owner@example.com"]]
     # The grants write (not the probe, which also names the file) runs under
     # the lock every in-container grants writer takes.
     locked_writes = [argv for argv in recorded if "flock data/.secrets/share_grants.toml.lock" in " ".join(argv)]
@@ -3185,7 +3182,7 @@ def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) 
     # domain does not route), so the document carries the label per share
     # target: the shell and the apps (system apps included), never internal services.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3213,7 +3210,7 @@ def test_machine_sharing_status_reports_no_labels_before_the_registrations_arriv
     # reached this client yet: the document says so (no labels) instead of
     # letting a client guess a link from the bare domain.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -3545,9 +3542,7 @@ def test_workspace_sharing_grants_put_stores_the_normalized_entries(tmp_path: Pa
 def test_workspace_sharing_delete_keeps_the_grants_in_its_document(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
-    cli = _fake_sharing_cli(
-        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml)
-    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.delete(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
@@ -6558,80 +6553,6 @@ def test_workspace_sharing_grants_put_reports_a_failed_push_as_not_synced(tmp_pa
     assert body["grants_synced"] is False
 
 
-def test_workspace_sharing_grants_put_learns_the_share_from_the_push_and_reads_no_status(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        share=_active_share(),
-        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
-        invitation_outcomes_to_return=[
-            InvitationOutcomeCliEntry(kind="email", value="viewer@example.com", app="system_interface", outcome=None)
-        ],
-    )
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.put(
-        f"/api/v1/workspace-sharing/{agent_id}/grants",
-        headers=_auth_header(),
-        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
-    )
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["enabled"] is True
-    assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
-    assert body["grants_synced"] is True
-    assert [(entry["value"], entry["outcome"]) for entry in body["invitation_outcomes"]] == [
-        ("viewer@example.com", None)
-    ]
-    assert cli.share_status_call_count == 0
-    assert len(cli.pushed_grants_documents) == 1
-
-
-def test_workspace_sharing_grants_put_falls_back_to_a_status_read_when_the_push_fails(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True), is_grants_push_failing=True
-    )
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.put(
-        f"/api/v1/workspace-sharing/{agent_id}/grants",
-        headers=_auth_header(),
-        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
-    )
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    # The save landed and the switch stays on; only the mirror did not, and the
-    # panel has nothing new to learn about invitations.
-    assert body["enabled"] is True
-    assert body["grants_synced"] is False
-    assert body["invitation_outcomes"] is None
-    assert cli.share_status_call_count == 1
-
-
-def test_workspace_sharing_grants_put_treats_a_not_published_refusal_as_unpublished(tmp_path: Path) -> None:
-    # The workspace still holds share materials, but the connector says the share
-    # is gone (unpublished from another device): the save lands and reports off.
-    agent_id = AgentId()
-    inactive = _active_share().model_copy_update(to_update(_active_share().field_ref().state, "inactive"))
-    cli = _fake_sharing_cli(share=inactive, mngr_caller=_ShareProbeCaller(is_share_env_present=True))
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.put(
-        f"/api/v1/workspace-sharing/{agent_id}/grants",
-        headers=_auth_header(),
-        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
-    )
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["enabled"] is False
-    assert body["grants_synced"] is None
-    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
-    assert cli.share_status_call_count == 0
-
-
 def test_workspace_sharing_grants_put_pushes_nothing_while_unpublished(tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
@@ -7257,156 +7178,3 @@ def test_visiting_agents_routes_require_auth_and_a_known_workspace(tmp_path: Pat
     assert unknown_host.status_code == 404, unknown_host.data
     # Only the resolved coordinate reached the workspace's CLI.
     assert len(_agent_access_exec_commands(caller)) == 1
-
-
-class _PlacementSeededResolver(StaticBackendResolver):
-    """Static resolver carrying the display info and labels the workspace listing reads."""
-
-    display_info_by_agent_id: dict[str, AgentDisplayInfo] = Field(default_factory=dict, frozen=True)
-    labels_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        return self.display_info_by_agent_id.get(str(agent_id))
-
-    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
-        return self.labels_by_agent_id.get(str(agent_id), {}).get(label_key)
-
-
-def test_list_workspaces_reports_the_placement_and_size_discovery_recorded(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """An agent inside a workspace reads its own placement and size here rather than off the sandbox."""
-    agent_id = AgentId()
-    host_id = HostId()
-    connection = f"aws_{uuid4().hex}"
-    resolver = _PlacementSeededResolver(
-        url_by_agent_and_service={str(agent_id): {}},
-        display_info_by_agent_id={
-            str(agent_id): AgentDisplayInfo(
-                agent_name="system-services", host_id=str(host_id), provider_name=connection
-            )
-        },
-        labels_by_agent_id={str(agent_id): {"launch_mode": "AWS", "instance_type": "t3.2xlarge"}},
-        host_size_by_host_id={str(host_id): DiscoveredHostSize(cpu_count=8, memory_gb=32.0, disk_gb=300.0)},
-    )
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver)
-
-    response = client.get("/api/v1/workspaces", headers=_auth_header())
-
-    assert response.status_code == 200
-    (workspace,) = json.loads(response.data)["workspaces"]
-    assert workspace["provider_name"] == connection
-    assert workspace["launch_mode"] == "AWS"
-    assert workspace["instance_type"] == "t3.2xlarge"
-    assert workspace["cpu_count"] == 8
-    assert workspace["memory_gb"] == 32.0
-    assert workspace["disk_gb"] == 300.0
-
-
-@pytest.mark.parametrize(
-    ("labels", "connection_backend", "expected_launch_mode"),
-    [
-        ({}, "gcp", "GCP"),
-        ({"launch_mode": "SPACE"}, "azure", "AZURE"),
-    ],
-    ids=["created-before-the-stamp", "stamped-with-a-value-that-is-not-a-mode"],
-)
-def test_list_workspaces_reads_the_launch_mode_off_the_provider_instance_when_the_stamp_is_unusable(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    labels: dict[str, str],
-    connection_backend: str,
-    expected_launch_mode: str,
-) -> None:
-    """A workspace without a usable ``launch_mode`` label is still placed: its provider instance implies the mode."""
-    agent_id = AgentId()
-    resolver = _PlacementSeededResolver(
-        url_by_agent_and_service={str(agent_id): {}},
-        display_info_by_agent_id={
-            str(agent_id): AgentDisplayInfo(
-                agent_name="system-services", host_id="localhost", provider_name=f"{connection_backend}_{uuid4().hex}"
-            )
-        },
-        labels_by_agent_id={str(agent_id): labels},
-    )
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver)
-
-    response = client.get("/api/v1/workspaces", headers=_auth_header())
-
-    assert response.status_code == 200
-    (workspace,) = json.loads(response.data)["workspaces"]
-    assert workspace["launch_mode"] == expected_launch_mode
-    assert workspace["instance_type"] is None
-
-
-def test_list_workspaces_reports_null_placement_and_size_when_none_is_recorded(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.get("/api/v1/workspaces", headers=_auth_header())
-
-    assert response.status_code == 200
-    (workspace,) = json.loads(response.data)["workspaces"]
-    assert workspace["launch_mode"] is None
-    assert workspace["instance_type"] is None
-    assert workspace["cpu_count"] is None
-    assert workspace["memory_gb"] is None
-    assert workspace["disk_gb"] is None
-
-
-def test_list_cloud_accounts_names_each_usable_connection_without_its_credentials(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The listing is the create form's connection picker: the ``cloud_account`` value, a masked hint, no secret.
-
-    A connection whose account is locked on this device cannot be created on, so it is left out.
-    """
-    owner_user_id = "11111111-1111-1111-1111-111111111111"
-    locked_user_id = "22222222-2222-2222-2222-222222222222"
-    data_dir = tmp_path / "sessions"
-    paths = InstallationPaths(data_dir=data_dir)
-    unlock_account_with_master_password_for_test(paths, owner_user_id)
-    unlock_account_with_master_password_for_test(paths, locked_user_id)
-    connection_store = make_connection_store_for_test(data_dir)
-    connection_id = ConnectionId.generate()
-    connection_store.add_connection(
-        owner_user_id,
-        connection_id,
-        ConnectionBackend.AWS,
-        "Work AWS",
-        "AKIA…PLE9",
-        {"default_region": "us-west-2", "default_instance_type": "t3.large"},
-        ConnectionCredentials(aws_access_key_id="AKIA1234EXAMPLE9", aws_secret_access_key=SecretStr("very-secret")),
-    )
-    add_modal_connection_for_test(connection_store, locked_user_id, "Locked Modal")
-    delete_dek(paths, locked_user_id)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, connection_store=connection_store)
-
-    response = client.get("/api/v1/workspaces/cloud-accounts", headers=_auth_header())
-
-    assert response.status_code == 200
-    (account,) = json.loads(response.data)["cloud_accounts"]
-    assert account["name"] == provider_instance_name_for_connection(ConnectionBackend.AWS, connection_id)
-    assert account["alias"] == "Work AWS"
-    assert account["backend"] == "aws"
-    assert account["region"] == "us-west-2"
-    assert account["is_region_pinned"] is True
-    assert account["identifier"] == "AKIA…PLE9"
-    assert "very-secret" not in response.get_data(as_text=True)
-    assert "AKIA1234EXAMPLE9" not in response.get_data(as_text=True)
-
-
-def test_list_cloud_accounts_is_empty_without_a_connection_store(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.get("/api/v1/workspaces/cloud-accounts", headers=_auth_header())
-
-    assert response.status_code == 200
-    assert json.loads(response.data) == {"cloud_accounts": []}
-
-
-def test_list_cloud_accounts_requires_bearer(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.get("/api/v1/workspaces/cloud-accounts")
-
-    assert response.status_code == 401

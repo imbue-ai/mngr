@@ -1,13 +1,8 @@
 from click.testing import CliRunner
 
-from imbue.mngr_imbue_cloud.cli.shares import _push_result_to_json
 from imbue.mngr_imbue_cloud.cli.shares import _share_to_json
 from imbue.mngr_imbue_cloud.cli.shares import shares
-from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
-from imbue.mngr_imbue_cloud.wire_types import InvitationOutcomeEntry
-from imbue.mngr_imbue_cloud.wire_types import ShareGrantsPushResult
 from imbue.mngr_imbue_cloud.wire_types import ShareInfo
-from imbue.mngr_imbue_cloud.wire_types import UserIdentity
 
 
 def test_shares_group_lists_subcommands() -> None:
@@ -144,53 +139,3 @@ def test_push_grants_requires_an_existing_document_file() -> None:
 
     assert result.exit_code == 2
     assert "does not exist" in result.output
-
-
-def test_push_result_to_json_emits_the_share_the_way_shares_status_does() -> None:
-    # The desktop parses the pushed share with the same reader as `shares
-    # status`, so the two outputs must spell it the same way.
-    info = ShareInfo(
-        host_id="host-" + "a" * 32,
-        workspace_domain="x.owner.us1.shares.example",
-        region="us1",
-        state="active",
-        last_tunnel_login_at="2026-09-02 10:00:00+00:00",
-    )
-    result = ShareGrantsPushResult(
-        host_id=info.host_id,
-        appended=2,
-        share=info,
-        outcomes=(InvitationOutcomeEntry(kind="email", value="bob@example.com", app="system_interface"),),
-        identities=(UserIdentity(user_id=SuperTokensUserId("u-2"), email="carol@example.com"),),
-    )
-
-    payload = _push_result_to_json(result)
-
-    assert payload["appended"] == 2
-    assert payload["share"] == _share_to_json(info, include_token=False)
-    assert payload["outcomes"] == [
-        {
-            "kind": "email",
-            "value": "bob@example.com",
-            "app": "system_interface",
-            "outcome": None,
-            "invited_at": None,
-            "joined_at": None,
-            "last_visited_at": None,
-        }
-    ]
-    assert payload["identities"] == [
-        {"user_id": "u-2", "email": "carol@example.com", "display_name": None, "profile_picture_url": None}
-    ]
-
-
-def test_push_result_to_json_keeps_what_an_older_connector_did_not_say_unset() -> None:
-    payload = _push_result_to_json(ShareGrantsPushResult(host_id="host-" + "a" * 32, appended=0))
-
-    assert payload == {
-        "host_id": "host-" + "a" * 32,
-        "appended": 0,
-        "share": None,
-        "outcomes": None,
-        "identities": None,
-    }

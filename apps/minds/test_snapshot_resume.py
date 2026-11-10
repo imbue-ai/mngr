@@ -481,7 +481,7 @@ def test_minds_recovery_restores_dead_system_interface(
 # snapshot *build* drives that same toolchain to create the first workspace).
 # This test reuses that warm toolchain to drive the real Electron app and create
 # a SECOND workspace -- which boots unauthenticated (the create flow injects no
-# AI credentials) and shows the welcome chat the creation page seeds. The first
+# AI credentials), open on the welcome chat the creation page seeded. The first
 # message sent there opens the provider chooser in the chat's own frame; the
 # test signs in through it with a raw API key (the designed first-boot step) and
 # asserts the agent replies. It runs in the same offload snapshot stage (carries
@@ -629,8 +629,8 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     """Create an unauthenticated Docker workspace, sign in via the chooser, chat.
 
     The product-level first-boot round-trip: the create flow injects no AI
-    credentials, so the workspace boots unauthenticated and shows the welcome chat
-    the creation page seeds with the onboarding conversation, whose composer is
+    credentials, so the workspace boots unauthenticated, open on the welcome chat
+    the creation page seeded with the onboarding conversation, whose composer is
     disabled while the provider chooser opens in the chat's own frame; the test
     fills the API-key path in the real chooser UI (which mints a provider account
     holding the key), sends the chat's first message, which launches its agent,

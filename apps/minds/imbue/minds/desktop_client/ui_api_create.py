@@ -26,8 +26,6 @@ renders:
   onboarding conversation to the attempt's workspace as its first chat
   (``welcome_chat.py``): held while the workspace is built and seeded when it is
   done, answering the chat's id once it is.
-- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat/landing`` --
-  logs how the wash over the attempt's new workspace came to lift.
 
 Some small derivations here (suggested color, locked emails, destroy statuses)
 mirror private helpers in ``app.py``; importing them would be circular
@@ -39,9 +37,7 @@ surface is deleted, those helpers should collapse into one shared home.
 import platform
 from collections.abc import Mapping
 from collections.abc import Sequence
-from enum import auto
 from typing import Final
-from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
@@ -50,10 +46,8 @@ from loguru import logger
 from pydantic import Field
 from pydantic import ValidationError
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
@@ -320,22 +314,6 @@ class WelcomeChatResponse(FrozenModel):
     chat_id: str = Field(
         description="The id of the chat the conversation continues in; empty while it is held for a workspace being built"
     )
-
-
-class WelcomeChatLanding(UpperCaseStrEnum):
-    """How the wash over a new workspace came to lift."""
-
-    ON_SCREEN = auto()
-    SEED_FAILED = auto()
-    NO_CHAT_REPORT = auto()
-    TIMED_OUT = auto()
-
-
-class WelcomeChatLandingRequest(FrozenModel):
-    """Body of POST /ui/api/create/attempts/<id>/welcome-chat/landing."""
-
-    landing: WelcomeChatLanding = Field(description="How the wash came to lift")
-    waited_ms: NonNegativeInt = Field(description="From the page seeing the attempt done to the wash being released")
 
 
 class CreateAttemptDetailResponse(FrozenModel):
@@ -763,8 +741,8 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
     conversation is held and seeded the moment the attempt finishes, whether or not the page
     is still open: 202. Once the attempt is done it is seeded now, or the seed already under
     way is waited on: 200 with the chat's id, or 502 with the script's own words when the
-    workspace refused or could not be reached. 409 for an attempt that is neither (failed, gone,
-    or unknown).
+    workspace refused or could not be reached, in which case the page enters the workspace
+    without the chat. 409 for an attempt that is neither (failed, gone, or unknown).
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -785,12 +763,6 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
             return make_json_error_response("The attempt has no workspace to seed", 409)
         seeder.hold(CreateAttemptId(create_attempt_id), welcome_chat)
         return _json_response(WelcomeChatResponse(chat_id=""), status=202)
-    # The hand-off into the new workspace is timed from this line.
-    logger.debug(
-        "Received the creating page's welcome chat for finished create attempt {} (workspace {})",
-        create_attempt_id,
-        workspace_agent_id,
-    )
     outcome = seeder.seed(CreateAttemptId(create_attempt_id), workspace_agent_id, welcome_chat)
     if not outcome.is_seeded:
         return make_json_error_response(
@@ -799,48 +771,11 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
     return _json_response(WelcomeChatResponse(chat_id=outcome.chat_id))
 
 
-def _handle_welcome_chat_landing(create_attempt_id: str) -> Response:
-    """Log how the wash over the attempt's new workspace came to lift; a landing without the chat is a warning."""
-    if not is_ui_request_authenticated():
-        return _unauthenticated_response()
-    try:
-        parsed_id = CreateAttemptId(create_attempt_id)
-    except InvalidRandomIdError:
-        return make_json_error_response("Not a create attempt id", 400)
-    try:
-        body = WelcomeChatLandingRequest.model_validate(request.get_json(silent=True, force=True))
-    except ValidationError as e:
-        logger.debug("Rejected a malformed welcome-chat landing body: {}", e)
-        return make_json_error_response("Invalid JSON body", 400)
-    match body.landing:
-        case WelcomeChatLanding.ON_SCREEN:
-            logger.debug(
-                "Landed in the new workspace of create attempt {} with its welcome chat on screen after {} ms",
-                parsed_id,
-                body.waited_ms,
-            )
-        case WelcomeChatLanding.SEED_FAILED | WelcomeChatLanding.NO_CHAT_REPORT | WelcomeChatLanding.TIMED_OUT:
-            logger.warning(
-                "Landed in the new workspace of create attempt {} without seeing its welcome chat on screen ({}) after {} ms",
-                parsed_id,
-                body.landing,
-                body.waited_ms,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Response(status=204)
-
-
 def register_create_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule(
         "/api/create/attempts/<create_attempt_id>/welcome-chat",
         view_func=_handle_seed_welcome_chat,
-        methods=["POST"],
-    )
-    blueprint.add_url_rule(
-        "/api/create/attempts/<create_attempt_id>/welcome-chat/landing",
-        view_func=_handle_welcome_chat_landing,
         methods=["POST"],
     )
     blueprint.add_url_rule("/api/create/form-defaults", view_func=_handle_create_form_defaults)

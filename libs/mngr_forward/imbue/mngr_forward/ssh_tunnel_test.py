@@ -29,9 +29,6 @@ from typing import cast
 
 import paramiko
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from loguru import logger
 from paramiko.common import AUTH_FAILED
 from paramiko.common import AUTH_SUCCESSFUL
 from paramiko.common import OPEN_FAILED_CONNECT_FAILED
@@ -59,7 +56,6 @@ from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_ssh_client
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 from imbue.mngr_forward.ssh_tunnel import _is_transport_unusable
-from imbue.mngr_forward.ssh_tunnel import _load_private_key
 from imbue.mngr_forward.ssh_tunnel import _log_authentication_failure
 from imbue.mngr_forward.ssh_tunnel import _open_and_relay
 from imbue.mngr_forward.ssh_tunnel import _resolve_known_hosts_path
@@ -284,30 +280,6 @@ def test_create_ssh_client_refuses_a_key_path_that_is_not_a_file(tmp_path: Path)
     with pytest.raises(SSHTunnelError, match="No SSH key file") as exc_info:
         _create_ssh_client(ssh_info)
     assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
-
-
-def test_create_ssh_client_refuses_a_key_file_it_cannot_load(tmp_path: Path) -> None:
-    """A key file that is on disk but will not load is refused before the host is dialed, as this device's fault."""
-    key_path = tmp_path / "ssh_key"
-    key_path.write_text("not a private key\n")
-    (tmp_path / "known_hosts").write_text("")
-    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
-
-    with pytest.raises(SSHTunnelError, match="Could not parse SSH private key") as exc_info:
-        _create_ssh_client(ssh_info)
-    assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
-
-
-def test_load_private_key_leaves_a_passphrase_protected_key_to_the_users_own_ssh_setup(tmp_path: Path) -> None:
-    key_path = tmp_path / "id_ed25519"
-    key_path.write_bytes(
-        ed25519.Ed25519PrivateKey.generate().private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.OpenSSH,
-            encryption_algorithm=serialization.BestAvailableEncryption(b"a passphrase mngr does not have"),
-        )
-    )
-    assert _load_private_key(key_path) is None
 
 
 def test_create_ssh_client_refusal_names_both_candidate_paths(tmp_path: Path) -> None:
@@ -1888,38 +1860,11 @@ class _InnerPortRefusingServer(paramiko.ServerInterface):
 class _KeyRejectingServer(paramiko.ServerInterface):
     """An sshd that accepts only public keys and rejects every one it is offered: a key it no longer authorizes."""
 
-    offered_keys: list[paramiko.PKey]
-
-    @classmethod
-    def create(cls) -> "_KeyRejectingServer":
-        instance = cls.__new__(cls)
-        object.__setattr__(instance, "offered_keys", [])
-        return instance
-
     def get_allowed_auths(self, username: str) -> str:
         return "publickey"
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
-        self.offered_keys.append(key)
         return AUTH_FAILED
-
-
-class _SingleKeyAcceptingServer(paramiko.ServerInterface):
-    """An sshd that accepts only public keys, and of those only the one it authorizes."""
-
-    _authorized_key_fingerprint: str
-
-    @classmethod
-    def create(cls, authorized_key: paramiko.PKey) -> "_SingleKeyAcceptingServer":
-        instance = cls.__new__(cls)
-        object.__setattr__(instance, "_authorized_key_fingerprint", authorized_key.fingerprint)
-        return instance
-
-    def get_allowed_auths(self, username: str) -> str:
-        return "publickey"
-
-    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
-        return AUTH_SUCCESSFUL if key.fingerprint == self._authorized_key_fingerprint else AUTH_FAILED
 
 
 @contextmanager
@@ -1935,7 +1880,9 @@ def _loopback_sshd(
     host go away mid-test.
     """
     host_key = paramiko.ECDSAKey.generate()
-    # The client key mngr itself generates (Ed25519, OpenSSH container).
+    # The client key mngr itself generates (Ed25519, OpenSSH container), which is
+    # the last key class paramiko tries a key file as, so a rejection surfaces as
+    # paramiko's own ``AuthenticationException`` rather than a later class's load error.
     key_path, _public_key_path = save_ssh_keypair(tmp_path, "id_ed25519")
 
     listener = socket.socket()
@@ -1961,13 +1908,7 @@ def _loopback_sshd(
                 return
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
-            try:
-                transport.start_server(server=server)
-            except (paramiko.SSHException, EOFError, ConnectionError) as e:
-                # A client that rejects this server's host key hangs up mid-handshake.
-                logger.trace("Loopback sshd handshake ended early: {!r}", e)
-                transport.close()
-                continue
+            transport.start_server(server=server)
             served.append(transport)
 
     thread = threading.Thread(target=accept_loop, daemon=True, name="test-loopback-sshd")
@@ -2051,7 +1992,7 @@ def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_pat
     Driven against a real handshake so the warning is pinned to the exception
     paramiko actually raises for a refusal, not one built by hand.
     """
-    with _loopback_sshd(tmp_path, _KeyRejectingServer.create()) as (ssh_info, _served):
+    with _loopback_sshd(tmp_path, _KeyRejectingServer()) as (ssh_info, _served):
         offered_fingerprint = paramiko.Ed25519Key.from_private_key_file(str(ssh_info.key_path)).fingerprint
         with capture_loguru("WARNING") as log_output:
             with pytest.raises(paramiko.AuthenticationException):
@@ -2065,165 +2006,40 @@ def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_pat
     assert str(ssh_info.key_path) not in warnings[0]
 
 
-def _write_rsa_pem_key(key_path: Path) -> paramiko.PKey:
-    """Write an RSA key in TraditionalOpenSSL PEM, which installs from before mngr generated Ed25519 keys still hold."""
-    key = paramiko.RSAKey.generate(2048)
-    key.write_private_key_file(str(key_path))
-    return key
-
-
-def _write_ecdsa_pem_key(key_path: Path) -> paramiko.PKey:
-    key = paramiko.ECDSAKey.generate()
-    key.write_private_key_file(str(key_path))
-    return key
-
-
 @pytest.mark.timeout(60)
-@pytest.mark.parametrize("write_key", [_write_rsa_pem_key, _write_ecdsa_pem_key], ids=["rsa", "ecdsa"])
-def test_a_real_sshd_rejecting_an_rsa_or_ecdsa_key_reports_the_rejection(
-    tmp_path: Path, write_key: Callable[[Path], paramiko.PKey]
-) -> None:
-    """A rejected RSA or ECDSA key surfaces as paramiko's ``AuthenticationException``, logged with the key offered.
-
-    Handed a key *file*, paramiko tries it as each key class in turn and raises
-    only the last failure, which for a rejected RSA key is the Ed25519 loader's
-    ``encountered RSA key, expected OPENSSH key``.
-    """
-    with _loopback_sshd(tmp_path, _KeyRejectingServer.create()) as (ssh_info, _served):
-        offered_key = write_key(ssh_info.key_path)
+def test_a_real_sshd_rejecting_an_ecdsa_key_logs_the_offered_key(tmp_path: Path) -> None:
+    """A rejected key of an earlier key class is still logged, though paramiko re-raises a later class's load error."""
+    with _loopback_sshd(tmp_path, _KeyRejectingServer()) as (ssh_info, _served):
+        ecdsa_key = paramiko.ECDSAKey.generate()
+        ecdsa_key.write_private_key_file(str(ssh_info.key_path))
         with capture_loguru("WARNING") as log_output:
-            with pytest.raises(paramiko.AuthenticationException, match="Authentication failed"):
+            with pytest.raises(paramiko.SSHException):
                 _create_ssh_client(ssh_info)
 
     warnings = log_output.getvalue().splitlines()
     assert len(warnings) == 1, warnings
-    assert f"key {offered_key.fingerprint} (file modified " in warnings[0]
-
-
-@pytest.mark.timeout(60)
-def test_a_real_sshd_authorizing_an_rsa_pem_key_accepts_it(tmp_path: Path) -> None:
-    """The RSA PEM key authenticates when the host authorizes it: its format is not what fails."""
-    rsa_key = paramiko.RSAKey.generate(2048)
-    with _loopback_sshd(tmp_path, _SingleKeyAcceptingServer.create(rsa_key)) as (ssh_info, _served):
-        rsa_key.write_private_key_file(str(ssh_info.key_path))
-        client = _create_ssh_client(ssh_info)
-        try:
-            transport = client.get_transport()
-            assert transport is not None
-            assert transport.is_authenticated()
-        finally:
-            client.close()
-
-
-def _running_client_transports() -> set[paramiko.Transport]:
-    return {
-        thread for thread in threading.enumerate() if isinstance(thread, paramiko.Transport) and not thread.server_mode
-    }
-
-
-@pytest.mark.timeout(60)
-def test_a_connection_whose_key_was_rejected_is_closed(tmp_path: Path) -> None:
-    """A failed ``connect`` does not leave its transport running."""
-    with _loopback_sshd(tmp_path, _KeyRejectingServer.create()) as (ssh_info, _served):
-        transports_before = _running_client_transports()
-        with pytest.raises(paramiko.AuthenticationException):
-            _create_ssh_client(ssh_info)
-
-        assert poll_until(lambda: not _running_client_transports() - transports_before), (
-            "the failed connection was left open"
-        )
-
-
-@pytest.mark.timeout(60)
-def test_a_connection_to_a_host_presenting_an_unpinned_host_key_is_closed(tmp_path: Path) -> None:
-    """A host key that does not match the pin fails ``connect`` after the transport is running; it is closed too."""
-    with _loopback_sshd(tmp_path, _InnerPortRefusingServer()) as (ssh_info, _served):
-        pinned_key = paramiko.ECDSAKey.generate()
-        (tmp_path / "known_hosts").write_text(
-            f"[127.0.0.1]:{ssh_info.port} {pinned_key.get_name()} {pinned_key.get_base64()}\n"
-        )
-        transports_before = _running_client_transports()
-        with pytest.raises(paramiko.BadHostKeyException):
-            _create_ssh_client(ssh_info)
-
-        assert poll_until(lambda: not _running_client_transports() - transports_before), (
-            "the failed connection was left open"
-        )
-
-
-@pytest.mark.timeout(60)
-def test_a_host_with_a_key_of_its_own_is_offered_that_key_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The user's own keys are not offered after the host's key is rejected."""
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    save_ssh_keypair(Path.home() / ".ssh", "id_ed25519")
-    server = _KeyRejectingServer.create()
-    with _loopback_sshd(tmp_path, server) as (ssh_info, _served):
-        configured_key_fingerprint = paramiko.PKey.from_path(ssh_info.key_path).fingerprint
-        with pytest.raises(paramiko.AuthenticationException):
-            _create_ssh_client(ssh_info)
-
-    assert [key.fingerprint for key in server.offered_keys] == [configured_key_fingerprint]
-
-
-@pytest.mark.timeout(60)
-def test_a_credential_deferring_host_authenticates_with_the_users_own_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A host with no key of its own is offered the user's ``~/.ssh/id_*``, the only credentials it has."""
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    user_key_path, _public_key_path = save_ssh_keypair(Path.home() / ".ssh", "id_ed25519")
-    server = _SingleKeyAcceptingServer.create(paramiko.PKey.from_path(user_key_path))
-    with _loopback_sshd(tmp_path, server) as (keyed_ssh_info, _served):
-        ssh_info = RemoteSSHInfo(
-            user=keyed_ssh_info.user,
-            host=keyed_ssh_info.host,
-            port=keyed_ssh_info.port,
-            key_path=Path(""),
-            known_hosts_path=tmp_path / "known_hosts",
-        )
-        client = _create_ssh_client(ssh_info)
-        try:
-            transport = client.get_transport()
-            assert transport is not None
-            assert transport.is_authenticated()
-        finally:
-            client.close()
+    assert f"key {ecdsa_key.fingerprint} (file modified " in warnings[0]
 
 
 def test_authentication_failure_log_reports_the_auth_types_the_server_allows() -> None:
     ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=Path(""))
     with capture_loguru("WARNING") as log_output:
-        _log_authentication_failure(
-            ssh_info, None, paramiko.BadAuthenticationType("Bad authentication type", ["password"])
-        )
+        _log_authentication_failure(ssh_info, paramiko.BadAuthenticationType("Bad authentication type", ["password"]))
 
     warning = log_output.getvalue()
     assert "offered credentials: the user's own SSH setup (credential-deferring host)" in warning
     assert "auth types the server allows: password" in warning
 
 
-def test_authentication_failure_log_names_the_fallback_for_a_key_that_needs_a_passphrase(tmp_path: Path) -> None:
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=tmp_path / "id_ed25519")
+def test_authentication_failure_log_survives_a_key_file_it_cannot_parse(tmp_path: Path) -> None:
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("not a private key\n")
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=key_path)
     with capture_loguru("WARNING") as log_output:
-        _log_authentication_failure(ssh_info, None, paramiko.AuthenticationException("Authentication failed."))
-
-    assert "offered credentials: the user's own SSH setup (the configured key needs a passphrase)" in (
-        log_output.getvalue()
-    )
-
-
-def test_authentication_failure_log_survives_a_key_file_that_has_since_gone(tmp_path: Path) -> None:
-    offered_key = paramiko.ECDSAKey.generate()
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=tmp_path / "id_ecdsa")
-    with capture_loguru("WARNING") as log_output:
-        _log_authentication_failure(ssh_info, offered_key, paramiko.AuthenticationException("Authentication timeout."))
+        _log_authentication_failure(ssh_info, paramiko.AuthenticationException("Authentication timeout."))
 
     warning = log_output.getvalue()
-    assert (
-        f"offered credentials: key {offered_key.fingerprint} (file no longer readable: FileNotFoundError)" in warning
-    )
+    assert "offered credentials: a key file that could not be read back (" in warning
     assert "AuthenticationException: Authentication timeout." in warning
     assert "auth types the server allows: not reported" in warning
 

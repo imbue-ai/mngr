@@ -32,16 +32,16 @@ import type {
 import { isAppOverlayPath } from "./classify";
 import type {
   PopoutOpenRequest,
+  ShellShortcutsReport,
   TearOutReport,
   WorkspaceLinkHandlingReport,
   WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
-import { welcomeChatArrival } from "../../models/welcomeChatArrival";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
-interface EmbedContractModule {
+export interface EmbedContractModule {
   OPEN_REQUEST_MODAL: string;
   OPEN_HELP: string;
   OPEN_AI_KEYS_PAGE: string;
@@ -55,7 +55,6 @@ interface EmbedContractModule {
   PERMISSION_RESOLUTIONS: string;
   FOCUS_CHAT: string;
   WORKSPACE_READY: string;
-  CHAT_ON_SCREEN: string;
   POP_OUT_WINDOW: string;
   WINDOW_DRAG_STARTED: string;
   WINDOW_DRAG_ENDED: string;
@@ -69,6 +68,12 @@ interface EmbedContractModule {
   IMMERSIVE_CHANGED: string;
   OPEN_LOCAL_FILES: string;
   HIGHLIGHT_CHROME: string;
+  KEYBOARD_SHORTCUTS_PAGE: string;
+  OPEN_KEYBOARD_SHORTCUTS: string;
+  SHELL_SHORTCUTS: string;
+  RUN_SHORTCUT: string;
+  RUN_CHORD: string;
+  RECORD_CHORD: string;
   CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
@@ -101,7 +106,22 @@ export const WORKSPACE_ORIGIN_FAMILY =
 export const WORKSPACE_FRAME_ALLOW =
   "clipboard-read *; clipboard-write *; fullscreen *; microphone *";
 
-async function loadEmbedContract(): Promise<EmbedContractModule> {
+// What workspace content may do inside a chrome frame. allow-top-navigation is
+// deliberately absent: the trusted chrome page is never steered by workspace
+// content.
+export const WORKSPACE_FRAME_SANDBOX =
+  "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock";
+
+/** Whether a message's origin is one of the workspace content origins a chrome frame navigates to. */
+export function isWorkspaceOrigin(origin: string): boolean {
+  try {
+    return WORKSPACE_ORIGIN_FAMILY.test(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export async function loadEmbedContract(): Promise<EmbedContractModule> {
   // Runtime URL import (the module is served by Flask, not bundled); the
   // variable specifier keeps both Vite and tsc from trying to resolve it.
   const moduleUrl = "/_static/embed_contract.js";
@@ -142,7 +162,10 @@ export interface EmbedHandlerDeps {
   sendAck: (type: string, payload?: Record<string, unknown>) => void;
   bringAppToFront: () => void;
   /** Arm the desktop relay for a sign-in of the mounted workspace; whether it is relaying, and why not. */
-  armProviderRelay: (flowId: string, url: string) => Promise<ProviderRelayAnswer>;
+  armProviderRelay: (
+    flowId: string,
+    url: string,
+  ) => Promise<ProviderRelayAnswer>;
   /** Stop the desktop relay for a sign-in of the mounted workspace that has ended. */
   stopProviderRelay: (flowId: string) => void;
   /** The mounted workspace's id, for the ?workspace= an overlay floats
@@ -153,10 +176,6 @@ export interface EmbedHandlerDeps {
    * it opens the links main hands back (minds:open-link), custom-scheme ones
    * included. */
   onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
-  /** The mounted page said whether it reports chats on screen (minds:chat-on-screen). */
-  onChatReportingKnown: (reportsChatOnScreen: boolean) => void;
-  /** A chat's transcript is drawn in a window the user can see. */
-  onChatOnScreen: (chatId: string) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
@@ -184,6 +203,9 @@ export interface EmbedHandlerDeps {
    * then never answers with the capability either. Called synchronously from
    * the handler, so the fullscreen request keeps the click's activation. */
   immersive: { request: (on: boolean) => void } | null;
+  /** The workspace reported its shortcuts (minds:shell-shortcuts), which the desktop app runs before any page sees
+   * the key; null in a chrome with no main process to run them. */
+  shellShortcuts: ((report: ShellShortcutsReport) => void) | null;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -202,8 +224,6 @@ export function buildEmbedHandlers(
     workspaceAgentId,
     openRequestPopup,
     onWorkspaceReady,
-    onChatReportingKnown,
-    onChatOnScreen,
   } = deps;
   const handlers: Record<string, (message: Record<string, unknown>) => void> =
     {};
@@ -265,28 +285,41 @@ export function buildEmbedHandlers(
       section: LOCAL_FILES_SECTION,
     });
   };
+  handlers[contract.OPEN_KEYBOARD_SHORTCUTS] = () => {
+    // Float the options panel's Workspace settings over this machine, at its Keyboard shortcuts group.
+    navigate(`/workspace/${workspaceAgentId()}/options`, {
+      tab: "settings",
+      group: "keyboard",
+    });
+  };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
     onWorkspaceReady({
       opensLinks: message.opensLinks === true,
       opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,
     });
-    onChatReportingKnown(message.reportsChatOnScreen === true);
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
     // Every chrome that runs these handlers has the options panel, so each
-    // takes OPEN_LOCAL_FILES.
+    // takes OPEN_LOCAL_FILES and OPEN_KEYBOARD_SHORTCUTS.
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
       immersive: deps.immersive !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
       opensLocalFiles: true,
+      opensKeyboardShortcuts: true,
     });
   };
-  handlers[contract.CHAT_ON_SCREEN] = (message) =>
-    onChatOnScreen(String(message.chatId));
+  const shellShortcuts = deps.shellShortcuts;
+  if (shellShortcuts !== null) {
+    handlers[contract.SHELL_SHORTCUTS] = (message) =>
+      shellShortcuts({
+        chords_by_action: message.chords_by_action as Record<string, string[]>,
+        claimed_chords: message.claimed_chords as string[],
+      });
+  }
   const immersive = deps.immersive;
   if (immersive !== null) {
     handlers[contract.IMMERSIVE_REQUEST] = (message) =>
@@ -510,16 +543,32 @@ function buildImmersiveController(
   });
 }
 
-// electronBridge.onCloseActiveTab has no unregister, so the preload callback
-// is registered ONCE at module scope and forwards to whichever frame is
-// currently mounted; mount/unmount only swap this ref.
-let activeCloseActiveTabForwarder: (() => void) | null = null;
-let isCloseActiveTabRegistered = false;
+/** What main's key relays reach in the mounted frame: an older workspace's close-tab chord, and the shortcuts main
+ * runs for a workspace that reported them (the keyboard-shortcuts spec, section 6). */
+interface KeyRelayForwarder {
+  closeActiveTab(): void;
+  runShortcut(action: string): void;
+  runChord(chord: string): void;
+}
 
-function ensureCloseActiveTabRegistered(): void {
-  if (isCloseActiveTabRegistered) return;
-  isCloseActiveTabRegistered = true;
-  electronBridge.onCloseActiveTab(() => activeCloseActiveTabForwarder?.());
+// The preload's key-relay callbacks have no unregister, so they are
+// registered ONCE at module scope and forward to whichever frame is currently
+// mounted; mount/unmount only swap this ref.
+let activeKeyRelayForwarder: KeyRelayForwarder | null = null;
+let areKeyRelaysRegistered = false;
+
+function ensureKeyRelaysRegistered(): void {
+  if (areKeyRelaysRegistered) return;
+  areKeyRelaysRegistered = true;
+  electronBridge.onCloseActiveTab(() =>
+    activeKeyRelayForwarder?.closeActiveTab(),
+  );
+  electronBridge.onRunShortcut((action) =>
+    activeKeyRelayForwarder?.runShortcut(action),
+  );
+  electronBridge.onRunChord((chord) =>
+    activeKeyRelayForwarder?.runChord(chord),
+  );
 }
 
 export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
@@ -531,7 +580,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let contract: EmbedContractModule | null = null;
   let armedWorkspaceAnyId: string | null = null;
   let unsubscribeWorkspaces: (() => void) | null = null;
-  let closeActiveTabForwarder: (() => void) | null = null;
+  let keyRelayForwarder: KeyRelayForwarder | null = null;
   let onFrameLoad: (() => void) | null = null;
   // Stamped by a listener of its own, attached at mount: `onFrameLoad` waits
   // for the embed contract and is also invoked by hand, so it cannot say when
@@ -671,7 +720,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           navigate: (path, params) =>
             m.route.set(
               path,
-              isAppOverlayPath(path) ? shell.overlayQuery(params ?? {}) : params,
+              isAppOverlayPath(path)
+                ? shell.overlayQuery(params ?? {})
+                : params,
             ),
           sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
@@ -699,9 +750,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingWorkspaceMessage();
           },
-          onChatReportingKnown: (reportsChatOnScreen) =>
-            welcomeChatArrival.noteWorkspaceReady(reportsChatOnScreen),
-          onChatOnScreen: (chatId) => welcomeChatArrival.noteChatOnScreen(chatId),
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
@@ -733,6 +781,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
                   ),
               }
             : null,
+          shellShortcuts: electronBridge.runsShellShortcuts
+            ? (report) =>
+                electronBridge.setShellShortcuts(
+                  shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+                  report,
+                )
+            : null,
         });
         endpoint = loaded.createEmbedderEndpoint({
           getFrameWindow: () => {
@@ -743,20 +798,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
               return null;
             }
           },
-          isExpectedOrigin: (origin: string) => {
-            try {
-              return WORKSPACE_ORIGIN_FAMILY.test(new URL(origin).hostname);
-            } catch {
-              return false;
-            }
-          },
+          isExpectedOrigin: isWorkspaceOrigin,
           handlers,
         });
-        closeActiveTabForwarder = () => {
-          if (contract !== null) endpoint?.send(contract.CLOSE_ACTIVE_TAB);
+        keyRelayForwarder = {
+          closeActiveTab: () => endpoint?.send(loaded.CLOSE_ACTIVE_TAB),
+          runShortcut: (action) =>
+            endpoint?.send(loaded.RUN_SHORTCUT, { action }),
+          runChord: (chord) => endpoint?.send(loaded.RUN_CHORD, { chord }),
         };
-        activeCloseActiveTabForwarder = closeActiveTabForwarder;
-        ensureCloseActiveTabRegistered();
+        activeKeyRelayForwarder = keyRelayForwarder;
+        ensureKeyRelaysRegistered();
         permissionResolvedSender = (requestId, verdict) => {
           // The same message type as the load-time snapshot, with one
           // unsolicited entry: the workspace keeps a single verdict code path.
@@ -842,8 +894,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     },
     onremove(vnode) {
       isRemoved = true;
-      if (activeCloseActiveTabForwarder === closeActiveTabForwarder) {
-        activeCloseActiveTabForwarder = null;
+      if (activeKeyRelayForwarder === keyRelayForwarder) {
+        activeKeyRelayForwarder = null;
       }
       if (permissionResolvedSender !== null) {
         vnode.attrs.shell.unregisterPermissionResolvedSender(
@@ -909,8 +961,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           // allow-pointer-lock: a pointer lock needs it in every sandbox
           // list on the way (the Screen's viewer takes one; the workspace
           // shell's page frames add it too).
-          sandbox:
-            "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock",
+          sandbox: WORKSPACE_FRAME_SANDBOX,
           allow: WORKSPACE_FRAME_ALLOW,
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",

@@ -76,7 +76,6 @@ from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_M
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import OutputCallback
-from imbue.minds.desktop_client.agent_creator import launch_mode_for_provider_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
@@ -111,7 +110,6 @@ from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import CloudAccountOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CloudAccountSummary
 from imbue.minds.desktop_client.api_models import CloudAccountUpdateRequest
-from imbue.minds.desktop_client.api_models import CloudAccountsResponse
 from imbue.minds.desktop_client.api_models import CreateAttemptDiscardStatusResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -162,10 +160,7 @@ from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.api_transport import agent_label_from_environ
 from imbue.minds.desktop_client.api_transport import transport_for_environ
-from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.backend_resolver import INSTANCE_TYPE_LABEL
-from imbue.minds.desktop_client.backend_resolver import LAUNCH_MODE_LABEL
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
@@ -297,7 +292,6 @@ from imbue.minds.desktop_client.visiting_agents import revoke_visiting_agent
 from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
 from imbue.minds.desktop_client.workspace_create import ResolvedRegion
 from imbue.minds.desktop_client.workspace_create import available_cloud_account_options
-from imbue.minds.desktop_client.workspace_create import available_connection_views
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import is_cloud_account_owned_by
@@ -561,7 +555,6 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
     # resolvers (and tests) report the placeholder ``"localhost"`` which is not a
     # valid HostId, so guard the lookup and treat the state as unknown there.
     host_state = None
-    host_size = None
     if host_id is not None:
         try:
             typed_host_id = HostId(host_id)
@@ -569,7 +562,6 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
             typed_host_id = None
         if typed_host_id is not None:
             host_state = backend_resolver.get_host_state(typed_host_id)
-            host_size = backend_resolver.get_host_size(typed_host_id)
     return WorkspaceSummary(
         agent_id=str(agent_id),
         # The human-readable display name (``workspace_display_name`` label,
@@ -583,11 +575,6 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         account_id=account.user_id if account is not None else None,
         account_email=account.email if account is not None else None,
         provider_name=info.provider_name if info is not None else None,
-        launch_mode=_workspace_launch_mode(backend_resolver, agent_id, info),
-        instance_type=backend_resolver.get_agent_label(agent_id, INSTANCE_TYPE_LABEL),
-        cpu_count=host_size.cpu_count if host_size is not None else None,
-        memory_gb=host_size.memory_gb if host_size is not None else None,
-        disk_gb=host_size.disk_gb if host_size is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL),
         color=backend_resolver.get_workspace_color(agent_id),
@@ -597,27 +584,6 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
     )
 
 
-def _workspace_launch_mode(
-    backend_resolver: BackendResolverInterface, agent_id: AgentId, info: AgentDisplayInfo | None
-) -> LaunchMode | None:
-    """The mode the workspace was created with: its stamped label, else the one its provider instance implies.
-
-    Workspaces created before the label was stamped carry none, and the provider
-    instance determines the mode, so they are not reported as unplaced.
-    """
-    stamped = backend_resolver.get_agent_label(agent_id, LAUNCH_MODE_LABEL)
-    if stamped is not None:
-        try:
-            return LaunchMode(stamped)
-        except ValueError:
-            logger.warning(
-                "Agent {} carries a {} label that is not a launch mode: {!r}", agent_id, LAUNCH_MODE_LABEL, stamped
-            )
-    if info is None or not info.provider_name:
-        return None
-    return launch_mode_for_provider_name(info.provider_name)
-
-
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceListResponse))
 def _handle_list_workspaces() -> WorkspaceListResponse:
@@ -625,20 +591,6 @@ def _handle_list_workspaces() -> WorkspaceListResponse:
     backend_resolver = get_state().backend_resolver
     workspaces = tuple(_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids())
     return WorkspaceListResponse(workspaces=workspaces)
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(CloudAccountsResponse))
-def _handle_list_cloud_accounts() -> CloudAccountsResponse:
-    """List the cloud connections a workspace can be created on from this device.
-
-    A connection's ``name`` is what a create request takes as ``cloud_account``.
-    The listing is the create form's connection picker (alias, backend, pinned
-    region, a masked key hint), never a credential, so it rides the
-    ``minds-workspaces-read`` grant like the rest of the workspace metadata.
-    """
-    usable_views = available_connection_views(get_state().connection_store)
-    return CloudAccountsResponse(cloud_accounts=tuple(_cloud_account_summary(view) for view in usable_views))
 
 
 @require_api_or_cookie_auth
@@ -3756,16 +3708,6 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         identities=_identities(document),
         grants_synced=grants_synced if isinstance(grants_synced, bool) else None,
         migrated_domain_from=_optional_str(document, "migrated_domain_from"),
-        invitation_outcomes=_invitation_outcomes(document),
-    )
-
-
-def _invitation_outcomes(document: dict[str, object]) -> tuple[InvitationOutcomeEntryResponse, ...] | None:
-    raw_outcomes = document.get("invitation_outcomes")
-    if not isinstance(raw_outcomes, list):
-        return None
-    return tuple(
-        InvitationOutcomeEntryResponse.model_validate(entry) for entry in raw_outcomes if isinstance(entry, dict)
     )
 
 
@@ -5567,8 +5509,6 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/remote-execution/<device_id>", view_func=_handle_remote_execution, methods=["POST"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/backups", view_func=_handle_workspaces_backups_stream, methods=["GET"])
-    # The connections a create may target; workspace metadata, so it rides the read grant.
-    blueprint.add_url_rule("/workspaces/cloud-accounts", view_func=_handle_list_cloud_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backup-check", view_func=_handle_workspace_backup_check, methods=["GET"]

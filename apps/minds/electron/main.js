@@ -75,6 +75,7 @@ const {
   isKeyRelaySilenced,
   originOf,
 } = require('./immersive-policy');
+const { chordFromInput, chordPlatformOf, decideChord, readShellShortcuts } = require('./shell-chords');
 const {
   shouldWriteSessionState,
   createDebouncedSaver,
@@ -247,6 +248,7 @@ if (app.isPackaged) {
 }
 
 const isMac = process.platform === 'darwin';
+const CHORD_PLATFORM = chordPlatformOf(process.platform);
 // Resolved once, before any window: a bad setting fails the launch outright.
 const windowControls = resolveWindowControls(process.platform, process.env);
 
@@ -737,6 +739,13 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     // integration spec, section 5): menu shortcuts are off and the
     // before-input-event relays are silenced while it is.
     isImmersive: false,
+    // The shortcuts the displayed workspace reported (minds:shell-shortcuts,
+    // electron/shell-chords.js), with the workspace that reported them; null
+    // until one does, which keeps the hard-coded close-tab chord in force.
+    shellShortcuts: null,
+    // Whether the page's keyboard shortcuts recorder is listening, during
+    // which main matches no shortcut and relays the host-acted keys to it.
+    isShortcutRecording: false,
     // The URL this window's content is "at" for session persistence and
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
@@ -1001,6 +1010,8 @@ function wireBundleNavigationEvents(bundle) {
     // the old page too (fullscreen ends with the document).
     linkRouter.forgetMount(wc);
     setImmersiveFor(bundle, false);
+    bundle.shellShortcuts = null;
+    bundle.isShortcutRecording = false;
     onTopLevelNavigate(url);
   });
   // Unlike did-navigate, this one also fires for the frames inside the page
@@ -1113,6 +1124,27 @@ function wireBundleNavigationEvents(bundle) {
   });
 }
 
+/** The shortcuts the window's displayed workspace reported, or null when it
+ *  has reported none (or the window now shows another workspace). */
+function shellShortcutsOfDisplayedWorkspace(bundle) {
+  const reported = bundle.shellShortcuts;
+  if (reported === null || !bundle.currentWorkspaceId) return null;
+  return toHostScopedWorkspaceId(bundle.currentWorkspaceId) === reported.workspaceId ? reported.shortcuts : null;
+}
+
+/** Act on a shortcut decision (electron/shell-chords.js) for the window. */
+function runChordDecision(bundle, wc, decision) {
+  if (decision.kind === 'run-shortcut' && decision.action === 'close-window' && isPopoutBundle(bundle)) {
+    // A popout's Close window closes the popout, which returns its window to
+    // the desktop (the close handshake), rather than closing the workspace
+    // window for everyone.
+    bundle.window.close();
+    return;
+  }
+  const value = decision.kind === 'run-shortcut' ? decision.action : decision.chord;
+  try { wc.send(decision.kind, value); } catch { /* noop */ }
+}
+
 function registerShortcutsFor(bundle, wc) {
   // The release of a watched title-bar drag reaches this window wherever the
   // cursor is by then, which the workspace shell's own pointer events do not
@@ -1138,6 +1170,22 @@ function registerShortcutsFor(bundle, wc) {
       if (!wc.isDestroyed()) wc.toggleDevTools();
       return;
     }
+    // The workspace's shortcuts (the keyboard-shortcuts spec, section 6.6):
+    // before-input-event sees the keystroke even when focus is inside the
+    // workspace iframe or a frame the shell cannot hear (the terminal, the
+    // Screen), so a bound chord wins here over the page and the OS.
+    const shortcuts = shellShortcutsOfDisplayedWorkspace(bundle);
+    const decision = decideChord({
+      chord: chordFromInput(input, CHORD_PLATFORM),
+      platform: CHORD_PLATFORM,
+      isRecording: bundle.isShortcutRecording,
+      shortcuts,
+    });
+    if (decision !== null) {
+      event.preventDefault();
+      if (!input.isAutoRepeat) runChordDecision(bundle, wc, decision);
+      return;
+    }
     // Escape backstop for the in-DOM overlay: keydowns inside the workspace
     // iframe (or its nested service iframes) don't reach the chrome page's
     // own listeners, but before-input-event sees every keystroke.
@@ -1145,14 +1193,16 @@ function registerShortcutsFor(bundle, wc) {
       try { wc.send('escape-pressed'); } catch { /* noop */ }
       return;
     }
-    // Cmd+W (macOS) / Ctrl+W closes the focused window INSIDE the
-    // displayed workspace, not the Electron window. before-input-event sees the
-    // keystroke even when focus is inside the workspace iframe; the chrome
-    // page relays it into the workspace through the embed contract.
+    // A listening recorder takes every other key, main's own included.
+    if (bundle.isShortcutRecording) return;
+    // Until the displayed workspace reports its shortcuts (one too old to),
+    // Cmd+W (macOS) / Ctrl+W closes the focused window INSIDE it, not the
+    // Electron window; the chrome page relays it into the workspace through
+    // the embed contract.
     const closeTabCombo = isMac
       ? input.meta && !input.shift && !input.alt && !input.control
       : input.control && !input.shift && !input.alt && !input.meta;
-    if (closeTabCombo && key === 'w' && bundle.currentWorkspaceId) {
+    if (shortcuts === null && closeTabCombo && key === 'w' && bundle.currentWorkspaceId) {
       event.preventDefault();
       if (isPopoutBundle(bundle)) {
         // In a popout the chord closes the popout, which returns its window
@@ -3231,6 +3281,26 @@ ipcMain.on('set-immersive', (event, on) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   setImmersiveFor(bundle, on);
+});
+
+// The displayed workspace's shortcuts, as its shell reported them
+// (minds:shell-shortcuts): main runs them before any page sees the key.
+ipcMain.on('set-shell-shortcuts', (event, report) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed() || !report || typeof report !== 'object') return;
+  const { workspaceId } = report;
+  if (typeof workspaceId !== 'string' || !/^(?:agent|host)-[a-f0-9]{1,64}$/i.test(workspaceId)) return;
+  const shortcuts = readShellShortcuts(report.shortcuts);
+  if (shortcuts === null) return;
+  bundle.shellShortcuts = { workspaceId: toHostScopedWorkspaceId(workspaceId), shortcuts };
+});
+
+// Whether the window's keyboard shortcuts recorder is listening
+// (minds:keyboard-shortcuts-page): main matches no shortcut while it is.
+ipcMain.on('set-shortcut-recording', (event, isRecording) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed()) return;
+  bundle.isShortcutRecording = isRecording === true;
 });
 
 // Which permission requests the default session grants. Electron grants

@@ -26,6 +26,7 @@ import {
   settle,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
+import { KeyboardShortcutsGroup } from "./KeyboardShortcutsGroup";
 import { SettingsGroups } from "./SettingsGroups";
 
 // Two machines, one without backups: the pane's state must be keyed on which
@@ -158,6 +159,24 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearAppContextForTests();
+});
+
+describe("the Keyboard shortcuts group", () => {
+  it("is listed in the nav and hosts the workspace's shortcuts page when chosen", () => {
+    const { draw } = harness();
+
+    const general = draw(BACKED);
+    const keyboard = draw(BACKED, "keyboard");
+
+    const navEntry = collectVnodes(general).find(
+      (vnode) => attrsOf(vnode)["data-settings-group"] === "keyboard",
+    );
+    expect(allText((navEntry as AnyVnode).children)).toContain("Keyboard shortcuts");
+    const hosted = (root: m.Children): AnyVnode | undefined =>
+      collectVnodes(root).find((vnode) => vnode.tag === KeyboardShortcutsGroup);
+    expect(hosted(general)).toBeUndefined();
+    expect(attrsOf(hosted(keyboard) as AnyVnode).agentId).toBe(BACKED);
+  });
 });
 
 describe("the Updates entry in the settings nav", () => {
