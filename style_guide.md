@@ -1792,7 +1792,7 @@ The types of tests are unit, integration, acceptance, release, and smoke. Each t
 2. integration tests: put them in `(src)/**/test_*.py`. They answer the question: "does our program behave in the way that we want?" by testing "end to end" functionality. Run locally with no network access, don't take too long, and are used for calculating coverage.
 3. acceptance tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.acceptance`. They answer the question: "does the application work under realistic conditions?" by testing with real dependencies (network access, credentials, etc). Run on all branches in CI.
 4. release tests: put them in `(src)/**/test_*.py` and mark with `@pytest.mark.release`. They answer the question: "is the application ready for release?" These are more comprehensive acceptance-style tests that only run when pushing to release. The idea is to have them fixed up overnight/before release rather than as a precondition for merging PRs.
-5. smoke tests: mark them with `@pytest.mark.smoke`. They answer the question: "does what we just shipped work in production?" They run after a deploy or a release, against the published artifact and the deployed production environment, and never gate a release.
+5. smoke tests: mark them with `@pytest.mark.smoke`. They answer the question: "does a real build of what we ship work end to end against a deployed tier?" In CI they run after a deploy and never gate; a release runs the same suite by hand against staging as one of its checks.
 
 ### Unit Tests
 
@@ -1939,9 +1939,9 @@ Release tests can sometimes be flaky. This is ok. Make it possible to easily ret
 
 ### Smoke Tests
 
-Smoke tests run *after* a deploy or a release, against the published artifact and the deployed production environment. They answer the question: "does what we just shipped actually work for a real user?"
+Smoke tests drive a real build end to end against a deployed tier. They answer the question: "does what we ship actually work for a real user?"
 
-Smoke tests never gate a release. They run after the fact to validate it; when one fails, the CI job fails and a knock-on process alerts us in Slack.
+In CI they run after a deploy and never gate: when one fails, the CI job fails and a knock-on process alerts us in Slack. A release runs the same suite by hand against staging as one of its checks, from the release checkout, and that run's verdict does count: the rehearsal is the release's human gate, and the suite is its instrument there.
 
 Driving the running Electron app end to end is their primary modality. They also validate API endpoints and run on the web. That reach is the point: they cover the journeys that are hard to get at any other way -- account creation, signup, workspace creation, and sharing.
 

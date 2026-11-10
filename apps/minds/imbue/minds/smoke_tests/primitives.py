@@ -58,6 +58,9 @@ SMOKE_SKIP_DWT_TESTS_ENV_VAR: Final[str] = "MINDS_SMOKE_SKIP_DWT_TESTS"
 # An absolute path: the app under test records the run as a Studio profile there
 # (what ``minds run --profile`` writes); unset records nothing.
 SMOKE_PROFILE_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_PROFILE_FILE"
+# The default-workspace-template tag the journey's workspace must lease a pool row baked at, so a run that
+# is meant to exercise a release's template fails when it leased another tag's row; unset checks nothing.
+SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR: Final[str] = "MINDS_SMOKE_EXPECTED_TEMPLATE_REF"
 
 # The mail.tm mailbox the throwaway account verifies its email through. The
 # address and JWT keep the names the deployment tests already thread through

@@ -333,7 +333,7 @@ def test_the_summary_counts_each_suite_s_outcomes_and_lists_each_failure() -> No
         ),
     )
 
-    assert dwt_results_markdown(results) == (
+    assert dwt_results_markdown(results, template_ref=None) == (
         "## default-workspace-template's CI suites in the workspace\n"
         "\n"
         "| Suite | Passed | Failed | Skipped |\n"
@@ -348,10 +348,24 @@ def test_the_summary_counts_each_suite_s_outcomes_and_lists_each_failure() -> No
 
 
 def test_a_summary_without_failures_lists_none() -> None:
-    markdown = dwt_results_markdown((_result("a.py::test_ok", DwtTestOutcome.PASSED, 1),))
+    markdown = dwt_results_markdown((_result("a.py::test_ok", DwtTestOutcome.PASSED, 1),), template_ref=None)
 
     assert "| chat | 1 | 0 | 0 |" in markdown
     assert "### Failed" not in markdown
+
+
+def test_the_summary_names_the_template_the_workspace_s_row_was_baked_at() -> None:
+    markdown = dwt_results_markdown(
+        (_result("a.py::test_ok", DwtTestOutcome.PASSED, 1),), template_ref="minds-v0.10.1"
+    )
+
+    assert markdown.startswith(
+        "## default-workspace-template's CI suites in the workspace\n"
+        "\n"
+        "Run in a workspace on a pool row baked at template `minds-v0.10.1`.\n"
+        "\n"
+        "| Suite | Passed | Failed | Skipped |\n"
+    )
 
 
 def test_the_dwt_tests_run_unless_the_environment_says_to_skip_them() -> None:

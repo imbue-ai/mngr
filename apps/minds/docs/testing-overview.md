@@ -276,10 +276,10 @@ rules keep that from corrupting the workspaces under test:
 
 ### 1.10 Smoke tests (`apps/minds/smoke_tests/`)
 
-Smoke tests run *after* a deploy or a release, against the published artifact
-and the deployed production environment, and never gate the release they
-validate -- the repo `style_guide.md` ("Types of tests" -> "Smoke Tests") holds
-that definition. This section is the operational half: what they target, what
+Smoke tests drive a real build end to end against a deployed tier. In CI they
+run after a deploy and never gate; a release runs the same suite by hand against
+staging as one of its checks. The repo `style_guide.md` ("Types of tests" ->
+"Smoke Tests") holds that definition. This section is the operational half: what they target, what
 triggers them, how their CI jobs are segmented, which credentials they hold, and
 how to run them. The decisions behind the first shape are recorded in
 `specs/minds-smoke-tests/spec.md`.
@@ -328,6 +328,10 @@ a run, so publishing a new app binary never starts one on its own. In CI the
 manifest, the pytest log and the screenshots are uploaded as the run's artifact,
 which `teardown` downloads. A daily run, when it is added, may carry a different
 target (for example stable/production daily, alpha/production post deploy).
+The release's staging rehearsal starts a run by hand from the release checkout
+("Running it locally" below, and `apps/minds/docs/deploy/ops/services.md`,
+*Which smoke run a deploy gets*); the workflow's Vault roles reach production
+only, so staging has no CI run.
 
 **Jobs.** Cleanup is the CI job's responsibility, segmented so the test job can
 never delete resources and the cleanup happens regardless of what the test did:
@@ -448,6 +452,18 @@ it, step 3b runs those suites inside it:
   group is reported as such. The journey's timeout, one session's
   `PYTEST_MAX_DURATION_SECONDS` and the CI job's timeout all grow to fit.
 
+- The template under test is the one the build under test pins: the journey
+  leaves the create form's Branch field at the build's `FALLBACK_BRANCH`, so a
+  channel's published build exercises that channel's tag and a checkout
+  exercises its own. The journey reads the leased pool row's
+  `repo_branch_or_tag` from the connector's lease listing, logs it at Step 3
+  (`pool row <id> baked at template <tag>`), and writes it at the top of
+  `summary.md`. A row's tag is the template the suites ran against only on the
+  fast path: a slow-path create leases a row baked at another tag and rebuilds
+  its container. `MINDS_SMOKE_EXPECTED_TEMPLATE_REF=minds-v<version>` makes
+  Step 3 fail unless the row was baked at that tag, for a run meant to certify
+  a release's template; unset, nothing is checked.
+
 Every template test is reported as a subtest of the journey labelled
 `dwt:<suite>::<node id>`, so each one that fails in the workspace is its own
 `SUBFAILED` result carrying its failure text, and the journey carries on. A run
@@ -469,11 +485,20 @@ passes `skip_dwt_tests=true`: a services deploy changes neither the template
 nor the pool hosts, which is what these tests exercise. These tests run in
 exactly one situation, a new desktop release deployed to staging, and every other
 run sets the variable to `1` explicitly, the hand dispatch after a channel publish
-included (`docs/deploy/ops/services.md`, *Which smoke run a deploy gets*).
+included (`docs/deploy/ops/services.md`, *Which smoke run a deploy gets*). That
+staging run is made from the checkout at the release commit with
+`MINDS_SMOKE_EXPECTED_TEMPLATE_REF` set to the release tag
+(`docs/deploy/ops/app-release.md`, *Reading the rehearsal's smoke run*): it is
+where a new template tag meets its own CI tests in a real workspace, and the
+release rule is that nothing of the release is deployed, baked or promoted on
+production until it has passed.
 
 **Running it locally.** The suite also runs from a developer laptop against
 staging or production with nothing but this checkout, so a developer can see
-whether the tier passes or fails without a CI run. What a run needs:
+whether the tier passes or fails without a CI run. On staging the build under
+test is this checkout (`MINDS_SMOKE_DEV_CHECKOUT=1`): a published build is
+baked for production, and the suite refuses to point one at another tier. What
+a run needs:
 
 - Vault: `vault login -method=oidc role=minds_staging` for staging; production
   needs the production role. The suite reads the persistent account from
@@ -520,9 +545,13 @@ MINDS_SMOKE_DEV_CHECKOUT=1 just minds-smoke <tier>                    # -k journ
 just minds-smoke-teardown <tier> <run-id> --state /tmp/smoke-<run-id>.json
 ```
 
-A run leases one pool row at the build's template tag, in the region the
-create form already points at (and fails when the tier's pool has none to lease
-there, which is a true thing to report about the tier), mints one LiteLLM key
+A run leases one pool row in the region the create form already points at:
+one baked at the build's template tag when the pool has one available there,
+else any row there, whose container the create rebuilds at the tag (the slow
+path; `MINDS_SMOKE_EXPECTED_TEMPLATE_REF=minds-v<version>` fails the journey
+in that case, for a run meant to certify a release's template). A pool with no
+row to lease there at all fails the run, which is a true thing to report about
+the tier. The run then mints one LiteLLM key
 for the persistent account, runs default-workspace-template's CI suites in the
 workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them, which
 every run except a new desktop release on staging should), and

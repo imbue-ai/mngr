@@ -30,6 +30,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
 from imbue.minds.smoke_tests.accounts import leased_host_db_id_for_host_id
+from imbue.minds.smoke_tests.accounts import leased_template_ref_for_host_id
 from imbue.minds.smoke_tests.accounts import list_leased_hosts
 from imbue.minds.smoke_tests.accounts import origin_of
 from imbue.minds.smoke_tests.accounts import sign_in
@@ -69,6 +70,7 @@ from imbue.minds.smoke_tests.dwt_suites import dwt_subtest_label
 from imbue.minds.smoke_tests.dwt_suites import run_dwt_ci_suites_in_workspace
 from imbue.minds.smoke_tests.manifest import record_created_resource
 from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
+from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
 from imbue.minds.smoke_tests.workspace_exec import app_mngr_workspace_shell
@@ -153,13 +155,31 @@ def _sign_in_through_the_app(
     wait_for_account_in_create_form(studio_app, str(account.email), _ACCOUNT_LISTED_TIMEOUT_SECONDS)
 
 
-def _leased_pool_row_id(backend: SmokeBackend, account: SmokeAccountCredentials, host_id: str) -> str:
-    """The pool row the workspace leased, read as the account itself: what the release routes take."""
+def _leased_pool_row(backend: SmokeBackend, account: SmokeAccountCredentials, host_id: str) -> tuple[str, str | None]:
+    """The pool row the workspace leased, read as the account itself: its id (what the release routes take)
+    and the template tag it was baked at (None when the row declares none)."""
     bearer = sign_in(connector_url=backend.connector_url, credentials=account)
     hosts = list_leased_hosts(connector_url=backend.connector_url, bearer=bearer)
     host_db_id = leased_host_db_id_for_host_id(hosts, host_id)
     assert host_db_id is not None, f"The connector lists no lease of {account.email} for host {host_id}: {hosts}"
-    return host_db_id
+    return host_db_id, leased_template_ref_for_host_id(hosts, host_id)
+
+
+def _assert_workspace_is_at_expected_template(
+    expected_template_ref: str, leased_template_ref: str | None, host_db_id: str
+) -> None:
+    """Fail unless the workspace's row was baked at the template the run is meant to exercise.
+
+    The row's tag is the template the suites run against only on the fast
+    path, so a run asked to certify a release's template must not pass on a
+    row baked at another tag, however well the rebuilt workspace works.
+    """
+    assert leased_template_ref == expected_template_ref, (
+        f"Pool row {host_db_id} was baked at template {leased_template_ref!r}, not at "
+        f"{expected_template_ref!r} ({SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR}): either the pool had no available "
+        f"row at that tag in the form's region and the create rebuilt another row's container (the slow path), "
+        f"or the build under test asks for a different tag than this run expects."
+    )
 
 
 def _workspace_row(studio_app: StudioAppSession, agent_id: str) -> Mapping[str, Any]:
@@ -224,6 +244,7 @@ def _run_dwt_ci_suites_reporting_each_test(
     workspace_row: Mapping[str, Any],
     run_id: SmokeRunId,
     output_dir: Path,
+    template_ref: str | None,
 ) -> None:
     """Run the template's CI suites in the fresh workspace and report each of their tests as a subtest.
 
@@ -249,7 +270,7 @@ def _run_dwt_ci_suites_reporting_each_test(
             deadline_seconds=_DWT_SUITES_DEADLINE_SECONDS,
             poll_interval_seconds=_DWT_POLL_INTERVAL_SECONDS,
         )
-        (output_dir / _DWT_SUMMARY_FILE_NAME).write_text(dwt_results_markdown(results))
+        (output_dir / _DWT_SUMMARY_FILE_NAME).write_text(dwt_results_markdown(results, template_ref=template_ref))
         for result in results:
             with subtests.test(msg=dwt_subtest_label(result)):
                 _assert_dwt_result_passed(result)
@@ -265,6 +286,7 @@ def _run_dwt_ci_suites_reporting_each_test(
 @pytest.mark.timeout(_JOURNEY_TIMEOUT_SECONDS)
 def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
     is_dwt_tests_skipped: bool,
+    expected_template_ref: str | None,
     backend: SmokeBackend,
     studio_app: StudioAppSession,
     persistent_account: SmokeAccountCredentials,
@@ -292,19 +314,33 @@ def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
         row = _workspace_row(studio_app, agent_id)
         assert row.get("account_email") == owner_email, row
         assert row.get("host_id"), row
-        host_db_id = _leased_pool_row_id(backend, persistent_account, str(row["host_id"]))
+        host_db_id, leased_template_ref = _leased_pool_row(backend, persistent_account, str(row["host_id"]))
+        # Recorded before any check of the row, so teardown releases it however the check comes out.
         record_created_resource(
             run_manifest, kind=SmokeResourceKind.WORKSPACE, identifier=host_db_id, owner_email=owner_email
         )
-        logger.info("Step 3: created workspace {} ({}, pool row {})", workspace_name, agent_id, host_db_id)
+        logger.info(
+            "Step 3: created workspace {} ({}, pool row {} baked at template {})",
+            workspace_name,
+            agent_id,
+            host_db_id,
+            leased_template_ref,
+        )
         screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
+        if expected_template_ref is not None:
+            _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
 
         if is_dwt_tests_skipped:
             with subtests.test(msg=_DWT_STEP_LABEL):
                 pytest.skip(f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests")
         else:
             _run_dwt_ci_suites_reporting_each_test(
-                subtests, studio_app, row, smoke_run_id, smoke_output_dir / _DWT_RESULTS_DIR_NAME
+                subtests,
+                studio_app,
+                row,
+                smoke_run_id,
+                smoke_output_dir / _DWT_RESULTS_DIR_NAME,
+                leased_template_ref,
             )
 
         welcome_chat = open_welcome_chat(workspace_frame)

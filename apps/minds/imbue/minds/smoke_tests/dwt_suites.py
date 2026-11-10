@@ -336,8 +336,13 @@ def is_dwt_subtest_label(label: str | None) -> bool:
 
 
 @pure
-def dwt_results_markdown(results: Sequence[DwtTestResult]) -> str:
-    """A summary for a CI job's page: each suite's outcome counts, then every failure by its subtest label."""
+def dwt_results_markdown(results: Sequence[DwtTestResult], *, template_ref: str | None) -> str:
+    """A summary for a CI job's page: each suite's outcome counts, then every failure by its subtest label.
+
+    ``template_ref`` is the tag the workspace's pool row was baked at, when the
+    journey could read it: the summary is the record of which template the
+    suites ran against.
+    """
     suite_names = sorted({str(result.suite_name) for result in results})
     count_rows = tuple(
         "| {} | {} | {} | {} |".format(
@@ -357,6 +362,7 @@ def dwt_results_markdown(results: Sequence[DwtTestResult]) -> str:
     lines = (
         "## default-workspace-template's CI suites in the workspace",
         "",
+        *((f"Run in a workspace on a pool row baked at template `{template_ref}`.", "") if template_ref else ()),
         "| Suite | Passed | Failed | Skipped |",
         "| --- | --- | --- | --- |",
         *count_rows,

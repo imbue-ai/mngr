@@ -7,6 +7,7 @@ from imbue.minds.smoke_tests.accounts import SMOKE_USER_AGENT
 from imbue.minds.smoke_tests.accounts import active_share_host_ids_of
 from imbue.minds.smoke_tests.accounts import leased_host_db_id_for_host_id
 from imbue.minds.smoke_tests.accounts import leased_host_db_ids_of
+from imbue.minds.smoke_tests.accounts import leased_template_ref_for_host_id
 from imbue.minds.smoke_tests.accounts import origin_of
 from imbue.minds.smoke_tests.accounts import parse_finalize_answer
 from imbue.minds.smoke_tests.accounts import persistent_account_credentials_from_env_or_none
@@ -72,6 +73,22 @@ def test_a_leased_row_is_found_by_its_host_coordinate() -> None:
     assert leased_host_db_id_for_host_id(listing, "host-bbbb") == "row-2"
     assert leased_host_db_id_for_host_id(listing, "host-cccc") is None
     assert leased_host_db_id_for_host_id([], "host-aaaa") is None
+
+
+def test_the_template_tag_a_leased_row_was_baked_at_is_read_from_its_attributes() -> None:
+    listing = [
+        {
+            "host_db_id": "row-1",
+            "host_id": "host-aaaa",
+            "attributes": {"repo_branch_or_tag": "minds-v0.10.1", "region": "US-EAST-VA"},
+        },
+        {"host_db_id": "row-2", "host_id": "host-bbbb", "attributes": {"region": "US-EAST-VA"}},
+        {"host_db_id": "row-3", "host_id": "host-cccc"},
+    ]
+    assert leased_template_ref_for_host_id(listing, "host-aaaa") == "minds-v0.10.1"
+    assert leased_template_ref_for_host_id(listing, "host-bbbb") is None
+    assert leased_template_ref_for_host_id(listing, "host-cccc") is None
+    assert leased_template_ref_for_host_id(listing, "host-dddd") is None
 
 
 def test_the_deletion_token_header_is_the_one_the_connector_names() -> None:

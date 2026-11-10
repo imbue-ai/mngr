@@ -52,6 +52,7 @@ from imbue.minds.smoke_tests.manifest import default_manifest_path
 from imbue.minds.smoke_tests.manifest import resolve_manifest_path_or_none
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_PASSWORD_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_HANDOFF_FILE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
@@ -105,6 +106,12 @@ def studio_binary(backend: SmokeBackend) -> StudioBinary:
 def is_dwt_tests_skipped() -> bool:
     """Whether the journey skips default-workspace-template's CI tests, by ``MINDS_SMOKE_SKIP_DWT_TESTS``."""
     return is_dwt_tests_skip_requested(os.environ)
+
+
+@pytest.fixture(scope="session")
+def expected_template_ref() -> str | None:
+    """The template tag the journey's workspace must lease a row baked at (``MINDS_SMOKE_EXPECTED_TEMPLATE_REF``), or None."""
+    return os.environ.get(SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR, "").strip() or None
 
 
 @pytest.fixture(scope="session")

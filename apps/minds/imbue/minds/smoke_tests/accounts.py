@@ -48,6 +48,8 @@ _POOL_DB_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
 _ACTIVE_SHARE_STATE: Final[str] = "active"
 # What ``POST /auth/signin`` answers for an unknown address or a wrong password.
 _WRONG_CREDENTIALS_STATUS: Final[str] = "WRONG_CREDENTIALS"
+# The pool-row attribute naming the default-workspace-template tag the row's slice was baked at.
+_TEMPLATE_REF_ATTRIBUTE: Final[str] = "repo_branch_or_tag"
 
 
 @pure
@@ -196,6 +198,27 @@ def leased_host_db_id_for_host_id(listing: Sequence[Mapping[str, Any]], host_id:
     for entry in listing:
         if str(entry.get("host_id", "")) == host_id:
             return str(entry["host_db_id"])
+    return None
+
+
+@pure
+def leased_template_ref_for_host_id(listing: Sequence[Mapping[str, Any]], host_id: str) -> str | None:
+    """The template tag the leased row whose host coordinate is ``host_id`` was baked at, or None.
+
+    A row's tag is the one its slice was baked at, which is the template the
+    workspace runs only when the create took the fast path: a slow-path create
+    leases a row baked at another tag and rebuilds its container, and the row
+    keeps its own tag. None when the listing has no such row, or the row
+    declares no tag.
+    """
+    for entry in listing:
+        if str(entry.get("host_id", "")) != host_id:
+            continue
+        attributes = entry.get("attributes")
+        if not isinstance(attributes, Mapping):
+            return None
+        template_ref = attributes.get(_TEMPLATE_REF_ATTRIBUTE)
+        return str(template_ref) if template_ref else None
     return None
 
 
