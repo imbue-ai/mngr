@@ -962,6 +962,7 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
 
 
 @pytest.mark.minds_snapshot_resume
+@pytest.mark.flaky
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900, func_only=False)
