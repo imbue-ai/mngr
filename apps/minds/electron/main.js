@@ -1,4 +1,4 @@
-const { BrowserWindow, Menu, Notification, Tray, clipboard, crashReporter, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const { BrowserWindow, Menu, Notification, Tray, clipboard, contentTracing, crashReporter, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -96,6 +96,7 @@ const {
   decideSecondInstanceAction,
   shouldShowDockIcon,
 } = require('./lifecycle-policy');
+const { chromiumTracingOptions, flushChromiumTrace, profilePathFromLaunch, sidecarPathFor } = require('./profiling');
 // Right-click (context) menu logic lives in ./context-menu so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
@@ -167,6 +168,7 @@ const launchArgs = process.argv.slice(1);
 // An agent starting the app for its API: the backend and the tray come up, no
 // window does (specs/imbue-studio-agent-access/spec.md).
 const isBackgroundStart = isBackgroundLaunch(launchArgs);
+const profilePath = profilePathFromLaunch({ args: launchArgs, env: process.env });
 const sandboxRelaunch = decideSandboxRelaunch({
   platform: process.platform,
   isPackaged: app.isPackaged,
@@ -2285,6 +2287,8 @@ function registerAppImageDesktopEntry() {
 let launchVersionChange = { previousVersion: null, isFirstLaunchAfterUpdate: false };
 
 async function onReady() {
+  // Before the first window, so the trace has the page's load in it.
+  if (profilePath !== null) await startChromiumTracing();
   launchVersionChange = launchVersion.recordLaunchVersion(paths.getStateDir(), app.getVersion(), {
     hasRunBefore: fs.existsSync(getSessionStatePath()),
   });
@@ -2772,6 +2776,7 @@ async function startBackendWithRetry() {
       (event) => handleAuthEvent(event),
       (event) => handleMngrForwardStarted(event),
       (line) => broadcastStartupLogLine(line),
+      { profilePath },
     );
 
     // `localhost` (not `127.0.0.1`) so the auth cookie, issued with
@@ -3821,6 +3826,68 @@ function notifyQuitCancelled() {
   for (const resolve of waiters) resolve();
 }
 
+// Chromium's own trace under the opt-in profiling mode: one recording for the
+// whole run, kept through closed windows and backend restarts alike.
+let isChromiumTraceRecording = false;
+
+async function startChromiumTracing() {
+  try {
+    await contentTracing.startRecording(chromiumTracingOptions());
+  } catch (err) {
+    console.warn(`[profiling] could not start Chromium's trace recording: ${err.message || err}`);
+    return;
+  }
+  isChromiumTraceRecording = true;
+  console.log(`[profiling] on: recording Chromium's trace; the trace file is ${profilePath}`);
+}
+
+// Posts Chromium's trace document to the backend's ingestion endpoint; resolves
+// once the backend has taken it and rejects on any other answer.
+function postChromiumTrace(document, signal) {
+  return new Promise((resolve, reject) => {
+    if (!backendBaseUrl) {
+      reject(new Error('no backend URL'));
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: `${backendBaseUrl}/ui/api/profile/chromium`, method: 'POST', useSessionCookies: true });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    req.setHeader('Content-Type', 'application/json');
+    signal.addEventListener('abort', () => {
+      try { req.abort(); } catch { /* noop */ }
+      reject(new Error('aborted'));
+    });
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => {
+        if (response.statusCode >= 200 && response.statusCode < 300) resolve();
+        else reject(new Error(`HTTP ${response.statusCode}`));
+      });
+      response.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end(document);
+  });
+}
+
+async function flushChromiumTraceAtQuit() {
+  if (!isChromiumTraceRecording) return;
+  isChromiumTraceRecording = false;
+  await flushChromiumTrace({
+    stopRecording: () => contentTracing.stopRecording(),
+    readFile: (filePath) => fs.promises.readFile(filePath),
+    postTrace: postChromiumTrace,
+    writeSidecar: (filePath, document) => fs.promises.writeFile(filePath, document),
+    deleteFile: (filePath) => fs.promises.unlink(filePath),
+    log: (line) => console.log(line),
+    sidecarPath: sidecarPathFor(profilePath),
+  });
+}
+
 async function runQuitSequence() {
   if (isShuttingDown || isQuitSequenceRunning) return;
   isQuitSequenceRunning = true;
@@ -3862,6 +3929,8 @@ async function runQuitSequence() {
   }
 
   updateQuittingStatus('Closing…');
+  // Before the backend is stopped: it is what writes the trace file.
+  await flushChromiumTraceAtQuit();
   await shutdown();
   if (bundles.size > 0) saveSessionState();
   // The console capture writes through an async stream, so records logged in the

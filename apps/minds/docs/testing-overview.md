@@ -495,6 +495,11 @@ whether the tier passes or fails without a CI run. What a run needs:
   (installed as `apps/minds/docs/dev-setup.md` describes; from the repo root,
   `export PATH="$HOME/.nvm/versions/node/v$(cat apps/minds/.nvmrc)/bin:$PATH"`), then
   `cd apps/minds && pnpm install --frozen-lockfile && node scripts/ensure-binaries.js && pnpm run build:ui`.
+- A profile of the run, when `MINDS_SMOKE_PROFILE_FILE=<absolute path>` is set: the
+  app under test is launched with `MINDS_PROFILE_FILE` at that path, so the backend,
+  its `mngr` processes and the page record the whole journey as one Perfetto trace
+  (`apps/minds/docs/dev-setup.md`, "Profiling a session"). Keep the path outside the
+  run's data home; the file is complete once the app has quit.
 - The build under test, named by one env var: `MINDS_SMOKE_DEV_CHECKOUT=1` runs
   this checkout's Electron (the laptop default, and the only mode exercised so
   far); `MINDS_SMOKE_BINARY_PATH` names an installed executable (untried on

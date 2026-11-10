@@ -13,6 +13,7 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
+from imbue.imbue_common.profiling import profiled
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import _decode_jwt_exp
@@ -65,6 +66,7 @@ def _refresh_lock(sessions_dir: Path, user_id: SuperTokensUserId) -> Generator[N
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
 
+@profiled("connector.token_refresh")
 def _refresh_locked(
     store: ImbueCloudSessionStore,
     client: ImbueCloudConnectorClient,
@@ -75,7 +77,8 @@ def _refresh_locked(
     Split out so ``force_refresh`` and ``get_active_token`` can both
     re-load the session under the lock and only then decide whether
     they still need to rotate (avoiding redundant work after another
-    process won the race and already rotated).
+    process won the race and already rotated). The whole sequence is one
+    ``connector.token_refresh`` tracer span.
     """
     if session.refresh_token is None:
         raise ImbueCloudAuthError(

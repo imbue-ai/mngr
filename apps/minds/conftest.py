@@ -34,6 +34,9 @@ from pydantic import SecretStr
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.profiling import disable
+from imbue.imbue_common.profiling import enable_collector
+from imbue.imbue_common.profiling import enable_writer
 from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
@@ -113,6 +116,32 @@ def isolated_minds_data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # Without it the suite runs entirely on space-free paths and cannot see the
     # shell-quoting and whitespace-splitting failures that layout provokes.
     monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path / "minds data home"))
+
+
+@pytest.fixture(autouse=True)
+def _disable_profiler_after_each_test() -> Iterator[None]:
+    """Reset the process-wide profiler so a test that enabled a mode cannot leak it into the next."""
+    yield
+    disable()
+
+
+@pytest.fixture
+def profile_writer_path(tmp_path: Path) -> Path:
+    """Put the process-wide profiler in writer mode on a trace file of the test's own, and return that file.
+
+    Code under test then records into it as the backend would under ``--profile``;
+    read it with ``flushed_trace_events`` while the test runs. The autouse teardown
+    closes it.
+    """
+    path = tmp_path / "profile" / "trace.json"
+    enable_writer(path, process_name="minds test")
+    return path
+
+
+@pytest.fixture
+def profile_collector() -> None:
+    """Put the process-wide profiler in collector mode, as a warm mngr process is; ``drain_events`` reads it."""
+    enable_collector(process_name="minds test")
 
 
 @pytest.fixture

@@ -38,6 +38,7 @@ from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.agent_class_registry import get_orphan_agent_class
@@ -912,17 +913,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         When ``on_output`` is provided, the command's output is streamed to it
         line-by-line as it arrives (see ``OuterHost.execute_stateful_command``).
+
+        The command runs inside a ``host.exec`` tracer span naming the host and its provider.
         """
-        if on_output is not None:
-            if user is not None:
-                raise NotImplementedError("Host does not support su user; pass an SSH user via the connector instead")
-            return self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
-        # FIXME: actually implement this. It's rather complex:
-        #  we need to create a unique lock file, ship the command over, and run an idempotent command that waits for it to be finished
-        #  once the command finishes, we can run idempotent commands to fetch the resulting stdout, stderr, and exit code
-        #  (which means we need a wrapper that appropriately saves that data somewhere that we can retrieve it)
-        #  then, just to be good, we should probably clean up after ourselves (the outputs and lock file)
-        return self.execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+        with get_profiler().span("host.exec", host_id=str(self.id), provider=str(self.get_provider_name())) as span:
+            if on_output is not None:
+                if user is not None:
+                    raise NotImplementedError(
+                        "Host does not support su user; pass an SSH user via the connector instead"
+                    )
+                result = self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
+            else:
+                # FIXME: actually implement this. It's rather complex:
+                #  we need to create a unique lock file, ship the command over, and run an idempotent command that waits for it to be finished
+                #  once the command finishes, we can run idempotent commands to fetch the resulting stdout, stderr, and exit code
+                #  (which means we need a wrapper that appropriately saves that data somewhere that we can retrieve it)
+                #  then, just to be good, we should probably clean up after ourselves (the outputs and lock file)
+                result = self.execute_idempotent_command(
+                    command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
+                )
+            span.add_args(is_success=result.success)
+            return result
 
     # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
     # and get_file_mtime are inherited unchanged from OuterHost.

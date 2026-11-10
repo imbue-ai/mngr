@@ -40,8 +40,10 @@ import click
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.profiling import enable_writer
 from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.bootstrap import PROFILE_FILE_ENV_VAR
 from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -245,6 +247,19 @@ MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
         "from MINDS_CLIENT_CONFIG_BUNDLE."
     ),
 )
+@click.option(
+    "--profile",
+    "profile_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    envvar=PROFILE_FILE_ENV_VAR,
+    help=(
+        "Record this session as a Perfetto trace at PATH (overwritten): the backend's spans, every warm mngr "
+        "process's spans, and the spans the page posts. Falls back to the MINDS_PROFILE_FILE env var, which is "
+        "how the Electron shell passes its own --profile. PATH must not be under the logs directory a bug "
+        "report uploads. Off when unset."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -252,6 +267,7 @@ def run(
     port: int,
     no_browser: bool,
     config_file: Path | None,
+    profile_path: Path | None,
 ) -> None:
     """Run the Imbue Studio bare-origin server with `mngr forward` as a subprocess."""
     try:
@@ -267,6 +283,9 @@ def run(
         data_dir=data_directory,
         log_root=minds_dir_for_role(MindsPathRole.LOGS, root_name),
     )
+    # Enabled before anything else runs so the startup's own spans are in the trace too.
+    if profile_path is not None:
+        _enable_profile_writer(profile_path, paths.log_dir)
 
     # Initialize Sentry for the Imbue Studio backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
@@ -318,6 +337,8 @@ def run(
     logger.info("  Config file: {}", client_config_path)
     logger.info("  connector_url: {}", client_env_config.connector_url)
     logger.info("  litellm_proxy_url: {}", client_env_config.litellm_proxy_url)
+    if profile_path is not None:
+        logger.info("  Profile file: {}", profile_path)
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
@@ -1188,6 +1209,16 @@ def run(
             serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
     finally:
         remove_app_record(record_path)
+
+
+def _enable_profile_writer(profile_path: Path, log_dir: Path) -> None:
+    """Start the session's trace file, refusing one under the logs directory a bug report uploads."""
+    if profile_path.resolve().is_relative_to(log_dir.resolve()):
+        raise click.ClickException(
+            f"--profile must not name a file under the logs directory {log_dir}: a trace names every route and "
+            "command of the session, and a bug report uploads that directory."
+        )
+    enable_writer(profile_path, process_name="minds run")
 
 
 def _finish_create_attempt(

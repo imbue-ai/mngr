@@ -41,6 +41,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
@@ -249,10 +250,16 @@ def provision_share_files_in_agent(
         clauses.append(atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
     if not clauses:
         raise ShareInjectionError(f"Nothing to write into agent {agent_address}: no grants and no share.env given")
-    result = mngr_caller.call(
-        ["exec", agent_address, " && ".join(clauses)],
-        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
-    )
+    with get_profiler().span(
+        "sharing.write_share_files",
+        agent_address=agent_address,
+        has_grants=grants_toml_text is not None,
+        has_share_env=share_env_text is not None,
+    ):
+        result = mngr_caller.call(
+            ["exec", agent_address, " && ".join(clauses)],
+            timeout=SHARE_EXEC_TIMEOUT_SECONDS,
+        )
     if result.returncode != 0:
         raise ShareInjectionError(f"Failed to write share files into agent {agent_address}: {result.stderr.strip()}")
 
@@ -323,10 +330,11 @@ def read_share_state_from_agent(agent_address: str, mngr_caller: MngrCaller) -> 
     script's UNREADABLE marker), or whose payload cannot be decoded, raises
     :class:`ShareInjectionError` for the same reason.
     """
-    result = mngr_caller.call(
-        ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
-        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
-    )
+    with get_profiler().span("sharing.probe_share_state", agent_address=agent_address):
+        result = mngr_caller.call(
+            ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
+            timeout=SHARE_EXEC_TIMEOUT_SECONDS,
+        )
     if result.returncode != 0:
         raise ShareStateUnreadError(
             f"Could not read the share state of agent {agent_address}: {result.stderr.strip() or 'exec failed'}"
@@ -440,10 +448,11 @@ def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller, ti
     could mistake an unreadable policy for an empty one (the ``|| true`` folds
     the absent-file case into rc 0 with empty stdout).
     """
-    result = mngr_caller.call(
-        ["exec", agent_address, f"cat {_SHARE_GRANTS_FILE} 2>/dev/null || true", "--no-start", "--format", "json"],
-        timeout=timeout_seconds,
-    )
+    with get_profiler().span("sharing.read_grants", agent_address=agent_address):
+        result = mngr_caller.call(
+            ["exec", agent_address, f"cat {_SHARE_GRANTS_FILE} 2>/dev/null || true", "--no-start", "--format", "json"],
+            timeout=timeout_seconds,
+        )
     if result.returncode != 0:
         raise ShareInjectionError(
             f"Could not read share grants from agent {agent_address}: {result.stderr.strip() or 'exec failed'}"
@@ -517,17 +526,18 @@ def read_share_gateway_status_from_agent(agent_address: str, mngr_caller: MngrCa
     yet, so a failed read (a stopped container, an older template with no
     status file) degrades to "no explanation", never to an error.
     """
-    result = mngr_caller.call(
-        [
-            "exec",
-            agent_address,
-            f"cat {_SHARE_GATEWAY_STATUS_FILE} 2>/dev/null || true",
-            "--no-start",
-            "--format",
-            "json",
-        ],
-        timeout=SHARE_EXEC_TIMEOUT_SECONDS,
-    )
+    with get_profiler().span("sharing.read_gateway_status", agent_address=agent_address):
+        result = mngr_caller.call(
+            [
+                "exec",
+                agent_address,
+                f"cat {_SHARE_GATEWAY_STATUS_FILE} 2>/dev/null || true",
+                "--no-start",
+                "--format",
+                "json",
+            ],
+            timeout=SHARE_EXEC_TIMEOUT_SECONDS,
+        )
     if result.returncode != 0:
         logger.debug("Share gateway status read failed for agent {}: {}", agent_address, result.stderr.strip())
         return None

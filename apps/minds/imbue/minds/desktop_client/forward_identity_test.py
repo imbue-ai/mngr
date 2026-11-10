@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from imbue.imbue_common.profiling import drain_events
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
@@ -159,3 +160,15 @@ def test_remove_legacy_forward_identity_file_is_a_no_op_without_one(tmp_path: Pa
     remove_legacy_forward_identity_file(tmp_path)
 
     assert not legacy.exists()
+
+
+def test_forward_headers_write_records_a_span_counting_the_shared_workspaces(
+    tmp_path: Path, profile_collector: None
+) -> None:
+    headers_file = ForwardHeadersFile(path=tmp_path / "forward_headers.json")
+
+    headers_file.write({_AGENT_A: OwnerIdentity(user_id=_OWNER_ID, email="owner@example.com")})
+
+    [span] = [event for event in drain_events() if event["ph"] == "X"]
+    assert span["name"] == "forward_identity.write"
+    assert span["args"] == {"shared_count": 1}

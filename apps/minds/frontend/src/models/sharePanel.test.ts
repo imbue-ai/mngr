@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { settle, sharePanelOptions } from "../testing";
+import { installProfiling } from "../profiling";
+import {
+  fakeProfilingEnvironment,
+  postedProfileEvents,
+  settle,
+  sharePanelOptions,
+} from "../testing";
 import { createAppQueryClient } from "./queryClient";
 import type {
   MachineSharingResponse,
@@ -151,6 +157,40 @@ function stepsDone(model: SharePanelModel): string[] {
     .filter((step) => step.isDone)
     .map((step) => step.label);
 }
+
+describe("SharePanelModel profiling", () => {
+  it("records a span per operation, naming the target and never the address", async () => {
+    const environment = fakeProfilingEnvironment();
+    const profiling = installProfiling(environment.options);
+    try {
+      const { model } = makeSharePanel(() => okResult(sharingResponse()));
+      await model.load();
+      model.addGrant(WHOLE, "email", "friend@example.com");
+      await settle();
+      await model.unpublish();
+      await model.publish();
+
+      environment.fireTimer();
+      const events = postedProfileEvents(environment);
+      expect(new Set(events.map((event) => event.name))).toEqual(
+        new Set([
+          "share_panel.load",
+          "share_panel.refresh_outcomes",
+          "share_panel.add_grant",
+          "share_panel.write_grants",
+          "share_panel.unpublish",
+          "share_panel.publish",
+        ]),
+      );
+      expect(
+        events.find((event) => event.name === "share_panel.add_grant")?.args,
+      ).toEqual({ target: WHOLE, kind: "email" });
+      expect(JSON.stringify(events)).not.toContain("friend@example.com");
+    } finally {
+      profiling.uninstall();
+    }
+  });
+});
 
 describe("SharePanelModel load", () => {
   it("keys the sharing API by the workspace id when one is known", async () => {

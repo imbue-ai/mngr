@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.profiling import drain_events
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -70,3 +71,13 @@ def test_identity_cache_treats_an_unreadable_file_as_empty(tmp_path: Path) -> No
     assert cache.get("user-1") is None
     cache.put(_record("user-1"), _NOW)
     assert json.loads(path.read_text())["entries_by_user_id"]["user-1"]["record"]["user_id"] == "user-1"
+
+
+def test_identity_cache_put_records_a_span_with_no_arguments(tmp_path: Path, profile_collector: None) -> None:
+    cache = IdentityCache(path=tmp_path / "identity_cache.json")
+
+    cache.put(_record("user-1", email="private@example.com"), _NOW)
+
+    [span] = [event for event in drain_events() if event["ph"] == "X"]
+    assert span["name"] == "identity_cache.put"
+    assert span["args"] == {}

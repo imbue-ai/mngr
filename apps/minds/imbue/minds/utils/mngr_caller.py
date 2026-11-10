@@ -15,6 +15,13 @@ stdout/stderr/exit-code, and the warm process then exits. As soon as a warm
 process is claimed, a replacement is spawned so the next call again finds one
 ready.
 
+Under ``minds run --profile`` the same socket carries the profiling data: the
+request tells the warm process the caller's ``traceparent`` and when the request
+was sent, and the result brings back the spans the warm process recorded (its
+import, its wait for the request, and the command under the caller's trace),
+which the parent writes into the one trace file under the child's own pid. A
+warm process is told to record by its request, never by the environment.
+
 The socket is an anonymous, connected ``socketpair`` (via
 :func:`multiprocessing.connection.Pipe`): the parent keeps one end and passes
 the other end's file descriptor to the child at spawn time. There is no
@@ -50,7 +57,9 @@ importing ``imbue.mngr.main`` once, off the request path.
 
 import contextlib
 import io
+import itertools
 import os
+import re
 import sys
 import threading
 import time
@@ -70,10 +79,22 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import SpanHandle
+from imbue.imbue_common.profiling import drain_events
+from imbue.imbue_common.profiling import enable_collector
+from imbue.imbue_common.profiling import get_profiler
+from imbue.imbue_common.profiling import parse_traceparent
+from imbue.imbue_common.profiling import render_traceparent
+from imbue.imbue_common.pure import pure
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+
+# Where a warm process's ``mngr_caller.import`` slice starts: this module's own imports are done and
+# the heavy one, ``imbue.mngr.main`` inside ``_run_warm_mngr_server``, is still ahead.
+_MODULE_LOADED_NS: Final[int] = time.perf_counter_ns()
 
 # Module path of the warm-server entry point, launched as ``python -m <module>``.
 _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
@@ -81,8 +102,22 @@ _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
 # Name of the throwaway warm process's concurrency group (used for its logs).
 _WARM_PROCESS_GROUP_NAME: Final[str] = "mngr-caller-warm-process"
 
-# One warm-server request as sent over the socket: (argv, env overrides, cwd).
-_WarmRequest = tuple[tuple[str, ...], dict[str, str], Path | None]
+# A request's profiling block: the caller's traceparent and its perf_counter_ns when it sent the
+# request. None when profiling is off, which is how a warm process learns whether to record.
+_WarmRequestProfiling = tuple[str, int]
+
+# One warm-server request as sent over the socket: (argv, env overrides, cwd, profiling block).
+_WarmRequest = tuple[tuple[str, ...], dict[str, str], Path | None, _WarmRequestProfiling | None]
+
+# A result's profiling block: the warm process's drained trace events, how long the request waited
+# before the process could serve it, and how long the command ran, both in microseconds.
+_WarmResultProfiling = tuple[list[dict[str, object]], int, int]
+
+# One warm-server result as sent back: (returncode, stdout, stderr, profiling block).
+_WarmResult = tuple[int, str, str, _WarmResultProfiling | None]
+
+# What a subcommand name looks like in argv; the first token that does not match ends the command.
+_SUBCOMMAND_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -135,6 +170,29 @@ def _coerce_exit_code(code: object) -> int:
         return code
     # A string exit message conventionally means failure.
     return 1
+
+
+@pure
+def _command_tokens(argv: Sequence[str]) -> tuple[str, ...]:
+    """The leading argv tokens that look like subcommand names, so a trace names the command and never its arguments.
+
+    ``imbue_cloud shares status --account ...`` yields all three names; ``exec agent@host.docker <script>``
+    yields ``exec`` alone, since the address and the script carry characters a subcommand name does not.
+    """
+    return tuple(itertools.takewhile(lambda token: _SUBCOMMAND_TOKEN_PATTERN.match(token) is not None, argv))
+
+
+@pure
+def _process_name_for_command(command_tokens: Sequence[str]) -> str:
+    return " ".join(("mngr", *command_tokens))
+
+
+class _WarmProcessStartup(FrozenModel):
+    """A warm process's timeline up to the moment it picks its request up, on the trace clock in nanoseconds."""
+
+    module_loaded_ns: int = Field(description="When this module's imports were done and the mngr import began")
+    import_done_ns: int = Field(description="When ``imbue.mngr.main`` had been imported")
+    serve_start_ns: int = Field(description="When the main thread picked the received request up to serve it")
 
 
 def _execute_mngr_cli(
@@ -209,13 +267,55 @@ def _receive_request_or_exit(
         request_received.set()
 
 
+def _execute_profiled_mngr_cli(
+    cli: click.Command,
+    argv: tuple[str, ...],
+    env_overrides: Mapping[str, str],
+    cwd: Path | None,
+    profiling: _WarmRequestProfiling,
+    startup: _WarmProcessStartup,
+) -> _WarmResult:
+    """Run the CLI under a collector, with the startup slices and a root span under the caller's trace, then drain it.
+
+    The root span is the flow target of the caller's ``mngr_caller.call`` span: the
+    traceparent's parent span id is the per-hop bind_id that span set as its source.
+    """
+    traceparent, sent_at_ns = profiling
+    command_tokens = _command_tokens(argv)
+    enable_collector(process_name=_process_name_for_command(command_tokens))
+    profiler = get_profiler()
+    profiler.complete("mngr_caller.import", startup.module_loaded_ns // 1000, startup.import_done_ns // 1000)
+    profiler.complete("mngr_caller.wait_for_request", startup.import_done_ns // 1000, startup.serve_start_ns // 1000)
+    parent = parse_traceparent(traceparent)
+    run_started_ns = time.perf_counter_ns()
+    with profiler.span(
+        _process_name_for_command(command_tokens),
+        traceparent=traceparent,
+        flow_in=parent.span_id if parent is not None else None,
+    ) as root:
+        root.add_args(trace_id=root.context.trace_id, span_id=root.context.span_id)
+        if parent is not None:
+            root.add_args(parent_span_id=parent.span_id)
+        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
+    run_us = (time.perf_counter_ns() - run_started_ns) // 1000
+    startup_wait_us = (startup.serve_start_ns - sent_at_ns) // 1000
+    return returncode, stdout, stderr, (drain_events(), startup_wait_us, run_us)
+
+
+def _run_request(cli: click.Command, request: _WarmRequest, startup: _WarmProcessStartup) -> _WarmResult:
+    argv, env_overrides, cwd, profiling = request
+    if profiling is None:
+        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
+        return returncode, stdout, stderr, None
+    return _execute_profiled_mngr_cli(cli, argv, env_overrides, cwd, profiling, startup)
+
+
 def _serve_request(
     connection: Connection,
     cli: click.Command,
     concurrency_group: ConcurrencyGroup,
-    argv: tuple[str, ...],
-    env_overrides: Mapping[str, str],
-    cwd: Path | None,
+    request: _WarmRequest,
+    startup: _WarmProcessStartup,
 ) -> None:
     """Run one already-received CLI request and send its result back.
 
@@ -231,8 +331,7 @@ def _serve_request(
     """
     start_parent_death_watcher(concurrency_group)
     try:
-        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
-        connection.send((returncode, stdout, stderr))
+        connection.send(_run_request(cli, request, startup))
     finally:
         connection.close()
 
@@ -268,14 +367,19 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
         # inline-imports ratchet.
         from imbue.mngr.main import cli
 
+        import_done_ns = time.perf_counter_ns()
         request_received.wait()
         if not request_box:
             # The receiver exits the process itself on a clean parent
             # disconnect, so an empty box means the recv failed unexpectedly
             # (already logged by the thread); there is no request to serve.
             return
-        argv, env_overrides, cwd = request_box[0]
-        _serve_request(connection, cli, concurrency_group, argv, env_overrides, cwd)
+        # Taken once the import is over: on a cold call the request was in the socket
+        # long before, and the time it waited there is part of what the caller sees.
+        startup = _WarmProcessStartup(
+            module_loaded_ns=_MODULE_LOADED_NS, import_done_ns=import_done_ns, serve_start_ns=time.perf_counter_ns()
+        )
+        _serve_request(connection, cli, concurrency_group, request_box[0], startup)
 
 
 class _WarmMngrProcess(MutableModel):
@@ -475,35 +579,49 @@ class MngrCaller(MutableModel):
         Only the branch below that hands back what the CLI printed sets
         ``is_mngr_output``; the ones that write their own stderr because no
         result came back leave it false, and so must any added later.
+
+        Under profiling the call is one span, the source of a per-hop flow the
+        warm process's root span is the target of, and the events the process
+        hands back are written into the trace under its own pid.
         """
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
-        warm_process = self._claim_warm_process()
-        connection = warm_process.connection
-        request = (tuple(argv), dict(env_overrides or {}), cwd)
-        # Always reap the claimed warm process (normally it exits on its own after
-        # responding; on an exec failure or a hang it must be terminated). On a
-        # cold call the warm process may still be importing ``mngr`` -- the request
-        # buffers in the socket and ``poll`` simply waits for the response.
-        is_timed_out = False
-        try:
-            connection.send(request)
-            if connection.poll(resolved_timeout):
-                try:
-                    returncode, stdout, stderr = connection.recv()
+        profiler = get_profiler()
+        with profiler.span("mngr_caller.call", command=" ".join(_command_tokens(argv))) as span:
+            if profiler.is_enabled:
+                span.set_flow_out(span.context.span_id)
+                profiling: _WarmRequestProfiling | None = (render_traceparent(span.context), time.perf_counter_ns())
+            else:
+                profiling = None
+            warm_process = self._claim_warm_process()
+            connection = warm_process.connection
+            request: _WarmRequest = (tuple(argv), dict(env_overrides or {}), cwd, profiling)
+            # Always reap the claimed warm process (normally it exits on its own after
+            # responding; on an exec failure or a hang it must be terminated). On a
+            # cold call the warm process may still be importing ``mngr`` -- the request
+            # buffers in the socket and ``poll`` simply waits for the response.
+            is_timed_out = False
+            try:
+                connection.send(request)
+                if connection.poll(resolved_timeout):
+                    try:
+                        returncode, stdout, stderr, child_profiling = connection.recv()
+                    except EOFError:
+                        return MngrCallResult(
+                            returncode=1,
+                            stderr="mngr warm process exited without returning a result",
+                        )
+                    if child_profiling is not None:
+                        _record_child_profiling(span, child_profiling)
                     return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr, is_mngr_output=True)
-                except EOFError:
-                    return MngrCallResult(
-                        returncode=1,
-                        stderr="mngr warm process exited without returning a result",
-                    )
-            is_timed_out = True
-            return MngrCallResult(
-                returncode=_TIMEOUT_RETURNCODE,
-                is_timed_out=True,
-                stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
-            )
-        finally:
-            warm_process.terminate(is_after_call_timeout=is_timed_out)
+                is_timed_out = True
+                span.add_args(is_timed_out=True)
+                return MngrCallResult(
+                    returncode=_TIMEOUT_RETURNCODE,
+                    is_timed_out=True,
+                    stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
+                )
+            finally:
+                warm_process.terminate(is_after_call_timeout=is_timed_out)
 
     def stop(self) -> None:
         """Terminate the idle warm process and reset to the uninitialized state.
@@ -521,6 +639,14 @@ class MngrCaller(MutableModel):
             self._is_initialized = False
         if idle_process is not None:
             idle_process.terminate(is_after_call_timeout=False)
+
+
+def _record_child_profiling(span: SpanHandle, child_profiling: _WarmResultProfiling) -> None:
+    """Put the warm process's timings on the call's span and its events into the trace, under the process's own pid."""
+    events, startup_wait_us, run_us = child_profiling
+    child_pid = next((event["pid"] for event in events if "pid" in event), None)
+    span.add_args(child_pid=child_pid, startup_wait_us=startup_wait_us, run_us=run_us)
+    get_profiler().write_foreign_events(events)
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}

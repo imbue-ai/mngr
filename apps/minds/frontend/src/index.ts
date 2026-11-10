@@ -15,6 +15,7 @@ import {
   NotificationsUiController,
 } from "./models/notificationsUi";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
+import { installProfiling } from "./profiling";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
 import { installTooltips } from "./views/shell/tooltips";
@@ -23,6 +24,9 @@ import { setScreenLocked } from "./screen-lock";
 
 function main(): void {
   const bootstrap = window.__MINDS_BOOTSTRAP__;
+  // Installed before anything fetches, so the first request already carries
+  // its traceparent and lands in the trace.
+  if (bootstrap?.profiling?.is_enabled === true) installProfiling();
   const bootContext = bootstrap
     ? bootFromBootstrap(bootstrap)
     : {

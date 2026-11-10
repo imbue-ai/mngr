@@ -126,6 +126,7 @@ from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
+from imbue.minds.desktop_client.request_profiling import install_request_profiling
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_redirect_response
@@ -2867,6 +2868,8 @@ def create_desktop_client(
             return exc
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
         return make_response(status_code=500, content=f"Internal Server Error: {exc}")
+
+    install_request_profiling(app)
 
     # The /ui channel: the broadcaster fans serialized frames out to every
     # connected SPA window, and the edge-driven publisher derives + diffs the

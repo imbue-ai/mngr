@@ -123,8 +123,11 @@ from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
+from imbue.minds.desktop_client.testing import flushed_trace_events
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import is_span_within
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.testing import trace_spans_named
 from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
@@ -3671,6 +3674,106 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     }
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
+
+
+def test_workspace_sharing_get_records_the_catalog_spans_under_its_request_span(
+    tmp_path: Path, profile_writer_path: Path
+) -> None:
+    agent_id = AgentId()
+    grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
+    cli = _fake_sharing_cli(
+        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml)
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    events = flushed_trace_events(profile_writer_path)
+    [request_span] = trace_spans_named(events, "GET /api/v1/workspace-sharing/<workspace_id>")
+    [get_sharing_span] = trace_spans_named(events, "sharing.get_sharing")
+    [probe_span] = trace_spans_named(events, "sharing.probe_share_state")
+    [resolve_span] = trace_spans_named(events, "sharing.resolve_identities")
+    assert get_sharing_span["args"] == {"host_id": _TEST_HOST_ID, "is_published": True}
+    assert probe_span["args"]["agent_address"].startswith(str(agent_id))
+    assert resolve_span["args"] == {"user_count": 0}
+    assert is_span_within(get_sharing_span, request_span)
+    assert is_span_within(probe_span, get_sharing_span)
+    assert is_span_within(resolve_span, get_sharing_span)
+    assert probe_span["ts"] <= resolve_span["ts"]
+    # The granted address never reaches the trace.
+    assert "viewer@example.com" not in json.dumps(events)
+
+
+def test_workspace_sharing_put_records_the_publish_spans_with_their_arguments(
+    tmp_path: Path, profile_writer_path: Path
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    events = flushed_trace_events(profile_writer_path)
+    [request_span] = trace_spans_named(events, "PUT /api/v1/workspace-sharing/<workspace_id>")
+    [publish_span] = trace_spans_named(events, "sharing.publish")
+    [probe_span] = trace_spans_named(events, "sharing.probe_share_state")
+    [write_span] = trace_spans_named(events, "sharing.write_share_files")
+    assert publish_span["args"] == {"host_id": _TEST_HOST_ID, "is_cloud_row": False, "is_first_publish": True}
+    assert probe_span["args"]["agent_address"].startswith(str(agent_id))
+    # A publish from off seeds an empty grants document beside the share materials.
+    assert write_span["args"] == {
+        "agent_address": probe_span["args"]["agent_address"],
+        "has_grants": True,
+        "has_share_env": True,
+    }
+    assert is_span_within(publish_span, request_span)
+    assert is_span_within(probe_span, publish_span)
+    assert is_span_within(write_span, publish_span)
+    assert probe_span["ts"] <= write_span["ts"]
+    # The relay token the fake share carries never reaches the trace.
+    assert "relay-token-abc" not in json.dumps(events)
+
+
+def test_machine_sharing_readiness_records_the_poll_and_the_probe_spans(
+    tmp_path: Path, profile_writer_path: Path
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share())
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+
+    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        http_client=http_client,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        },
+    )
+
+    client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+    client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+
+    events = flushed_trace_events(profile_writer_path)
+    request_spans = trace_spans_named(events, "GET /api/v1/machines/<host_id>/sharing/readiness")
+    readiness_spans = trace_spans_named(events, "sharing.readiness")
+    probe_spans = trace_spans_named(events, "sharing.readiness_probe")
+    assert len(request_spans) == len(readiness_spans) == len(probe_spans) == 2
+    # The first poll looks the share up; the second reuses the cached lookup.
+    assert [span["args"] for span in readiness_spans] == [
+        {"host_id": _TEST_HOST_ID, "is_ready": True, "is_share_cached": False},
+        {"host_id": _TEST_HOST_ID, "is_ready": True, "is_share_cached": True},
+    ]
+    probe_host = f"system_interface-shl1.{_active_share().workspace_domain}"
+    assert all(span["args"] == {"probe_host": probe_host, "is_ready": True} for span in probe_spans)
+    for request_span, readiness_span, probe_span in zip(request_spans, readiness_spans, probe_spans, strict=True):
+        assert is_span_within(readiness_span, request_span)
+        assert is_span_within(probe_span, readiness_span)
 
 
 def test_machine_sharing_readiness_polls_reuse_the_cached_share_lookup(tmp_path: Path) -> None:

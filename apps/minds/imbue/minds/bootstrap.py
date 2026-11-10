@@ -18,6 +18,9 @@ from typing import assert_never
 from imbue.imbue_common.enums import UpperCaseStrEnum
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
+# The trace file of the opt-in profiling mode: `minds run --profile` reads it, and the Electron
+# shell sets it for the backend it starts.
+PROFILE_FILE_ENV_VAR: Final[str] = "MINDS_PROFILE_FILE"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
 # The inert ``ci-snapshot`` tier (apps/minds/imbue/minds/config/envs/ci-snapshot/) the e2e harnesses
 # run under when no env is activated, and the root the minds-snapshot image's workspace was baked under.

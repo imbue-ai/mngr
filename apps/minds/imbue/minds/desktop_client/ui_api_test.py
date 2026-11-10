@@ -80,6 +80,21 @@ def test_ui_index_inlines_bootstrap_and_hashed_asset_tags(tmp_path: Path, monkey
     assert bootstrap["schema_version"] == UI_SCHEMA_VERSION
     assert bootstrap["snapshot"]["workspaces"]["type"] == "workspaces"
     assert bootstrap["seed"]["mngr_forward_origin"].startswith("https://localhost:")
+    assert bootstrap["profiling"] == {"is_enabled": False}
+
+
+def test_ui_index_bootstrap_says_profiling_is_on_while_the_backend_records_a_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile_writer_path: Path
+) -> None:
+    monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_manifest(tmp_path)))
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    response = client.get("/ui/")
+
+    bootstrap_json = (
+        response.get_data(as_text=True).split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
+    )
+    assert json.loads(bootstrap_json)["profiling"] == {"is_enabled": True}
 
 
 def test_ui_index_bootstrap_seed_reflects_mac_user_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

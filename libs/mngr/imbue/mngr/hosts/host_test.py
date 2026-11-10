@@ -51,6 +51,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.profiling import drain_events
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -2025,6 +2026,14 @@ def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeou
     # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
     with pytest.raises(CommandTimeoutError):
         local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
+
+
+def test_execute_stateful_command_runs_inside_a_host_exec_span(local_host: Host, collecting_profiler: None) -> None:
+    result = local_host.execute_stateful_command("echo traced-73190")
+
+    [span] = [event for event in drain_events() if event["ph"] == "X" and event["name"] == "host.exec"]
+    assert result.success
+    assert span["args"] == {"host_id": str(local_host.id), "provider": "local", "is_success": True}
 
 
 def test_host_keeps_a_secret_bearing_command_and_its_parameters_out_of_the_logs(local_host: Host) -> None:

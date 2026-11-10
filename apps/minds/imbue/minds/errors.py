@@ -99,6 +99,15 @@ class MalformedMngrOutputError(MindError, ValueError):
     ...
 
 
+class ProfileEventFlowError(MindError, ValueError):
+    """Raised when a page's profile event names two different flows, which one trace event cannot carry.
+
+    Subclasses ``ValueError`` so pydantic reports it as a validation error of the posted body.
+    """
+
+    ...
+
+
 class InvalidJsonBodyError(MindError, ValueError):
     """Raised when a request body is missing or not valid JSON.
 

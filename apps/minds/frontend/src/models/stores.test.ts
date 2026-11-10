@@ -338,6 +338,7 @@ describe("boot seeding", () => {
         is_onboarding_complete: false,
         account_id: "user-1",
       },
+      profiling: { is_enabled: false },
       schema_version: 1,
       snapshot: {
         workspaces: workspacesMessage(),

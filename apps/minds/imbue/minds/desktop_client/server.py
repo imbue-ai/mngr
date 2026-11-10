@@ -12,7 +12,8 @@ shutdown path:
    from the thread running ``serve()``).
 3. Once serving has stopped, run the teardown sequence: close the shared
    HTTP client, terminate the envelope + permission-requests consumers, stop
-   the pre-warmed mngr caller, and drain the root concurrency group.
+   the pre-warmed mngr caller, drain the root concurrency group, and close the
+   profiling trace file when there is one.
 
 The server is cheroot's pure-Python threaded WSGI server rather than the
 Werkzeug development server. Werkzeug's dev server hardcodes ``Connection:
@@ -49,6 +50,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.profiling import disable
 from imbue.minds.desktop_client.api_socket import create_local_socket_server
 from imbue.minds.desktop_client.api_socket import restrict_socket_file
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -240,10 +242,13 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
                 "mngr latchkey forward is still winding down after {}s; its --parent-pid watch finishes the job",
                 _LATCHKEY_FORWARD_STOP_JOIN_TIMEOUT_SECONDS,
             )
-    # Last: flush Sentry and any pending S3 attachment uploads so errors captured
+    # Flush Sentry and any pending S3 attachment uploads so errors captured
     # during the session (including any logged above during teardown) are sent
     # before the process exits. No-op when Sentry was never initialized.
     flush_sentry_on_shutdown()
+    # Last of all: close the trace file, so the array is terminated after every
+    # step above has recorded its spans.
+    disable()
 
 
 def _stop_servers(servers: Sequence[wsgi.Server]) -> None:

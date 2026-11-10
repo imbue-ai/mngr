@@ -41,6 +41,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import MINDS_APP_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import PROFILE_FILE_ENV_VAR
 from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import mngr_prefix_for
@@ -69,6 +70,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_BINARY_PATH_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_CHANNEL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_DEV_CHECKOUT_ENABLED_VALUE
 from imbue.minds.smoke_tests.primitives import SMOKE_DEV_CHECKOUT_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_PROFILE_FILE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 
@@ -513,6 +515,22 @@ def app_environment(environ: Mapping[str, str], launch_env: Mapping[str, str]) -
     return {**inherited, **launch_env}
 
 
+def profile_file_launch_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The app's profiling switch: ``MINDS_PROFILE_FILE`` at the path ``MINDS_SMOKE_PROFILE_FILE`` names, or nothing.
+
+    The test process's own ``MINDS_`` variables never reach the app (see
+    :func:`app_environment`), so the operator names the trace file through
+    this one and the launch environment carries it across.
+    """
+    raw = environ.get(SMOKE_PROFILE_FILE_ENV_VAR, "")
+    if not raw:
+        return {}
+    path = Path(raw)
+    if not path.is_absolute():
+        raise SmokeConfigError(f"{SMOKE_PROFILE_FILE_ENV_VAR} must be an absolute path, got {raw!r}")
+    return {PROFILE_FILE_ENV_VAR: str(path)}
+
+
 @contextmanager
 def launched_studio_app(
     binary: StudioBinary, backend: SmokeBackend, data_home: Path, debug_port: int, display: str | None
@@ -544,6 +562,7 @@ def launched_studio_app(
         ACTIVATED_CLIENT_CONFIG_PATH_ENV_VAR: str(resolve_smoke_client_config_path(backend.env_name)),
         _BROWSER_ENV_VAR: no_op_command,
         **({_DISPLAY_ENV_VAR: display} if display is not None else {}),
+        **profile_file_launch_env(os.environ),
     }
     logger.info(
         "Launching {} as {} with {}={}", binary.label, binary.root_name, STUDIO_ROOTS_OVERRIDE_ENV_VAR, data_home

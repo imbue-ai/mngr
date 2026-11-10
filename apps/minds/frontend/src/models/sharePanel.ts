@@ -20,6 +20,7 @@ import {
   QueryObserver,
   matchMutation,
 } from "@tanstack/query-core";
+import { span } from "../profiling";
 import m from "mithril";
 import { getAppQueryClient } from "./queryClient";
 import type {
@@ -89,7 +90,9 @@ export function remedyPathFromBody(body: unknown): string {
   if (body === null || typeof body !== "object") return "";
   const record = body as Record<string, unknown>;
   const path = record["shared_workspaces_path"];
-  return record["code"] === "quota_exceeded" && typeof path === "string" ? path : "";
+  return record["code"] === "quota_exceeded" && typeof path === "string"
+    ? path
+    : "";
 }
 
 /** One throw of the switch, as its mutation remembers it: the token by which
@@ -212,7 +215,11 @@ export type PublishWrite =
   | { readonly state: "idle" }
   | { readonly state: "publishing" }
   | { readonly state: "unpublishing" }
-  | { readonly state: "failed"; readonly message: string; readonly remedyPath: string };
+  | {
+      readonly state: "failed";
+      readonly message: string;
+      readonly remedyPath: string;
+    };
 
 /** The workspace gateway's own bring-up report while the link is not live. */
 const GATEWAY_STATES = ["up", "retrying", "halted"] as const;
@@ -631,7 +638,8 @@ export class SharePanelModel {
       return {
         state: "failed",
         message: error?.message ?? "Could not change sharing",
-        remedyPath: error instanceof SharingRequestError ? error.remedyPath : "",
+        remedyPath:
+          error instanceof SharingRequestError ? error.remedyPath : "",
       };
     return { state: "idle" };
   }
@@ -889,13 +897,15 @@ export class SharePanelModel {
 
   /** Give the workspace an address on the internet. Admits nobody by itself. */
   async publish(): Promise<void> {
-    this.beginProvisioningWait();
-    await this.throwSwitch(true);
+    await span("share_panel.publish", async () => {
+      this.beginProvisioningWait();
+      await this.throwSwitch(true);
+    });
   }
 
   /** Take the workspace's address away, keeping every grant it was admitting on. */
   async unpublish(): Promise<void> {
-    await this.throwSwitch(false);
+    await span("share_panel.unpublish", () => this.throwSwitch(false));
   }
 
   /** The toggle runs in the shared ledger, where every panel on this workspace
@@ -981,39 +991,41 @@ export class SharePanelModel {
    * undrawn (isCheckingPublication) until it answers.
    */
   async load(): Promise<void> {
-    this.loadErrorMessage = null;
-    // A refusal is said once, at the moment it happened (spec O5).
-    for (const [key, state] of this.inviteStateByKey)
-      if (state.state === "refused") this.inviteStateByKey.delete(key);
-    // The mobile link's confirmation and refusal are about the moment they
-    // happened too, so a fresh look at the panel starts over.
-    if (this.mobileLink.state !== "sending")
-      this.mobileLink = { state: "idle" };
-    const cached = this.statusQuery.getCurrentResult().data;
-    if (cached !== undefined && this.adoptedStatusSequence === null)
-      this.adoptLoadedDocument(cached, this.nextStatusSequence());
-    if (this.adoptedStatusSequence === null) this.loadStatus = "loading";
-    this.redraw();
-    const sequence = this.nextStatusSequence();
-    const query = this.statusQuery.getCurrentQuery();
-    const documentsBefore = query.state.dataUpdateCount;
-    const result = await this.statusQuery.refetch({ cancelRefetch: false });
-    if (this.isDisposed) return;
-    if (result.isError) {
-      this.loadStatus = "load_failed";
-      this.loadErrorMessage =
-        "Could not load sharing status: " + result.error.message;
+    await span("share_panel.load", async () => {
+      this.loadErrorMessage = null;
+      // A refusal is said once, at the moment it happened (spec O5).
+      for (const [key, state] of this.inviteStateByKey)
+        if (state.state === "refused") this.inviteStateByKey.delete(key);
+      // The mobile link's confirmation and refusal are about the moment they
+      // happened too, so a fresh look at the panel starts over.
+      if (this.mobileLink.state !== "sending")
+        this.mobileLink = { state: "idle" };
+      const cached = this.statusQuery.getCurrentResult().data;
+      if (cached !== undefined && this.adoptedStatusSequence === null)
+        this.adoptLoadedDocument(cached, this.nextStatusSequence());
+      if (this.adoptedStatusSequence === null) this.loadStatus = "loading";
       this.redraw();
-      return;
-    }
-    // A read the switch cancelled leaves the document as it was; the toggle
-    // that cancelled it owns the switch now.
-    if (
-      result.data === undefined ||
-      query.state.dataUpdateCount === documentsBefore
-    )
-      return;
-    this.adoptLoadedDocument(result.data, sequence);
+      const sequence = this.nextStatusSequence();
+      const query = this.statusQuery.getCurrentQuery();
+      const documentsBefore = query.state.dataUpdateCount;
+      const result = await this.statusQuery.refetch({ cancelRefetch: false });
+      if (this.isDisposed) return;
+      if (result.isError) {
+        this.loadStatus = "load_failed";
+        this.loadErrorMessage =
+          "Could not load sharing status: " + result.error.message;
+        this.redraw();
+        return;
+      }
+      // A read the switch cancelled leaves the document as it was; the toggle
+      // that cancelled it owns the switch now.
+      if (
+        result.data === undefined ||
+        query.state.dataUpdateCount === documentsBefore
+      )
+        return;
+      this.adoptLoadedDocument(result.data, sequence);
+    });
   }
 
   /** Take in a document a read answered with, or the cache held. */
@@ -1060,33 +1072,39 @@ export class SharePanelModel {
    * entry never becomes a row.
    */
   addGrant(target: string, kind: GrantAddKind, rawValue: string): void {
-    if (!this.canAdd) return;
-    const value = normalizeGrantValue(kind, rawValue);
-    if (!value) return;
-    const row = this.addRow(target);
-    const refusalMessage = this.refusalFor(target, kind, value);
-    if (refusalMessage !== null) {
-      row.refusalMessage = refusalMessage;
-      this.redraw();
-      return;
-    }
-    row.refusalMessage = null;
-    row.value = "";
-    const grantee: Grantee = { kind, value };
-    const grant: Grant = {
-      key: grantKey(grantee),
-      grantee,
-      status: { state: "saving" },
-      addedAtMs: this.nowMs(),
-    };
-    this.discardPendingRemoval(target, grantee);
-    const grants = this.mutableGrants(target);
-    grants.push(grant);
-    this.grantsByTarget.set(target, orderGrants(grants, this.identities));
-    this.enqueueGrantsWrite();
-    if (kind === "email")
-      void this.upgradeGrantToAccount(target, grant.key, value);
-    this.redraw();
+    span(
+      "share_panel.add_grant",
+      () => {
+        if (!this.canAdd) return;
+        const value = normalizeGrantValue(kind, rawValue);
+        if (!value) return;
+        const row = this.addRow(target);
+        const refusalMessage = this.refusalFor(target, kind, value);
+        if (refusalMessage !== null) {
+          row.refusalMessage = refusalMessage;
+          this.redraw();
+          return;
+        }
+        row.refusalMessage = null;
+        row.value = "";
+        const grantee: Grantee = { kind, value };
+        const grant: Grant = {
+          key: grantKey(grantee),
+          grantee,
+          status: { state: "saving" },
+          addedAtMs: this.nowMs(),
+        };
+        this.discardPendingRemoval(target, grantee);
+        const grants = this.mutableGrants(target);
+        grants.push(grant);
+        this.grantsByTarget.set(target, orderGrants(grants, this.identities));
+        this.enqueueGrantsWrite();
+        if (kind === "email")
+          void this.upgradeGrantToAccount(target, grant.key, value);
+        this.redraw();
+      },
+      { target, kind },
+    );
   }
 
   /** Take a row out now; a failed write puts it back where it was, marked. */
@@ -1133,31 +1151,40 @@ export class SharePanelModel {
    * outcome (spec P3).
    */
   async invite(target: string, key: GrantKey): Promise<void> {
-    const grant = this.mutableGrants(target).find(
-      (candidate) => candidate.key === key,
+    await span(
+      "share_panel.invite",
+      async () => {
+        const grant = this.mutableGrants(target).find(
+          (candidate) => candidate.key === key,
+        );
+        if (grant === undefined || !this.canInvite(target, grant)) return;
+        const grantee = grant.grantee;
+        const subject =
+          grantee.kind === "user"
+            ? { user_id: grantee.userId }
+            : { email: grantee.value };
+        this.inviteStateByKey.set(key, { state: "inviting" });
+        this.redraw();
+        const result = await this.fetchJson(
+          `${this.shareApiBase()}/invitations`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...subject,
+              app: target === this.options.wholeService ? null : target,
+            }),
+          },
+        );
+        if (this.isDisposed) return;
+        this.inviteStateByKey.set(
+          key,
+          this.adoptInviteAnswer(target, grantee, result),
+        );
+        this.redraw();
+      },
+      { target },
     );
-    if (grant === undefined || !this.canInvite(target, grant)) return;
-    const grantee = grant.grantee;
-    const subject =
-      grantee.kind === "user"
-        ? { user_id: grantee.userId }
-        : { email: grantee.value };
-    this.inviteStateByKey.set(key, { state: "inviting" });
-    this.redraw();
-    const result = await this.fetchJson(`${this.shareApiBase()}/invitations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...subject,
-        app: target === this.options.wholeService ? null : target,
-      }),
-    });
-    if (this.isDisposed) return;
-    this.inviteStateByKey.set(
-      key,
-      this.adoptInviteAnswer(target, grantee, result),
-    );
-    this.redraw();
   }
 
   /** The row's state after an invite answered, with the outcome the answer
@@ -1246,18 +1273,21 @@ export class SharePanelModel {
   /** Read what the granter may learn about every row. Nothing is readable
    * while unpublished: no invitation can be made until publishing again. */
   private async refreshOutcomes(): Promise<void> {
-    if (!this.isPublished) return;
-    const sequence = ++this.outcomesRequestCount;
-    const result = await this.fetchJson(
-      `${this.shareApiBase()}/invitation-outcomes`,
-    );
-    if (this.isDisposed || sequence <= this.adoptedOutcomesSequence) return;
-    if (!result.ok) return;
-    this.adoptedOutcomesSequence = sequence;
-    const entries = (result.body as InvitationOutcomesResponse).outcomes ?? [];
-    this.outcomeByKey = outcomesByKey(entries);
-    this.isOutcomesKnown = true;
-    this.redraw();
+    await span("share_panel.refresh_outcomes", async () => {
+      if (!this.isPublished) return;
+      const sequence = ++this.outcomesRequestCount;
+      const result = await this.fetchJson(
+        `${this.shareApiBase()}/invitation-outcomes`,
+      );
+      if (this.isDisposed || sequence <= this.adoptedOutcomesSequence) return;
+      if (!result.ok) return;
+      this.adoptedOutcomesSequence = sequence;
+      const entries =
+        (result.body as InvitationOutcomesResponse).outcomes ?? [];
+      this.outcomeByKey = outcomesByKey(entries);
+      this.isOutcomesKnown = true;
+      this.redraw();
+    });
   }
 
   private buildGrantsDocument(): SharingGrantsDocument {
@@ -1364,53 +1394,59 @@ export class SharePanelModel {
     target: string,
     generation: number,
   ): Promise<void> {
-    if (this.isDisposed || generation !== this.pollGeneration) return;
-    this.readinessTimerId = null;
-    const elapsed = this.nowMs() - this.pollStartedAtMs;
-    if (elapsed > READINESS_DEADLINE_MS) {
-      // Stop warning at the deadline rather than pretending failure forever.
-      this.markLive();
-      return;
-    }
-    const result = await this.fetchJson(`${this.shareApiBase()}/readiness`);
-    if (this.isDisposed || generation !== this.pollGeneration) return;
-    const body = result.ok
-      ? (result.body as SharingReadinessResponse | null)
-      : null;
-    if (body) {
-      this.mergeServiceLabels(body.service_labels);
-      if (body.cert_not_after != null) this.isCertIssued = true;
-      this.adoptGatewayStatus(body);
-      const tunnelStamp = body.last_tunnel_login_at ?? null;
-      if (this.tunnelLoginSnapshot.state === "unseen") {
-        this.tunnelLoginSnapshot = { state: "seen", stamp: tunnelStamp };
-      } else if (
-        tunnelStamp !== null &&
-        tunnelStamp !== this.tunnelLoginSnapshot.stamp
-      ) {
-        this.isTunnelConnected = true;
-      }
-    }
-    // Ready means the shell's label origin answers; the on-screen target may
-    // still lack its own label (a per-app target registered later), so keep
-    // polling until this target's link can actually be shown.
-    if (body?.ready === true && this.isLabelKnown(target)) {
-      this.markLive();
-      return;
-    }
-    if (body?.ready === true) this.isLive = true;
-    if (this.isProvisioningHalted) {
-      // The gateway will not try again until the workspace is published again,
-      // so polling would only repeat the same answer.
-      this.stopReadinessPolling();
-      this.redraw();
-      return;
-    }
-    this.redraw();
-    this.scheduleReadinessProbe(
-      target,
-      generation,
-      this.nowMs() - this.pollStartedAtMs,
+    await span(
+      "share_panel.probe_readiness",
+      async () => {
+        if (this.isDisposed || generation !== this.pollGeneration) return;
+        this.readinessTimerId = null;
+        const elapsed = this.nowMs() - this.pollStartedAtMs;
+        if (elapsed > READINESS_DEADLINE_MS) {
+          // Stop warning at the deadline rather than pretending failure forever.
+          this.markLive();
+          return;
+        }
+        const result = await this.fetchJson(`${this.shareApiBase()}/readiness`);
+        if (this.isDisposed || generation !== this.pollGeneration) return;
+        const body = result.ok
+          ? (result.body as SharingReadinessResponse | null)
+          : null;
+        if (body) {
+          this.mergeServiceLabels(body.service_labels);
+          if (body.cert_not_after != null) this.isCertIssued = true;
+          this.adoptGatewayStatus(body);
+          const tunnelStamp = body.last_tunnel_login_at ?? null;
+          if (this.tunnelLoginSnapshot.state === "unseen") {
+            this.tunnelLoginSnapshot = { state: "seen", stamp: tunnelStamp };
+          } else if (
+            tunnelStamp !== null &&
+            tunnelStamp !== this.tunnelLoginSnapshot.stamp
+          ) {
+            this.isTunnelConnected = true;
+          }
+        }
+        // Ready means the shell's label origin answers; the on-screen target may
+        // still lack its own label (a per-app target registered later), so keep
+        // polling until this target's link can actually be shown.
+        if (body?.ready === true && this.isLabelKnown(target)) {
+          this.markLive();
+          return;
+        }
+        if (body?.ready === true) this.isLive = true;
+        if (this.isProvisioningHalted) {
+          // The gateway will not try again until the workspace is published again,
+          // so polling would only repeat the same answer.
+          this.stopReadinessPolling();
+          this.redraw();
+          return;
+        }
+        this.redraw();
+        this.scheduleReadinessProbe(
+          target,
+          generation,
+          this.nowMs() - this.pollStartedAtMs,
+        );
+      },
+      { target },
     );
   }
 
@@ -1571,53 +1607,55 @@ export class SharePanelModel {
   }
 
   private async writeGrantsOnce(): Promise<void> {
-    const document = this.buildGrantsDocument();
-    const carriedRows = this.carriedRowSignatures();
-    const carriedRemovals = this.carriedRemovals();
-    const sequence = this.nextStatusSequence();
-    const result = await this.fetchJson(`${this.shareApiBase()}/grants`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grants: document }),
-    });
-    if (this.isDisposed) return;
-    if (result.ok) {
-      // Read back before settling: the merge keeps every row still saving, and
-      // this write's rows are settled on top of what came back.
-      const document = result.body as MachineSharingResponse;
-      if (this.adoptStatusDocument(document, sequence)) {
-        this.queryClient.setQueryData(this.queryKey, document);
-        this.adoptOrReadOutcomes(document);
-      } else {
-        // An older answer says nothing about the rows as they stand now.
-        void this.refreshOutcomes();
-      }
-      this.markCarriedRows(carriedRows, { state: "settled" });
-      this.maybeAutoInviteGrantedPeople();
-      this.redraw();
-      return;
-    }
-    // A refusal saves nothing, so the rest of the document is sent again
-    // without the rows it named. A refusal naming nothing this panel can drop
-    // would send the same document forever, so it is reported as a failure.
-    const refusals = grantRefusalsFrom(result.status, result.body);
-    if (refusals !== null && this.applyRefusals(refusals) > 0) {
-      this.enqueueGrantsWrite();
-    } else {
-      // A refusal body names entries, not a sentence for the row, so only a
-      // plain failure's own words are worth reporting.
-      const failureMessage =
-        refusals === null
-          ? errorMessageFromBody(result.body, GRANT_SAVE_FAILURE_MESSAGE)
-          : GRANT_SAVE_FAILURE_MESSAGE;
-      this.markCarriedRows(carriedRows, {
-        state: "failed",
-        failedOperation: "add",
-        failureMessage,
+    await span("share_panel.write_grants", async () => {
+      const document = this.buildGrantsDocument();
+      const carriedRows = this.carriedRowSignatures();
+      const carriedRemovals = this.carriedRemovals();
+      const sequence = this.nextStatusSequence();
+      const result = await this.fetchJson(`${this.shareApiBase()}/grants`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grants: document }),
       });
-      this.restoreRemovals(carriedRemovals, failureMessage);
-    }
-    this.redraw();
+      if (this.isDisposed) return;
+      if (result.ok) {
+        // Read back before settling: the merge keeps every row still saving, and
+        // this write's rows are settled on top of what came back.
+        const document = result.body as MachineSharingResponse;
+        if (this.adoptStatusDocument(document, sequence)) {
+          this.queryClient.setQueryData(this.queryKey, document);
+          this.adoptOrReadOutcomes(document);
+        } else {
+          // An older answer says nothing about the rows as they stand now.
+          void this.refreshOutcomes();
+        }
+        this.markCarriedRows(carriedRows, { state: "settled" });
+        this.maybeAutoInviteGrantedPeople();
+        this.redraw();
+        return;
+      }
+      // A refusal saves nothing, so the rest of the document is sent again
+      // without the rows it named. A refusal naming nothing this panel can drop
+      // would send the same document forever, so it is reported as a failure.
+      const refusals = grantRefusalsFrom(result.status, result.body);
+      if (refusals !== null && this.applyRefusals(refusals) > 0) {
+        this.enqueueGrantsWrite();
+      } else {
+        // A refusal body names entries, not a sentence for the row, so only a
+        // plain failure's own words are worth reporting.
+        const failureMessage =
+          refusals === null
+            ? errorMessageFromBody(result.body, GRANT_SAVE_FAILURE_MESSAGE)
+            : GRANT_SAVE_FAILURE_MESSAGE;
+        this.markCarriedRows(carriedRows, {
+          state: "failed",
+          failedOperation: "add",
+          failureMessage,
+        });
+        this.restoreRemovals(carriedRemovals, failureMessage);
+      }
+      this.redraw();
+    });
   }
 
   /** What each in-flight row looked like when the write was built, so an edit

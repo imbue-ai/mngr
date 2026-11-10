@@ -55,6 +55,9 @@ SMOKE_HANDOFF_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_HANDOFF_FILE"
 SMOKE_MANIFEST_PATH_ENV_VAR: Final[str] = "MINDS_SMOKE_MANIFEST_PATH"
 # ``1`` skips default-workspace-template's CI tests in the journey's workspace; unset or ``0`` runs them.
 SMOKE_SKIP_DWT_TESTS_ENV_VAR: Final[str] = "MINDS_SMOKE_SKIP_DWT_TESTS"
+# An absolute path: the app under test records the run as a Studio profile there
+# (what ``minds run --profile`` writes); unset records nothing.
+SMOKE_PROFILE_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_PROFILE_FILE"
 
 # The mail.tm mailbox the throwaway account verifies its email through. The
 # address and JWT keep the names the deployment tests already thread through

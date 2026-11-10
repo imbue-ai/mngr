@@ -29,6 +29,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.mngr.utils.file_utils import atomic_write
@@ -97,12 +98,13 @@ class ForwardHeadersFile(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def write(self, identity_by_agent_id: Mapping[str, OwnerIdentity]) -> None:
-        rendered = json.dumps(render_forward_headers(identity_by_agent_id).headers_by_agent_key, indent=2)
-        with self._lock:
-            if self._current_text() == rendered:
-                return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(self.path, rendered)
+        with get_profiler().span("forward_identity.write", shared_count=len(identity_by_agent_id)):
+            rendered = json.dumps(render_forward_headers(identity_by_agent_id).headers_by_agent_key, indent=2)
+            with self._lock:
+                if self._current_text() == rendered:
+                    return
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(self.path, rendered)
 
     def _current_text(self) -> str | None:
         try:

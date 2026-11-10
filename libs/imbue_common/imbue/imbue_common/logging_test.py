@@ -12,13 +12,18 @@ from loguru import logger
 
 from imbue.imbue_common.logging import _build_flat_log_dict
 from imbue.imbue_common.logging import _format_arg_value
+from imbue.imbue_common.logging import _profiler_span_name
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import make_jsonl_file_sink
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.logging import trace_span
+from imbue.imbue_common.profiling import drain_events
+from imbue.imbue_common.profiling import enable_collector
+from imbue.imbue_common.profiling import get_profiler
 
 
 class _SampleLoggingError(Exception):
@@ -484,3 +489,96 @@ def test_build_flat_log_dict_includes_exception_info() -> None:
     # The full stack is recorded, down to the raising line, so a log file alone locates the failure.
     assert 'raise ValueError("test error")' in exc_info["traceback_text"]
     assert exc_info["traceback_text"].rstrip().endswith("ValueError: test error")
+
+
+# Tests for the tracer spans the helpers derive
+
+
+def _recorded_spans() -> list[dict[str, Any]]:
+    return [event for event in drain_events() if event["ph"] == "X"]
+
+
+def test_log_span_records_a_tracer_span_named_by_the_formatted_message_without_arguments() -> None:
+    enable_collector()
+    with capture_logs():
+        with log_span("creating agent {} on host {}", "agent-1", "host-1", token="secret"):
+            pass
+
+    [span] = _recorded_spans()
+    assert span["name"] == "creating agent agent-1 on host host-1"
+    assert span["args"] == {}
+
+
+def test_log_span_records_a_failed_tracer_span_when_the_body_raises() -> None:
+    enable_collector()
+    with capture_logs():
+        try:
+            with log_span("risky operation", host="host-1"):
+                raise _SampleLoggingError("boom")
+        except _SampleLoggingError:
+            pass
+
+    [span] = _recorded_spans()
+    assert span["name"] == "risky operation"
+    assert span["args"] == {"is_failed": True}
+
+
+def test_info_span_and_trace_span_record_tracer_spans_without_arguments() -> None:
+    enable_collector()
+    with capture_logs():
+        with info_span("starting {}", "service", port=8080):
+            pass
+        with trace_span("polling {}", "endpoint", attempt=3):
+            pass
+
+    spans = _recorded_spans()
+    assert [span["name"] for span in spans] == ["starting service", "polling endpoint"]
+    assert all(span["args"] == {} for span in spans)
+
+
+def test_trace_span_disabled_records_no_tracer_span() -> None:
+    enable_collector()
+    with capture_logs():
+        with trace_span("quiet {}", "work", _is_trace_span_enabled=False):
+            pass
+
+    assert _recorded_spans() == []
+
+
+def test_log_call_records_a_tracer_span_named_after_the_function_without_arguments() -> None:
+    @log_call
+    def multiply(a: int, b: int) -> int:
+        return a * b
+
+    enable_collector()
+    with capture_logs():
+        assert multiply(2, 3) == 6
+
+    [span] = _recorded_spans()
+    assert span["name"] == "multiply"
+    assert span["args"] == {}
+
+
+def test_profiler_span_name_is_formatted_only_when_profiling_is_enabled() -> None:
+    assert _profiler_span_name(get_profiler(), "creating {} on {}", ("agent-1",)) == "creating {} on {}"
+
+    enable_collector()
+    assert _profiler_span_name(get_profiler(), "creating {} on {}", ("agent-1", "host-1")) == (
+        "creating agent-1 on host-1"
+    )
+    assert _profiler_span_name(get_profiler(), "creating {} on {}", ("agent-1",)) == "creating {} on {}"
+    assert _profiler_span_name(get_profiler(), "took {:d} seconds", ("not a number",)) == "took {:d} seconds"
+    assert _profiler_span_name(get_profiler(), "for {name}", ("positional",)) == "for {name}"
+
+
+def test_logging_helpers_leave_the_tracer_untouched_when_profiling_is_disabled() -> None:
+    with capture_logs() as cap:
+        with log_span("plain {}", "span"):
+            pass
+        with info_span("plain info"):
+            pass
+
+    assert get_profiler().is_enabled is False
+    assert get_profiler().current_traceparent() is None
+    assert cap.messages[0] == "plain span"
+    assert cap.messages[2] == "plain info"

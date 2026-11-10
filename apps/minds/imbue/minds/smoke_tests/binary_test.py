@@ -15,6 +15,7 @@ from imbue.minds.smoke_tests.binary import cached_build_dir
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
 from imbue.minds.smoke_tests.binary import launch_target_for
 from imbue.minds.smoke_tests.binary import packaged_studio_binary
+from imbue.minds.smoke_tests.binary import profile_file_launch_env
 from imbue.minds.smoke_tests.binary import published_build_cache_key
 from imbue.minds.smoke_tests.binary import published_build_cache_root
 from imbue.minds.smoke_tests.binary import published_build_layout_or_none
@@ -262,3 +263,18 @@ def test_the_app_keeps_its_roots_in_the_data_home_under_the_old_override_name_an
         "STUDIO_ROOTS_OVERRIDE": "/tmp/run/studio-data-home",
         "MINDS_DATA_HOME": "/tmp/run/studio-data-home",
     }
+
+
+def test_profile_file_launch_env_is_empty_when_no_profile_is_requested() -> None:
+    assert profile_file_launch_env({"HOME": "/home/runner", "MINDS_SMOKE_TIER": "staging"}) == {}
+
+
+def test_profile_file_launch_env_hands_the_app_the_requested_trace_path() -> None:
+    assert profile_file_launch_env({"MINDS_SMOKE_PROFILE_FILE": "/tmp/run/trace.json"}) == {
+        "MINDS_PROFILE_FILE": "/tmp/run/trace.json"
+    }
+
+
+def test_profile_file_launch_env_refuses_a_relative_path() -> None:
+    with pytest.raises(SmokeConfigError):
+        profile_file_launch_env({"MINDS_SMOKE_PROFILE_FILE": "trace.json"})

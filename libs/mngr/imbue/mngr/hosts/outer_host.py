@@ -68,6 +68,7 @@ from tenacity import wait_fixed
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -1276,14 +1277,23 @@ class OuterHost(OuterHostInterface):
         path it may retry on a transient SSH error, so a caller passing
         ``on_output`` should tolerate the (rare) duplicate line on retry --
         matching the retry the non-streaming idempotent delegate already does.
+
+        The command runs inside a ``host.exec`` tracer span; an outer host belongs
+        to no provider, so the span names the host alone.
         """
-        if on_output is not None:
-            if user is not None:
-                raise NotImplementedError(
-                    "OuterHost does not support su user; pass an SSH user via the connector instead"
+        with get_profiler().span("host.exec", host_id=str(self.id)) as span:
+            if on_output is not None:
+                if user is not None:
+                    raise NotImplementedError(
+                        "OuterHost does not support su user; pass an SSH user via the connector instead"
+                    )
+                result = self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
+            else:
+                result = self.execute_idempotent_command(
+                    command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
                 )
-            return self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
-        return self.execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+            span.add_args(is_success=result.success)
+            return result
 
     def execute_streaming_command(
         self,

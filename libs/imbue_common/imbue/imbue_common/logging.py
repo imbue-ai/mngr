@@ -20,6 +20,8 @@ from uuid import uuid4
 
 from loguru import logger
 
+from imbue.imbue_common.profiling import ProfilerInterface
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.imbue_common.tracebacks import format_exception_traceback
 
@@ -50,10 +52,22 @@ def _format_arg_value(value: Any) -> str:
     return str_value
 
 
+def _profiler_span_name(profiler: ProfilerInterface, message: str, args: tuple[Any, ...]) -> str:
+    """Name a tracer span after a helper's message, formatting its placeholders only when the span is recorded."""
+    if not profiler.is_enabled:
+        return message
+    try:
+        return message.format(*args)
+    except (IndexError, KeyError, ValueError, AttributeError, TypeError):
+        return message
+
+
 def log_call(func: Callable[P, R]) -> Callable[P, R]:
     """Decorator that logs function calls with inputs and outputs at debug level.
 
-    Logs the function name and binds arguments as structured logging fields.
+    Logs the function name and binds arguments as structured logging fields,
+    and runs the call inside a tracer span named after the function that
+    carries no arguments.
     Useful for API entry points to trace execution.
     """
     # Get the function name once at decoration time
@@ -72,7 +86,8 @@ def log_call(func: Callable[P, R]) -> Callable[P, R]:
 
         start_time = time.monotonic()
 
-        result = func(*args, **kwargs)
+        with get_profiler().span(func_name):
+            result = func(*args, **kwargs)
 
         elapsed = time.monotonic() - start_time
         done_message = f"Calling {func_name} [done in {elapsed:.5f} sec]"
@@ -92,8 +107,12 @@ def log_span(message: str, *args: Any, **context: Any) -> Generator[None, None, 
 
     Keyword arguments are passed to logger.contextualize so that all log messages
     within the span include the extra context fields.
+
+    The body also runs inside a tracer span named by the formatted message. That
+    span carries none of the context fields or format args, which can hold secrets.
     """
-    with logger.contextualize(**context):
+    profiler = get_profiler()
+    with profiler.span(_profiler_span_name(profiler, message, args)), logger.contextualize(**context):
         logger.debug(message, *args)
         start_time = time.monotonic()
         try:
@@ -118,8 +137,12 @@ def info_span(message: str, *args: Any, **context: Any) -> Generator[None, None,
 
     Keyword arguments are passed to logger.contextualize so that all log messages
     within the span include the extra context fields.
+
+    The body also runs inside a tracer span named by the formatted message. That
+    span carries none of the context fields or format args, which can hold secrets.
     """
-    with logger.contextualize(**context):
+    profiler = get_profiler()
+    with profiler.span(_profiler_span_name(profiler, message, args)), logger.contextualize(**context):
         logger.info(message, *args)
         start_time = time.monotonic()
         is_success = False
@@ -143,11 +166,15 @@ def trace_span(
 
     Keyword arguments are passed to logger.contextualize so that all log messages
     within the span include the extra context fields.
+
+    The body also runs inside a tracer span named by the formatted message. That
+    span carries none of the context fields or format args, which can hold secrets.
     """
     if not _is_trace_span_enabled:
         yield
     else:
-        with logger.contextualize(**context):
+        profiler = get_profiler()
+        with profiler.span(_profiler_span_name(profiler, message, args)), logger.contextualize(**context):
             logger.trace(message, *args)
             start_time = time.monotonic()
             try:

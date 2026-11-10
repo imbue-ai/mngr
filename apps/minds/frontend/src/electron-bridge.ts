@@ -198,6 +198,10 @@ interface MindsNativeSurface {
   // Optional: a preload from before immersive mode lacks it, and the browser
   // build has no accelerators or relays to silence.
   setImmersive?(on: boolean): void;
+  // This window's renderer process id, which names its lane in a profiling
+  // trace beside Chromium's own. Optional: a preload from before profiling
+  // lacks it, and the browser build has no process of its own to name.
+  rendererPid?: number;
 }
 
 /** This launch's app version against the previous launch's, as main recorded
@@ -511,5 +515,10 @@ export const electronBridge = {
    * menu shortcuts and key relays stay out of the way while it lasts. */
   setImmersive(on: boolean): void {
     native()?.setImmersive?.(on);
+  },
+  /** This window's renderer process id; null in the browser, and on a
+   * desktop build older than profiling. */
+  get rendererPid(): number | null {
+    return native()?.rendererPid ?? null;
   },
 };

@@ -25,6 +25,7 @@ from flask import Response
 from flask import request
 from loguru import logger
 
+from imbue.imbue_common.profiling import get_profiler
 from imbue.minds.desktop_client.onboarding_progress import resolve_is_onboarding_complete
 from imbue.minds.desktop_client.session_store import get_owning_account_id_for_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
@@ -38,6 +39,7 @@ from imbue.minds.desktop_client.ui_api_notifications import register_notificatio
 from imbue.minds.desktop_client.ui_api_onboarding import register_onboarding_routes
 from imbue.minds.desktop_client.ui_api_options import register_options_routes
 from imbue.minds.desktop_client.ui_api_permissions import register_permissions_routes
+from imbue.minds.desktop_client.ui_api_profile import register_profile_routes
 from imbue.minds.desktop_client.ui_api_provider_relay import register_provider_relay_routes
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
 from imbue.minds.desktop_client.ui_api_updates import register_update_routes
@@ -50,6 +52,7 @@ from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
+from imbue.minds.desktop_client.ui_models import UiProfilingBootstrap
 from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import MindError
@@ -147,7 +150,12 @@ def _build_bootstrap_json() -> str:
         is_onboarding_complete=resolve_is_onboarding_complete(state.minds_config, state.backend_resolver),
         account_id=account_id,
     )
-    bootstrap = UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=publisher.build_snapshot(account_id))
+    bootstrap = UiBootstrap(
+        seed=seed,
+        schema_version=UI_SCHEMA_VERSION,
+        snapshot=publisher.build_snapshot(account_id),
+        profiling=UiProfilingBootstrap(is_enabled=get_profiler().is_enabled),
+    )
     # "</" must not appear verbatim inside an inline <script> body: a name or
     # log line containing "</script>" would otherwise terminate the tag early.
     return bootstrap.model_dump_json().replace("</", "<\\/")
@@ -317,4 +325,6 @@ def create_ui_blueprint() -> Blueprint:
     register_user_routes(blueprint)
     register_provider_relay_routes(blueprint)
     register_window_routes(blueprint)
+    if get_profiler().is_enabled:
+        register_profile_routes(blueprint)
     return blueprint

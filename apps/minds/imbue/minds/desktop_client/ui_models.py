@@ -25,9 +25,11 @@ from datetime import datetime
 from enum import auto
 from typing import Annotated
 from typing import Literal
+from typing import Self
 
 from pydantic import Field
 from pydantic import TypeAdapter
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -52,6 +54,7 @@ from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.errors import ProfileEventFlowError
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressMode
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 
@@ -911,12 +914,66 @@ class UiRouteAccountResponse(FrozenModel):
     account_id: str = Field(description="The account the route's window shows (a user id, or 'local' for the device)")
 
 
+class UiProfilingBootstrap(FrozenModel):
+    """Whether the backend records this session's trace, so the page knows to record and post its own spans."""
+
+    is_enabled: bool = Field(default=False, description="True when the backend was started with --profile")
+
+
 class UiBootstrap(FrozenModel):
     """The ``window.__MINDS_BOOTSTRAP__`` document inlined into the SPA index page."""
 
     seed: UiBootstrapSeed = Field(description="First-paint seed values")
     schema_version: int = Field(description="UI_SCHEMA_VERSION the serving code was built with")
     snapshot: UiSnapshot = Field(description="Connect-time state snapshot")
+    profiling: UiProfilingBootstrap = Field(description="Whether the page records and posts its spans this session")
+
+
+# The page's profiling events (POST /ui/api/profile/events), posted while the bootstrap says profiling is on.
+
+
+class UiProfileEventKind(LowerCaseStrEnum):
+    """The two shapes of event the page records: a span with a duration, or a point-in-time marker."""
+
+    SPAN = auto()
+    INSTANT = auto()
+
+
+class UiProfileEvent(FrozenModel):
+    """One event the page recorded, timed in milliseconds relative to the page's ``performance.timeOrigin``."""
+
+    kind: UiProfileEventKind = Field(description="A span with a duration, or an instant marker")
+    name: str = Field(description="The span or marker name")
+    cat: str = Field(description="The event's category")
+    start_ms: float = Field(description="Start, in milliseconds since the page's time origin")
+    duration_ms: float = Field(description="Duration in milliseconds; 0 for an instant")
+    args: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict, description="The event's arguments: identifiers, counts, booleans, and the like"
+    )
+    flow_out_id: str | None = Field(default=None, description="The flow this event is the source of, if any")
+    flow_in_id: str | None = Field(default=None, description="The flow this event is the target of, if any")
+
+    @model_validator(mode="after")
+    def _ensure_one_flow(self) -> Self:
+        if self.flow_out_id is not None and self.flow_in_id is not None and self.flow_out_id != self.flow_in_id:
+            raise ProfileEventFlowError(
+                f"Event {self.name!r} cannot be the source of flow {self.flow_out_id!r} and the target of "
+                f"{self.flow_in_id!r}"
+            )
+        return self
+
+
+class UiProfileEventsBatch(FrozenModel):
+    """Body of POST /ui/api/profile/events: one page's events since its last post."""
+
+    session_id: str = Field(description="The page's profiling session; each one is a process of its own in the trace")
+    time_origin_ms: float = Field(
+        description="performance.timeOrigin: the wall-clock epoch milliseconds the events' times count from"
+    )
+    renderer_pid: int | None = Field(
+        default=None, description="The renderer's real pid under Electron, named in the trace; None in a browser"
+    )
+    events: tuple[UiProfileEvent, ...] = Field(description="The events, in recording order")
 
 
 # Per-workspace permissions payloads (GET/POST /ui/api/workspaces/<agent_id>/permissions)
@@ -1334,6 +1391,7 @@ class UiWireSchema(FrozenModel):
     bring_app_to_front: UiBringAppToFrontMessage = Field(description="bring_app_to_front frame")
     client_state: UiClientStateMessage = Field(description="client_state frame (client to server)")
     bootstrap: UiBootstrap = Field(description="bootstrap document")
+    profile_events: UiProfileEventsBatch = Field(description="profile/events request body")
     workspace_permissions: UiWorkspacePermissions = Field(description="workspace permissions payload")
     connector_toggle: UiConnectorToggleRequest = Field(description="connector-toggle request body")
     self_toggle: UiSelfToggleRequest = Field(description="self-toggle request body")

@@ -18,6 +18,11 @@ import type {
 } from "./models/create";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
+import type {
+  ProfileEvent,
+  ProfilingInstallOptions,
+  ResourceTimingEntry,
+} from "./profiling";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
 import { ShellState } from "./views/shell/shell-state";
@@ -465,6 +470,172 @@ export function pendingInstallUpdate(): {
       }),
     resolveInstall: () => resolveInstall(),
   };
+}
+
+export interface RecordedMark {
+  name: string;
+  detail: unknown;
+}
+
+export interface RecordedMeasure {
+  name: string;
+  start: string;
+  end: string;
+  detail: unknown;
+}
+
+export interface RecordedFetchCall {
+  input: RequestInfo | URL;
+  init: RequestInit | undefined;
+}
+
+/** Everything `installProfiling` reaches into, as fakes a test drives by hand. */
+export interface FakeProfilingEnvironment {
+  options: ProfilingInstallOptions;
+  /** The profiler's clock, in `performance.now()` milliseconds. */
+  clock: { nowMs: number };
+  timeOriginMs: number;
+  origin: string;
+  marks: RecordedMark[];
+  measures: RecordedMeasure[];
+  /** The object whose `fetch` the profiler wraps; call `fetchHost.fetch` to go through the wrapper. */
+  fetchHost: { fetch: typeof fetch };
+  /** Every call that reached the fetch the wrapper replaced, profile posts included. */
+  fetchCalls: RecordedFetchCall[];
+  /** What that fetch answers; reassign it to make requests fail. */
+  respond: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  beacons: { url: string; body: string }[];
+  /** The delays of every flush timer scheduled so far. */
+  timerDelays: number[];
+  /** Run the pending flush timer, as the second elapsing would. */
+  fireTimer(): void;
+  deliverResourceEntries(entries: ResourceTimingEntry[]): void;
+  firePageHide(): void;
+}
+
+/** A profiling environment whose clock, timers, fetch, resource timing, page
+ * hide, beacon, and random source are all fakes the test drives. The random
+ * bytes count upward from one, so no id is ever all zeros by accident. */
+export function fakeProfilingEnvironment(
+  overrides: Partial<ProfilingInstallOptions> = {},
+): FakeProfilingEnvironment {
+  const clock = { nowMs: 0 };
+  const marks: RecordedMark[] = [];
+  const measures: RecordedMeasure[] = [];
+  const fetchCalls: RecordedFetchCall[] = [];
+  const beacons: { url: string; body: string }[] = [];
+  const timerDelays: number[] = [];
+  const pendingTimers: { id: number; callback: () => void }[] = [];
+  let timerCount = 0;
+  let randomCounter = 0;
+  let onEntries: ((entries: ResourceTimingEntry[]) => void) | null = null;
+  let onPageHide: (() => void) | null = null;
+  const environment: FakeProfilingEnvironment = {
+    clock,
+    timeOriginMs: 1_700_000_000_000,
+    origin: "http://127.0.0.1:5000",
+    marks,
+    measures,
+    fetchHost: {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ input, init });
+        return environment.respond(input, init);
+      },
+    },
+    fetchCalls,
+    respond: () => Promise.resolve(jsonResponse({})),
+    beacons,
+    timerDelays,
+    fireTimer: () => {
+      const timer = pendingTimers.shift();
+      if (timer === undefined) throw new Error("No flush timer is pending.");
+      timer.callback();
+    },
+    deliverResourceEntries: (entries) => {
+      if (onEntries === null)
+        throw new Error("Nothing observes resource timing.");
+      onEntries(entries);
+    },
+    firePageHide: () => {
+      if (onPageHide === null) throw new Error("Nothing listens for pagehide.");
+      onPageHide();
+    },
+    options: {},
+  };
+  environment.options = {
+    fetchHost: environment.fetchHost,
+    performance: {
+      timeOrigin: environment.timeOriginMs,
+      now: () => clock.nowMs,
+      mark: (name, options) => {
+        marks.push({ name, detail: options?.detail });
+      },
+      measure: (name, options) => {
+        measures.push({
+          name,
+          start: options.start,
+          end: options.end,
+          detail: options.detail,
+        });
+      },
+      clearMarks: (name) => {
+        const idx = marks.findIndex((mark) => mark.name === name);
+        if (idx !== -1) marks.splice(idx, 1);
+      },
+    },
+    observeResources: (callback) => {
+      onEntries = callback;
+      return () => {
+        onEntries = null;
+      };
+    },
+    setTimer: (callback, delayMs) => {
+      const id = ++timerCount;
+      timerDelays.push(delayMs);
+      pendingTimers.push({ id, callback });
+      return id;
+    },
+    clearTimer: (timerId) => {
+      const idx = pendingTimers.findIndex((timer) => timer.id === timerId);
+      if (idx !== -1) pendingTimers.splice(idx, 1);
+    },
+    onPageHide: (handler) => {
+      onPageHide = handler;
+      return () => {
+        onPageHide = null;
+      };
+    },
+    sendBeacon: (url, body) => {
+      beacons.push({ url, body });
+      return true;
+    },
+    randomBytes: (byteCount) => {
+      const bytes = new Uint8Array(byteCount);
+      for (let idx = 0; idx < byteCount; idx++)
+        bytes[idx] = (randomCounter++ % 255) + 1;
+      return bytes;
+    },
+    origin: environment.origin,
+    rendererPid: 4242,
+    ...overrides,
+  };
+  return environment;
+}
+
+/** The events every batch posted to the profile endpoint carried, in order,
+ * whether by fetch or by beacon. */
+export function postedProfileEvents(
+  environment: FakeProfilingEnvironment,
+): ProfileEvent[] {
+  const bodies = [
+    ...environment.fetchCalls
+      .filter((call) => String(call.input) === "/ui/api/profile/events")
+      .map((call) => call.init?.body as string),
+    ...environment.beacons.map((beacon) => beacon.body),
+  ];
+  return bodies.flatMap(
+    (body) => (JSON.parse(body) as { events: ProfileEvent[] }).events,
+  );
 }
 
 /** Run `run` with `window.mindsNative` set to `surface`, or with a `window`

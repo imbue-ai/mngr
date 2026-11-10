@@ -79,6 +79,7 @@ from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
+from imbue.minds.desktop_client.ui_models import UiProfilingBootstrap
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
@@ -463,7 +464,12 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
         is_onboarding_complete=True,
         account_id="user-alice",
     )
-    return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
+    return UiBootstrap(
+        seed=seed,
+        schema_version=UI_SCHEMA_VERSION,
+        snapshot=snapshot,
+        profiling=UiProfilingBootstrap(is_enabled=False),
+    )
 
 
 def render_spa_index_html(bootstrap: UiBootstrap) -> str:

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.profiling import disable
+from imbue.imbue_common.profiling import enable_collector
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.utils.testing import ExecOnlyParamikoServer
@@ -31,6 +33,16 @@ def paramiko_ssh_host_factory(
             port, host_key_path, private_key_path, temp_host_dir, temp_mngr_ctx, tmp_path
         )
         yield factory, server
+
+
+@pytest.fixture
+def collecting_profiler() -> Generator[None, None, None]:
+    """Run the test with the process-wide profiler collecting events, returning it to the no-op afterwards."""
+    enable_collector()
+    try:
+        yield
+    finally:
+        disable()
 
 
 @pytest.fixture

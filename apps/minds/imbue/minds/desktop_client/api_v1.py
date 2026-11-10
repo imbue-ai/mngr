@@ -56,6 +56,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
@@ -4247,52 +4248,56 @@ def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
     share target, from which the UI builds every link.
     """
     state = get_state()
-    http_client = state.http_client
-    if http_client is None:
-        return SharingReadinessResponse(ready=False)
-    # Only the connector-side share status is needed here (the full sharing
-    # document would also exec into the workspace for grants each poll), and
-    # it rides the short-TTL cache: the poll fires every ~2 seconds while the
-    # only per-tick question -- is the hostname live yet? -- is answered by
-    # the TLS probe below, not by re-running a multi-second `shares status`
-    # subprocess for a domain that never changes.
-    share = get_active_share_cached(
-        host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.active_share_cache
-    )
-    if share is None or not share.workspace_domain:
-        return SharingReadinessResponse(ready=False)
-    # Probe the shell's routable label origin, not the bare machine domain
-    # (which does not route on a share). Not-ready until the shell label is known.
-    service_labels = resolve_share_target_labels_for_host(state.backend_resolver, state.session_store, host_id)
-    shell_label = service_labels.get(WHOLE_MACHINE_SERVICE)
-    probe_host = f"{shell_label}.{share.workspace_domain}" if shell_label else None
-    is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
-    # The labels ride every poll so a share panel opened before the workspace's
-    # registrations reached this client learns them without re-fetching anything.
-    if is_ready:
+    with get_profiler().span("sharing.readiness", host_id=host_id, is_ready=False) as span:
+        http_client = state.http_client
+        if http_client is None:
+            return SharingReadinessResponse(ready=False)
+        # Only the connector-side share status is needed here (the full sharing
+        # document would also exec into the workspace for grants each poll), and
+        # it rides the short-TTL cache: the poll fires every ~2 seconds while the
+        # only per-tick question -- is the hostname live yet? -- is answered by
+        # the TLS probe below, not by re-running a multi-second `shares status`
+        # subprocess for a domain that never changes.
+        span.add_args(is_share_cached=state.active_share_cache.get(host_id) is not None)
+        share = get_active_share_cached(
+            host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.active_share_cache
+        )
+        if share is None or not share.workspace_domain:
+            return SharingReadinessResponse(ready=False)
+        # Probe the shell's routable label origin, not the bare machine domain
+        # (which does not route on a share). Not-ready until the shell label is known.
+        service_labels = resolve_share_target_labels_for_host(state.backend_resolver, state.session_store, host_id)
+        shell_label = service_labels.get(WHOLE_MACHINE_SERVICE)
+        probe_host = f"{shell_label}.{share.workspace_domain}" if shell_label else None
+        is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
+        span.add_args(is_ready=is_ready)
+        # The labels ride every poll so a share panel opened before the workspace's
+        # registrations reached this client learns them without re-fetching anything.
+        if is_ready:
+            return SharingReadinessResponse(
+                ready=True,
+                cert_not_after=share.cert_not_after,
+                last_tunnel_login_at=share.last_tunnel_login_at,
+                service_labels=service_labels,
+            )
+        # Not live yet: ask the workspace's own gateway how the bring-up is going,
+        # so a failing or halted provisioning is explained instead of spinning.
+        span.add_args(is_gateway_cached=state.gateway_status_cache.get(host_id) is not None)
+        gateway_status = get_share_gateway_status_cached(
+            host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.gateway_status_cache
+        )
         return SharingReadinessResponse(
-            ready=True,
+            ready=False,
             cert_not_after=share.cert_not_after,
             last_tunnel_login_at=share.last_tunnel_login_at,
             service_labels=service_labels,
+            gateway_state=gateway_status.state if gateway_status is not None else None,
+            gateway_error=(gateway_status.last_error or None) if gateway_status is not None else None,
+            gateway_failed_attempt_count=(
+                int(gateway_status.failed_attempt_count) if gateway_status is not None else None
+            ),
+            gateway_next_retry_at=gateway_status.next_retry_at if gateway_status is not None else None,
         )
-    # Not live yet: ask the workspace's own gateway how the bring-up is going,
-    # so a failing or halted provisioning is explained instead of spinning.
-    gateway_status = get_share_gateway_status_cached(
-        host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.gateway_status_cache
-    )
-    return SharingReadinessResponse(
-        ready=False,
-        cert_not_after=share.cert_not_after,
-        last_tunnel_login_at=share.last_tunnel_login_at,
-        service_labels=service_labels,
-        gateway_state=gateway_status.state if gateway_status is not None else None,
-        gateway_error=(gateway_status.last_error or None) if gateway_status is not None else None,
-        gateway_failed_attempt_count=(
-            int(gateway_status.failed_attempt_count) if gateway_status is not None else None
-        ),
-        gateway_next_retry_at=gateway_status.next_retry_at if gateway_status is not None else None,
-    )
 
 
 @require_api_or_cookie_auth

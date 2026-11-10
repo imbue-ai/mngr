@@ -8,6 +8,7 @@ and makes them deterministic.
 import ast
 import inspect
 import json as _json
+from typing import Any
 
 import httpx2
 import pytest
@@ -15,10 +16,15 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.profiling import TraceContext
+from imbue.imbue_common.profiling import drain_events
+from imbue.imbue_common.profiling import get_profiler
+from imbue.imbue_common.profiling import parse_traceparent
 from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr_imbue_cloud.connector import client as connector_client_module
 from imbue.mngr_imbue_cloud.connector.client import CLIENT_ID_HEADER
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.client import TRACEPARENT_HEADER
 from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
@@ -1096,6 +1102,84 @@ def test_release_host_follows_modal_303_redirect_to_result(monkeypatch: pytest.M
     # success -- before follow_redirects the bare 303 raised here.
     client.release_host(SecretStr("tok"), "db-1")
     assert seen_paths == ["/hosts/db-1/release", "/attempts/tok-303"]
+
+
+# Profiling (_send's connector.request span and traceparent header)
+
+
+def _connector_request_spans() -> list[dict[str, Any]]:
+    return [event for event in drain_events() if event["ph"] == "X" and event["name"] == "connector.request"]
+
+
+def test_send_carries_its_spans_traceparent_and_records_the_status_when_profiling(collecting_profiler: None) -> None:
+    seen_headers: list[httpx2.Headers] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen_headers.append(request.headers)
+        return httpx2.Response(200, json=[])
+
+    assert _make_transport_client(handler).list_hosts(SecretStr("tok-profiled")) == []
+
+    [span] = _connector_request_spans()
+    [headers] = seen_headers
+    assert span["args"] == {
+        "method": "GET",
+        "path": "/hosts",
+        "attempt": 1,
+        "trace_id": span["args"]["trace_id"],
+        "span_id": span["args"]["span_id"],
+        "status": 200,
+    }
+    assert parse_traceparent(headers[TRACEPARENT_HEADER]) == TraceContext(
+        trace_id=span["args"]["trace_id"], span_id=span["args"]["span_id"]
+    )
+    # The bearer and client-id headers ride alongside, untouched by the merge.
+    assert headers["Authorization"] == "Bearer tok-profiled"
+    assert headers[CLIENT_ID_HEADER] == connector_client_module.get_client_identifier()
+
+
+def test_send_omits_the_traceparent_header_while_profiling_is_off() -> None:
+    seen_headers: list[httpx2.Headers] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen_headers.append(request.headers)
+        return httpx2.Response(200, json=[])
+
+    assert get_profiler().is_enabled is False
+    assert _make_transport_client(handler).list_hosts(SecretStr("tok")) == []
+
+    [headers] = seen_headers
+    assert TRACEPARENT_HEADER not in headers
+    assert headers["Authorization"] == "Bearer tok"
+
+
+def test_send_records_one_connector_request_span_per_attempt(collecting_profiler: None) -> None:
+    seen_traceparents: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen_traceparents.append(request.headers[TRACEPARENT_HEADER])
+        if len(seen_traceparents) == 1:
+            raise httpx2.ConnectError("simulated DNS failure", request=request)
+        return httpx2.Response(200, json=[])
+
+    # In a warm mngr child the command's root span encloses the connector calls; stand in for it here.
+    with get_profiler().span("mngr imbue_cloud hosts list") as operation:
+        assert _make_transport_client(handler).list_hosts(SecretStr("tok")) == []
+
+    [failed_span, succeeded_span] = _connector_request_spans()
+    assert failed_span["args"]["attempt"] == 1
+    assert failed_span["args"]["error"] == "ConnectError"
+    assert failed_span["args"]["is_failed"] is True
+    assert "status" not in failed_span["args"]
+    assert succeeded_span["args"]["attempt"] == 2
+    assert succeeded_span["args"]["status"] == 200
+    # Both attempts join the enclosing operation's trace, each under its own span id.
+    assert {failed_span["args"]["trace_id"], succeeded_span["args"]["trace_id"]} == {operation.context.trace_id}
+    assert failed_span["args"]["span_id"] != succeeded_span["args"]["span_id"]
+    assert [parse_traceparent(value) for value in seen_traceparents] == [
+        TraceContext(trace_id=span["args"]["trace_id"], span_id=span["args"]["span_id"])
+        for span in (failed_span, succeeded_span)
+    ]
 
 
 def test_send_follows_modal_303_redirect_to_result() -> None:

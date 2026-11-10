@@ -39,6 +39,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -465,6 +466,32 @@ def capture_error_logs() -> Generator[list[str], None, None]:
         yield records
     finally:
         loguru_logger.remove(sink_id)
+
+
+def flushed_trace_events(trace_path: Path) -> list[dict[str, Any]]:
+    """Every event the live writer has recorded into ``trace_path`` so far, in order.
+
+    The writer buffers and only terminates the array when it closes, so this
+    flushes it and completes the array itself to read mid-test.
+    """
+    get_profiler().flush()
+    text = trace_path.read_text()
+    return json.loads(text if text.rstrip().endswith("]") else text + "]")
+
+
+def trace_spans_named(events: Sequence[Mapping[str, Any]], name: str) -> list[Mapping[str, Any]]:
+    """The complete ("X") events of one name, in recording order."""
+    return [event for event in events if event["ph"] == "X" and event["name"] == name]
+
+
+def is_span_within(inner: Mapping[str, Any], outer: Mapping[str, Any]) -> bool:
+    """Whether ``inner`` nests under ``outer``: same process and thread, and inside its time range."""
+    return (
+        inner["pid"] == outer["pid"]
+        and inner["tid"] == outer["tid"]
+        and outer["ts"] <= inner["ts"]
+        and inner["ts"] + inner["dur"] <= outer["ts"] + outer["dur"]
+    )
 
 
 def write_dead_destroy_marker(

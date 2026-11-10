@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
@@ -101,7 +102,7 @@ class IdentityCache(MutableModel):
 
     def put_all(self, records: Sequence[IdentityRecord], now: datetime) -> None:
         """Store every record as fetched now, in one rewrite of the file."""
-        with self._lock:
+        with get_profiler().span("identity_cache.put"), self._lock:
             document = self._load()
             entries = dict(document.entries_by_user_id)
             for record in records:

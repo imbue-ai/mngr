@@ -21,7 +21,9 @@ from collections.abc import Sequence
 from functools import cache
 from importlib import metadata
 from typing import Any
+from typing import Final
 from urllib.parse import quote
+from urllib.parse import urlsplit
 
 import httpx2
 from loguru import logger
@@ -39,6 +41,8 @@ from tenacity import wait_random_exponential
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
+from imbue.imbue_common.profiling import render_traceparent
 from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
@@ -173,6 +177,8 @@ _CONNECT_PHASE_TRANSPORT_ERRORS = (httpx2.ConnectError, httpx2.ConnectTimeout)
 # access log can attribute traffic to shipped client versions -- the input for
 # support-window decisions and, later, deprecation-by-date enforcement.
 CLIENT_ID_HEADER = "X-Imbue-Client"
+
+TRACEPARENT_HEADER: Final[str] = "traceparent"
 
 # Set by the minds desktop launcher; when present the identifier carries the
 # product version ahead of the plugin package version.
@@ -417,6 +423,31 @@ class ImbueCloudConnectorClient(MutableModel):
             return httpx2.delete(url, follow_redirects=True, **kwargs)
         raise SwitchError(f"Unsupported HTTP method: {method}")
 
+    def _http_call_in_span(self, method: str, url: str, attempt_number: int, **kwargs: Any) -> httpx2.Response:
+        """Make one attempt of a connector request inside a ``connector.request`` span.
+
+        While a profiling mode is enabled the request also carries the span's own
+        ids as its ``traceparent`` header, so the connector's access log line for
+        this exact attempt can be found from the trace. The path is recorded
+        without its query string, and the status (or the transport error's class)
+        once the attempt ends. Off, this is the plain call.
+        """
+        profiler = get_profiler()
+        if not profiler.is_enabled:
+            return self._http_call(method, url, **kwargs)
+        with profiler.span(
+            "connector.request", method=method, path=urlsplit(url).path, attempt=attempt_number
+        ) as span:
+            span.add_args(trace_id=span.context.trace_id, span_id=span.context.span_id)
+            headers = {**kwargs.get("headers", {}), TRACEPARENT_HEADER: render_traceparent(span.context)}
+            try:
+                response = self._http_call(method, url, **{**kwargs, "headers": headers})
+            except httpx2.TransportError as exc:
+                span.add_args(error=type(exc).__name__)
+                raise
+            span.add_args(status=response.status_code)
+            return response
+
     def _send(
         self,
         method: str,
@@ -438,7 +469,8 @@ class ImbueCloudConnectorClient(MutableModel):
         POSTs) retry on any ``httpx2.TransportError``; non-idempotent POSTs pass
         ``idempotent=False`` so only
         connect-phase errors -- where the request never reached the server --
-        are retried, avoiding a double-allocation on a post-send blip.
+        are retried, avoiding a double-allocation on a post-send blip. Each
+        attempt is its own ``connector.request`` span (see ``_http_call_in_span``).
         """
         retrying = Retrying(
             retry=retry_if_exception(lambda exc: _is_retryable_transport_error(exc, idempotent=idempotent)),
@@ -452,7 +484,10 @@ class ImbueCloudConnectorClient(MutableModel):
             reraise=True,
         )
         try:
-            return retrying(self._http_call, method, url, **kwargs)
+            # tenacity's statistics name the attempt in flight, which is what the span records.
+            return retrying(
+                lambda: self._http_call_in_span(method, url, retrying.statistics["attempt_number"], **kwargs)
+            )
         except httpx2.TransportError as exc:
             attempt_count = retrying.statistics["attempt_number"]
             raise exc_cls(

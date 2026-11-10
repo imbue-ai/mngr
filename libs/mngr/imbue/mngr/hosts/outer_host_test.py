@@ -26,6 +26,7 @@ from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.imbue_common.profiling import drain_events
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
@@ -454,6 +455,17 @@ def test_outer_host_stateful_without_on_output_still_returns_result(local_outer_
     result = local_outer_host.execute_stateful_command("echo hello-buffered")
     assert result.success
     assert "hello-buffered" in result.stdout
+
+
+def test_outer_host_stateful_command_runs_inside_a_host_exec_span(
+    local_outer_host: OuterHost, collecting_profiler: None
+) -> None:
+    """An outer host belongs to no provider, so its span names the host alone."""
+    result = local_outer_host.execute_stateful_command("echo before-fail; exit 7")
+
+    [span] = [event for event in drain_events() if event["ph"] == "X" and event["name"] == "host.exec"]
+    assert not result.success
+    assert span["args"] == {"host_id": str(local_outer_host.id), "is_success": False}
 
 
 class _FakePyinfraHostRaisingOnConnect:

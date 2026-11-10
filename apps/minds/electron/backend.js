@@ -9,6 +9,7 @@ const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 const { backgroundLaunchEnv } = require('./background-launch');
+const { profileFileEnv } = require('./profiling');
 const { bundledGitEnv } = require('./git-env');
 const { dropStdioWriteErrors } = require('./stdio-write-errors');
 const {
@@ -280,10 +281,20 @@ function logBundledGitVersion(gitRoot) {
  * In dev mode, uses `uv run --package minds` from the monorepo root so
  * the workspace venv (synced to minds' dependency closure) is used directly.
  *
+ * `profilePath` is the trace file of the opt-in profiling mode, handed to the
+ * backend as MINDS_PROFILE_FILE; null when the mode is off.
+ *
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStarted, onLogLine = () => {}) {
+function startBackend(
+  onProgress,
+  onNotification,
+  onAuthEvent,
+  onMngrForwardStarted,
+  onLogLine = () => {},
+  { profilePath = null } = {},
+) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -392,6 +403,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...latchkeyCurlEnv(),
           ...latchkeyCaBundleEnv(caBundlePath),
           ...pythonCaBundleEnv(caBundlePath),
+          ...profileFileEnv(profilePath),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -481,6 +493,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
             execPath: process.execPath,
             appImagePath: process.env.APPIMAGE,
           }),
+          ...profileFileEnv(profilePath),
         };
       }
 

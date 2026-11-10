@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import AnyUrl
 
+from imbue.imbue_common.profiling import drain_events
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
@@ -861,3 +862,15 @@ def test_resize_machine_raises_the_typed_quota_error_on_the_connectors_structure
         cli.resize_machine("owner@example.com", "host-" + "a" * 32, target_memory_units=32, target_disk_gb=None)
 
     assert "active machine units limit is 16" in str(exc_info.value)
+
+
+def test_run_records_a_span_named_by_the_cg_name_and_never_by_the_arguments(profile_collector: None) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=3, stderr="refused"))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    cli._run(["auth", "signin", "--password", "hunter2"], cg_name="imbue-cloud-auth-signin")
+
+    [span] = [event for event in drain_events() if event["ph"] == "X"]
+    assert span["name"] == "imbue_cloud_cli.run"
+    assert span["args"] == {"cg_name": "imbue-cloud-auth-signin", "returncode": 3, "is_timed_out": False}
+    assert "hunter2" not in json.dumps(span)

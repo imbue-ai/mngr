@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.profile_ingestion import PageSessionRegistry
 from imbue.minds.desktop_client.program_resolution import LoginShellPath
 from imbue.minds.desktop_client.provider_relay import ProviderRelayRegistry
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
@@ -391,6 +392,12 @@ class DesktopClientState(MutableModel):
             "Short-TTL cache of in-workspace share gateway status reads for the sharing readiness poll "
             "(invalidated by the sharing PUT/DELETE handlers)"
         ),
+    )
+
+    page_profile_sessions: PageSessionRegistry = Field(
+        default_factory=PageSessionRegistry,
+        frozen=True,
+        description="The synthetic trace process of each page's profiling session; only written to under --profile",
     )
 
     def invalidate_sharing_caches(self, host_id: str) -> None:

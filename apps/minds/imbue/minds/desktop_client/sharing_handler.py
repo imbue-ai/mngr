@@ -41,6 +41,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.agent_address import build_agent_address
@@ -245,19 +246,22 @@ def split_relay_endpoint(endpoint: str) -> tuple[str, int] | None:
 
 def _measure_tcp_connect_seconds(endpoint: str, timeout_seconds: float) -> float | None:
     """Time a bare TCP connect to a ``host:port`` endpoint; None when unparseable or unreachable."""
-    host_and_port = split_relay_endpoint(endpoint)
-    if host_and_port is None:
-        logger.debug("Skipping unparseable relay endpoint: {}", endpoint)
-        return None
-    host, port = host_and_port
-    started_at = time.monotonic()
-    try:
-        with socket.create_connection((host, port), timeout=timeout_seconds):
-            pass
-    except OSError as exc:
-        logger.debug("Relay latency probe to {} failed: {}", endpoint, exc)
-        return None
-    return time.monotonic() - started_at
+    with get_profiler().span("sharing.relay_probe", endpoint=endpoint) as span:
+        host_and_port = split_relay_endpoint(endpoint)
+        if host_and_port is None:
+            logger.debug("Skipping unparseable relay endpoint: {}", endpoint)
+            return None
+        host, port = host_and_port
+        started_at = time.monotonic()
+        try:
+            with socket.create_connection((host, port), timeout=timeout_seconds):
+                pass
+        except OSError as exc:
+            logger.debug("Relay latency probe to {} failed: {}", endpoint, exc)
+            span.add_args(is_reachable=False)
+            return None
+        span.add_args(is_reachable=True)
+        return time.monotonic() - started_at
 
 
 def pick_lowest_latency_relay_region(
@@ -344,21 +348,22 @@ def _resolve_grant_identities(
     with nothing cached, is simply absent from the result; the share panel then
     renders the id itself.
     """
-    if identity_cache is None:
-        return {}
-    identities: dict[str, IdentityRecord] = {}
-    now = now_utc()
-    for user_id in user_ids:
-        try:
-            record = identity_cache.get_or_fetch(
-                user_id, lambda lookup_id: _fetch_identity_from_connector(cli, account_email, lookup_id), now
-            )
-        except ImbueCloudCliError as exc:
-            logger.debug("Could not resolve the identity of grantee {}: {}", user_id[:8], exc)
-            continue
-        if record is not None:
-            identities[user_id] = record
-    return identities
+    with get_profiler().span("sharing.resolve_identities", user_count=len(user_ids)):
+        if identity_cache is None:
+            return {}
+        identities: dict[str, IdentityRecord] = {}
+        now = now_utc()
+        for user_id in user_ids:
+            try:
+                record = identity_cache.get_or_fetch(
+                    user_id, lambda lookup_id: _fetch_identity_from_connector(cli, account_email, lookup_id), now
+                )
+            except ImbueCloudCliError as exc:
+                logger.debug("Could not resolve the identity of grantee {}: {}", user_id[:8], exc)
+                continue
+            if record is not None:
+                identities[user_id] = record
+        return identities
 
 
 class _GrantsSync(FrozenModel):
@@ -648,79 +653,83 @@ def _publish_workspace_with_cli(
     # whatever the workspace already grants.
     grants: SharingGrantsDocument | None,
 ) -> dict[str, Any]:
-    # One exec answers everything the flow needs from the workspace: whether
-    # the template ships the share gateway, whether share.env is present, and
-    # the current grants document.
-    try:
-        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        raise SharingError(str(exc)) from exc
-    if not probe.has_gateway:
-        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
-    stored_grants = _readable_grants_document(probe.grants_toml_text)
+    with get_profiler().span("sharing.publish", host_id=host_id, is_cloud_row=is_cloud_row) as span:
+        # One exec answers everything the flow needs from the workspace: whether
+        # the template ships the share gateway, whether share.env is present, and
+        # the current grants document.
+        try:
+            probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+        except ShareInjectionError as exc:
+            raise SharingError(str(exc)) from exc
+        if not probe.has_gateway:
+            raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        stored_grants = _readable_grants_document(probe.grants_toml_text)
 
-    # What this publish writes, if anything. With no document given the
-    # workspace keeps the one it holds -- unless nothing there can be parsed,
-    # which counts as holding none: the gateway refuses every request when it
-    # cannot read a document, so an empty one is written for it.
-    if grants is not None:
-        refusals = validate_grants_document(grants, account_email, stored_grants or SharingGrantsDocument())
-        if refusals:
-            raise GrantsRefusedError(refusals)
-        grants_to_store: SharingGrantsDocument | None = normalized_grants_document(grants)
-    elif stored_grants is None:
-        grants_to_store = SharingGrantsDocument()
-    else:
-        grants_to_store = None
-    grants_toml = _render_grants_document_toml(grants_to_store) if grants_to_store is not None else None
-    # What the file holds after this publish: what is about to be written, or the one already there.
-    saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
-    user_ids = _granted_user_ids(saved_grants)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    identities_json = render_share_identities_json(identities) if grants_toml is not None else None
+        # What this publish writes, if anything. With no document given the
+        # workspace keeps the one it holds -- unless nothing there can be parsed,
+        # which counts as holding none: the gateway refuses every request when it
+        # cannot read a document, so an empty one is written for it.
+        if grants is not None:
+            refusals = validate_grants_document(grants, account_email, stored_grants or SharingGrantsDocument())
+            if refusals:
+                raise GrantsRefusedError(refusals)
+            grants_to_store: SharingGrantsDocument | None = normalized_grants_document(grants)
+        elif stored_grants is None:
+            grants_to_store = SharingGrantsDocument()
+        else:
+            grants_to_store = None
+        grants_toml = _render_grants_document_toml(grants_to_store) if grants_to_store is not None else None
+        # What the file holds after this publish: what is about to be written, or the one already there.
+        saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
+        span.add_args(is_first_publish=not probe.has_share_env)
+        user_ids = _granted_user_ids(saved_grants)
+        identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+        identities_json = render_share_identities_json(identities) if grants_toml is not None else None
 
-    # Materials present means the workspace is published already or carries
-    # stale ones from a share disabled elsewhere (re-provision). Only this path
-    # needs the connector's status; the common publish-from-off path never reads
-    # it -- create is the source of truth there.
-    existing = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
-    if existing is not None:
-        share = existing
-        if grants_toml is not None:
-            _write_grants_document(agent_address, grants_toml, identities_json, cli)
-    else:
-        # Local shares with no materials in the workspace pick the relay by
-        # measured latency from here (the workspace runs on this machine, so
-        # the desktop's latency is the right proximity signal). A cloud row
-        # runs elsewhere, and a stale-materials re-provision is already placed,
-        # so both skip the measurement. The preference is advisory anyway: the
-        # connector honors it only for hosts it has no region record of.
-        is_relay_region_measured = not is_cloud_row and not probe.has_share_env
-        share = _create_share_and_write_materials(
+        # Materials present means the workspace is published already or carries
+        # stale ones from a share disabled elsewhere (re-provision). Only this path
+        # needs the connector's status; the common publish-from-off path never reads
+        # it -- create is the source of truth there.
+        existing = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
+        if existing is not None:
+            share = existing
+            if grants_toml is not None:
+                _write_grants_document(agent_address, grants_toml, identities_json, cli)
+        else:
+            # Local shares with no materials in the workspace pick the relay by
+            # measured latency from here (the workspace runs on this machine, so
+            # the desktop's latency is the right proximity signal). A cloud row
+            # runs elsewhere, and a stale-materials re-provision is already placed,
+            # so both skip the measurement. The preference is advisory anyway: the
+            # connector honors it only for hosts it has no region record of.
+            is_relay_region_measured = not is_cloud_row and not probe.has_share_env
+            share = _create_share_and_write_materials(
+                host_id,
+                agent_id,
+                agent_address,
+                cli,
+                account_email,
+                client_env_config,
+                preferred_region=_pick_preferred_relay_region(cli, account_email)
+                if is_relay_region_measured
+                else None,
+                service_labels=service_labels,
+                grants_toml_text=grants_toml,
+                identities_json_text=identities_json,
+            )
+
+        _mark_shared_on_forward(agent_id, forward_identity, owner_account)
+        # The create (or the status read above) is the authority on the share, not the push.
+        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
+        return _share_status_document(
             host_id,
-            agent_id,
-            agent_address,
-            cli,
-            account_email,
-            client_env_config,
-            preferred_region=_pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None,
-            service_labels=service_labels,
-            grants_toml_text=grants_toml,
-            identities_json_text=identities_json,
+            share,
+            saved_grants,
+            service_labels,
+            _identities_after_sync(sync, identity_cache, lambda: identities),
+            sync.is_synced,
+            sync.outcomes,
         )
-
-    _mark_shared_on_forward(agent_id, forward_identity, owner_account)
-    # The create (or the status read above) is the authority on the share, not the push.
-    sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
-    return _share_status_document(
-        host_id,
-        share,
-        saved_grants,
-        service_labels,
-        _identities_after_sync(sync, identity_cache, lambda: identities),
-        sync.is_synced,
-        sync.outcomes,
-    )
 
 
 def _save_grants_with_cli(
@@ -732,40 +741,42 @@ def _save_grants_with_cli(
     service_labels: Mapping[str, str],
     identity_cache: IdentityCache | None,
 ) -> dict[str, Any]:
-    # One read answers everything this save needs of the workspace: whether the
-    # gateway is there to read what it writes, and which of the entries being
-    # saved are new (only those face the rules).
-    try:
-        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        raise SharingError(str(exc)) from exc
-    if not probe.has_gateway:
-        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
-    stored_grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
-    refusals = validate_grants_document(grants, account_email, stored_grants)
-    if refusals:
-        raise GrantsRefusedError(refusals)
-    saved_grants = normalized_grants_document(grants)
-    user_ids = _granted_user_ids(saved_grants)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    _write_grants_document(
-        agent_address, _render_grants_document_toml(saved_grants), render_share_identities_json(identities), cli
-    )
-    # An unpublished workspace's save never reaches the connector: the next
-    # publish pushes whatever the document holds by then.
-    if not probe.has_share_env:
-        return _share_status_document(host_id, None, saved_grants, service_labels, identities, None, None)
-    # Materials present means the workspace believes itself published; the push says what the share is.
-    sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
-    return _share_status_document(
-        host_id,
-        _share_after_sync(sync, lambda: _read_active_share(cli, account_email, host_id)),
-        saved_grants,
-        service_labels,
-        _identities_after_sync(sync, identity_cache, lambda: identities),
-        sync.is_synced,
-        sync.outcomes,
-    )
+    with get_profiler().span("sharing.save_grants", host_id=host_id) as span:
+        # One read answers everything this save needs of the workspace: whether the
+        # gateway is there to read what it writes, and which of the entries being
+        # saved are new (only those face the rules).
+        try:
+            probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+        except ShareInjectionError as exc:
+            raise SharingError(str(exc)) from exc
+        if not probe.has_gateway:
+            raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        stored_grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+        refusals = validate_grants_document(grants, account_email, stored_grants)
+        if refusals:
+            raise GrantsRefusedError(refusals)
+        saved_grants = normalized_grants_document(grants)
+        user_ids = _granted_user_ids(saved_grants)
+        span.add_args(user_count=len(user_ids))
+        identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+        _write_grants_document(
+            agent_address, _render_grants_document_toml(saved_grants), render_share_identities_json(identities), cli
+        )
+        # An unpublished workspace's save never reaches the connector: the next
+        # publish pushes whatever the document holds by then.
+        if not probe.has_share_env:
+            return _share_status_document(host_id, None, saved_grants, service_labels, identities, None, None)
+        # Materials present means the workspace believes itself published; the push says what the share is.
+        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
+        return _share_status_document(
+            host_id,
+            _share_after_sync(sync, lambda: _read_active_share(cli, account_email, host_id)),
+            saved_grants,
+            service_labels,
+            _identities_after_sync(sync, identity_cache, lambda: identities),
+            sync.is_synced,
+            sync.outcomes,
+        )
 
 
 def _write_grants_document(
@@ -1111,70 +1122,76 @@ def get_sharing(
     so opening the share panel is what moves it; that read raises
     :class:`SharingError` when the move fails.
     """
-    # Discovery is concurrently updated, so the coordinate can be unresolvable;
-    # degrade to UNKNOWN grants rather than failing the whole read. The grants
-    # must not degrade to "empty": the pane would render every grantee as
-    # revoked, and a save from that state would replace a policy nobody ever saw.
-    try:
-        agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
-    except SharingError as exc:
-        logger.debug("Sharing grants read: {}", exc)
-        return _unknown_grants_document(host_id, None, {})
-    if cli is None:
-        return _unknown_grants_document(host_id, None, {})
-    service_labels = resolve_share_target_labels(backend_resolver, agent_id)
-    agent_address = build_agent_address(agent_id, backend_resolver)
-    account_email = _account_email_or_none(session_store, agent_id)
-    try:
-        probe = read_share_state_from_agent(agent_address, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        logger.debug("Sharing grants read: {}", exc)
-        share_without_grants = (
-            _read_active_share_or_none(cli, account_email, host_id) if account_email is not None else None
-        )
-        return _unknown_grants_document(host_id, share_without_grants, service_labels)
-    # A document nothing can parse reads back as an empty one; ``grants: null``
-    # is reserved for a read that never landed, above.
-    grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
-    if account_email is None:
-        # Without a signed-in account there is nothing to ask the connector with.
-        return _share_status_document(host_id, None, grants, service_labels, {}, None, None)
-    # Materials present means the workspace believes itself published, so the
-    # push says what the share is. Without them the status read does, since a
-    # share can be active on the connector with the materials gone (a publish
-    # that failed between the create and the injection); such a share still
-    # gets its document pushed.
-    if probe.has_share_env:
-        sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
-        share = _share_after_sync(sync, lambda: _read_active_share_or_none(cli, account_email, host_id))
-    else:
-        share = _read_active_share_or_none(cli, account_email, host_id)
-        sync = (
-            _sync_grants_with_connector(cli, account_email, host_id, grants) if share is not None else _NOTHING_PUSHED
-        )
-    if share is not None and share.needs_reshare:
-        if client_env_config is None:
-            raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
-        return migrate_stale_share(
-            host_id,
-            agent_id,
-            agent_address,
-            share,
-            probe,
-            cli,
-            account_email,
-            client_env_config,
-            service_labels,
+    with get_profiler().span("sharing.get_sharing", host_id=host_id) as span:
+        # Discovery is concurrently updated, so the coordinate can be unresolvable;
+        # degrade to UNKNOWN grants rather than failing the whole read. The grants
+        # must not degrade to "empty": the pane would render every grantee as
+        # revoked, and a save from that state would replace a policy nobody ever saw.
+        try:
+            agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+        except SharingError as exc:
+            logger.debug("Sharing grants read: {}", exc)
+            return _unknown_grants_document(host_id, None, {})
+        if cli is None:
+            return _unknown_grants_document(host_id, None, {})
+        service_labels = resolve_share_target_labels(backend_resolver, agent_id)
+        agent_address = build_agent_address(agent_id, backend_resolver)
+        account_email = _account_email_or_none(session_store, agent_id)
+        try:
+            probe = read_share_state_from_agent(agent_address, cli.mngr_caller)
+        except ShareInjectionError as exc:
+            logger.debug("Sharing grants read: {}", exc)
+            share_without_grants = (
+                _read_active_share_or_none(cli, account_email, host_id) if account_email is not None else None
+            )
+            return _unknown_grants_document(host_id, share_without_grants, service_labels)
+        # A document nothing can parse reads back as an empty one; ``grants: null``
+        # is reserved for a read that never landed, above.
+        grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+        if account_email is None:
+            # Without a signed-in account there is nothing to ask the connector with.
+            return _share_status_document(host_id, None, grants, service_labels, {}, None, None)
+        # Materials present means the workspace believes itself published, so the
+        # push says what the share is. Without them the status read does, since a
+        # share can be active on the connector with the materials gone (a publish
+        # that failed between the create and the injection); such a share still
+        # gets its document pushed.
+        if probe.has_share_env:
+            sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
+            share = _share_after_sync(sync, lambda: _read_active_share_or_none(cli, account_email, host_id))
+        else:
+            share = _read_active_share_or_none(cli, account_email, host_id)
+            sync = (
+                _sync_grants_with_connector(cli, account_email, host_id, grants)
+                if share is not None
+                else _NOTHING_PUSHED
+            )
+        span.add_args(is_published=share is not None)
+        if share is not None and share.needs_reshare:
+            if client_env_config is None:
+                raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
+            return migrate_stale_share(
+                host_id,
+                agent_id,
+                agent_address,
+                share,
+                probe,
+                cli,
+                account_email,
+                client_env_config,
+                service_labels,
+                identity_cache,
+                forward_identity,
+                owner_account_for_workspace(session_store, agent_id),
+            )
+        identities = _identities_after_sync(
+            sync,
             identity_cache,
-            forward_identity,
-            owner_account_for_workspace(session_store, agent_id),
+            lambda: _resolve_grant_identities(_granted_user_ids(grants), identity_cache, cli, account_email),
         )
-    identities = _identities_after_sync(
-        sync,
-        identity_cache,
-        lambda: _resolve_grant_identities(_granted_user_ids(grants), identity_cache, cli, account_email),
-    )
-    return _share_status_document(host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes)
+        return _share_status_document(
+            host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes
+        )
 
 
 def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
@@ -1391,29 +1408,30 @@ def invite_grantee_for_workspace(
     Raises :class:`SharingError` when the workspace is unpublished or the
     connector cannot be reached.
     """
-    state = get_state()
-    cli: ImbueCloudCli | None = state.imbue_cloud_cli
-    if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
-    session_store = state.session_store
-    agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
-    account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    share = _read_active_share(cli, account_email, host_id)
-    if share is None:
-        raise SharingError("Publish this workspace before inviting anyone: the invitation carries its link.")
-    target = app if app else WHOLE_MACHINE_SERVICE
-    label = resolve_share_target_labels(backend_resolver, agent_id).get(target)
-    attempt = _InvitationAttempt(
-        account_email=account_email,
-        host_id=host_id,
-        user_id=user_id,
-        email=email,
-        app=None if target == WHOLE_MACHINE_SERVICE else target,
-        link=f"https://{label}.{share.workspace_domain}/" if label else None,
-        workspace_name=_workspace_display_name(backend_resolver, agent_id),
-        app_display_name=resolve_share_target_display_names(backend_resolver, agent_id).get(target),
-    )
-    return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
+    with get_profiler().span("sharing.invite", host_id=host_id):
+        state = get_state()
+        cli: ImbueCloudCli | None = state.imbue_cloud_cli
+        if cli is None:
+            raise SharingError("imbue_cloud CLI is not configured on this app.")
+        session_store = state.session_store
+        agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+        account_email = resolve_account_email_for_workspace(session_store, agent_id)
+        share = _read_active_share(cli, account_email, host_id)
+        if share is None:
+            raise SharingError("Publish this workspace before inviting anyone: the invitation carries its link.")
+        target = app if app else WHOLE_MACHINE_SERVICE
+        label = resolve_share_target_labels(backend_resolver, agent_id).get(target)
+        attempt = _InvitationAttempt(
+            account_email=account_email,
+            host_id=host_id,
+            user_id=user_id,
+            email=email,
+            app=None if target == WHOLE_MACHINE_SERVICE else target,
+            link=f"https://{label}.{share.workspace_domain}/" if label else None,
+            workspace_name=_workspace_display_name(backend_resolver, agent_id),
+            app_display_name=resolve_share_target_display_names(backend_resolver, agent_id).get(target),
+        )
+        return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
 
 
 def _invite_with_one_retry(cli: ImbueCloudCli, attempt: _InvitationAttempt, agent_address: str) -> InvitationCliResult:
@@ -1425,7 +1443,8 @@ def _invite_with_one_retry(cli: ImbueCloudCli, attempt: _InvitationAttempt, agen
             raise
         _push_current_document(cli, attempt.account_email, attempt.host_id, agent_address)
         try:
-            return _invite_through_cli(cli, attempt)
+            with get_profiler().span("sharing.invite_retry", host_id=attempt.host_id):
+                return _invite_through_cli(cli, attempt)
         except ImbueCloudShareRefusedCliError:
             raise
         except ImbueCloudCliError as retry_exc:
@@ -1526,9 +1545,12 @@ def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
     connector's share record + the workspace's own service labels, never from
     caller input.
     """
-    try:
-        http_client.get(f"https://{probe_host}/", timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx2.HTTPError as exc:
-        logger.debug("Probed share host {} but it is not ready yet: {}", probe_host, exc)
-        return False
-    return True
+    with get_profiler().span("sharing.readiness_probe", probe_host=probe_host) as span:
+        try:
+            http_client.get(f"https://{probe_host}/", timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+        except httpx2.HTTPError as exc:
+            logger.debug("Probed share host {} but it is not ready yet: {}", probe_host, exc)
+            span.add_args(is_ready=False)
+            return False
+        span.add_args(is_ready=True)
+        return True

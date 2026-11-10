@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.errors import MindError
@@ -597,12 +598,14 @@ class ImbueCloudCli(MutableModel):
         # signin/signup) pass secrets like --password.
         logger.debug("Running imbue_cloud command (cg={}, timeout={}s)", cg_name, timeout_seconds)
         start_time = time.monotonic()
-        result = self.mngr_caller.call(
-            argv,
-            timeout=float(timeout_seconds),
-            env_overrides=env_overrides,
-            cwd=Path.home(),
-        )
+        with get_profiler().span("imbue_cloud_cli.run", cg_name=cg_name) as span:
+            result = self.mngr_caller.call(
+                argv,
+                timeout=float(timeout_seconds),
+                env_overrides=env_overrides,
+                cwd=Path.home(),
+            )
+            span.add_args(returncode=result.returncode, is_timed_out=result.is_timed_out)
         logger.debug(
             "Finished imbue_cloud command (cg={}) in {:.1f}s: returncode={} timed_out={}",
             cg_name,

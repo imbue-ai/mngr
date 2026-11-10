@@ -71,6 +71,47 @@ launches Electron. The Linux launcher and the internal `just minds-start`
 recipes end in this same script. You create your first agent from the login
 URL the app prints on startup.
 
+## Profiling a session
+
+Imbue Studio has an opt-in profiling mode that records a session as one trace
+file the [Perfetto UI](https://ui.perfetto.dev) opens as is: the page's spans,
+the backend's request and sharing spans, each warm `mngr` process's import,
+wait and command, and, under Electron, Chromium's own trace of the shell and
+the renderer, all on one timeline. It is off unless the backend is started
+with a path to write to, and the path must not be under the logs directory a
+bug report uploads (the backend refuses one). To measure a share-panel
+operation from source:
+
+1. Start the app with the trace file named: `MINDS_PROFILE_FILE=~/profiles/share-1.json just minds-start`
+   (the shell's `--profile` launch argument does the same; see
+   [desktop-app.md](./desktop-app.md#environment-variables)), or run the
+   backend alone with `uv run minds run --profile ~/profiles/share-1.json`
+   and open it in a browser, which records everything but Chromium's trace.
+2. Open the share panel, publish, add a grant, close the panel. The page
+   posts its spans as they happen, and each warm process hands its spans
+   back as it finishes.
+3. Quit the app. Under Electron the shell flushes Chromium's trace into the
+   file and then stops the backend, which closes the file. Open
+   `~/profiles/share-1.json` in the Perfetto UI, or serve it to the UI from
+   localhost with Perfetto's own `open_trace_in_ui` script (fetched from
+   `get.perfetto.dev`).
+4. In the UI, the backend process shows one slice per request with the
+   sharing spans nested under it; each `mngr_caller.call` slice has an arrow
+   to the child process's lane, where the import, the wait, and the command
+   are three slices; the `Imbue Studio UI` process shows the panel's
+   operations with arrows to the requests that served them; Chromium's
+   browser and renderer processes show what the page and the shell were
+   doing meanwhile. A connector call's server-side duration is one
+   OpenObserve query on the `trace_id` its slice carries.
+
+For a function-level view of the backend, start it under viztracer instead
+(`uv run viztracer --min_duration 500 --ignore_frozen -o ~/profiles/share-1.viztracer.json -m imbue.minds.main run --profile ~/profiles/share-1.json`),
+then combine the two files (`viztracer --combine ours.json theirs.json -o combined.json`,
+or `jq -s add`); both are on the system monotonic clock, so they line up
+without rebasing. viztracer's filters are tuned per investigation:
+`--min_duration` keeps the file small and `--include_files` narrows it to our
+packages.
+
 ## Imbue-internal: developing against a dev env
 
 Everything above is what a contributor working from the public repo needs.
