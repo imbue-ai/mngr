@@ -3756,6 +3756,16 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         identities=_identities(document),
         grants_synced=grants_synced if isinstance(grants_synced, bool) else None,
         migrated_domain_from=_optional_str(document, "migrated_domain_from"),
+        invitation_outcomes=_invitation_outcomes(document),
+    )
+
+
+def _invitation_outcomes(document: dict[str, object]) -> tuple[InvitationOutcomeEntryResponse, ...] | None:
+    raw_outcomes = document.get("invitation_outcomes")
+    if not isinstance(raw_outcomes, list):
+        return None
+    return tuple(
+        InvitationOutcomeEntryResponse.model_validate(entry) for entry in raw_outcomes if isinstance(entry, dict)
     )
 
 

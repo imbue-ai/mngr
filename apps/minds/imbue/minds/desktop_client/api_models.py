@@ -1356,6 +1356,14 @@ class MachineSharingResponse(FrozenModel):
             "not live until the workspace's share stack restarts."
         ),
     )
+    invitation_outcomes: tuple[InvitationOutcomeEntryResponse, ...] | None = Field(
+        default=None,
+        description=(
+            "What the granter may learn about each open user or email grant, as Imbue Cloud answered it on "
+            "this operation's grants push; null when nothing was pushed (the workspace is unpublished, the "
+            "push failed, or Imbue Cloud did not say), in which case GET .../invitation-outcomes still reads them"
+        ),
+    )
 
 
 class StopStateContainerResponse(FrozenModel):

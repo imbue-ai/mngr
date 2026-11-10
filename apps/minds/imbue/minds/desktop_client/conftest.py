@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
@@ -63,7 +64,9 @@ from imbue.minds.desktop_client.imbue_cloud_cli import NotificationPreferencesCl
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareGrantsPushCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
+from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -364,6 +367,12 @@ class FakeImbueCloudCli(ImbueCloudCli):
     invitation_outcomes_error_to_raise: ImbueCloudCliError | None = Field(
         default=None, description="When set, list_invitation_outcomes raises it"
     )
+    identities_to_return: list[UserIdentityCliInfo] | None = Field(
+        default=None,
+        description=(
+            "The granted accounts' records push_share_grants answers; None plays a connector that does not say"
+        ),
+    )
     notification_preferences_by_email: dict[str, NotificationPreferencesCliInfo] = Field(
         default_factory=dict, description="account email -> preferences (the fake server state; absent means defaults)"
     )
@@ -371,11 +380,28 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default=False, description="When True, the notification preference calls raise ImbueCloudCliError"
     )
 
-    def push_share_grants(self, *, account: str, host_id: str, document: Mapping[str, Any]) -> int:
+    def push_share_grants(
+        self, *, account: str, host_id: str, document: Mapping[str, Any]
+    ) -> ShareGrantsPushCliResult:
+        """Answer as the connector does: refuse an unpublished share, else carry its status beside the count."""
         if self.is_grants_push_failing:
             raise ImbueCloudCliError("fake grants push failure")
+        share = self.share_as_the_connector_holds_it(account=account, host_id=host_id)
+        if share is None or share.state != "active":
+            refused = ImbueCloudShareRefusedCliError("shares push-grants: the workspace is unpublished")
+            refused.code = "not_published"
+            raise refused
         self.pushed_grants_documents.append((account, host_id, dict(document)))
-        return 1
+        return ShareGrantsPushCliResult(
+            appended=1,
+            share=share,
+            outcomes=tuple(self.invitation_outcomes_to_return),
+            identities=tuple(self.identities_to_return) if self.identities_to_return is not None else None,
+        )
+
+    def share_as_the_connector_holds_it(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        """The share a push answers with: the status document, read without counting as a status read."""
+        return self.get_share_status(account=account, host_id=host_id)
 
     def invite_grantee(
         self,

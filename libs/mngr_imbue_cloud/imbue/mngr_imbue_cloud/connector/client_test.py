@@ -3298,6 +3298,70 @@ def test_lease_host_sends_the_declared_ports_only_when_declared(monkeypatch: pyt
     assert "published_ports" not in bodies[-1]
 
 
+def test_push_share_grants_parses_the_share_the_outcomes_and_the_identities(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One push answers everything the share panel reads after a save: the
+    # share's status document, the invitation outcomes, and the grantees' records.
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "host_id": "host-abc",
+                "appended": 2,
+                "share": {
+                    "host_id": "host-abc",
+                    "workspace_domain": "host-abc.owner.us1.shares.example",
+                    "region": "us1",
+                    "state": "active",
+                    "relay_endpoints": [{"relay_id": "relay-1", "endpoint": "relay-us1.example:7000"}],
+                    "relays": [{"relay_id": "relay-1", "last_login_at": "2026-09-30T12:00:00+00:00"}],
+                    "last_tunnel_login_at": "2026-09-30T12:00:00+00:00",
+                    "cert_not_after": "2026-12-30T00:00:00+00:00",
+                    "needs_reshare": False,
+                    "media_port": 40001,
+                },
+                "outcomes": [
+                    {"kind": "email", "value": "bob@example.com", "app": "system_interface", "outcome": "invited"},
+                    {"kind": "user", "value": "u-2", "app": "notes", "outcome": "a-newer-outcome"},
+                ],
+                "identities": [{"user_id": "u-2", "email": "carol@example.com", "display_name": "Carol"}],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    result = client.push_share_grants(SecretStr("tok"), "host-abc", {})
+
+    assert result.appended == 2
+    assert result.share is not None
+    assert result.share.workspace_domain == "host-abc.owner.us1.shares.example"
+    assert result.share.state == "active"
+    assert result.share.media_port == 40001
+    assert [entry.relay_id for entry in result.share.relay_endpoints] == ["relay-1"]
+    assert result.outcomes is not None
+    assert [entry.outcome for entry in result.outcomes] == [InvitationOutcome.INVITED, InvitationOutcome.UNKNOWN]
+    assert result.identities is not None
+    assert [(record.user_id, record.email, record.display_name) for record in result.identities] == [
+        ("u-2", "carol@example.com", "Carol")
+    ]
+
+
+def test_push_share_grants_leaves_what_an_older_connector_omits_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A connector that answers only the count says nothing about the share, the
+    # outcomes, or the identities: None, never an empty answer the caller
+    # would mistake for "no outcomes" or "unpublished".
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"host_id": "host-abc", "appended": 1})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    result = client.push_share_grants(SecretStr("tok"), "host-abc", {})
+
+    assert result.appended == 1
+    assert result.share is None
+    assert result.outcomes is None
+    assert result.identities is None
+
+
 # Backup repositories (the backup store)
 
 

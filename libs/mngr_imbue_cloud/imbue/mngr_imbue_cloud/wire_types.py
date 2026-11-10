@@ -425,13 +425,6 @@ class ShareInfo(WireModel):
     )
 
 
-class ShareGrantsPushResult(WireModel):
-    """What ``PUT /shares/{host_id}/grants`` answers: how many grant events the push appended."""
-
-    host_id: str = Field(description="The share's host id")
-    appended: int = Field(default=0, description="Events appended to the centralized grants table by this push")
-
-
 class InvitationOutcome(WireEnum):
     """What a granter may learn about an invitation (specs/inviting-granted-visitors/spec.md, O1)."""
 
@@ -725,6 +718,27 @@ class ContactEntry(UserIdentity):
 
     trust_level: str = Field(default="known", description="The owner's private trust level for this contact")
     created_at: str = Field(default="", description="When the contact was added (server timestamp)")
+
+
+class ShareGrantsPushResult(WireModel):
+    """What ``PUT /shares/{host_id}/grants`` answers: the appended count, and everything the share panel reads after a push.
+
+    The share, the outcomes, and the identities are None against a connector
+    that predates them, which is "not said", never "none".
+    """
+
+    host_id: str = Field(description="The share's host id")
+    appended: int = Field(default=0, description="Events appended to the centralized grants table by this push")
+    share: ShareInfo | None = Field(
+        default=None, description="The share's status document (as GET /shares/{host_id}/status answers it)"
+    )
+    outcomes: tuple[InvitationOutcomeEntry, ...] | None = Field(
+        default=None,
+        description="The granter-visible outcome of every open user or email grant (as the outcomes route answers)",
+    )
+    identities: tuple[UserIdentity, ...] | None = Field(
+        default=None, description="The identity record of every granted account the connector knows"
+    )
 
 
 class AdminAccountInfo(AccountInfo):

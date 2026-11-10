@@ -1,0 +1,7 @@
+- Opening the share panel and saving a grant each make one connector call where they made up to three plus one per granted account. While the workspace is published, the grants push that already ran behind every save and load now stands alone: Imbue Cloud mirrors the granted accounts into the share's index and the owner's contacts itself, and answers the share's status, the invitation outcomes, and the grantees' identity records on the push, so the desktop no longer reads the status before a save, calls `set-grantees` and `contacts add` after it, or looks grantees up one by one.
+
+- The sharing document (`GET`/`PUT /api/v1/workspace-sharing/<id>`, the grants `PUT`) carries `invitation_outcomes`: what the granter may learn about each open user or email grant, as the push answered it. The share panel takes them from the document instead of reading `GET .../invitation-outcomes` after every load, save, and publish, and no longer re-reads them after an invite (the invite's own answer is the row's outcome); the route stays, and the panel still reads it when a document carries no outcomes.
+
+- The open of a published panel reads the workspace's share state in one exec (the same probe the publish uses) rather than the grants file alone, so it knows whether the workspace holds share materials before asking the connector anything.
+
+- `docs/share-panel-connector-calls.md` records what the one-call panel saved, measured against `main` on a dev tier, and how.

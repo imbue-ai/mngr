@@ -2088,6 +2088,126 @@ describe("SharePanelModel invitations", () => {
     ).toBeNull();
   });
 
+  it("takes the outcomes from a document that carries them and reads nothing more", async () => {
+    const { model, requests } = makeSharePanel(() =>
+      okResult(
+        sharingResponse({
+          grants: grantsDocument({
+            users: ["user-2"],
+            emails: ["friend@example.com"],
+          }),
+          identities: {
+            "user-2": {
+              user_id: "user-2",
+              email: "carol@example.com",
+              display_name: "Carol",
+              profile_picture_url: null,
+            },
+          },
+          grants_synced: true,
+          invitation_outcomes: [
+            {
+              kind: "email",
+              value: "friend@example.com",
+              app: WHOLE,
+              outcome: "invited",
+              invited_at: INVITED_AT,
+            },
+            { kind: "user", value: "user-2", app: WHOLE, outcome: null },
+          ],
+        }),
+      ),
+    );
+
+    await model.load();
+    await settle();
+
+    expect(
+      requests.filter((request) => request.url.endsWith(OUTCOMES_SUFFIX)),
+    ).toHaveLength(0);
+    expect(
+      model.outcomeFor(WHOLE, rowOf(model, WHOLE, "friend@example.com")),
+    ).toEqual({
+      kind: "invited",
+      invitedAt: INVITED_AT,
+      joinedAt: null,
+      lastVisitedAt: null,
+    });
+    // The outcomes are known, so a person with none has never been here.
+    expect(
+      model.workspaceAccessFor(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toEqual({ kind: "never" });
+  });
+
+  it("takes the outcomes a save answers with, which also settles who still needs an invitation", async () => {
+    const { model, requests } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT" && url.endsWith("/grants"))
+        return okResult(
+          sharingResponse({
+            grants: sentDocument(init),
+            grants_synced: true,
+            invitation_outcomes: [
+              {
+                kind: "email",
+                value: "newcomer@example.com",
+                app: WHOLE,
+                outcome: "invited",
+                invited_at: INVITED_AT,
+              },
+            ],
+          }),
+        );
+      return okResult(
+        sharingResponse({ grants_synced: true, invitation_outcomes: [] }),
+      );
+    });
+    await model.load();
+    await settle();
+
+    model.addGrant(WHOLE, "email", "newcomer@example.com");
+    await settle();
+    await settle();
+
+    expect(
+      requests.filter((request) => request.url.endsWith(OUTCOMES_SUFFIX)),
+    ).toHaveLength(0);
+    // Imbue Cloud already knows the newcomer was invited, so the panel does
+    // not ask for a first invitation of its own.
+    expect(inviteRequests(requests)).toHaveLength(0);
+    expect(
+      model.outcomeFor(WHOLE, rowOf(model, WHOLE, "newcomer@example.com")),
+    ).toEqual({
+      kind: "invited",
+      invitedAt: INVITED_AT,
+      joinedAt: null,
+      lastVisitedAt: null,
+    });
+  });
+
+  it("does not read the outcomes again after an invite answers", async () => {
+    const { model, requests } = invitablePanel();
+    await model.load();
+    await settle();
+    const readsAfterLoad = requests.filter((request) =>
+      request.url.endsWith(OUTCOMES_SUFFIX),
+    ).length;
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    await model.invite(WHOLE, friend.key);
+    await settle();
+
+    expect(inviteRequests(requests)).toHaveLength(1);
+    expect(
+      requests.filter((request) => request.url.endsWith(OUTCOMES_SUFFIX)),
+    ).toHaveLength(readsAfterLoad);
+    expect(model.outcomeFor(WHOLE, friend)).toEqual({
+      kind: "invited",
+      invitedAt: INVITED_AT,
+      joinedAt: null,
+      lastVisitedAt: null,
+    });
+  });
+
   it("offers Invite only for a saved person who has not joined, on a published workspace whose document has reached Imbue Cloud", async () => {
     let isPublished = true;
     const { model } = invitablePanel(

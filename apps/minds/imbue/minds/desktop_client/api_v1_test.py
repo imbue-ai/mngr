@@ -108,6 +108,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
 from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
@@ -2279,6 +2280,9 @@ class FakeSharingCli(FakeImbueCloudCli):
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         self.share_status_call_count += 1
+        return self.share_as_the_connector_holds_it(account=account, host_id=host_id)
+
+    def share_as_the_connector_holds_it(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         if self.share is None:
             return None
         # The status document never carries the relay token (only create does).
@@ -2857,7 +2861,7 @@ def test_machine_sharing_status_disabled_when_no_share(tmp_path: Path) -> None:
 def test_machine_sharing_status_lists_the_grants_of_an_unpublished_machine(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = ["partner.org"]\n'
-    cli = _fake_sharing_cli(mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(grants_stdout=grants_toml))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
@@ -2868,12 +2872,23 @@ def test_machine_sharing_status_lists_the_grants_of_an_unpublished_machine(tmp_p
     assert body["url"] is None
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
     assert body["grants"]["workspace"]["email_domains"] == ["partner.org"]
+    # Unpublished: nothing is pushed, so the panel has nothing to learn about invitations.
+    assert body["invitation_outcomes"] is None
+    assert cli.pushed_grants_documents == []
 
 
 def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
+    cli = _fake_sharing_cli(
+        share=_active_share(),
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml),
+        invitation_outcomes_to_return=[
+            InvitationOutcomeCliEntry(
+                kind="email", value="viewer@example.com", app="system_interface", outcome="invited"
+            )
+        ],
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -2885,6 +2900,13 @@ def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
     assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     # The grants document survives the exec envelope round trip.
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
+    # One connector call: the push, which answered the share and the outcomes.
+    assert cli.share_status_call_count == 0
+    assert len(cli.pushed_grants_documents) == 1
+    assert body["grants_synced"] is True
+    assert [(entry["value"], entry["outcome"]) for entry in body["invitation_outcomes"]] == [
+        ("viewer@example.com", "invited")
+    ]
 
 
 def test_machine_sharing_status_repairs_a_share_left_on_a_retired_content_domain(tmp_path: Path) -> None:
@@ -3010,36 +3032,13 @@ class _ShareProbeCaller(RecordingMngrCaller):
         return result
 
 
-class _GrantsReadCaller(RecordingMngrCaller):
-    """Recording caller that answers the grants read with a proper exec JSON envelope.
-
-    The real read unwraps ``mngr exec --format json`` output, so a canned raw
-    string cannot stand in for it; ``grants_stdout`` is the remote ``cat``'s
-    own output ('' plays the absent-file case, unparseable text a corrupted
-    document). Every other call keeps the canned default result.
-    """
-
-    grants_stdout: str = Field(default="", description="The remote cat's stdout inside the envelope")
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
-        if any("cat" in part and "share_grants.toml" in part for part in argv):
-            envelope = {"results": [{"agent": "a", "stdout": self.grants_stdout, "stderr": "", "success": True}]}
-            return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
-        return result
-
-
 def test_machine_sharing_status_reports_a_malformed_document_as_an_empty_one(tmp_path: Path) -> None:
     # ``grants: null`` is kept for a read that never landed, which is a
     # different thing.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout="not toml [["))
+    cli = _fake_sharing_cli(
+        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout="not toml [[")
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -3138,12 +3137,18 @@ def test_machine_sharing_put_publishes_with_a_document_that_grants_nobody(tmp_pa
     assert base64.b64encode(empty_toml.encode()).decode("ascii") in write_command
 
 
-def test_machine_sharing_put_with_user_grants_mirrors_them_to_the_connector(tmp_path: Path) -> None:
-    # A user-id grant is written into the grants file AND mirrored (best
-    # effort) to the connector: the share's grantee index and the owner's
-    # contacts. Neither mirror affects who may visit.
+def test_machine_sharing_put_with_user_grants_pushes_them_once_and_reports_the_identities_it_answered(
+    tmp_path: Path,
+) -> None:
+    # A user-id grant is written into the grants file and pushed once; the
+    # connector mirrors it into the share's grantee index and the owner's
+    # contacts itself, and answers the grantee's record, so the desktop
+    # launches nothing else. Neither mirror affects who may visit.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(),
+        identities_to_return=[UserIdentityCliInfo(user_id="user-2", email="carol@example.com", display_name="Carol")],
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -3155,24 +3160,20 @@ def test_machine_sharing_put_with_user_grants_mirrors_them_to_the_connector(tmp_
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["grants"]["workspace"]["users"] == ["user-2"]
-    # No identity cache in this app: the grantee renders as a bare id.
-    assert body["identities"] == {}
+    # No identity cache in this app, and still a name: the push answered it.
+    assert body["identities"] == {
+        "user-2": {
+            "user_id": "user-2",
+            "email": "carol@example.com",
+            "display_name": "Carol",
+            "profile_picture_url": None,
+        }
+    }
+    ((_account, pushed_host_id, pushed),) = cli.pushed_grants_documents
+    assert pushed_host_id == _TEST_HOST_ID
+    assert pushed["workspace"]["users"] == ["user-2"]
     recorded = _recorded_mngr_calls(cli)
-    grantee_calls = [argv for argv in recorded if "set-grantees" in argv]
-    assert grantee_calls == [
-        [
-            "imbue_cloud",
-            "shares",
-            "set-grantees",
-            _TEST_HOST_ID,
-            "--account",
-            "owner@example.com",
-            "--user-id",
-            "user-2",
-        ]
-    ]
-    contact_calls = [argv for argv in recorded if "contacts" in argv]
-    assert contact_calls == [["imbue_cloud", "contacts", "add", "user-2", "--account", "owner@example.com"]]
+    assert not any("set-grantees" in argv or "contacts" in argv or "users" in argv for argv in recorded)
     # The grants write (not the probe, which also names the file) runs under
     # the lock every in-container grants writer takes.
     locked_writes = [argv for argv in recorded if "flock data/.secrets/share_grants.toml.lock" in " ".join(argv)]
@@ -3184,7 +3185,7 @@ def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) 
     # domain does not route), so the document carries the label per share
     # target: the shell and the apps (system apps included), never internal services.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3212,7 +3213,7 @@ def test_machine_sharing_status_reports_no_labels_before_the_registrations_arriv
     # reached this client yet: the document says so (no labels) instead of
     # letting a client guess a link from the bare domain.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
@@ -3544,7 +3545,9 @@ def test_workspace_sharing_grants_put_stores_the_normalized_entries(tmp_path: Pa
 def test_workspace_sharing_delete_keeps_the_grants_in_its_document(tmp_path: Path) -> None:
     agent_id = AgentId()
     grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
+    cli = _fake_sharing_cli(
+        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml)
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.delete(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
@@ -6553,6 +6556,80 @@ def test_workspace_sharing_grants_put_reports_a_failed_push_as_not_synced(tmp_pa
     body = json.loads(response.data)
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
     assert body["grants_synced"] is False
+
+
+def test_workspace_sharing_grants_put_learns_the_share_from_the_push_and_reads_no_status(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        share=_active_share(),
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
+        invitation_outcomes_to_return=[
+            InvitationOutcomeCliEntry(kind="email", value="viewer@example.com", app="system_interface", outcome=None)
+        ],
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is True
+    assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert body["grants_synced"] is True
+    assert [(entry["value"], entry["outcome"]) for entry in body["invitation_outcomes"]] == [
+        ("viewer@example.com", None)
+    ]
+    assert cli.share_status_call_count == 0
+    assert len(cli.pushed_grants_documents) == 1
+
+
+def test_workspace_sharing_grants_put_falls_back_to_a_status_read_when_the_push_fails(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True), is_grants_push_failing=True
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    # The save landed and the switch stays on; only the mirror did not, and the
+    # panel has nothing new to learn about invitations.
+    assert body["enabled"] is True
+    assert body["grants_synced"] is False
+    assert body["invitation_outcomes"] is None
+    assert cli.share_status_call_count == 1
+
+
+def test_workspace_sharing_grants_put_treats_a_not_published_refusal_as_unpublished(tmp_path: Path) -> None:
+    # The workspace still holds share materials, but the connector says the share
+    # is gone (unpublished from another device): the save lands and reports off.
+    agent_id = AgentId()
+    inactive = _active_share().model_copy_update(to_update(_active_share().field_ref().state, "inactive"))
+    cli = _fake_sharing_cli(share=inactive, mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is False
+    assert body["grants_synced"] is None
+    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
+    assert cli.share_status_call_count == 0
 
 
 def test_workspace_sharing_grants_put_pushes_nothing_while_unpublished(tmp_path: Path) -> None:

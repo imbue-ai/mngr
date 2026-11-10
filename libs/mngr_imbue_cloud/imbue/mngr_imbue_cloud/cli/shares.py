@@ -14,6 +14,7 @@ from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.primitives import WorkspaceId
+from imbue.mngr_imbue_cloud.wire_types import ShareGrantsPushResult
 from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 
 
@@ -223,14 +224,33 @@ def push_share_grants(host_id: str, document_file: Path, account: str | None, co
 
     Discovery and invitations only: the workspace's own grants file stays the
     sole authority over who may enter. Pushing the same document twice appends
-    nothing. Fails with code ``not_published`` while the workspace is unpublished.
+    nothing. Imbue Cloud also replaces the share's grantee index and adds the
+    granted accounts to your contacts, and answers the share's status
+    (``share``), the invitation outcomes (``outcomes``), and the granted
+    accounts' identity records (``identities``) beside ``appended``. Fails
+    with code ``not_published`` while the workspace is unpublished.
     """
     document = json.loads(document_file.read_text())
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    emit_json(client.push_share_grants(token, host_id, document).model_dump(mode="json"))
+    emit_json(_push_result_to_json(client.push_share_grants(token, host_id, document)))
+
+
+def _push_result_to_json(result: ShareGrantsPushResult) -> dict[str, object]:
+    """The push's answer with its share spelled the way ``shares status`` spells one, so one reader parses both."""
+    return {
+        "host_id": result.host_id,
+        "appended": result.appended,
+        "share": _share_to_json(result.share, include_token=False) if result.share is not None else None,
+        "outcomes": (
+            [entry.model_dump(mode="json") for entry in result.outcomes] if result.outcomes is not None else None
+        ),
+        "identities": (
+            [record.model_dump(mode="json") for record in result.identities] if result.identities is not None else None
+        ),
+    }
 
 
 @shares.command(name="invite")
