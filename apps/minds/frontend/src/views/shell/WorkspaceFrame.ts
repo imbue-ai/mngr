@@ -37,6 +37,7 @@ import type {
   WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
+import { welcomeChatArrival } from "../../models/welcomeChatArrival";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
@@ -54,6 +55,7 @@ interface EmbedContractModule {
   PERMISSION_RESOLUTIONS: string;
   FOCUS_CHAT: string;
   WORKSPACE_READY: string;
+  CHAT_ON_SCREEN: string;
   POP_OUT_WINDOW: string;
   WINDOW_DRAG_STARTED: string;
   WINDOW_DRAG_ENDED: string;
@@ -151,6 +153,10 @@ export interface EmbedHandlerDeps {
    * it opens the links main hands back (minds:open-link), custom-scheme ones
    * included. */
   onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
+  /** The mounted page said whether it reports chats on screen (minds:chat-on-screen). */
+  onChatReportingKnown: (reportsChatOnScreen: boolean) => void;
+  /** A chat's transcript is drawn in a window the user can see. */
+  onChatOnScreen: (chatId: string) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
@@ -196,6 +202,8 @@ export function buildEmbedHandlers(
     workspaceAgentId,
     openRequestPopup,
     onWorkspaceReady,
+    onChatReportingKnown,
+    onChatOnScreen,
   } = deps;
   const handlers: Record<string, (message: Record<string, unknown>) => void> =
     {};
@@ -263,6 +271,7 @@ export function buildEmbedHandlers(
       opensLinks: message.opensLinks === true,
       opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,
     });
+    onChatReportingKnown(message.reportsChatOnScreen === true);
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
@@ -276,6 +285,8 @@ export function buildEmbedHandlers(
       opensLocalFiles: true,
     });
   };
+  handlers[contract.CHAT_ON_SCREEN] = (message) =>
+    onChatOnScreen(String(message.chatId));
   const immersive = deps.immersive;
   if (immersive !== null) {
     handlers[contract.IMMERSIVE_REQUEST] = (message) =>
@@ -688,6 +699,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingWorkspaceMessage();
           },
+          onChatReportingKnown: (reportsChatOnScreen) =>
+            welcomeChatArrival.noteWorkspaceReady(reportsChatOnScreen),
+          onChatOnScreen: (chatId) => welcomeChatArrival.noteChatOnScreen(chatId),
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,

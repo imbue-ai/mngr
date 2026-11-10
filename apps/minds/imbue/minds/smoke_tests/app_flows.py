@@ -117,7 +117,8 @@ _WEB_LOGIN_URL_TIMEOUT_MS: Final[float] = 60_000.0
 # minutes and more.
 _CREATE_TIMEOUT_SECONDS: Final[int] = 1200
 _DESKTOP_TIMEOUT_MS: Final[float] = 180_000.0
-# The welcome chat is framed by the desktop's app list, which arrives after the backdrop.
+# The welcome chat is framed once it is seeded, which the workspace is entered without waiting
+# for (as late as the seed's own timeout), and by the desktop's app list, which arrives after the backdrop.
 _CHAT_FRAME_TIMEOUT_SECONDS: Final[float] = 240.0
 # The chat app answers its listing only once it has read the agent list from mngr.
 _MAIN_CHAT_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -369,7 +370,7 @@ def list_workspaces(session: StudioAppSession) -> list[dict[str, Any]]:
 
 
 def open_welcome_chat(workspace_frame: Frame) -> Frame:
-    """The chat a fresh workspace opens on: the conversation its creation page seeded.
+    """The chat a fresh workspace shows once it is seeded: the conversation its creation page handed over.
 
     Returned before any composer renders, which is what it is for here: on a
     workspace with no AI provider yet, the composer is replaced by the

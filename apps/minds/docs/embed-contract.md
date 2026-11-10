@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 14 (tracks `CONTRACT_VERSION` in
+Version: 15 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v14)
+## Message inventory (v15)
 
 ### workspace -> embedder
 
@@ -57,7 +57,8 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName? }` | Open the shell's share panel for this workspace, focused on that service, or on the whole workspace when `serviceName` is absent. A present name must match `SERVICE_NAME_PATTERN`. Fire-and-forget (no ack). |
-| `minds:workspace-ready` | `{ opensLinks?, opensCustomSchemeLinks? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`, external links included; `false` or absent means it does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme links (`slack:`, `vscode:`) in `minds:open-link` too. A value that is not a boolean rejects the message. |
+| `minds:workspace-ready` | `{ opensLinks?, opensCustomSchemeLinks?, reportsChatOnScreen? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`, external links included; `false` or absent means it does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme links (`slack:`, `vscode:`) in `minds:open-link` too. `reportsChatOnScreen: true` promises `minds:chat-on-screen`. A value that is not a boolean rejects the message. |
+| `minds:chat-on-screen` | `{ chatId }` | This chat's transcript is drawn in a window the user can see. Sent once per chat page load, from the chat page itself; the chat root and the shell forward it up unchanged like every other `minds:` message. The creation page keeps its wash over a new workspace until the welcome chat says this. |
 | `minds:provider-sign-in` | `{ url, flowId }` | A provider sign-in is waiting on the user in a browser. The embedder listens for the sign-in's loopback callback, relays it into the workspace's flow `flowId`, and opens `url`. It replies with `minds:provider-sign-in-ack`. |
 | `minds:provider-sign-in-end` | `{ flowId }` | The sign-in `flowId` has ended (signed in, failed, or abandoned); the embedder stops listening on its port. Fire-and-forget (no ack). |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
@@ -299,3 +300,10 @@ payloads -- to the console.
   may clear, from a chrome that cannot relay at all. A chrome from before v14
   sends no reason, and the workspace falls back as before; an older workspace
   ignores it.
+- **15** -- added `chat-on-screen` (workspace -> embedder) and the optional
+  `reportsChatOnScreen` field on `workspace-ready`: the creation page's wash
+  stays over a new workspace until its welcome chat is really on screen, which
+  only the chat's own page can tell. A chrome from before v15 ignores both. A
+  workspace from before v15 announces no `reportsChatOnScreen`, so a v15 chrome
+  knows the report will never come and lifts the wash once the seed has
+  answered rather than waiting out its bound.

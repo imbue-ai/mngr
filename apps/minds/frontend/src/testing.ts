@@ -417,6 +417,15 @@ export async function withReceiverGuardedGlobalFetch(
   }
 }
 
+/** An `EventSource` that never connects or delivers anything, for code that
+ * opens a stream the test does not exercise (node has no `EventSource`).
+ * Install it with `vi.stubGlobal("EventSource", InertEventSource)`. */
+export class InertEventSource {
+  onmessage: unknown = null;
+  onerror: unknown = null;
+  close(): void {}
+}
+
 /** Flush pending promise work: a timer turn runs only after the microtask queue
  * is empty, so every await chain the models queued has run by the time it
  * fires -- including `Response.json()`, whose body read takes more microtask

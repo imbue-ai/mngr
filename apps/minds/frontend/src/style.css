@@ -1045,22 +1045,24 @@ body:has(#notice-band) .workspace-surface {
 
 /*
  * The wash (views/shell/Wash.ts, models/wash.ts): a disc of the workspace's
- * color grows from the loading box's blob until it covers the window (36% of
- * the run), holds while the shell swaps the screen underneath (to 47%), then
- * lifts. One animation for all three beats, so a frame of the old screen can
- * never show between "covered" and "fading". --wash-scale is measured per
- * window: a circle big enough to cover from the middle is not big enough to
- * cover from a corner.
+ * color grows from the loading box's blob until it covers the window, stays
+ * whole while the workspace comes up underneath it, for as long as that takes,
+ * and then lifts. --wash-scale is measured per window: a circle big enough to
+ * cover from the middle is not big enough to cover from a corner.
  */
 @keyframes wash-cover {
-  0% { transform: translate(-50%, -50%) scale(0.2); opacity: 1; }
-  36% { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 1; }
-  47% { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 1; }
-  60% { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 0; }
-  100% { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 0; }
+  from { transform: translate(-50%, -50%) scale(0.2); }
+  to { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); }
+}
+@keyframes wash-lift {
+  from { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 1; }
+  to { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 0; }
 }
 .wash-disc {
-  animation: wash-cover var(--wash-ms, 2400ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: wash-cover var(--wash-cover-ms, 864ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.wash-disc--lifting {
+  animation: wash-lift var(--wash-lift-ms, 312ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 /* With motion unwelcome, every turn is simply there and nothing breathes. */
@@ -1074,6 +1076,10 @@ body:has(#notice-band) .workspace-surface {
     animation: none;
   }
   .wash-disc {
+    animation: none;
+    transform: translate(-50%, -50%) scale(var(--wash-scale, 20));
+  }
+  .wash-disc--lifting {
     animation: none;
     opacity: 0;
   }

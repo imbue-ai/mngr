@@ -30,6 +30,7 @@ import {
   REPORTING_MORE_LABEL,
   stepText,
 } from "./startFlow";
+import type { WelcomeChatLanding } from "./welcomeChatArrival";
 
 export interface WelcomeChatTurn {
   role: "user" | "assistant";
@@ -199,4 +200,20 @@ export async function postWelcomeChat(
   if (typeof payload.chat_id !== "string")
     throw new Error(`POST ${url} answered without a chat id`);
   return payload.chat_id;
+}
+
+/** Tell the desktop client how the wash over the new workspace came to lift, for its log. */
+export async function postWelcomeChatLanding(
+  createAttemptId: string,
+  landing: WelcomeChatLanding,
+  waitedMs: number,
+): Promise<void> {
+  const url = `/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}/welcome-chat/landing`;
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ landing, waited_ms: waitedMs }),
+  });
+  if (!response.ok) throw new Error(`POST ${url} failed (${response.status})`);
 }

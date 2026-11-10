@@ -411,10 +411,28 @@ export interface CreateAttemptWatcherHooks {
   onProgress(progress: OperationProgress): void;
 }
 
+/** How often an attempt's status is polled while it is being built. */
+export const STATUS_POLL_INTERVAL_MS = 2000;
+/**
+ * How often it is polled while the new workspace boots: DONE comes the moment the boot does, and
+ * the ready turn and the way into the workspace start on the poll that sees it.
+ */
+export const READY_WAIT_STATUS_POLL_INTERVAL_MS = 250;
+/** A status read that has not answered by now is dropped, so one hung request cannot end the polling. */
+export const STATUS_POLL_TIMEOUT_MS = 10_000;
+
+/** How often the status is polled after a poll that answered `status`. */
+export function statusPollIntervalMs(status: string | undefined): number {
+  return status === "WAITING_FOR_READY" ? READY_WAIT_STATUS_POLL_INTERVAL_MS : STATUS_POLL_INTERVAL_MS;
+}
+
 export class CreateAttemptWatcher {
   readonly createAttemptId: string;
   private readonly hooks: CreateAttemptWatcherHooks;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollIntervalMs = STATUS_POLL_INTERVAL_MS;
+  /** One status read at a time, so answers apply in order and none lands after the terminal one. */
+  private isPollInFlight = false;
   private source: EventSource | null = null;
   private isStopped = false;
 
@@ -425,7 +443,7 @@ export class CreateAttemptWatcher {
 
   start(): void {
     this.pollOnce();
-    this.pollTimer = setInterval(() => this.pollOnce(), 2000);
+    this.pollEvery(STATUS_POLL_INTERVAL_MS);
     this.source = new EventSource(
       `/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}/logs`,
     );
@@ -454,8 +472,7 @@ export class CreateAttemptWatcher {
 
   stop(): void {
     this.isStopped = true;
-    if (this.pollTimer !== null) clearInterval(this.pollTimer);
-    this.pollTimer = null;
+    this.stopPolling();
     this.source?.close();
     this.source = null;
   }
@@ -465,23 +482,41 @@ export class CreateAttemptWatcher {
     const progress = progressOf(data);
     if (progress !== null) this.hooks.onProgress(progress);
     if (data.status === "DONE" && data.redirect_url) {
-      if (this.pollTimer !== null) clearInterval(this.pollTimer);
-      this.pollTimer = null;
+      this.stopPolling();
       this.hooks.onDone(data.redirect_url);
-    } else if (data.status === "FAILED") {
-      if (this.pollTimer !== null) clearInterval(this.pollTimer);
-      this.pollTimer = null;
-      this.hooks.onFailed(data.error ?? "unknown error", data.error_kind ?? "");
-    } else if (data.status_text) {
-      this.hooks.onStageText(data.status_text);
+      return;
     }
+    if (data.status === "FAILED") {
+      this.stopPolling();
+      this.hooks.onFailed(data.error ?? "unknown error", data.error_kind ?? "");
+      return;
+    }
+    if (data.status_text) this.hooks.onStageText(data.status_text);
+    const intervalMs = statusPollIntervalMs(data.status);
+    if (this.pollTimer !== null && intervalMs !== this.pollIntervalMs) this.pollEvery(intervalMs);
+  }
+
+  private pollEvery(intervalMs: number): void {
+    this.stopPolling();
+    this.pollIntervalMs = intervalMs;
+    this.pollTimer = setInterval(() => this.pollOnce(), intervalMs);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer !== null) clearInterval(this.pollTimer);
+    this.pollTimer = null;
   }
 
   private pollOnce(): void {
+    if (this.isPollInFlight) return;
+    this.isPollInFlight = true;
+    const abort = new AbortController();
+    const abortTimer = setTimeout(() => abort.abort(), STATUS_POLL_TIMEOUT_MS);
     fetch(
       `/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}`,
       {
         credentials: "same-origin",
+        signal: abort.signal,
       },
     )
       .then((response) =>
@@ -493,6 +528,10 @@ export class CreateAttemptWatcher {
         this.applyStatus(data);
         m.redraw();
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(abortTimer);
+        this.isPollInFlight = false;
+      });
   }
 }

@@ -12,7 +12,7 @@ workspace's first real agent.
 The page hands the conversation over as soon as it has it, while the workspace is still being
 built, and the seed runs when the create attempt finishes (``WelcomeChatSeeder``), so a
 workspace the user enters some other way -- from the workspace list, after leaving the creation
-page -- still opens on its welcome chat.
+page -- still shows its welcome chat.
 
 The transcript rides the command line as base64 (``mngr exec`` carries no stdin, and the
 turns hold newlines and quotes). The script itself retries the chat app for a bounded window
@@ -34,6 +34,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -128,11 +129,8 @@ def seed_welcome_chat(
         chat_id = _chat_id_from_stdout(result.stdout)
         if chat_id:
             return WelcomeChatOutcome(chat_id=chat_id)
-        detail = "the seeding script printed no chat id"
-    else:
-        detail = _failure_detail(result)
-    logger.warning("Could not seed the welcome chat in workspace {}: {}", workspace_address, detail)
-    return WelcomeChatOutcome(failure_detail=detail)
+        return WelcomeChatOutcome(failure_detail="the seeding script printed no chat id")
+    return WelcomeChatOutcome(failure_detail=_failure_detail(result))
 
 
 class WelcomeChatSeeder(MutableModel):
@@ -186,13 +184,22 @@ class WelcomeChatSeeder(MutableModel):
         if running is not None:
             return running.result()
         address = build_agent_address(workspace_agent_id, self.backend_resolver)
-        try:
-            outcome = seed_welcome_chat(self.mngr_caller, address, welcome_chat)
-        except OSError as e:
-            # Whoever waits on this seed must get an answer, so a call that never ran is a failed seed.
-            logger.warning("Could not run the welcome chat's seed in workspace {}: {}", address, e)
-            outcome = WelcomeChatOutcome(failure_detail=f"mngr could not be run: {e}")
-        if not outcome.is_seeded:
+        # info_span rather than log_span: its timed close is at DEBUG, so the seed's duration reaches minds.log.
+        with info_span("Seeding the welcome chat for create attempt {} in workspace {}", create_attempt_id, address):
+            try:
+                outcome = seed_welcome_chat(self.mngr_caller, address, welcome_chat)
+            except OSError as e:
+                # Whoever waits on this seed must get an answer, so a call that never ran is a failed seed.
+                outcome = WelcomeChatOutcome(failure_detail=f"mngr could not be run: {e}")
+        if outcome.is_seeded:
+            logger.debug("Seeded welcome chat {} for create attempt {}", outcome.chat_id, create_attempt_id)
+        else:
+            logger.warning(
+                "Could not seed the welcome chat for create attempt {} in workspace {}: {}",
+                create_attempt_id,
+                address,
+                outcome.failure_detail,
+            )
             with self._lock:
                 del self._seed_by_attempt[create_attempt_id]
         own.set_result(outcome)

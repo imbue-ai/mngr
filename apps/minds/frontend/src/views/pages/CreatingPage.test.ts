@@ -4,6 +4,7 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
 import {
+  READY_LINE,
   SETUP_LINE,
   SHOWCASE_APP,
   SHOWCASE_INTRO_LINE,
@@ -19,10 +20,12 @@ import {
   startFlow,
   streamDurationMs,
 } from "../../models/startFlow";
+import { wash } from "../../models/wash";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
+import { WELCOME_CHAT_WAIT_BOUND_MS, welcomeChatArrival } from "../../models/welcomeChatArrival";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import type { AnyVnode } from "../../testing";
-import { allText, byId, classTokensOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
+import { InertEventSource, allText, byId, classTokensOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
 import { Button } from "../components/Button";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
@@ -71,6 +74,8 @@ describe("failureTurn", () => {
 describe("CreatingPage across a route change", () => {
   afterEach(() => {
     startFlow.reset();
+    wash.cancel();
+    welcomeChatArrival.cancel();
     vi.useRealTimers();
     clearAppContextForTests();
     vi.unstubAllGlobals();
@@ -197,8 +202,8 @@ describe("CreatingPage across a route change", () => {
 
   /**
    * A live attempt whose status polls answer `status` (DONE unless given, until `setStatus` says
-   * otherwise), with every welcome-chat post held open until the returned `settleSeed` is called. Reduced motion, so
-   * the page enters directly instead of starting the wash, which measures the DOM.
+   * otherwise), with every welcome-chat post held open until the returned `settleSeed` or `failSeed` is called. Reduced
+   * motion, so the wash covers at once instead of growing from the loading box, which measures the DOM.
    */
   function mountDoneAttempt(
     createAttemptId: string,
@@ -207,18 +212,28 @@ describe("CreatingPage across a route change", () => {
   ): {
     page: m.Component;
     entered: string[];
+    focusRequests: [string, string][];
+    landings: unknown[];
     seedBodies: WelcomeChatBody[];
     logSources: LogSource[];
     settleSeed: () => void;
+    failSeed: () => void;
     setStatus: (next: string) => void;
   } {
     vi.useFakeTimers();
     let currentStatus = status;
     const entered: string[] = [];
+    const focusRequests: [string, string][] = [];
+    const landings: unknown[] = [];
     const logSources: LogSource[] = [];
+    const workspaces = { accentEntry: () => undefined, toAgentScopedId: (id: string) => id };
     registerAppContext({
-      stores: { workspaces: { accentEntry: () => undefined } },
-      shell: { enterWorkspace: (id: string) => entered.push(id) },
+      stores: { workspaces },
+      shell: {
+        stores: { workspaces },
+        enterWorkspace: (id: string) => entered.push(id),
+        requestFocusChat: (workspaceId: string, chatId: string) => focusRequests.push([workspaceId, chatId]),
+      },
     } as unknown as AppContext);
     vi.stubGlobal("window", {
       matchMedia: () => ({ matches: true }),
@@ -227,13 +242,11 @@ describe("CreatingPage across a route change", () => {
     });
     vi.stubGlobal(
       "EventSource",
-      class {
-        onmessage: unknown = null;
-        onerror: unknown = null;
+      class extends InertEventSource {
         constructor() {
+          super();
           logSources.push(this);
         }
-        close(): void {}
       },
     );
     const seedBodies: WelcomeChatBody[] = [];
@@ -244,6 +257,10 @@ describe("CreatingPage across a route change", () => {
         return new Promise<Response>((resolve) => {
           seedResolvers.push(resolve);
         });
+      }
+      if (url.endsWith("/welcome-chat/landing")) {
+        landings.push(JSON.parse(init?.body as string));
+        return Promise.resolve(new Response(null, { status: 204 }));
       }
       if (url.startsWith("/ui/api/create/attempts/"))
         return Promise.resolve(jsonResponse(liveDetail(createAttemptId, isDriven)));
@@ -263,11 +280,17 @@ describe("CreatingPage across a route change", () => {
     return {
       page,
       entered,
+      focusRequests,
+      landings,
       seedBodies,
       logSources,
       settleSeed: () => {
         for (const resolve of seedResolvers)
           resolve(jsonResponse({ chat_id: "agent-seeded" }));
+      },
+      failSeed: () => {
+        for (const resolve of seedResolvers)
+          resolve(new Response(JSON.stringify({ error: "no chat app" }), { status: 502 }));
       },
       setStatus: (next: string) => {
         currentStatus = next;
@@ -275,13 +298,21 @@ describe("CreatingPage across a route change", () => {
     };
   }
 
-  it("hands the conversation to the finished attempt's workspace and enters it once the hand-off settles", async () => {
-    const { page, entered, seedBodies, settleSeed } =
+  /** Run a mounted, finished attempt to its entry: the workspace mounted under the cover and the page gone. */
+  async function runToEntry(mounted: ReturnType<typeof mountDoneAttempt>): Promise<void> {
+    await vi.waitFor(() => expect(mounted.seedBodies).toHaveLength(2));
+    await vi.advanceTimersByTimeAsync(FLOW_THINK_MS + streamDurationMs(READY_LINE) + 1);
+    expect(mounted.entered).toEqual(["agent-0123abcd"]);
+    (mounted.page.onremove as () => void).call(mounted.page);
+  }
+
+  it("hands the conversation to the finished attempt's workspace and keeps the cover up until the chat is on screen", async () => {
+    const { page, entered, focusRequests, landings, seedBodies, settleSeed } =
       mountDoneAttempt("create-attempt-d");
     const render = (vnode: m.Vnode): m.Vnode =>
       (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
 
-    // Handed over once the page knows the settings, and again once the attempt is done, which waits on the seed.
+    // Handed over once the page knows the settings, and again once the attempt is done, which starts the seed.
     await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
     expect(seedBodies[1]).toEqual(seedBodies[0]);
     const turns = seedBodies[0].turns;
@@ -306,13 +337,53 @@ describe("CreatingPage across a route change", () => {
     const ready = nodes.find((node) => attrsOf(node).key === "creation-ready") as AnyVnode;
     expect(classTokensOf(ready)).toContain("mt-20");
 
-    // The ready hold passes, but the workspace is not entered while the hand-off is still in flight.
-    await vi.advanceTimersByTimeAsync(30_000);
+    // The ready line streams first.
     expect(entered).toEqual([]);
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLOW_THINK_MS + streamDurationMs(READY_LINE) + 1);
+    // Then the workspace mounts behind the cover with the seed still in flight, and the page goes away.
     expect(entered).toEqual(["agent-0123abcd"]);
     (page.onremove as () => void).call(page);
+    expect(wash.active).not.toBeNull();
+
+    // The seed's answer asks the workspace for the chat, and is not yet the chat on screen.
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(focusRequests).toEqual([["agent-0123abcd", "agent-seeded"]]);
+    expect(wash.active?.isLifting).toBe(false);
+
+    // Only the seeded chat's own report lifts it.
+    welcomeChatArrival.noteChatOnScreen("agent-99999999");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active?.isLifting).toBe(false);
+    welcomeChatArrival.noteChatOnScreen("agent-seeded");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active).toBeNull();
+    expect(landings).toEqual([{ landing: "ON_SCREEN", waited_ms: expect.any(Number) }]);
+  });
+
+  it("lifts the cover at once when the seed definitively fails, and records why", async () => {
+    const mounted = mountDoneAttempt("create-attempt-s");
+    const { focusRequests, landings, failSeed } = mounted;
+    await runToEntry(mounted);
+
+    failSeed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active).toBeNull();
+    expect(focusRequests).toEqual([]);
+    expect(landings).toEqual([{ landing: "SEED_FAILED", waited_ms: expect.any(Number) }]);
+  });
+
+  it("lifts the cover at the bound when the chat never shows, so the user is not stranded", async () => {
+    const mounted = mountDoneAttempt("create-attempt-t");
+    const { landings, settleSeed } = mounted;
+    await runToEntry(mounted);
+    settleSeed();
+
+    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS - FLOW_THINK_MS - streamDurationMs(READY_LINE) - 1000);
+    expect(wash.active?.isLifting).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(wash.active).toBeNull();
+    expect(landings).toEqual([{ landing: "TIMED_OUT", waited_ms: expect.any(Number) }]);
   });
 
   it("folds the settings behind a toggle in the user's turn, and lists them once it is opened", async () => {
@@ -414,17 +485,16 @@ describe("CreatingPage across a route change", () => {
     const tail = seedBodies[0].turns.slice(-3).map((turn) => turn.text);
     expect(tail).toEqual([SETUP_LINE, showcaseMarkdown(SHOWCASE_APP), readyTurnMarkdown()]);
 
-    // The attempt finishes: the ready line lands under the box, and the entry waits for the seed.
+    // The attempt finishes: the ready line lands under the box, and the workspace is entered with
+    // the seed still in flight.
     setStatus("DONE");
     await vi.advanceTimersByTimeAsync(2000);
     expect(seedBodies).toHaveLength(2);
     const done = columnKeys(render());
     expect(done.indexOf("creation-box")).toBeLessThan(done.indexOf("creation-ready"));
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(entered).toEqual([]);
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
     expect(entered).toEqual(["agent-0123abcd"]);
+    settleSeed();
     (page.onremove as () => void).call(page);
   });
 
@@ -461,16 +531,32 @@ describe("CreatingPage across a route change", () => {
     (page.onremove as () => void).call(page);
   });
 
-  it("does not enter the workspace when the page was left while the hand-off was in flight", async () => {
-    const { page, entered, seedBodies, settleSeed } =
-      mountDoneAttempt("create-attempt-e");
+  it("leaves the cover up when another creating page opens during the wait for the chat", async () => {
+    const first = mountDoneAttempt("create-attempt-w");
+    await runToEntry(first);
+    first.settleSeed();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const second = mountDoneAttempt("create-attempt-x", "CREATING");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active?.isLifting).toBe(false);
+    (second.page.onremove as () => void).call(second.page);
+    expect(wash.active?.isLifting).toBe(false);
+
+    welcomeChatArrival.noteChatOnScreen("agent-seeded");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active).toBeNull();
+  });
+
+  it("does not enter the workspace when the page was left during the ready turn", async () => {
+    const { page, entered, landings, seedBodies } = mountDoneAttempt("create-attempt-e");
 
     await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
-    await vi.advanceTimersByTimeAsync(30_000);
     (page.onremove as () => void).call(page);
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS + 1000);
     expect(entered).toEqual([]);
+    expect(wash.active).toBeNull();
+    expect(landings).toEqual([]);
   });
 
   it("hands the conversation over while the workspace is still being built, so leaving the page cannot lose it", async () => {

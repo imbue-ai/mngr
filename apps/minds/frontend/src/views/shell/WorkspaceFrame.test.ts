@@ -116,6 +116,7 @@ function makeContract() {
     CLOSE_ACTIVE_TAB: "minds:close-active-tab",
     PERMISSION_RESOLUTIONS: "minds:permission-resolutions",
     WORKSPACE_READY: "minds:workspace-ready",
+    CHAT_ON_SCREEN: "minds:chat-on-screen",
     POP_OUT_WINDOW: "minds:pop-out-window",
     WINDOW_DRAG_STARTED: "minds:window-drag-started",
     WINDOW_DRAG_ENDED: "minds:window-drag-ended",
@@ -161,6 +162,8 @@ function makeHandlers(
   const popoutCalls: unknown[] = [];
   let frontCount = 0;
   const readyAnnouncements: WorkspaceLinkPromises[] = [];
+  const chatReportingAnswers: boolean[] = [];
+  const chatsOnScreen: string[] = [];
   const externalLinks: string[] = [];
   const immersiveRequests: boolean[] = [];
   const highlights: (string | null)[] = [];
@@ -185,6 +188,9 @@ function makeHandlers(
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
     onWorkspaceReady: (promises) => readyAnnouncements.push(promises),
+    onChatReportingKnown: (reportsChatOnScreen) =>
+      chatReportingAnswers.push(reportsChatOnScreen),
+    onChatOnScreen: (chatId) => chatsOnScreen.push(chatId),
     openExternalLink:
       options.opensExternalLinks === true
         ? (url) => externalLinks.push(url)
@@ -225,6 +231,8 @@ function makeHandlers(
     popoutCalls,
     frontCount: () => frontCount,
     readyAnnouncements,
+    chatReportingAnswers,
+    chatsOnScreen,
     externalLinks,
     immersiveRequests,
     highlights,
@@ -232,6 +240,15 @@ function makeHandlers(
 }
 
 describe("buildEmbedHandlers", () => {
+  it("passes on a chat reported on screen, and whether the workspace promises that report", () => {
+    const { contract, handlers, chatReportingAnswers, chatsOnScreen } = makeHandlers();
+    handlers[contract.CHAT_ON_SCREEN]({ chatId: "agent-0123abcd" });
+    expect(chatsOnScreen).toEqual(["agent-0123abcd"]);
+    handlers[contract.WORKSPACE_READY]({});
+    handlers[contract.WORKSPACE_READY]({ reportsChatOnScreen: true });
+    expect(chatReportingAnswers).toEqual([false, true]);
+  });
+
   it("reports a workspace's readiness announcement, which is what releases a held chat ask", () => {
     const { contract, handlers, readyAnnouncements, navigations } =
       makeHandlers();

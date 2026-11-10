@@ -420,6 +420,40 @@ test('embedder endpoint reads opensLinks and opensCustomSchemeLinks on a readine
   ]);
 });
 
+test('embedder endpoint reads reportsChatOnScreen on a readiness announcement only as a boolean or absent', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push(msg.reportsChatOnScreen) },
+  });
+  const announce = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.WORKSPACE_READY, ...payload } });
+  announce({});
+  announce({ reportsChatOnScreen: true });
+  announce({ reportsChatOnScreen: false });
+  announce({ reportsChatOnScreen: 'yes' });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});
+
+test('embedder endpoint takes a chat-on-screen report only with a chat id of the agent shape', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.CHAT_ON_SCREEN]: (msg) => seen.push(msg.chatId) },
+  });
+  const report = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.CHAT_ON_SCREEN, ...payload } });
+  report({ chatId: 'agent-0123456789abcdef0123456789abcdef' });
+  report({});
+  report({ chatId: 7 });
+  report({ chatId: 'not an agent id' });
+  assert.deepStrictEqual(seen, ['agent-0123456789abcdef0123456789abcdef']);
+});
+
 test('workspace endpoint accepts an open-link only for an absolute http(s), mailto, tel or custom-scheme URL within the length bound', () => {
   const seen = [];
   contract.createWorkspaceEndpoint({
@@ -523,8 +557,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 14', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '14');
+test('the contract is at version 15', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '15');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {

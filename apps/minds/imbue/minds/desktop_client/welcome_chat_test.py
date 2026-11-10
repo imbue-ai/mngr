@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import shlex
 import threading
 from collections.abc import Sequence
@@ -21,6 +22,7 @@ from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.testing import capture_loguru
 
 _AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")
 
@@ -117,6 +119,22 @@ def _seeded_transcript(argv: Sequence[str]) -> dict[str, object]:
     return json.loads(base64.b64decode(shlex.split(argv[3])[3]).decode("utf-8"))
 
 
+_SEED_STARTED_LINE = f"Seeding the welcome chat for create attempt {_ATTEMPT_ID} in workspace {_AGENT_ID}"
+
+
+def _assert_seed_span_timed(lines: Sequence[str]) -> str:
+    """Assert the seed's span closed once with its duration, and answer that closing line."""
+    (closed,) = [line for line in lines if line.startswith(f"{_SEED_STARTED_LINE} [")]
+    assert re.fullmatch(rf"{re.escape(_SEED_STARTED_LINE)} \[done in \d+\.\d{{5}} sec\]", closed)
+    return closed
+
+
+def _seed_warning_line(failure_detail: str) -> str:
+    return (
+        f"Could not seed the welcome chat for create attempt {_ATTEMPT_ID} in workspace {_AGENT_ID}: {failure_detail}"
+    )
+
+
 def test_a_conversation_handed_over_while_the_workspace_was_built_is_seeded_when_the_attempt_finishes() -> None:
     """The creation page may be gone by then: the user left it and entered the workspace from the list."""
     caller = RecordingMngrCaller(result=_SEEDED)
@@ -206,7 +224,34 @@ def test_a_seed_that_could_not_run_mngr_answers_a_failure_rather_than_leaving_it
 
     caller.set_on_call(refuse_to_run)
 
-    outcome = _seeder(caller).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+    with capture_loguru(level="WARNING") as log_output:
+        outcome = _seeder(caller).seed(_ATTEMPT_ID, _AGENT_ID, _request())
 
     assert not outcome.is_seeded
     assert outcome.failure_detail == "mngr could not be run: the warm process is gone"
+    assert log_output.getvalue().splitlines() == [
+        _seed_warning_line("mngr could not be run: the warm process is gone")
+    ]
+
+
+def test_a_seed_logs_its_start_its_duration_and_the_chat_it_opened() -> None:
+    """The hand-off into a new workspace is measured from these lines in minds.log."""
+    with capture_loguru(level="DEBUG") as log_output:
+        _seeder(RecordingMngrCaller(result=_SEEDED)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+    lines = log_output.getvalue().splitlines()
+    closed = _assert_seed_span_timed(lines)
+    seeded = f"Seeded welcome chat agent-seeded for create attempt {_ATTEMPT_ID}"
+    assert lines.index(_SEED_STARTED_LINE) < lines.index(closed) < lines.index(seeded)
+
+
+def test_a_failed_seed_logs_its_duration_and_one_warning_with_the_reason() -> None:
+    with capture_loguru(level="DEBUG") as log_output:
+        _seeder(RecordingMngrCaller(result=_REFUSED)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+    lines = log_output.getvalue().splitlines()
+    _assert_seed_span_timed(lines)
+    assert [line for line in lines if line.startswith("Could not seed the welcome chat for create attempt")] == [
+        _seed_warning_line("Could not seed the welcome chat: the chat app answered HTTP 503")
+    ]
+    assert not [line for line in lines if line.startswith("Seeded welcome chat")]

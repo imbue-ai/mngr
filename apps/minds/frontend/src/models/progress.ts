@@ -1,6 +1,6 @@
 // The progress an operation reports (a workspace create, a connection's
 // provider prepare), as the status polls carry it, and the display that turns
-// polls two seconds apart into a bar that moves every frame.
+// periodic polls into a bar that moves every frame.
 //
 // The server owns the arithmetic: its percent is the expected-duration-weighted
 // share of completed steps and never decreases. Between polls the page

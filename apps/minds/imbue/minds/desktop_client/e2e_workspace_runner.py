@@ -1018,7 +1018,7 @@ USER_TURN_SELECTOR: Final[str] = ".pending-message, .message.message-user"
 # from another.
 CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
-# A fresh workspace opens on the welcome chat the creation page seeded; the desktop's launcher
+# A fresh workspace shows the welcome chat the creation page seeds; the desktop's launcher
 # (the menu behind the taskbar's field) carries one row per app launch path, each marked
 # ``data-launch="<app>:<launch>"``. The chat's ``new`` is the menu's primary free-text row, which
 # with nothing typed runs the launch path with no text and starts an empty chat in the chat's
@@ -1039,10 +1039,11 @@ _LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The welcome chat's composer is on its page before any agent exists, but the shell frames
-# the chat only once its app list has arrived, and a chat minted from a row is created
-# asynchronously (a sign-in through its provider chooser launches it), so a chat input can
-# take a while to appear on a fresh first boot.
+# The welcome chat's composer is on its page before any agent exists, but the workspace is
+# entered before that chat is seeded and the chat app frames it only once it is (as late as the
+# seed's own timeout), the shell frames it only once its app list has arrived, and a chat minted
+# from a row is created asynchronously (a sign-in through its provider chooser launches it), so a
+# chat input can take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 
@@ -1136,9 +1137,9 @@ def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[st
 def chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
     """The first chat page's frame inside the workspace, once the workspace has opened one.
 
-    A fresh workspace opens on the welcome chat the creation page seeded, so
-    that is the frame this returns -- and it returns before the composer
-    renders, which is what a caller that has to sign the chat in first needs.
+    A fresh workspace shows the welcome chat the creation page seeds once it is
+    seeded, so that is the frame this returns -- and it returns before the
+    composer renders, which is what a caller that has to sign the chat in first needs.
 
     Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
     """
@@ -1172,7 +1173,7 @@ def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
     The shell shields every window but the focused one and makes the pages under the
     shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
     intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
-    that would raise it. A fresh workspace opens on the welcome chat alone and focused, so
+    that would raise it. A fresh workspace's welcome chat opens alone and focused, so
     the chat is normally unshielded and this returns at once; the shell shields it when
     another window is shown above it or a menu or the launcher is open, and then the
     shell's own two-step raises it: press the shield, then act on the page.

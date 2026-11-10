@@ -1,6 +1,17 @@
+import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { jsonResponse } from "../testing";
-import { MindLivenessTracker, hostNameFormatError, submitCreateRequest } from "./create";
+import { InertEventSource, jsonResponse } from "../testing";
+import type { CreateOperationStatus } from "./create";
+import {
+  CreateAttemptWatcher,
+  MindLivenessTracker,
+  READY_WAIT_STATUS_POLL_INTERVAL_MS,
+  STATUS_POLL_TIMEOUT_MS,
+  STATUS_POLL_INTERVAL_MS,
+  hostNameFormatError,
+  statusPollIntervalMs,
+  submitCreateRequest,
+} from "./create";
 import { OnboardingProgress } from "./onboarding";
 
 describe("hostNameFormatError", () => {
@@ -57,6 +68,151 @@ describe("MindLivenessTracker", () => {
     );
     await tracker.stop("agent-2");
     expect(tracker.displayedLiveness("agent-2", "RUNNING")).toBe("RUNNING");
+  });
+});
+
+describe("statusPollIntervalMs", () => {
+  it("polls briskly only while the new workspace boots", () => {
+    expect(statusPollIntervalMs("WAITING_FOR_READY")).toBe(READY_WAIT_STATUS_POLL_INTERVAL_MS);
+    expect(READY_WAIT_STATUS_POLL_INTERVAL_MS).toBeLessThan(STATUS_POLL_INTERVAL_MS);
+    for (const status of ["INITIALIZING", "CLONING_REPO", "CREATING_WORKSPACE", "DONE", undefined]) {
+      expect(statusPollIntervalMs(status)).toBe(STATUS_POLL_INTERVAL_MS);
+    }
+  });
+});
+
+describe("CreateAttemptWatcher", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** A started watcher whose status reads go to `fetchStub`. */
+  function startWatcher(fetchStub: (url: string, init: RequestInit) => Promise<Response>): {
+    watcher: CreateAttemptWatcher;
+    doneRedirects: string[];
+    failures: string[];
+  } {
+    vi.useFakeTimers();
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    vi.stubGlobal("EventSource", InertEventSource);
+    vi.stubGlobal("fetch", fetchStub);
+    const doneRedirects: string[] = [];
+    const failures: string[] = [];
+    const watcher = new CreateAttemptWatcher("create-attempt-0123abcd", {
+      onDone: (redirectUrl) => doneRedirects.push(redirectUrl),
+      onFailed: (error) => failures.push(error),
+      onStageText: () => undefined,
+      onLogLines: () => undefined,
+      onProgress: () => undefined,
+    });
+    watcher.start();
+    return { watcher, doneRedirects, failures };
+  }
+
+  /** A started watcher whose status polls answer `answer.current` at the time each poll is made
+   * (once it settles, when it is a promise). */
+  function startWatching(answer: { current: CreateOperationStatus | Promise<CreateOperationStatus> }): {
+    watcher: CreateAttemptWatcher;
+    statusPollCount: () => number;
+    doneRedirects: string[];
+    failures: string[];
+  } {
+    let polls = 0;
+    const started = startWatcher(() => {
+      polls += 1;
+      return Promise.resolve(answer.current).then(jsonResponse);
+    });
+    return { ...started, statusPollCount: () => polls };
+  }
+
+  it("drops a status read that never answers, so the next poll can still see DONE", async () => {
+    let polls = 0;
+    const { watcher, doneRedirects } = startWatcher((_url, init) => {
+      polls += 1;
+      if (polls === 1) {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
+      return Promise.resolve(jsonResponse({ status: "DONE", redirect_url: "/goto/agent-0123abcd/" }));
+    });
+
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_TIMEOUT_MS - 1);
+    expect(polls).toBe(1);
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS + 1);
+    expect(polls).toBe(2);
+    expect(doneRedirects).toEqual(["/goto/agent-0123abcd/"]);
+    watcher.stop();
+  });
+
+  it("polls every two seconds while the workspace is built, every quarter second while it boots, and stops at DONE", async () => {
+    const answer = { current: { status: "CREATING_WORKSPACE" } as CreateOperationStatus };
+    const { watcher, statusPollCount, doneRedirects } = startWatching(answer);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statusPollCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS - 1);
+    expect(statusPollCount()).toBe(1);
+
+    // The poll that sees the boot start switches to the brisk cadence.
+    answer.current = { status: "WAITING_FOR_READY" };
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statusPollCount()).toBe(2);
+    await vi.advanceTimersByTimeAsync(READY_WAIT_STATUS_POLL_INTERVAL_MS * 4);
+    expect(statusPollCount()).toBe(6);
+
+    // DONE is picked up within one brisk poll of being published, once, and polling ends.
+    answer.current = { status: "DONE", redirect_url: "/goto/agent-0123abcd/" };
+    await vi.advanceTimersByTimeAsync(READY_WAIT_STATUS_POLL_INTERVAL_MS);
+    expect(doneRedirects).toEqual(["/goto/agent-0123abcd/"]);
+    const pollsAtDone = statusPollCount();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS * 5);
+    expect(statusPollCount()).toBe(pollsAtDone);
+    expect(doneRedirects).toEqual(["/goto/agent-0123abcd/"]);
+    watcher.stop();
+  });
+
+  it("stops polling at a failure", async () => {
+    const answer = { current: { status: "WAITING_FOR_READY" } as CreateOperationStatus };
+    const { watcher, statusPollCount, failures } = startWatching(answer);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(READY_WAIT_STATUS_POLL_INTERVAL_MS);
+    expect(statusPollCount()).toBe(2);
+
+    answer.current = { status: "FAILED", error: "the workspace never answered" };
+    await vi.advanceTimersByTimeAsync(READY_WAIT_STATUS_POLL_INTERVAL_MS);
+    expect(failures).toEqual(["the workspace never answered"]);
+    const pollsAtFailure = statusPollCount();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS * 5);
+    expect(statusPollCount()).toBe(pollsAtFailure);
+    watcher.stop();
+  });
+
+  it("starts no poll while the last one has not answered", async () => {
+    let answerSlowPoll: (status: CreateOperationStatus) => void = () => undefined;
+    const answer: { current: CreateOperationStatus | Promise<CreateOperationStatus> } = {
+      current: new Promise((resolve) => {
+        answerSlowPoll = resolve;
+      }),
+    };
+    const { watcher, statusPollCount } = startWatching(answer);
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS * 3);
+    expect(statusPollCount()).toBe(1);
+
+    answer.current = { status: "WAITING_FOR_READY" };
+    answerSlowPoll({ status: "WAITING_FOR_READY" });
+    await vi.advanceTimersByTimeAsync(READY_WAIT_STATUS_POLL_INTERVAL_MS);
+    expect(statusPollCount()).toBe(2);
+    watcher.stop();
+  });
+
+  it("polls no more once stopped", async () => {
+    const { watcher, statusPollCount } = startWatching({ current: { status: "WAITING_FOR_READY" } });
+    await vi.advanceTimersByTimeAsync(0);
+    watcher.stop();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_INTERVAL_MS * 5);
+    expect(statusPollCount()).toBe(1);
   });
 });
 
