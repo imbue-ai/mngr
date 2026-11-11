@@ -392,6 +392,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Protocol-handshake permissions (MCP session, Fastmail JMAP and DAV discovery) are implicit in every grant and no longer shown as a "Session" switch.
 - Changed: The desktop writes `data/.secrets/share_identities.json` beside the grants so the workspace roster names grantees who have not arrived yet.
 - Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
+- Changed: The pool-host runbook (`docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag (a newer checkout can fail every slice of an older tag), that a pre-`minds-v0.10.0` tag needs a box with no `minds-v0.10.0`+ slice, and that the baking machine must stay awake until the bake exits.
 
 ### Deprecated
 

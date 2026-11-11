@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-11-10
 
+The pool-host runbook (`apps/minds/docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag, since a newer checkout can fail every slice of an older tag with `Host data file has incompatible schema` or a build step the older template lacks. It also says a tag before `minds-v0.10.0` needs a box with no slice at `minds-v0.10.0` or later, and that the machine running a bake must stay awake until the bake exits.
+
+## 2026-11-10
+
 The smoke journey now names the default-workspace-template tag its workspace's pool row was baked at, in its Step 3 log line and at the top of the template suites' `summary.md`, so a run's record says which template the template's CI tests exercised. A new `MINDS_SMOKE_EXPECTED_TEMPLATE_REF` makes Step 3 fail unless the row was baked at that tag, for a run meant to certify a release's template: a slow-path lease or a checkout at another commit no longer passes as having exercised the new pin.
 
 The release's staging rehearsal sets that variable to the release tag on its smoke run, and `apps/minds/docs/deploy/ops/app-release.md` gains *Reading the rehearsal's smoke run*, which says what the run must show before anything of the release reaches production and that a failed template test gets one rerun on a fresh row before it blocks. `services.md` says the staging smoke account is exclusive while that run is on, since a local teardown releases every workspace the account leases. `apps/minds/docs/testing-overview.md` section 1.10 records that the template the tests exercise is the one the build under test pins, that a published build cannot be pointed at staging, and the smoke-test definition the style guide now carries.
