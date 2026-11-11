@@ -70,6 +70,32 @@ mngr_work_lease_declare() {
     return 0
 }
 
+# Whether any lease still holds: succeeds when one names a deadline in the future. The
+# agent's own activity tracker asks this so work outliving a turn keeps the host awake --
+# the turn marker is gone by then, and an activity file that stops being refreshed is what
+# an idle host shuts down on.
+mngr_work_lease_any_live() {
+    local lease_dir now
+    lease_dir=$(mngr_work_lease_dir)
+    [ -n "$lease_dir" ] || return 1
+    [ -d "$lease_dir" ] || return 1
+    now=$(date +%s)
+    for mngr_lease in "$lease_dir"/*; do
+        [ -f "$mngr_lease" ] || continue
+        # First line only, the same grammar the Python reader parses. The verdict travels in a
+        # variable because awk's `exit` runs END, whose own exit status would replace it.
+        awk -v now="$now" '
+            NR == 1 {
+                for (i = 1; i <= NF; i++)
+                    if ($i ~ /^until:[0-9]+$/) { split($i, p, ":"); if (p[2] > now) live = 1 }
+                exit
+            }
+            END { exit !live }
+        ' "$mngr_lease" 2>/dev/null && return 0
+    done
+    return 1
+}
+
 mngr_work_lease_clear() {
     local lease_dir prefix
     lease_dir=$(mngr_work_lease_dir)

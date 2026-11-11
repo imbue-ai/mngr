@@ -80,6 +80,55 @@ def test_declaring_leaves_no_staging_file_a_reader_would_count(tmp_path: Path) -
     assert [path.name for path in (tmp_path / WORK_LEASE_DIR_NAME).iterdir()] == ["task-abc"]
 
 
+def _is_any_lease_live(state_dir: Path) -> bool:
+    """The library's verdict, read from a branch so the probe itself always exits cleanly."""
+    result = _run_lib(state_dir, "if mngr_work_lease_any_live; then echo LIVE; else echo IDLE; fi")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() in ("LIVE", "IDLE"), result.stdout
+    return result.stdout.strip() == "LIVE"
+
+
+def test_a_lease_holding_now_reads_as_live(tmp_path: Path) -> None:
+    """What keeps a host awake while work outlives a turn: the turn marker is gone by then."""
+    _run_lib(tmp_path, "mngr_work_lease_declare task-abc 3600")
+
+    assert _is_any_lease_live(tmp_path) is True
+
+
+def test_a_lease_past_its_deadline_does_not_hold_the_host_awake(tmp_path: Path) -> None:
+    """A deadline that has passed is the whole point of having one: work that died silently
+    stops counting without anyone coming back to remove its lease."""
+    lease_dir = tmp_path / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir()
+    (lease_dir / "task-expired").write_text("until:1000\n")
+
+    assert _is_any_lease_live(tmp_path) is False
+
+
+def test_one_live_lease_is_enough_whatever_else_the_dir_holds(tmp_path: Path) -> None:
+    """The dir belongs to the agent, so a reader meets whatever anything else left there.
+
+    A directory under a lease's own name is the shape the turn-end hook cannot clear, and the
+    shape that aborts an awk given it as an argument -- so it must not decide the answer.
+    """
+    lease_dir = tmp_path / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir()
+    (lease_dir / "task-expired").write_text("until:1000\n")
+    (lease_dir / "task-unbounded").write_text("forever\n")
+    (lease_dir / "task-unclearable").mkdir()
+    (lease_dir / "zz-someone-elses").write_text("since:1 until:4102444800\n")
+
+    assert _is_any_lease_live(tmp_path) is True
+
+
+def test_nothing_outstanding_reads_as_not_live(tmp_path: Path) -> None:
+    assert _is_any_lease_live(tmp_path) is False
+
+    (tmp_path / WORK_LEASE_DIR_NAME).mkdir()
+
+    assert _is_any_lease_live(tmp_path) is False
+
+
 def test_clearing_removes_only_the_named_prefixes(tmp_path: Path) -> None:
     """The lease dir belongs to the agent, so a writer clears only what it wrote.
 

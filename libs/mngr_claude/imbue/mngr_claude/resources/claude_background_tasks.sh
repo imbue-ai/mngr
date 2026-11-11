@@ -64,6 +64,11 @@ _MNGR_LOG_SOURCE="logs/claude_background_tasks"
 _MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/claude_background_tasks/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
+# Optional: an agent provisioned before the work-lease library existed has no
+# leases to read, and mngr_work_lease_any_live is simply never called.
+# shellcheck source=/dev/null
+[ -f "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh" ] \
+    && source "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh"
 
 # Liveness is keyed on the tmux session id rather than its name: renaming an agent
 # renames its session but leaves the id unchanged. The pane this supervisor runs in
@@ -136,7 +141,12 @@ log_info "Background tasks started for session $SESSION_NAME"
 
 while [ -n "$SESSION_ID" ] && tmux has-session -t "$SESSION_ID" 2>/dev/null; do
     # Update activity timestamp if agent is actively processing
-    if [ -f "$MNGR_AGENT_STATE_DIR/active" ]; then
+    # A turn in progress, or work the agent left running past one: in both the agent is
+    # working, so both keep this file fresh. Were the second left out, an agent whose turn
+    # ended with a background task going would stop refreshing it and the host's idle
+    # watcher would stop the host out from under the work.
+    if [ -f "$MNGR_AGENT_STATE_DIR/active" ] \
+        || { command -v mngr_work_lease_any_live >/dev/null 2>&1 && mngr_work_lease_any_live; }; then
         printf '{"time": %d, "source": "activity_updater"}' \
             "$(($(date +%s) * 1000))" > "$MNGR_AGENT_STATE_DIR/activity/agent"
     fi
