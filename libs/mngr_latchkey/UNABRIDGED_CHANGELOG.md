@@ -4,6 +4,46 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+The `minds-workspaces-read` verb's dialog text now says it also reads a workspace's recorded size and lists the cloud connections a workspace can be created on (`GET /api/v1/workspaces/cloud-accounts`, which Imbue Studio added under the workspaces tree the verb already covers). The grant itself is unchanged.
+
+## 2026-11-08
+
+Testing branch merging `mngr/avoid-api-key-limits` and `mngr/remote-execution`. For this project it carries the remote-execution branch's `remote-execution` request type and grant naming unchanged; see that branch's entry.
+
+- The `permission-requests` gateway extension accepts a sixth request type, `remote-execution`, whose payload is `{}` for any command or `{"program": ...}` for one program (a bare name or a path starting with `/` or `~/`), and whose effect is one `remote-execution-<device id>` or `remote-execution-<device id>:<program>` permission under `latchkey-self`, pinned by a `const` path to the approving desktop's own `POST /minds-api-proxy/api/v1/remote-execution/<device id>` route and, for a program, requiring the URL's `program` query parameter to be exactly that program (the gateway checks an extension route without its body, so the pin lives in the URL), so a desktop can never grant commands on another, nothing under a wider prefix matches, and a program grant admits nothing else. It takes no approve override. A new `remote_execution` module reads and writes the grant's name; the name carries no product prefix.
+
+## 2026-11-07
+
+Bump Latchkey version to 3.22.0, which adds the `mcp` login flow for registered services. A `custom-service` permission request may now name it: the gateway extension and `custom_services` validate its parameters (`mcpEndpoint`, `tokenEndpoint`, `registrationEndpoint`, optional `scopes` and `issuesRefreshTokens`) and require the MCP endpoint to be on the approved origin itself, since that is the only place a custom service's credentials are ever injected. `validate_login_flow` now takes the service's scheme for that check.
+
+The flow's OAuth endpoints are not held to the approved domain, since MCP servers routinely delegate to an authorization server elsewhere. Instead the new `mcp_metadata` module checks them against what the MCP server publishes (its RFC 9728 protected-resource metadata and the authorization server's RFC 8414 or OpenID metadata), with the domain rule as the fallback for a server that publishes nothing; `validate_mcp_login_on_domain` is that fallback.
+
+The URLs of the capture flows (the login page, `cookieUrl`, `tokenUrl`) may now also be on a parent domain of the approved one. The minimum locally-installed Latchkey version rises to 3.22.0 accordingly.
+
+## 2026-11-05
+
+Custom services now belong to the machine they are created on, the way credentials and policy already do, and are deregistered with their last account.
+
+- Each machine store keeps a `config.json` of its own (the desktop's settings with that machine's custom services in place of this computer's) instead of a symlink to the desktop's; a store from an earlier build is migrated the first time it is materialized, keeping the registrations its link resolved to.
+
+- A connect of a custom service, and a disconnect of a custom service's last account, read the machine's `config.json` first (one extra round trip) and install it again with that one registration added or removed, so a service another of the user's computers registered on the machine since this one last looked is kept. A connect of a builtin or bundled service carries no config at all; the bundled registrations reach a machine at provisioning, which no longer pushes this computer's own custom services and leaves the machine's as they are.
+
+- `MachineCredentials.refresh` and remote provisioning adopt the custom services the machine's config registers into its machine store.
+
+- `clear_remote_credentials` takes the config snapshot to install with the clear, and `MachineCredentials.disconnect_account` takes `is_service_deregistered`; `Latchkey.register_custom_service` takes the store directory to register in, and `Latchkey.deregister_custom_service` is its inverse. Both refresh the desktop gateway's `services.json`, which is now materialized from the union of every machine's custom services (`custom_service_registration_entries_of_every_machine`); `ServicesCatalog(is_including_every_machine=True)` reads that union, while a catalog over one latchkey directory names that machine's services alone.
+
+The services catalog now distinguishes *implicit* permissions: the protocol handshake every grant under a scope has to carry, which no client can skip and which grants no content on its own. `generate_services_json.py` marks every hosted MCP service's `<service>-mcp-session` plus Fastmail's JMAP `fastmail-session` and DAV `fastmail-dav-discover` with `"is_implicit": true` in `services.json`. `ServicePermissionInfo` keeps them out of the grantable `permission_schemas`, lists them under the new `implicit_permission_schemas`, and gains `with_implicit_permissions`, which appends them to any non-empty permission set and leaves an empty one empty, so every writer of a per-account grant produces a rule the agent can actually use. Previously a grant of narrower MCP tool permissions without the session permission could not even open an MCP session, and the dialog and Permissions tab offered the handshake as an ordinary "Session" switch.
+
+A host's policy now travels to its machine without the whitespace between its JSON tokens. The whole policy goes in one remote command capped at 100,000 bytes, and the registered-agent list (every agent the host has run) is most of it, so the indentation more than doubled what the cap was spent on; a long-lived remote workspace could end up unable to take any sign-in or grant ("the single command that would carry it is 102745 bytes, past the 100000 a remote shell accepts"). The copy read back from a machine is still written here in the usual indented form, so the round trip is exact for a policy this plugin wrote.
+
+New `set_registered_agents_for_host` and `list_registered_agent_ids_for_host` in `agent_setup`: the first makes a given set exactly the agents registered for a host in one write, adding the ones missing and dropping the ones outside it (a host with no file, or no policy, gets a fresh baseline like a registration would), and returns whether the file changed so the caller can push it; the second reads the set back. `register_agent_for_host` is now the single-agent case of the same editing path. Imbue Studio pins each workspace's list from its discovery stream; this package never unregisters an agent on its own.
+
+Tests only: the SSH wiring-failure tests use mngr's shared `make_client_and_host_ssh_keys` test helper instead of their own copy. No user-visible change.
+
 ## 2026-11-02
 
 MIND-301: `scripts/generate_services_json.py` checks that every catalog scope is a string, raising `GenerateServicesError` on one that is not. `CodedLatchkeyFailure.known_code` checks membership against the set of `LatchkeyErrorCode` values, which means the same on every Python version. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`.

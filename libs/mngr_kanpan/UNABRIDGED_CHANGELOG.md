@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-05
+
+Changed: the board's help now names mngr's new `RUNNING_BACKGROUND` state among the lifecycle states it groups agents by -- an agent whose turn has ended while work it declared is still outstanding -- and the README's filter recipe for working agents selects it alongside `RUNNING`.
+
 ## 2026-11-02
 
 MIND-301: `_build_focus_map` declares urwid's own `Hashable` attribute-map types, which urwid's `AttrMap` signature requires. Tests that render an agent row share a `_rendered_segments` helper typed against `Columns`, and the `PrField` immutability test uses `assert_model_is_frozen`. Type-checker-only; the board renders exactly as before.

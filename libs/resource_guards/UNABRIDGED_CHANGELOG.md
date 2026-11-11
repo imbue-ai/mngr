@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
 ## 2026-11-02
 
 MIND-301: A `# ty: ignore[invalid-assignment]` comment that ty 0.0.87 no longer needs is removed. Type-checker-only; behavior is unchanged.

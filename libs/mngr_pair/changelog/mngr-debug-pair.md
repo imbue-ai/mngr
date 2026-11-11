@@ -1,5 +1,0 @@
-Pairing with a remote agent no longer dies partway through a large first pass with `Unison exited with code 3` (unison's own words: `Uncaught exception (please report a bug): Sys_blocked_io`). unison started ssh on its own stderr, and OpenSSH puts every non-tty stdio descriptor of a session into non-blocking mode. The flag belongs to the shared open file description, so unison's stderr went non-blocking too, and the first time its transfer narration filled that pipe faster than mngr read it (a few thousand files is enough) the refused write was fatal. The ssh wrapper mngr hands unison now sends ssh's stderr to a file beside it instead.
-
-When unison does end on its own, the error now quotes the end of what ssh wrote (`Unison exited with code 3. ssh reported: ...`), which is where a refused key or a dropped connection explains itself; it used to be lost in debug logging.
-
-`write_ssh_wrapper_script` returns an `SshWrapper` (the script path and the stderr file) rather than a bare path, `UnisonSyncer` takes it as `ssh_wrapper` in place of `ssh_wrapper_path`, and `UnisonSyncer.read_ssh_stderr` reads that file.

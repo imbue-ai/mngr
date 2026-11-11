@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-08
+
+VPS hosts run a new every-boot `mngr-vps-container-meminfo.service` that publishes each agent container's cgroup limit and headroom into the container's volume as `/mngr-vol/.host-meminfo`, the file the gen-2 slice VMs already publish and an in-container earlyoom run with `--host-meminfo` already reads: under gVisor the sandbox's own `/proc/meminfo` cannot see the memory the runtime is charged against the cap, so a memory guard reading it alone acted only once the cgroup was already at its limit and the sandbox thrashing (a 2026-11-08 production OOM kill on an AWS host). The publisher's Perl (container discovery, the two-slot, symlink-refusing writes) lives in `imbue.imbue_common.container_meminfo_publisher`, which the gen-2 slice guests' publisher builds on too.
+
+runsc containers get `--ulimit memlock=64 MiB` unless the caller sets one: gVisor's default is 64 KiB and it measures `mlockall` against the whole mapped address space, so earlyoom's `mlockall` failed at every start.
+
+`ParsedVpsBuildOptions` gained `root_disk_gb`, with the shared `extract_root_disk_gb` parser behind the cloud providers' new `--<prefix>-root-disk-gb=N` build args; a per-create root disk is recorded on the host's shape so `mngr list` reports it.
+
+## 2026-11-05
+
+Changed: this provider's batched listing now collects each agent's work leases alongside its `active` marker, so an agent whose turn has ended while declared work is still outstanding reports the new `RUNNING_BACKGROUND` state rather than `WAITING`.
+
 ## 2026-11-03
 
 gVisor is pinned to release `20261102`. Since August, gVisor ships each release only as a `gvisor.tar.zstd` tarball holding runsc, its containerd shim and the `gvisor-bin/` sidecars runsc runs, and runsc refuses sidecars from any other release. The shared install script (`render_gvisor_binary_install_script`, which now takes the release and install directory) downloads that tarball, checks its sha512, installs `zstd` when the host lacks it, and puts all three side by side in `/usr/local/bin`. It now skips only when the installed runsc already reports the pinned release, so it upgrades an older runsc in place instead of leaving it. The new release stops the gofer's inode-number map from growing for as long as a sandbox runs (google/gvisor#16197) and the 32 MiB file-descriptor table each tmux client call left behind (google/gvisor#15989).

@@ -14,6 +14,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `mngr create` raises `ModalDeployedAppLimitMngrError` when the Modal workspace is out of deployed-app slots, naming the cap and how to free slots.
+- Changed: New `-b volume=` volumes are v2 Modal Volumes, without v1's 500,000-file limit.
+- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
+
+### Fixed
+
+- Fixed: Commands no longer hang when Modal stops answering a state-volume read, listing, removal or write; stalled attempts are cancelled and retried. Modal SDK pinned at 1.6.1.
 
 ## [v0.3.1] - 2026-10-28
 

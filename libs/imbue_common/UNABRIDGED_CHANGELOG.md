@@ -4,6 +4,64 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-10
+
+`imbue_common` gains `imbue.imbue_common.profiling`, the tracer behind Imbue Studio's opt-in profiling mode. It records named spans and instants as Chrome JSON trace events on the system monotonic clock, keeps a per-thread trace context with W3C `traceparent` parsing and rendering so a span can join a trace started in another process, and attaches Perfetto flow links between spans in different processes. It has two modes: `enable_writer(path)` appends events to one trace file, buffered and flushed on the recording thread by count, by age, on `flush()`, and at exit, and `enable_collector()` keeps events in memory for `drain_events()`, so a child process can hand its spans back to the writer. Until a mode is enabled, `get_profiler()` is a no-op that costs about 160 ns per span; enabled, a span costs about 6 microseconds in collector mode and about 10 microseconds in writer mode, at about 100 bytes per span on disk. Each mode is capped (one million of the writer's own events, fifty thousand of a collector's) and records a single `overflow` instant past its cap; events another process recorded are written verbatim and are not counted. A file the writer produces opens in Perfetto as is, with one lane per process, named threads, nested slices, and arrows between the spans that share a flow id. A span's handle can set its flow links after it opens (`set_flow_out`, `set_flow_in`), so a span can be the source of a flow bound to its own span id, and `complete(name, start_us, end_us)` records a span that already finished from explicit timestamps.
+
+The logging helpers `log_span`, `info_span`, `trace_span`, and `log_call` now run their body inside a tracer span named by the formatted message (the function name, for `log_call`), so every span already written in `mngr` and `minds` appears in a trace when profiling is on. These derived spans carry no arguments, since the helpers' context fields and bound arguments can hold secrets, and the message is only formatted when a mode is enabled, so logging is unchanged while profiling is off.
+
+## 2026-11-09
+
+# Ratchet tests load their file scan during setup, outside their timeout
+
+Ratchet checks share their work through process-wide caches: the file listing, every file's
+contents, and every Python file's parsed AST. Those caches used to fill inside the body of whichever
+ratchet test ran first in a process, so that one test paid for reading and parsing the whole tree
+inside its 10s pytest-timeout. Offload runs every CI batch as its own pytest process, so every batch
+had such a test, and under load some of them timed out (MIND-182).
+
+- New pytest marker `ratchet_scan(source_dir)`. The shared conftest hooks preload a marked test's
+  scan during pytest setup, which `timeout_func_only = true` leaves untimed, so the test's timeout
+  covers only its own check.
+
+- New `preload_text_scan` and `preload_python_ast_scan` in `ratchet_testing.core`, and
+  `preload_ratchet_scan_for_test` in `ratchet_testing.standard_ratchet_checks`. Python files are
+  parsed only for the tests of the eight checks that read ASTs.
+
+- This project's `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the
+  `xdist_group` marker, which no test runner here honours.
+
+## 2026-11-08
+
+New `imbue.imbue_common.container_meminfo_publisher`: the Perl a VM runs to publish each agent container's cgroup memory limit and headroom into the container's volume as `.host-meminfo` (container discovery and the two-slot, symlink-refusing writes), plus that file's name. mngr_vps's VPS-host publisher and mngr_imbue_cloud's gen-2 slice guest publisher both render from it; it lives here because the gen-2 renderers ship into the remote service connector's container, which holds no mngr package.
+
+## 2026-11-05
+
+# Sentry issues are filed under our code again, not the stdlib
+
+Sentry decides which stack frames are the application's own, derives an issue's culprit
+from the last of them, and shows only those frames until a reader expands the rest. Left
+to guess, it never counted our code as the application's in a shipped desktop build: the
+build installs our code into a venv, and the SDK rules out anything under `site-packages`
+as third-party.
+
+What took its place depended on the process. The `mngr latchkey forward` daemon is
+launched from the directory that also holds the bundled interpreter, so the SDK took the
+standard library for the project and filed the daemon's issues under it -- `logging in
+handle`, `threading in run`, `concurrent.futures._base in __get_result`. The minds backend
+counted no frame at all, so its issues fell back to whichever frame happened to be deepest.
+Either way our own frames were collapsed out of the default view.
+
+The classification is now stated outright rather than inferred from the build layout:
+frames under `imbue` are ours, frames in the standard library are not. This affects both
+desktop-side Python processes that report to hosted Sentry. Because Sentry's grouping
+weighs application frames, existing issues from both may regroup as new ones once a build
+carrying this ships.
+
+Changed: `find_bash_scripts_without_strict_mode` now excludes sourced `*_lib.sh` shell libraries, which are not runnable scripts: declaring `set -euo pipefail` in one applies it to whatever sources it rather than to itself.
+
+New shared pytest marker `harness_internals(harness)` marks a release test that asserts an internal of a harness CLI that mngr reads, such as a transcript record, hook payload, TUI string or launch flag. Select one CLI's tests by keyword, e.g. `-m "release and harness_internals(harness='claude')"`.
+
 ## 2026-11-02
 
 MIND-301: The type-check gate, `check_no_type_errors`, fails on any ty diagnostic, warnings included, and its failure message counts and lists warnings as causes alongside errors.

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The window sitter and task dispatcher cron recipes count `RUNNING_BACKGROUND` agents as working.
+
 ## [v0.2.1] - 2026-10-28
 
 ## [v0.2.0] - 2026-10-22

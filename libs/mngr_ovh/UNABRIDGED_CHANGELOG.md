@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+The OVH bootstrap now loads its SSH private key with the shared `ssh_utils.load_ssh_private_key_file` instead of trying `Ed25519Key`, `RSAKey`, and `ECDSAKey` in turn and reporting the last one's parse error. RSA PEM and OpenSSH Ed25519 keys load as before, an unloadable key still raises `VpsProvisioningError`, and DSS keys now load too. A passphrase-protected key is now reported as needing a passphrase rather than as unparseable.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

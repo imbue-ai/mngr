@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-05
+
+New release test `test_claude_statusline_cost_reaches_mngr_usage_as_api_spend`. It drives a real claude under an API key through one turn, then checks that `mngr usage` reports the turn exactly once, as API spend equal to the `cost.total_cost_usd` claude gave its statusline. It also pins the statusline stdin fields `claude_usage_writer.sh` reads: `session_id`, matching the agent's `claude_session_id`; `cost`, which must validate as mngr's `CostSnapshot`; and `rate_limits`, which must be absent under an API key. It is marked `harness_internals(harness="claude")`, so the release test workflow also runs it against the latest Claude Code release.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

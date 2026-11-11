@@ -1,1 +1,0 @@
-Fixed: a chat whose turn ended with a background task still running reports mngr's new `RUNNING_BACKGROUND` state, and the gate that every mutating backup program runs first now counts it as a running chat, so such a chat is no longer interrupted mid-work. The update watchdog counts it as busy for the same reason, so it no longer nudges a chat that is still working.

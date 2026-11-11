@@ -4,6 +4,38 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-06
+
+The Claude streaming snapshot no longer reads Claude's own status lines as reply text. Once a tool group finishes, Claude collapses it into a gray "Ran 3 shell commands" line under the reply, with no marker of its own, and a running tool's marker blinks off to a gray blank cell. Both were appended to the streamed reply, so text that had already landed was streamed again with the summary attached. A line drawn in Claude's status gray now ends the reply. Only a marker in the first column starts a reply, so the "● main" row of the background-agents list under the input box is no longer streamed as a reply while a subagent runs.
+
+## 2026-11-05
+
+Added: a Claude agent now declares the background work its turn leaves running, so mngr reports it as RUNNING_BACKGROUND until that work wakes it.
+
+At each turn end `wait_for_stop_hook.sh` declares one work lease per in-flight background task under the agent's `leases/` directory, taken from the `background_tasks` the Stop payload carries for exactly this purpose. That set covers a background command, an armed monitor, a workflow and a backgrounded subagent alike, and a task reporting a finished status is skipped rather than leased. A `session_crons` schedule is deliberately not leased: a schedule is an appointment rather than work in flight, so an agent with one armed is idle until it fires.
+
+The hook writes leases through the shared `mngr_work_lease_lib.sh` rather than spelling the format itself, and keeps only the job that is genuinely its own: reading the Stop payload. It rewrites its own leases at every turn end, so work that has finished stops counting, and leaves leases written by anything else alone, since each states a bound it expires by. Nothing refreshes a lease: its deadline bounds how long background work that died silently can hold an agent, so it only has to outlast the longest task that runs without waking the agent. An agent provisioned before that library existed declares no leases and still ends its turns normally.
+
+A restart drops those leases outright, alongside the `active` and `permissions_waiting` markers the startup hook already cleared: the tasks were processes the restart killed, so an agent restarted mid-lease reads WAITING immediately rather than when the deadline passes.
+
+Previously an agent that ended its turn with a subagent, a review or a monitor still running was indistinguishable from one waiting on you.
+
+New release tests drive a real claude to pin the Claude Code internals mngr reads. They are marked `harness_internals(harness="claude")`, so the release test workflow also runs them against the latest Claude Code release. Each checks the raw internal and the user-visible outcome, and its failure names the internal, the mngr code that reads it and the claude version. They cover the model-switch confirmation and `/model` picker dialogs; autocompact's context sizing and the `compact_boundary` and `isCompactSummary` records; `/compact`'s PreCompact/PostCompact payloads and command records; a response written over several assistant records; a failed tool call's `tool_result`; the shoulder tap's `meta+q` keybinding; the `PermissionRequest` hook for auto-allowed agents; the `StopFailure`, `idle_prompt` and SessionStart `resume` hook events; stacked `--append-system-prompt` blocks; and the `AskUserQuestion` tool name.
+
+The claude release-test plumbing lives in `imbue.mngr_claude.testing` under public names. `start_held_tool_call` holds a turn's Bash call open until the test creates a release file, `created_agent` tears the test's context down after destroying its agent, and `record_one_proxied_turn` runs one turn through a local proxy that records the API requests the agent sends.
+
+New release tests pin two Claude Code internals that mngr hardcodes, by driving a real claude. They, the transcript record contract and the adopt-session test are marked `harness_internals(harness="claude")`, so the release test workflow also runs them against the latest Claude Code release, and a change to an internal they pin fails the release.
+
+- `test_claude_stop_hook_block_keeps_agent_running_through_its_continuation`: when a project Stop hook blocks a turn end, the agent stays RUNNING through claude's continuation and reports WAITING after it. It also checks the `Stop hook feedback:` record and the `stop_hook_summary` after it, which `wait_for_stop_hook.sh` reads.
+
+- `test_claude_mid_turn_message_lands_once_in_the_common_transcript`: a message sent during a tool call lands exactly once in the common transcript. It also checks the `absorbed_mid_turn` queue removal and `queued_command` attachment `common_transcript_convert.py` reads.
+
+- `test_claude_transcript_record_contract` now checks queue operations as (operation, reason) pairs, so a new removal reason fails it.
+
 ## 2026-11-03
 
 `is_shell_command_message`, the check for a leading-`!` shell-mode message, moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`, where the grok plugin uses it too. Claude's handling of `!` messages is unchanged.

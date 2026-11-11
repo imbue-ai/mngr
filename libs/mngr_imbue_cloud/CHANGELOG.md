@@ -10,10 +10,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: Imbue Cloud slices publish the ports a create declares, reported as `published_endpoints`; `ShareInfo` and the lease wire types gain `published_ports`/`media_port` (published-ports contract).
 - Added: `mngr imbue_cloud sync records retire <workspace-id>` retires a workspace record instead of deleting it, keeping one with anything to recover as a destroyed tombstone (`status: retired`); it fails rather than deletes against a connector without retirement.
+- Added: `mngr imbue_cloud backup-repo create|list|roll-token|destroy|usage` for the backup store, and `bucket freeze <name>` to make a legacy bucket read-only.
+- Added: Gen-2 slice VMs publish the data filesystem's host quota at `/mngr-vol/.host-diskinfo`.
+- Added: With profiling enabled, connector requests carry a W3C `traceparent` header and record `connector.request` / `connector.token_refresh` spans.
 
 ### Changed
 
 - Changed: The connector client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
+- Changed: Fast-path workspace creation makes fewer round trips (one SSH connection for slice adoption, no redundant container sshd wait, host env and `data.json` cached under the host lock) and logs where the time goes.
+- Changed: `ShareGrantsPushResult` gains `share`, `outcomes` and `identities`, printed by `shares push-grants`.
+- Changed: `auth login` JSON output includes `is_email_verified`.
+- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
 
 ### Removed
 

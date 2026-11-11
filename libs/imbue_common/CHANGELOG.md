@@ -9,15 +9,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `testing.assert_model_is_frozen`, which asserts a pydantic model is declared frozen.
+- Added: `imbue.imbue_common.profiling`, a Chrome JSON trace tracer (W3C `traceparent` propagation, cross-process flow links, file-writer and in-memory collector modes, no-op until enabled) behind Imbue Studio's profiling mode; `log_span`, `info_span`, `trace_span` and `log_call` now also open tracer spans.
+- Added: `imbue.imbue_common.container_meminfo_publisher`, the shared Perl that publishes each container's cgroup memory headroom as `.host-meminfo`.
+- Added: Shared pytest markers `ratchet_scan(source_dir)` (preloads a ratchet test's file scan during setup, via new `preload_text_scan`, `preload_python_ast_scan` and `preload_ratchet_scan_for_test`) and `harness_internals(harness)`.
 
 ### Changed
 
 - Changed: The owner-exec client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
 - Changed: `check_no_type_errors` now fails on any ty diagnostic, warnings included, and lists warnings in its failure message.
+- Changed: `find_bash_scripts_without_strict_mode` excludes sourced `*_lib.sh` shell libraries.
 
 ### Fixed
 
 - Fixed: Error-report log uploads no longer raise `FileNotFoundError` (and file a spurious `Sentry callback raised` event) when a size-rotated log file is renamed away before the upload runs; the missing file is logged and skipped.
+- Fixed: Sentry now treats frames under `imbue` as in-app and stdlib frames as not, so desktop-side Python issues are filed under our code instead of the stdlib; existing issues may regroup.
 
 ## [v0.1.22] - 2026-10-28
 

@@ -9,16 +9,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `minds-workspaces-account-settings` verb in the workspace-permissions catalog, a target-scoped PUT on `/account-settings/keybindings` that lets a workspace save keybindings to its owning account once approved.
+- Added: `remote-execution` request type in the `permission-requests` gateway extension, granting a device-pinned `remote-execution-<device id>[:<program>]` permission (new `remote_execution` module).
+- Added: Latchkey 3.22.0's `mcp` login flow for custom services, with the new `mcp_metadata` module checking OAuth endpoints against the MCP server's published metadata; capture-flow URLs may be on a parent domain.
+- Added: `set_registered_agents_for_host` and `list_registered_agent_ids_for_host` in `agent_setup`.
 
 ### Changed
 
-- Changed: Bumped Latchkey version to 3.21.0; the bundled service catalog now includes Asana.
+- Changed: Bumped Latchkey version to 3.22.0, which is also the new minimum locally-installed version; the bundled service catalog now includes Asana.
+- Changed: Custom services belong to their machine (each machine store has its own `config.json`, migrated from the old symlink) and are deregistered with their last account; adds `Latchkey.deregister_custom_service` and `ServicesCatalog(is_including_every_machine=True)`.
+- Changed: The services catalog marks protocol-handshake permissions `is_implicit`; `ServicePermissionInfo` lists them under `implicit_permission_schemas` and `with_implicit_permissions` adds them to any non-empty grant.
 
 ### Fixed
 
 - Fixed: The VPS gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing truncated Slack replies for datalib.
 - Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
 - Fixed: A machine policy with no rules is treated as unprovisioned, so a read or provisioning pass seeds it from this computer's policy instead of adopting the deny-all default.
+- Fixed: Host policies are sent without whitespace, so long-lived remote workspaces no longer exceed the 100,000-byte remote command cap on sign-ins and grants.
 
 ## [v0.2.1] - 2026-10-28
 

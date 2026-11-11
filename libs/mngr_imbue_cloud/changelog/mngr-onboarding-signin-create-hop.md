@@ -1,1 +1,0 @@
-`mngr imbue_cloud auth login` now includes `is_email_verified` in its JSON output: `true` or `false` when the hosted page's loopback callback said whether the signed-in address is verified, and `null` when it did not (an older connector) or named a different address. A caller can use it instead of running `auth is-verified` straight after signing in.

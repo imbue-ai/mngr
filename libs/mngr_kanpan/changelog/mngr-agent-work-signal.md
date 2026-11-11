@@ -1,1 +1,0 @@
-Changed: the board's help now names mngr's new `RUNNING_BACKGROUND` state among the lifecycle states it groups agents by -- an agent whose turn has ended while work it declared is still outstanding -- and the README's filter recipe for working agents selects it alongside `RUNNING`.

@@ -1,1 +1,0 @@
-A host container's entrypoint, once the host is provisioned, now also runs the image's start hook, `/usr/local/bin/mngr-container-start-hook`, detached, after it restarts sshd on every container (re)start, when the image ships an executable one. An image relaunches whatever else it needs there after a restart docker made on its own.

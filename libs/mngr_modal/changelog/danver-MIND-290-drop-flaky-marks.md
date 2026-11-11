@@ -1,1 +1,0 @@
-MIND-290 is fixed, so the `@pytest.mark.flaky` marks kept while it was open come off `test_delete_nonexistent_snapshot_raises_error` and `test_provision_statusline_shim_on_modal_host`. Seven other Modal acceptance tests keep their marks, now attributed to the tickets still open against them (MIND-633, MIND-351, MIND-477, MIND-296, MIND-634).

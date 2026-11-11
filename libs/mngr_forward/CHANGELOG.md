@@ -9,11 +9,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: The `httpx2` dependency floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
+- Changed: `mngr forward` follows each agent's services with `mngr event <agent>@<host>.<provider>`, skipping a discovery pass so a new workspace's origins route sooner; it logs each stream's time to first event.
 
 ### Fixed
 
 - Fixed: An SSH host that closes the connection during the handshake or while a reverse tunnel is being set up now surfaces as an `SSHTunnelError` (`HOST_CONNECT`) instead of a bare paramiko `EOFError` that used to kill the reverse-tunnel health-check thread and abort the latchkey discovery cycle.
 - Fixed: Removing a reverse tunnel and `SSHTunnelManager.cleanup()` no longer raise when the host hangs up during the best-effort remote port-forward cancel.
+- Fixed: SSH tunnel setup reports the real authentication failure instead of `encountered RSA key, expected OPENSSH key`, authenticates a host with its own key alone, and closes connections that fail key or host-key checks instead of leaking one per retry.
 
 ## [v0.2.1] - 2026-10-28
 

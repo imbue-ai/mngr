@@ -1,1 +1,0 @@
-The Vault setup guide (`docs/deploy/setup/vault.md`) lists the nightly changelog job as a consumer of the CI LiteLLM proxy credentials instead of `secrets/mngr/ci/ANTHROPIC_API_KEY`. It also drops the step that redeployed that job after a key rotation, since it now runs in GitHub Actions and no longer holds a copy of the key.

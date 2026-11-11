@@ -1,1 +1,0 @@
-- `run_local_command_modern_version`, `run_background`, and `ConcurrencyGroup.run_process_in_background` take `is_own_process_group`: the child is spawned as the leader of its own session and process group, and a shutdown or timeout signals the whole group, so what the child forked dies with it instead of outliving it.

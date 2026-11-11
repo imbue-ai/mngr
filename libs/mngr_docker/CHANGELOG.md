@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: The docker provider publishes ports declared with `mngr create --publish`, recording them as `host.published_endpoints` and replaying them on snapshot restore (published-ports contract).
+- Added: A provisioned host container runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restarting sshd on every container (re)start.
 
 ## [v0.1.1] - 2026-10-28
 

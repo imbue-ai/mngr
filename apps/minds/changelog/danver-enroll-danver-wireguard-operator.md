@@ -1,1 +1,0 @@
-Added Danver's WireGuard operator keys (`danver`) to the dev (`10.112.0.8`), staging (`10.96.0.7`), and production (`10.64.0.7`) management-plane peer lists, so he can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers` for each tier.

@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `skitwright` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
 ## 2026-11-04
 
 New `imbue.skitwright.artifact_scrub`: rewrites every text file under a set of paths so the named credential values are redacted by value and anything else credential-shaped (Anthropic keys, LiteLLM and OpenAI keys, Modal tokens, GitHub tokens, AWS access key ids, private-key blocks, documentation placeholders excepted) is redacted by pattern, reporting each pattern redaction with its file and line. It backs the `scrub-artifact` CI action and the TMR report mirror.

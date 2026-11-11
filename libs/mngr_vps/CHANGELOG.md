@@ -9,10 +9,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: The VPS providers publish ports declared with `mngr create --publish` (recorded as `published_endpoints`); cloud VPS providers gain a `firewall_published_ports` config key their `prepare` opens (published-ports contract).
+- Added: VPS hosts run an every-boot `mngr-vps-container-meminfo.service` publishing each container's cgroup memory headroom to `/mngr-vol/.host-meminfo` for in-container earlyoom under gVisor.
+- Added: `ParsedVpsBuildOptions.root_disk_gb` and the shared `extract_root_disk_gb` parser behind `--<prefix>-root-disk-gb=N`.
 
 ### Changed
 
 - Changed: gVisor pinned to `20261102`, installed from its sha512-checked `gvisor.tar.zstd` release tarball (runsc, shim and `gvisor-bin/` sidecars); `render_gvisor_binary_install_script` now takes the release and install directory and upgrades an older runsc in place.
+- Changed: runsc containers default to `--ulimit memlock=64 MiB` so earlyoom's `mlockall` succeeds.
+- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
 
 ### Fixed
 

@@ -1,1 +1,0 @@
-mngr commands on Modal no longer hang when Modal stops answering a state-volume write (MIND-290), such as the host-record write during create, stop and destroy. A stalled upload is cancelled and retried within the existing budget, so it cannot overwrite a newer record afterwards.

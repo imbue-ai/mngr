@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-10
+
+`Host.execute_stateful_command` and `OuterHost.execute_stateful_command` now run the command inside a `host.exec` span of the `imbue_common` tracer behind Imbue Studio's opt-in profiling mode, with the arguments `host_id`, `provider` (the provider instance the host belongs to; an outer host has none, so its span names the host alone), and `is_success` from the command's result. The span is what makes a workspace exec show up as its own slice in a Studio trace, beside the `log_span` and `log_call` slices `mngr exec` already records. Until a profiling mode is enabled the tracer is a no-op, so `mngr` runs unchanged.
+
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so its file scan loads during pytest setup instead of inside the first ratchet test's 10s timeout. `test_prevent_getattr`, which timed out in exactly that way, is no longer marked flaky.
+
+Added `ssh_utils.load_ssh_private_key_file`, which loads an SSH private key of any type paramiko supports, detecting the type from the file contents (`paramiko.PKey.from_path`). Handing paramiko a key path (`SSHClient.connect(key_filename=...)`) or trying key classes one at a time makes paramiko report only the last key class's failure, which is how a rejected RSA key came to be reported as `encountered RSA key, expected OPENSSH key`. Loading the key once means any later failure is reported as itself.
+
+A key that cannot be loaded raises one of two errors, both subclasses of the new `SSHPrivateKeyError` (a `MngrError`):
+
+- `SSHPrivateKeyEncryptedError` when the key is passphrase-protected, which mngr has no passphrase for. This is read from the file's own encryption marker (the PKCS#8 PEM label, the classic-PEM `Proc-Type` header, or the cipher named in the OpenSSH container), not from the `TypeError` `cryptography` raises for it, because `cryptography` raises the same `TypeError` for a bad argument, which is a bug and must not be reported as a bad key file.
+
+- `SSHPrivateKeyUnparseableError` when the file cannot be read, is malformed, or holds a key type mngr cannot use.
+
+## 2026-11-08
+
+The generated `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) now documents the `backup-repo {create, list, roll-token, destroy, usage}` group and the compat `bucket freeze` command that the Imbue Cloud plugin gained for the backup store.
+
+Testing branch merging `mngr/avoid-api-key-limits` and `mngr/remote-execution`. For this project it carries the regenerated `mngr imbue_cloud` CLI reference for the `backup-repo` group unchanged; see the backup-store branch's entry.
+
+The self-healing container entrypoint shared by the docker and VPS providers now runs the image's start hook, `/usr/local/bin/mngr-container-start-hook`, detached, after it has brought sshd back on a container restart (an OOM kill, a docker daemon restart, a VM reboot), when the image installs one and the host is already provisioned. An image relaunches whatever else it needs there, such as the agent that runs its service supervisor, which until now came back only through an explicit `mngr start`.
+
+## 2026-11-06
+
+The Modal provider docs say that a `-b volume=` volume mngr creates is a v2 Modal Volume, with no file-count limit, and that an existing volume is mounted at the version it already has.
+
+`mngr event TARGET SOURCE...` (and `--source`) now finds the named sources by listing only their own directories instead of the target's whole events tree, which saves network round trips on remote hosts at startup and on every follow rescan. For a follow of one source on a Modal workspace (`mngr event AGENT services --follow`, as `mngr forward` runs for each agent), the time to the first event dropped from about 9.9 s to about 5.9 s.
+
+The sources found, their rotated files and their order are unchanged for the names mngr uses, a named source that appears later is still picked up by the follow rescan, and `mngr event` without source names still lists the whole tree. Two cases differ: a named source directory that is a symlink is now read, and on a case-insensitive filesystem (macOS) a wrongly cased name such as `Services` now shows that directory's events with a source-mismatch warning instead of nothing. Naming many sources at once on a remote host can take about as long as the old walk.
+
+## 2026-11-05
+
+Added: a `RUNNING_BACKGROUND` agent state, for an agent whose turn has ended while work it declared is still outstanding -- a background command, a subagent, a monitor or a workflow that is going to start its next turn without you. A standing schedule does not count: it is an appointment rather than work in flight, so an agent with one armed is idle until it fires.
+
+Such an agent used to report `WAITING`, indistinguishable from one waiting on you. `RUNNING` and `WAITING` keep their meanings exactly: `RUNNING` is a turn in progress, and `WAITING` now means no turn is open and nothing is pending.
+
+Whatever starts the work declares a *work lease* under the agent's `leases/` directory, whose first line names its own deadline as `until:<epoch seconds>`. Because each lease states a deadline, work that dies without cleaning up stops counting on its own, unlike the `active` marker, which strands when a hook fails to remove it.
+
+`--running` now selects both states, since it asks which agents will move themselves and `RUNNING` alone stopped answering that. `mngr ls` reports the outstanding work as `leases`, so a caller can see which work is holding an agent rather than only that something is.
+
+`resources/mngr_work_lease_lib.sh` ships the write side for shell hooks, so any agent plugin declares leases without reimplementing the format; it is provisioned into every agent alongside the other shared libraries. The probe reads them in the same host read that already collects the `active` marker, so the new state costs no extra round trip.
+
+An agent that declares no leases behaves exactly as before.
+
+The shared agent release-test harness (`imbue/mngr/agents/agent_release_testing.py`) makes public the helpers that agent plugins' own release tests call: `agent_state_dir`, `marker_path`, `read_common_records`, `wait_for_records`, `wait_for_user_message`, `is_step_from`, `step_message`, `count_user_steps_containing` and `send_expecting_success`. They were underscore-prefixed, so the claude release tests imported private names. The record helpers take read-only `Mapping` records. Behavior is unchanged.
+
+- `DEFAULT_HOST_LOCK_TIMEOUT_SECONDS` (the default wait of `Host.lock_cooperatively`) is now public, so a `Host` subclass that wraps the lock can keep the same default.
+
+- Test helpers only: the in-process SSH server used in tests (`in_process_paramiko_sshd`) now counts the connections it accepts, so a test can check that code reuses one SSH connection instead of opening a new one for each command. It also takes a required `dropped_connection_count`, the number of first connections it closes unanswered, like an sshd that is still starting. A new `make_client_and_host_ssh_keys` helper makes the client key and host key it takes, for tests in any project.
+
+`mngr event agent-...@host-....PROVIDER` now reads an agent by its ids only through a provider that discovery would load. When the provider has been removed from the config, or is disabled, empty or unreachable, the command falls back to the pinned lookup. A removed or disabled provider then fails with the target-not-found exit code instead of an unknown-backend error, or reading the host anyway. The `mngr event` help and the address docs also now say that such an address reads the events without looking the agent up, so an agent that is not on a readable host shows no events instead of failing.
+
+Documented: the spec for `RUNNING_BACKGROUND` now records what its create-time provisioning means for a rollout -- that an existing agent never reports the state however many turns it takes, since both the work-lease library and the harness's turn-end hook are copied into an agent's own state dir by `mngr create` and nothing re-copies them on start. An upgrade is therefore safe for existing agents, and a consumer cannot retire the signal it used before this state existed until those agents are gone.
+
 ## 2026-11-04
 
 The `mngr imbue_cloud` command reference documents the new `sync records retire` command, which keeps a workspace record holding anything to recover as a destroyed tombstone instead of deleting it.

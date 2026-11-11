@@ -4,6 +4,187 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-10
+
+The smoke journey now names the default-workspace-template tag its workspace's pool row was baked at, in its Step 3 log line and at the top of the template suites' `summary.md`, so a run's record says which template the template's CI tests exercised. A new `MINDS_SMOKE_EXPECTED_TEMPLATE_REF` makes Step 3 fail unless the row was baked at that tag, for a run meant to certify a release's template: a slow-path lease or a checkout at another commit no longer passes as having exercised the new pin.
+
+The release's staging rehearsal sets that variable to the release tag on its smoke run, and `apps/minds/docs/deploy/ops/app-release.md` gains *Reading the rehearsal's smoke run*, which says what the run must show before anything of the release reaches production and that a failed template test gets one rerun on a fresh row before it blocks. `services.md` says the staging smoke account is exclusive while that run is on, since a local teardown releases every workspace the account leases. `apps/minds/docs/testing-overview.md` section 1.10 records that the template the tests exercise is the one the build under test pins, that a published build cannot be pointed at staging, and the smoke-test definition the style guide now carries.
+
+Imbue Studio gains an opt-in profiling mode. `minds run --profile PATH` (or `MINDS_PROFILE_FILE=PATH`, which is how the Electron shell's own `--profile PATH` reaches the backend) records the session as one Chrome JSON trace file at `PATH`, which the Perfetto UI (`ui.perfetto.dev`) opens as is: drop the file on the page, or use Perfetto's `open_trace_in_ui` script. The path must not be under the logs directory a bug report uploads; the backend refuses such a path at startup. Off unless set: no span is recorded, no file is written, and the profiling endpoints do not exist.
+
+The file shows every participating process as its own lane on one timeline:
+
+- The backend records one span per HTTP request, named by the URL rule (`GET /api/v1/workspace-sharing/<workspace_id>`) with the path, status, and trace ids, under the trace the page's `traceparent` header names, so an arrow joins each request to the page's span that made it. The `/ui/ws` channel and the server-sent-event log streams are not recorded. Inside a request, the sharing flows record named spans at the steps the share-panel latency research found expensive (`sharing.get_sharing`, `sharing.publish`, `sharing.save_grants`, `sharing.invite`, `sharing.readiness`, the share-file probes, reads and writes, the relay and readiness probes, identity resolution, the identity cache write, and the forward headers rewrite), each `mngr imbue_cloud` command as `imbue_cloud_cli.run` (named by its subcommand, never its arguments), and every span the existing `log_span` and `log_call` helpers already write.
+
+- Every warm `mngr` process the backend launches appears as a lane of its own, with three slices: the import of `mngr`, the wait for its request, and the command itself, under the backend's `mngr_caller.call` span with an arrow between them. The parent's span carries the child's pid, how long the request waited for the process, and how long the command ran. The warm process is told to record by its request, never by the environment, and hands its spans back over the socket it already answers on; nothing else is written anywhere.
+
+- The page's own spans (the share panel's operations and every request it makes, with the browser's resource timing) arrive through `POST /ui/api/profile/events` and appear as `Imbue Studio UI <n>`, one such process per window, with the renderer's real pid in the name under Electron.
+
+- Under Electron, Chromium's own trace of the shell and the renderer arrives through `POST /ui/api/profile/chromium` when the app quits, with the query string and fragment cut from every URL in it, so a login code or a share handoff token never reaches the file.
+
+Spans carry identifiers, counts, booleans, route templates, and paths without query strings; never a token, a cookie, a request body, an email address, or the argument vector of a `mngr` command. The trace file is never swept into a bug report.
+
+The smoke suite records its run on request: `MINDS_SMOKE_PROFILE_FILE=<absolute path>` launches the app under test with `MINDS_PROFILE_FILE` set to that path, so a staging or production journey leaves one trace behind.
+
+Quitting is what completes the file: the backend closes the array as the last step of its shutdown. A backend killed by a signal leaves the array unterminated; appending a `]` makes the file open. For a function-level view of the backend, run it under viztracer (`uv run viztracer --min_duration 500 -o backend.viztracer.json -m imbue.minds.main run --profile trace.json`) and combine the two files with `viztracer --combine`; both are on the same clock. The developer workflow is in `apps/minds/docs/dev-setup.md`.
+
+The Vault setup guide (`docs/deploy/setup/vault.md`) lists the nightly changelog job as a consumer of the CI LiteLLM proxy credentials instead of `secrets/mngr/ci/ANTHROPIC_API_KEY`. It also drops the step that redeployed that job after a key rotation, since it now runs in GitHub Actions and no longer holds a copy of the key.
+
+Alpha moves to Imbue Studio 0.10.3 on mac, Linux and the web: `[channels.alpha]` points at build `2611107f2mm335f` (version 0.10.3, `fallback_branch` `minds-v0.10.3`, 100%, mac gated at `minimumSystemVersion` 22.0.0) and `[web_channels.alpha]` at `minds-v0.10.3`, so alpha desktops take the 0.10.3 update and alpha browser creates lease the `minds-v0.10.3` rows production is baked at. Beta and stable stay on 0.9.4.
+
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` and `test_minds_ratchets.py` declare `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so their file scan loads during pytest setup instead of inside the first ratchet test's 10s timeout. `test_prevent_if_elif_without_else`, which timed out in exactly that way, is no longer marked flaky.
+
+Added Danver's WireGuard operator keys (`danver`) to the dev (`10.112.0.8`), staging (`10.96.0.7`), and production (`10.64.0.7`) management-plane peer lists, so he can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers` for each tier.
+
+- Opening the share panel and saving a grant each make one connector call where they made up to three plus one per granted account. While the workspace is published, the grants push that already ran behind every save and load now stands alone: Imbue Cloud mirrors the granted accounts into the share's index and the owner's contacts itself, and answers the share's status, the invitation outcomes, and the grantees' identity records on the push, so the desktop no longer reads the status before a save, calls `set-grantees` and `contacts add` after it, or looks grantees up one by one.
+
+- The sharing document (`GET`/`PUT /api/v1/workspace-sharing/<id>`, the grants `PUT`) carries `invitation_outcomes`: what the granter may learn about each open user or email grant, as the push answered it. The share panel takes them from the document instead of reading `GET .../invitation-outcomes` after every load, save, and publish, and no longer re-reads them after an invite (the invite's own answer is the row's outcome); the route stays, and the panel still reads it when a document carries no outcomes.
+
+- The open of a published panel reads the workspace's share state in one exec (the same probe the publish uses) rather than the grants file alone, so it knows whether the workspace holds share materials before asking the connector anything.
+
+- `docs/share-panel-connector-calls.md` records what the one-call panel saved, measured against `main` on a dev tier, and how.
+
+- Corrected stale statements in `docs/testing-overview.md`. The e2e driver list now names `materialize_paired_default_workspace_template_worktree`, the function that creates the DEFAULT_WORKSPACE_TEMPLATE worktree, in place of a function that does not exist. The Electron create-and-chat test is described as signing in through the provider chooser before it sends its first message. The Playwright section lists all four specs and says CI runs `macos-launch.spec.js` and `macos-lifecycle.spec.js`. The smoke-test section's job list includes the workflow's `resolve` job, and its local-run paragraph no longer says the suite has no CI. The e2e backlog drops the item that waited for the create UI to post to `/api/v1/workspaces`, which it already does, and renumbers the items after it.
+
+- `test/e2e/README.md` lists `macos-lifecycle.spec.js` among the specs CI runs.
+
+- The module docstring of `desktop_client/e2e_workspace_runner.py` no longer says the module has only two callers.
+
+Imbue Studio 0.10.2: the desktop app's version moves to 0.10.2 and its pinned workspace template to `minds-v0.10.2`, a patch release over 0.10.1 (workspaces already on 0.10.x are not prompted to update). It exists because 0.10.1's template could no longer install the Screen's Fortress browser: the upstream x64 release asset was re-uploaded with a different digest on 2026-11-09, so `minds-v0.10.2`'s template pins the new digest and also carries the Screen service fix that keeps a returned Screen session from being re-granted on neko's echo of the service's own host change.
+
+Imbue Studio 0.10.3: the desktop app's version moves to 0.10.3 and its pinned workspace template to `minds-v0.10.3`, a patch release over 0.10.2 (workspaces already on 0.10.x are not prompted to update). It carries everything on `main` since the 0.10.2 cut: a new workspace is entered as soon as its welcome chat is on screen, the share panel opens and saves with one connector call, and the studio skill places and sizes new workspaces; the template side carries the chat's held-send fixes, the multiplayer desktop fixes, the phone and sharing checks for built apps, and the chat-on-screen report.
+
+The deploy docs record the minds-v0.10.1 release (`docs/deploy/history/minds-v0.10.1.md`): the cut, the release-test runs and the GitHub outage behind their first failures, the staging deploy with its two rolled-back attempts, the two bakes, the smoke journey and the full smoke run with the template's CI suites. `next_deploy.md` is reset to what the next deployment still owes, with the production Cloudflare token and account's backup-store prerequisites added, and `setup/tier-bringup.md` now says every tier's account needs a `workers.dev` subdomain, since wrangler refuses the Worker upload without one whatever the Worker's route.
+
+The deploy docs now say which smoke run each deploy gets: a new desktop release on staging runs every smoke test, and that is the only situation with `MINDS_SMOKE_SKIP_DWT_TESTS=0`; every other run sets it to `1`, the hand dispatch after a production channel publish included.
+
+The deploy docs also record the minds-v0.10.2 release (`docs/deploy/history/minds-v0.10.2.md`): why it was cut (the Fortress asset re-upload that left 0.10.1 unbakeable), the release tiers and their flakes, the pair and tag runs, the staging deploy, bake and full smoke run with the template's CI suites green, the production deploy, the twenty-row bake, and the alpha promotion. `next_deploy.md` is reset to what the next deployment still owes, with the stale Fortress digest of the 0.10.0 and 0.10.1 templates recorded.
+
+`test_legacy_association_files_migrate_into_synced_records` carries the flaky mark: in the minds-v0.10.2 release-tier run it failed once on `Electron CDP attach failed after 3 relaunch attempts`, the same attach error three sibling tests recovered from on retry, and it was the only test of the stage to get no retry.
+
+A new workspace opens on its welcome chat, and as soon as it can. The wash now stays up until the workspace reports the chat on screen, so the user never lands on an empty chat list. The creation page polls the create's status every quarter second (instead of every two seconds) while the workspace boots, the workspace mounts under the wash while the chat is being seeded, the page asks the workspace for the chat as soon as the seed answers, and the ready line no longer has a 900 ms hold.
+
+The wash lifts without the chat only when the seed has failed, 45 seconds after the create finished, or, for a template too old to report the chat (embed contract before v15), once the seed has answered. With reduced motion a plain cover does the same job.
+
+The hand-off can now be measured from `minds.log`: the seed's start and duration (`Seeding the welcome chat for create attempt ...`), its outcome (`Seeded welcome chat ...`, or a warning with the reason), the page's post when it sees the create done (`Received the creating page's welcome chat for finished create attempt ...`), and the landing itself with its wait (`Landed in the new workspace of create attempt ...`, a warning when the chat was not on screen).
+
+The alpha channel moves to 0.10.2 on mac and Linux (ToDesktop build `261109uzur0ec74`, template tag `minds-v0.10.2`, macOS 13 or newer), and alpha browser creates pin to `minds-v0.10.2`. 0.10.1 was never promoted: its template could no longer install the Screen's Fortress browser after the upstream asset was re-uploaded, which 0.10.2's template re-pins. Beta and stable stay on 0.9.4.
+
+The `imbue-studio` skill now tells an agent how to create a workspace where and as large as it should be: `launch_mode`, the connection (`cloud_account`), `instance_type` and the root `disk_gb` for the VM modes, read off the agent's own entry in `GET /api/v1/workspaces` unless the user asks for a different machine, and `enable_web_access` only when the agent's own workspace is published and the new one is for the user's own use. Following the old text created a cloud workspace at the connection's default size with its default 50 GB root disk, about 30 GB of it the data volume.
+
+`GET /api/v1/workspaces` reports each workspace's placement and size: `launch_mode` (stamped as a label at create, else read off the provider instance the workspace runs on), `instance_type` (stamped at create, so null on older workspaces) and the host's `cpu_count`, `memory_gb` and `disk_gb` as its provider recorded them. Under gVisor the sandbox hides the CPU model and the cloud metadata service, so an agent could not read its own instance type before.
+
+New `GET /api/v1/workspaces/cloud-accounts` lists the cloud connections a create may target (name, alias, backend, pinned region, masked key hint, owning account; never a credential). It rides the `minds-workspaces-read` grant, like the rest of the workspace metadata. The create request's `disk_gb` description now says it is the VM's root disk for the VM modes.
+
+## 2026-11-08
+
+Imbue Cloud workspace backups now live in the backup store (`specs/backup-store/spec.md`): the desktop app creates each workspace's repository through `mngr imbue_cloud backup-repo create` and writes a `rest:` repository URL with `RESTIC_REST_USERNAME` / `RESTIC_REST_PASSWORD` into the canonical `restic.env`, instead of minting a per-bucket Cloudflare S3 key. restic 0.16 or newer is required on the computer running Imbue Studio (the bundled binary already is).
+
+Workspaces still on one of the account's legacy per-workspace buckets migrate on their own: the landing page's backup status batch moves a few online workspaces per pass into the store as a tracked backup operation ("Moving backups to the new backup storage"), archives the old env, and freezes the old bucket read-only; a workspace another device of the account has already moved is left to the record sync. The workspace backups page lists snapshots at a workspace's previous backup destinations under "Previous storage"; Download and Restore work on them until that storage is reaped, the restore reading from the previous repository while its safety snapshot still goes to the current one. Once the connector reports a previous storage gone, its row disappears from the page and the archived credentials are removed.
+
+Freeing backup space no longer needs a cleanup grant: the trim flow forgets the oldest half of each repository's snapshots and prunes within the store's hard-limit headroom, re-reading the account's exact usage from the store. The Accounts page's storage meter reads that usage too and no longer speaks of keys turning read-only. Destroyed-workspace reaping, quota eviction, and orphan cleanup handle both store repositories and legacy buckets.
+
+The desktop's mutation gate recognizes `host_backup`'s `BACKUP_SKIPPED_OVER_QUOTA` as the end of an over-quota tick. `deploy.toml` gains `[backup_store] is_deployed` (on for every tier), a tier deploy needs the new `secrets/minds/<tier>/backup-store` Vault entry populated (the store's admin secret; see `apps/minds/docs/deploy/setup/vault.md`), and the deployment tests exercise the store's hard limit instead of the cleanup-grant cycle.
+
+Imbue Studio 0.10.1: the desktop app's version moves to 0.10.1 and its pinned workspace template to `minds-v0.10.1`, a patch release carrying everything on `main` since 0.10.0, so workspaces already on 0.10.0 are not prompted to update.
+
+The build's ToDesktop upload estimator now understands the root-level file exclusions `todesktop.js` declares (`!.env`, `!.env.*`) alongside `!<dir>/**`, with fast-glob's top-level-only matching, so `pnpm dist` builds again; it still refuses any appFiles shape it has not been taught, and a unit test holds it to the real `todesktop.js`.
+
+The stop/start and machine-resize deployment tests keep polling through a connector 5xx (a Neon connection dropped mid-query during the 0.10.1 release-tier run) instead of failing on the first one, and both carry the flaky mark.
+
+The design doc's request-identity section (`docs/design.md`) records how in-workspace services now treat a header-less request: the workspace's own browser is on loopback too, so every service installs the template's request guard, which refuses a page of another origin and admits a header-less request from loopback alone under a loopback `Host`, and the Screen's browser carries a policy denying every site the Local Network Access permission (imbue-ai/mngr-internal#2816; the code lands in default-workspace-template).
+
+Testing branch merging `mngr/avoid-api-key-limits` (Imbue Cloud backups move to the backup store, with the on-device migration of legacy buckets and the trim flow re-read from the store's usage) and `mngr/remote-execution` (agents can run commands on the user's computer behind the "This computer" switch, a device-pinned grant, and a per-call re-check). Against `main`'s workspace-keyed legacy bucket fixes, the desktop reaper and quota eviction now try the store repository (or the record's explicit bucket) first and otherwise derive the legacy bucket name from the workspace id and then the host id.
+
+The titlebar's account switcher marks a window account that has no session on this device with a "(signed out)" pill (warning-colored, one type size up, drawn beside the truncating name so a long name never hides it), so a signed-out account reads as such without opening the popover. In the popover, a signed-out account's row carries a "Sign in" control at its right that starts the browser sign-in for that account; the window keeps its account and the row and mark turn back to signed in once the sign-in lands.
+
+Fixes found while testing the two branches together:
+
+- The remote-execution permission dialog warns that a workspace is shared only when the workspace is published *and* its grants document admits someone (a user, an email, or a domain, at the workspace level or on any app). The create form publishes every workspace by default, so the warning used to appear for every workspace; the desktop now reads the workspace's grants document (a bounded exec; a stopped workspace reads as not shared) when it builds the dialog.
+
+- The Settings > This computer warning reads "This makes it possible for agents to request access to run commands on this computer as you.", asks the user to be careful with which commands they allow for a workspace, lists what arbitrary commands could let anyone in a workspace (agent or user) do, and its checkbox reads "I will be careful with which commands I allow in my workspaces."; the request dialog's any-command list shares the new wording.
+
+- The desktop app's permission policy once again refuses `openExternal`, so a page launching another app goes through the ask-first link router: the immersive-mode permission handler had replaced the earlier handler that did this (Electron keeps one handler per session), which silently granted every custom-scheme launch.
+
+- `deploy.toml` gains `[legacy_backup_buckets] is_reaped`, on for staging and production and off for dev and ci (whose envs share one Cloudflare account), stamped into the connector as `MINDS_LEGACY_BUCKET_REAPING_ENABLED`; a test pins the four tiers' values.
+
+The create form offers a disk size for AWS, GCP, and Azure workspaces (50 GB by default, passed as the provider's `--<cloud>-root-disk-gb=` build arg), and the aws / gcp / azure connection blocks carry `root_disk_size_gb = 50` for a create that does not pick one; mngr's own 30 GB default left such workspaces a 6 GB data volume once the image and the OS had taken their 20 GB reserve.
+
+The share panel's readiness poll no longer believes a share gateway status that says `up` but was last stamped more than five minutes ago: the template's gateway now restamps a running stack's status every minute, so an old `up` means the gateway is not alive to write it (a container restarted with its services down).
+
+- Agents in an approved workspace can now run commands on the user's computer, as the user, through `POST /api/v1/remote-execution/<device_id>?program=<program>`, behind three gates that must all be open: a new install-keyed setting (Settings > This computer, "Allow agents to run commands on this computer", off by default, stored on this device alone and never synced), a per-workspace latchkey grant of a new `remote-execution` request type pinned to the one device that approved it, for any command or for one program (a bare name resolved on the user's login-shell PATH, or a `~`-rooted or absolute path such as a script the agent wrote through file sharing; the request dialog shows the file it resolves to right now, or that it is not there yet, and gives a shell or language runtime the any-command warning), and a re-check of the setting on every call, so turning it off stops every workspace at once. Turning the setting on opens a large warning that has to be acknowledged before it writes; the request popup's dialog carries the same warning, offers no Approve while the setting is off, and warns when the asking workspace is shared (published and granting access to someone; a workspace published with no grants, the create form's default, is not warned about). The route names the program in its `program` query parameter (which the gateway pins for a program grant, since it checks the URL and never the body) and takes the arguments in the body's `args` (the published OpenAPI document lists the query parameter beside the path's `device_id`), streams the command's output as NDJSON in the owner-exec `/run` shape (stdout and stderr lines, keepalives, one final exit line, no output cap), kills the command on timeout, on a dropped connection, or at shutdown, refuses the browser session cookie, and records every command's start and end under `events/remote_execution/events.jsonl` (never its output). The workspace Permissions tab gains a revoke-only "This computer" entry listing every device, and every single program, the workspace's agents may run commands on. The route resolves a bare program name on the user's login-shell PATH rather than the desktop's own, expands a `~`-rooted one, and records where it resolved.
+
+- The gateway's `permission-requests` extension accepts the new `remote-execution` type; its grant is never part of the services catalog, the cross-workspace verb file, or the agent baseline, so no other dialog's "all" or "any" switch can carry it (pinned by tests and a new `remote-execution` behavior corpus).
+
+## 2026-11-07
+
+Bump Latchkey version to 3.22.0. An agent's `custom-service` permission request may now describe the service's browser sign-in with Latchkey's new `mcp` login flow (OAuth with dynamic client registration against an MCP server), alongside `cookie-capture` and `token-capture`. Approving such a request first checks the sign-in's OAuth endpoints against the metadata the MCP server publishes, so a server whose authorization server lives on another domain can be connected; a request the server contradicts is denied with a message telling the agent what the server publishes.
+
+Workspaces can be created on AWS, GCP, and Azure connections again from a template that publishes ports. Since the template's cloud-VM create templates started publishing the Screen's ICE mux ports (`59000/udp`, `59000/tcp`), every such create failed before a machine existed with "cannot publish port 59000/udp: the provider's firewall does not allow it", because the connection blocks the app writes never listed any `firewall_published_ports`. The materializer now writes those ports onto every aws / gcp / azure connection block, so a connection added from now on has its security group, NSG, or firewall rule prepared with them, and a release test pins the list to the template's `publish__extend`.
+
+A connection added before this change still has a firewall without those ports until its cloud's `prepare` runs again (for AWS: `mngr aws prepare --provider <aws_hex> --region <region>` against the app's mngr profile, which is idempotent and only adds the missing rules); until then a workspace created on it builds, but its Screen ports are unreachable from outside.
+
+## 2026-11-06
+
+`docs/deploy/next_deploy.md`: the app-usage floors item names the renamed `user_app_*` and `any_app_*` signals and the separate floor of the input signals, and a new item clears the old `app_*` signal rows from any dev or staging lake that aggregated before the rename.
+
+Studio now notifies you about two error states you would otherwise miss while its window is hidden or in the background. Each one arrives as a notification-feed entry (the bell, an in-app toast, and an OS banner when no focused window can show the toast), under the existing notification toggle and delivery style:
+
+- An Imbue account signed out because its session expired. Clicking it opens the accounts page, where you can sign in again.
+
+- A workspace that stopped responding and couldn't be started again. Clicking it opens the workspace and its recovery card.
+
+A failed workspace is announced once per outage, and no more than once every 30 minutes, so a workspace that keeps failing doesn't send repeated notifications.
+
+Clicking an app notification that names its own page, such as the notice that sharing couldn't be turned on because the shared-workspace limit was reached, now opens that page directly instead of the workspace's backups page.
+
+## 2026-11-05
+
+- The smoke suite launches the app with its roots override under both names,
+  `STUDIO_ROOTS_OVERRIDE` and the older `MINDS_DATA_HOME`. A published build
+  cut before the rename reads only the older name, so it now keeps its state
+  in the run's data home too, where step 3b looks for the app's own mngr.
+
+Custom connections are now per machine, and removing one's last account deregisters it.
+
+- Approving an agent's `custom-service` request registers the service in the store of the asking workspace's machine (this computer's own latchkey directory for a local workspace, the remote machine's mirror for a remote one), and the registration reaches a remote machine in the same change as the credential and the grant. The same origin requested from a workspace on another machine is created afresh there, with the header its own request asked for, rather than silently reusing a registration made for a different machine.
+
+- Signing out of a custom service's only account from a workspace's Permissions tab deregisters the service from that machine, after stripping the account's grants, so the next request for its origin registers what that request describes (the "wrong first guess at the header format cannot be undone from the UI" bug). A service another account is still connected to stays registered.
+
+- A workspace's Permissions tab lists and offers only the custom services registered on its own machine, and every connector write (toggle, route, connect, revoke, disconnect) checks against that machine's catalog. Opening a remote workspace's tab reads the machine's custom services back with its credentials, so a second computer sees the connections the first one created there and a service either one removed is gone for both. Pending-request titles and brand marks still resolve against every machine's services.
+
+Connector permissions that are a protocol handshake (an MCP service's session permission, Fastmail's JMAP session document and DAV principal discovery) are no longer offered as a "Session" switch in the permission-request dialog or the workspace Permissions tab. They are *implicit*: every grant written under the scope carries them whenever anything else is granted, and they go with the last chosen permission, so a grant of narrower permissions is never one the agent cannot open a session with. A Permissions tab flip also repairs a rule written before this change: turning any permission on puts the handshake in. Both surfaces say what the grant includes behind an information icon beside the scope's permissions (on the connection's intro, or on each scope heading when a service has several), whose tooltip quotes the catalog's description of the handshake; the dialog payload and the Permissions tab's scope panels carry it as `implicit_note`. An agent that names the handshake in its request gets no row for it, and the granted message names only what the user chose.
+
+Imbue Studio now keeps each workspace's Minds API allowlist pinned to the agents discovery lists on it, and pushes the pinned policy to the workspace's machine the way a registration is pushed. The allowlist only ever grew before, so a long-lived remote workspace eventually had a policy too large for the one remote command that carries a sign-in or a grant to its VPS, and every new connection failed with "the single command that would carry it is N bytes, past the 100000 a remote shell accepts". Adding is immediate; dropping waits for a second look: an agent is unregistered only when two consecutive complete listings of its workspace (ones that include its `system-services` agent), from two different discovery snapshots, both lack it, so a partial read, a stopped host, a destroyed host lingering in discovery, a listing that misses one agent once, or a resolver change that discovery did not drive never unregisters anything, and an agent registered outside discovery (a file repair, `mngr latchkey register-agent`) is kept until discovery has twice confirmed it gone. Existing workspaces are cleaned up on the second complete listing after the app starts. The policy also travels to the machine without whitespace, which on its own takes a policy like the one that hit the cap back under it.
+
+Fixed: a chat whose turn ended with a background task still running reports mngr's new `RUNNING_BACKGROUND` state, and the gate that every mutating backup program runs first now counts it as a running chat, so such a chat is no longer interrupted mid-work. The update watchdog counts it as busy for the same reason, so it no longer nudges a chat that is still working.
+
+`docs/testing-overview.md` lists the release test workflow's new `test-claude-internals-latest` job, which runs the claude `harness_internals` release tests against the latest Claude Code; no Imbue Studio test runs there.
+
+The desktop writes what it knows of each granted account beside the grants document. Every grants save and every publish that stores a document now also writes `data/.secrets/share_identities.json` into the workspace, in the same exec and before the grants: the email and display name each granted account id was resolved from (`{"version": 1, "identities": {"<user_id>": {"email", "display_name"}}}`, from the identity cache the share panel already fills). The workspace shell's roster falls back to it for a grantee who has not arrived yet, who was otherwise shown in the people strip as a bare account id (mngr-internal issue #2732). Unlinking a workspace from its account removes the file with the grants; a share.env-only rewrite (a stale-domain repair) leaves it alone.
+
+After a browser sign-in, the first-run Imbue Cloud create no longer waits on a second email-verification check or on the local Docker probes before it goes out.
+
+- `GET /accounts/verification` answers verified at once when the latest browser sign-in for the address in this app run (within the last hour) reported it verified, instead of starting a `mngr imbue_cloud auth is-verified` process. Every other case still asks the connector.
+
+- `GET /ui/api/create/form-defaults` takes a new `?skip_local_probes=1`, which leaves out the local Docker probes; the start flow uses it.
+
+- While a cloud create is still waiting, the start page shows a spinner with "Checking your account…" during the verification check, then "Starting your workspace…" while the create is sent. An unverified email gets the verification question instead.
+
+- A cloud create the connector refuses for an unverified email fails on the creating page with the connector's own sentence instead of the `mngr create` transcript, and is not reported as an error, like a waitlist refusal.
+
+Creating a workspace from the default template no longer waits on a clone from GitHub. The app now fetches its pinned default-workspace-template release once in the background at launch, into the tier's cache directory (`template-cache/`), and a create of that template at that release copies it locally instead of cloning it. The copy is the same repository the network clone produces, so the rest of the create is unchanged.
+
+- Only `minds-vX.Y.Z` release tags (and prereleases such as `minds-vX.Y.Z-rc.1`) are cached. A create of a branch, a commit SHA, or any other repository clones from the network as before.
+
+- A create that starts while the launch-time download is running waits for it, and the create log says so. If the download stops receiving data for a minute, or the cache is missing, damaged, or cannot be copied, the create clones from the network instead. The cache never fails a create.
+
+- At launch the app re-fetches the cached release if its tag moved upstream or the clone is damaged, and deletes its clones of other releases.
+
+The desktop app now says why it cannot relay a Claude or ChatGPT browser sign-in. `POST /ui/api/provider-relay` answers a refusal with a `reason` (`port_taken`, `no_forward_channel` or `no_browser`), and the chrome passes it on in the `minds:provider-sign-in-ack` message's new optional `reason` field (embed contract v14). A workspace can then tell a callback port that happens to be in use on this machine, often a Docker container's published SSH port, from a chrome that cannot relay at all. It starts the sign-in again on a fresh port instead of dropping to the paste-a-code flow. A taken port is now logged at info level.
+
 ## 2026-11-04
 
 - The smoke journey runs default-workspace-template's CI test suites inside the

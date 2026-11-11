@@ -176,6 +176,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `docs/deploy/history/rollouts/gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows on runsc older than `20261102`, the affected-workspace survey, and the runbook for moving the fleet onto `20261102` (`minds-admin install-runsc` and `restart-workspace-container` per leased workspace, then a rebake).
 - Added: The pool-hosts runbook gains an "Alerts: an empty or thin pool" section covering the new pool-stock alert rules, their Slack card, and the fix for each lease outcome.
 - Added: The desktop app bundles the `imbue-mngr-grok` agent-type plugin.
+- Added: Released Imbue Studio 0.10.1, 0.10.2 and 0.10.3; alpha (mac, Linux and web) moves to 0.10.3, beta and stable stay on 0.9.4.
+- Added: Opt-in profiling mode: `minds run --profile PATH` (or `MINDS_PROFILE_FILE`) records one Perfetto-readable Chrome JSON trace covering backend requests, warm `mngr` processes, the UI and Chromium, with no secrets in spans.
+- Added: Agents can run commands on the user's computer through `POST /api/v1/remote-execution/<device_id>?program=<program>`, gated by an off-by-default per-device Settings > This computer switch, a device-pinned per-workspace `remote-execution` grant (any command or one program), and a per-call re-check; output streams as NDJSON and every command is logged.
+- Added: `GET /api/v1/workspaces` reports each workspace's `launch_mode`, `instance_type`, `cpu_count`, `memory_gb` and `disk_gb`, and new `GET /api/v1/workspaces/cloud-accounts` lists create targets; the `imbue-studio` skill uses them to place and size new workspaces.
+- Added: The create form offers a root disk size for AWS, GCP and Azure workspaces (default 50 GB).
+- Added: Notifications (feed, toast, OS banner) when an Imbue account is signed out by session expiry or a workspace stops responding and cannot be restarted.
+- Added: The titlebar account switcher marks accounts with no session on this device as "(signed out)" and offers a per-row "Sign in".
+- Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
 
 ### Changed
 
@@ -377,6 +385,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball and upgrades an older runsc it installed instead of skipping.
 - Changed: The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`; the old `minds-desktop` launcher is left in place and keeps working (delete it by hand).
 - Changed: "Remove from this list" on a landing-page tile retires the workspace record instead of deleting it: any record but an untouched stub moves to "Recently destroyed", so its backups stay restorable through the retention window.
+- Changed: Imbue Cloud backups move to the backup store (`rest:` repositories with per-repository tokens instead of per-bucket Cloudflare keys; restic 0.16+ required). Legacy buckets migrate automatically, older snapshots stay listed under "Previous storage", and freeing space no longer needs a cleanup grant. Tier deploys need `[backup_store] is_deployed` and the `secrets/minds/<tier>/backup-store` Vault entry.
+- Changed: New workspaces open on their welcome chat sooner: the wash stays until the chat is on screen, create status is polled every 250 ms while the workspace boots, and default-template creates copy a release cached at launch (`template-cache/`) instead of cloning from GitHub; the first-run cloud create skips a redundant verification check and Docker probes after browser sign-in.
+- Changed: Opening the share panel and saving a grant each make one connector call (was up to three plus one per grantee); the sharing document carries `invitation_outcomes`.
+- Changed: Custom connections belong to the machine they were created on, and signing out of a custom service's last account deregisters it there.
+- Changed: Protocol-handshake permissions (MCP session, Fastmail JMAP and DAV discovery) are implicit in every grant and no longer shown as a "Session" switch.
+- Changed: The desktop writes `data/.secrets/share_identities.json` beside the grants so the workspace roster names grantees who have not arrived yet.
+- Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
 
 ### Deprecated
 
@@ -548,6 +563,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A bug report filed while an earlier report from the same workspace is still collecting now waits and collects afresh, instead of running a concurrent collection that let both time out.
 - Fixed: Electron's log path now points at the tier's log root (on macOS the default omitted the tier).
 - Fixed: Freeing backup space for a new workspace finds a destroyed workspace's real (workspace-named) backup bucket, instead of guessing a machine-named one, deleting the record without freeing anything, and leaving the new workspace without backups.
+- Fixed: A chat whose turn ended with background work still running (mngr's new `RUNNING_BACKGROUND`) is no longer interrupted by backup programs or nudged by the update watchdog.
+- Fixed: Long-lived remote workspaces no longer fail new sign-ins and grants with a policy past the 100,000-byte remote command cap: the Minds API allowlist is pinned to discovered agents and sent without whitespace.
+- Fixed: Workspaces can again be created on AWS, GCP and Azure connections from templates that publish ports; new connections get the Screen ports in `firewall_published_ports` (existing ones need their cloud's `prepare` rerun).
+- Fixed: The desktop app again refuses `openExternal`, routing custom-scheme launches through the ask-first link router instead of silently granting them.
 
 ### Security
 

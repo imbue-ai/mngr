@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+Gave `test_http2_connection_is_not_drained_after_a_thousand_requests` a 30-second timeout (up from the 10-second default) and marked it `@pytest.mark.flaky`. Its 1002 HTTP/2 requests pass back and forth between a client thread and an in-process server thread, so CPU contention multiplies its runtime. It hit the 10-second limit on a heavily loaded machine.
+
+SSH tunnel setup now reports the authentication failure it actually hit, and closes a connection that fails partway through setup.
+
+`_create_ssh_client` handed the private key to paramiko as a path (`key_filename=`), which makes paramiko try the file as each key class in turn and re-raise only the last failure. When a host rejected an RSA or ECDSA key in PEM format, the error read `SSHException: encountered RSA key, expected OPENSSH key` (or `encountered EC key`) instead of the rejection. The key is now loaded once with `ssh_utils.load_ssh_private_key_file` and passed as `pkey=`, so a rejection is reported as `AuthenticationException: Authentication failed.` for every key type. A key file that is on disk but will not load fails before the host is dialed, as `SSHTunnelError` tagged `LOCAL_SETUP`.
+
+A host with a key of its own is now authenticated with that key alone, so the ssh-agent's keys and `~/.ssh/id_*` can no longer supply the reported failure. Hosts with no key of their own (the `ssh` provider without `key_file`, and outer hosts reached over `DOCKER_HOST=ssh://`), and hosts whose key needs a passphrase, keep using the user's own SSH setup.
+
+A connection whose key was rejected, or whose host key does not match the pin, is now closed. paramiko leaves the transport running when either check fails, and the repair loop retries a failing tunnel indefinitely, so every retry left one more connection open until the host dropped it.
+
+The warning logged for a rejected key now describes the credentials actually offered: the loaded key's fingerprint, or the user's own SSH setup and why.
+
+## 2026-11-05
+
+`mngr forward` now follows each agent's service registrations with `mngr event <agent>@<host>.<provider>`, naming the provider from its own discovery state, where it used to pass `<agent>@<host>`. With the provider named, `mngr event` reads the agent's events straight from its host instead of first running discovery over the agent's provider (or over every provider, for an agent the discovery log does not know yet). For an Imbue Cloud account that discovery is an outer-SSH listing of every one of the account's hosts, so a just-created workspace waited on all of them before its services reached the forward and its origin could route. The same saving applies to every stream the forward starts at launch. Providers whose lookup of one host already lists every host (the VPS providers) get no faster.
+
+One consequence: a stream started for an agent that was destroyed while its host stays up no longer exits as a gone target. It waits, with no events, until discovery reports the destroy or the next snapshot drops the agent, and then the forward stops it. A stream whose host is gone, or whose provider was removed from the settings (for example when an account signs out), still exits as a gone target and backs off as before.
+
+The forward also logs, once per events stream it starts, how long the stream took to deliver its first line, so the delay before a new workspace's origins can route shows up in the log.
+
 ## 2026-11-02
 
 MIND-301: The `RemoteSSHInfo` immutability test uses `assert_model_is_frozen` instead of mutating a field inside `pytest.raises`, and two `# ty: ignore` comments ty no longer needs are removed. Context managers annotate their return type as `Generator[X, None, None]` rather than `Iterator[X]`, which ty 0.0.87 deprecates for `@contextmanager`. Type-checker-only; behavior is unchanged.

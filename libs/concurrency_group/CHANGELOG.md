@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `is_own_process_group` option on `run_local_command_modern_version`, `run_background` and `ConcurrencyGroup.run_process_in_background` makes the child its own process-group leader, so shutdown or timeout signals also kill what it forked.
+
 ## [v0.1.22] - 2026-10-28
 
 ### Added

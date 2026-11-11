@@ -9,6 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr aws prepare` opens the config's `firewall_published_ports` in its security group; a `create --publish` must name only listed ports (published-ports contract).
+- Added: `--aws-root-disk-gb=N` build arg sizes one host's root EBS volume, overriding `root_disk_size_gb`.
+
+### Changed
+
+- Changed: EC2 user data is gzip-compressed, so the cloud-init script can outgrow EC2's 16 KiB raw cap.
 
 ## [v0.2.1] - 2026-10-28
 

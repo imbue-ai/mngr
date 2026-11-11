@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-05
+
+Fixed: a grok agent now reports mngr's new `RUNNING_BACKGROUND` state while the work its turn left running is still outstanding, rather than `WAITING`.
+
+grok reports its in-flight work on every end-of-turn `Stop`, but mngr kept only the subagents from that snapshot and discarded every other kind. A turn that ended with a background shell command running therefore read `WAITING` -- indistinguishable from an agent waiting on you -- right up until the command finished and woke it. The turn-end hook now declares one work lease per in-flight task whatever its kind, so that agent reads `RUNNING_BACKGROUND` and `mngr ls` names the work holding it.
+
+A background subagent used to be covered a different way, by holding the turn marker open, so such an agent reported `RUNNING` as though a turn were in progress. It is leased like any other background work now and reports `RUNNING_BACKGROUND`, which says what is actually true: the turn has ended and something other than you will move the agent next. A subagent still running inside a turn keeps the marker open exactly as before.
+
+A lease ends when its work does -- when the task is absent from the next turn's snapshot, when a subagent ends, fails or is cancelled, or when the session ends -- and otherwise expires on its own deadline. A permission dialog a background subagent is waiting on still outranks the work it left running, so such an agent reports `WAITING` on you rather than `RUNNING_BACKGROUND`.
+
+The grok binary-contract release tests and five grok e2e release tests (a send while busy, a tool call, a subagent, a restart, clone and adoption) are marked `harness_internals(harness="grok")`, so `-m "release and harness_internals(harness='grok')"` runs every release test that pins a grok internal mngr reads.
+
+The grok binary-contract release test for a background subagent now checks that the agent reports `RUNNING_BACKGROUND`, with a lease naming the subagent, once the turn that spawned it ends, `RUNNING` again from the subagent's end through its wake turn, and `WAITING` once that turn ends; it had still expected the turn marker to stay on throughout, which stopped being true when background subagents moved to work leases.
+
+The README's Lifecycle section describes the same: a background subagent or background shell a turn leaves running makes the agent `RUNNING_BACKGROUND` through a work lease, and only a subagent running inside a turn keeps it `RUNNING`. A permission card such a background subagent shows once that turn has ended leaves the agent `RUNNING_BACKGROUND`, and `waiting_reason` reads `PERMISSIONS` only for a card open during a turn.
+
 ## 2026-11-03
 
 New package `imbue-mngr-grok`: the `grok` agent type, which runs xAI's Grok Build CLI (`grok`) as an mngr agent, configured under `[agent_types.grok]`. It is tested with Grok Build 1.0.62; the README documents every field and behaviour.

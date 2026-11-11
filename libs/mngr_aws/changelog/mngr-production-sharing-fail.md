@@ -1,1 +1,0 @@
-`mngr create -b --aws-root-disk-gb=N` sizes the root EBS volume of that host alone, overriding the provider config's `root_disk_size_gb` (which stays the default); the size is recorded on the host's shape.

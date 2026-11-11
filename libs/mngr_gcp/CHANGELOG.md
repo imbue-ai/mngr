@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr gcp prepare` creates a published-ports firewall rule for the config's `firewall_published_ports` (removed by `cleanup`); a `create --publish` must name only listed ports.
+- Added: `--gcp-root-disk-gb=N` build arg sizes one host's boot disk, overriding `root_disk_size_gb`.
 
 ### Fixed
 

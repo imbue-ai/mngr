@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr azure prepare` opens the config's `firewall_published_ports` on the NSG; a `create --publish` must name only listed ports (published-ports contract).
+- Added: `--azure-root-disk-gb=N` build arg sizes one host's OS disk, overriding `root_disk_size_gb`.
 
 ### Fixed
 

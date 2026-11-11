@@ -1,1 +1,0 @@
-The grok binary-contract release tests and five grok e2e release tests (a send while busy, a tool call, a subagent, a restart, clone and adoption) are marked `harness_internals(harness="grok")`, so `-m "release and harness_internals(harness='grok')"` runs every release test that pins a grok internal mngr reads.

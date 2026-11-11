@@ -4,6 +4,16 @@ Full, unedited changelog entries for the `mngr_wait` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-05
+
+Changed: `mngr wait <agent>` with no states named now waits until nothing but you will move the agent, rather than until its process goes idle.
+
+An agent that ends its turn leaving a background task running reports the new `RUNNING_BACKGROUND` state, which is not terminal, so the wait holds open instead of reporting finished work that is still running. Naming states explicitly is unaffected, and `mngr wait <agent> RUNNING_BACKGROUND` waits for exactly that.
+
 ## 2026-10-29
 
 Adds the repo-wide `test_prevent_httpx_import` ratchet, synced into every project's `test_ratchets.py`. It counts `import httpx` / `from httpx` statements, since the repo's HTTP clients now use `httpx2`; `httpx` is kept only where a third-party SDK built on it raises its errors.

@@ -1,1 +1,0 @@
-`docs/testing-overview.md` lists the release test workflow's new `test-claude-internals-latest` job, which runs the claude `harness_internals` release tests against the latest Claude Code; no Imbue Studio test runs there.

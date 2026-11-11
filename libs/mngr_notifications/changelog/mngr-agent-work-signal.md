@@ -1,1 +1,0 @@
-Fixed: `mngr notify` also notifies when an agent leaves mngr's new `RUNNING_BACKGROUND` state for `WAITING`, so a turn that ended with a background task running still reports once that work is no longer holding the agent.

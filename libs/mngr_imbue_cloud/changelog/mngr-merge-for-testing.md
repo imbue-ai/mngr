@@ -1,1 +1,0 @@
-Testing branch merging `mngr/avoid-api-key-limits` and `mngr/remote-execution`. For this project it carries the backup-store branch's `mngr imbue_cloud backup-repo` group and `bucket freeze` command unchanged; see that branch's entry.

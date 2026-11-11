@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-06
+
+A `-b volume=NAME:/path` volume that does not exist yet is created as a v2 Modal Volume, which has no limit on how many files it holds; a v1 volume stops at 500,000 files and then fails every write with "No space left on device" while plenty of space is free. A volume that already exists is mounted at the version it has, since Modal refuses to open a volume at any other.
+
+## 2026-11-05
+
+mngr commands on Modal no longer hang when Modal stops answering a state-volume read, listing or removal (MIND-290). A stalled attempt is cancelled after 20s without progress and retried within the existing 60s budget. The Modal SDK is pinned at 1.6.1. Five Modal acceptance tests that these stalls turned red are marked `@pytest.mark.flaky` while MIND-290 is open.
+
+mngr commands on Modal no longer hang when Modal stops answering a state-volume write (MIND-290), such as the host-record write during create, stop and destroy. A stalled upload is cancelled and retried within the existing budget, so it cannot overwrite a newer record afterwards.
+
+MIND-290 is fixed, so the `@pytest.mark.flaky` marks kept while it was open come off `test_delete_nonexistent_snapshot_raises_error` and `test_provision_statusline_shim_on_modal_host`. Seven other Modal acceptance tests keep their marks, now attributed to the tickets still open against them (MIND-633, MIND-351, MIND-477, MIND-296, MIND-634).
+
+Changed: this provider's batched listing now collects each agent's work leases alongside its `active` marker, so an agent whose turn has ended while declared work is still outstanding reports the new `RUNNING_BACKGROUND` state rather than `WAITING`.
+
 ## 2026-11-03
 
 The Modal provider's `list_volumes` reports each host volume's creation time (`VolumeInfo.created_at`). `mngr gc` needs it to spare a volume too young to trust the host listing: the volume of a host still being created when gc listed hosts is no longer deleted.

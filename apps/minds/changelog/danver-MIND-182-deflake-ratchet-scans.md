@@ -1,1 +1,0 @@
-Test-only (MIND-182): `test_ratchets.py` and `test_minds_ratchets.py` declare `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so their file scan loads during pytest setup instead of inside the first ratchet test's 10s timeout. `test_prevent_if_elif_without_else`, which timed out in exactly that way, is no longer marked flaky.

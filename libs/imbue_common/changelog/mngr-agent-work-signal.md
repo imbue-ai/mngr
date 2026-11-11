@@ -1,1 +1,0 @@
-Changed: `find_bash_scripts_without_strict_mode` now excludes sourced `*_lib.sh` shell libraries, which are not runnable scripts: declaring `set -euo pipefail` in one applies it to whatever sources it rather than to itself.

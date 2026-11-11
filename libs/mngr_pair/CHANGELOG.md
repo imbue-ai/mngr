@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `write_ssh_wrapper_script` returns an `SshWrapper`, and `UnisonSyncer` takes `ssh_wrapper` instead of `ssh_wrapper_path`.
+
+### Fixed
+
+- Fixed: Pairing no longer dies with `Unison exited with code 3` (`Sys_blocked_io`) on large first passes; ssh's stderr goes to a file, quoted when unison fails.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Fixed

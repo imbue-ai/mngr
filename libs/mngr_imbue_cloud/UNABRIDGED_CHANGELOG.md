@@ -4,6 +4,46 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-10
+
+The connector client takes part in Imbue Studio's opt-in profiling mode. Every attempt `ImbueCloudConnectorClient._send` makes runs inside a `connector.request` span of the `imbue_common` tracer, with the arguments `method`, `path` (the route without its query string), `attempt`, `trace_id`, `span_id`, and the response `status` (or the transport error's class name when the attempt failed), and while a profiling mode is enabled the request carries a W3C `traceparent` header built from that span's own ids, alongside the bearer and client-id headers. The connector's access log records the header, so a trace id from a desktop trace finds the server-side duration of every connector call it caused. A token refresh in `auth_helper` (`force_refresh`, and `get_active_token` when the access token is near expiry) runs inside a `connector.token_refresh` span. Until a profiling mode is enabled the tracer is a no-op and no header is sent, so the client's requests are unchanged.
+
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+- `ShareGrantsPushResult` (what `PUT /shares/{host_id}/grants` answers) gains `share`, `outcomes`, and `identities`: the share's status document, the granter-visible invitation outcomes, and the identity records of the granted accounts, each None against a connector that predates them. `mngr imbue_cloud shares push-grants` prints them beside `appended`, the share spelled the way `shares status` spells one, so a client that pushed needs no separate status, outcomes, or identity reads.
+
+## 2026-11-08
+
+Added `mngr imbue_cloud backup-repo create|list|roll-token|destroy|usage`, the client for the connector's backup-store routes (`specs/backup-store/spec.md`): one restic repository per workspace on the backup store, reached over restic's REST backend with a per-repository token (`repository_url`, `rest_username`, `rest_password`) instead of a per-bucket Cloudflare S3 key. `destroy` loops while the connector reports objects remaining; `usage` reports the account's used bytes, soft and hard limits, and enforcement mode. The connector's account refusals (suspended, deleted, unverified) and quota refusals are reported by code on every one of them.
+
+The `bucket` group stays for the migration window and gains `bucket freeze <name>`, which makes a legacy bucket's key read-only once its workspace has moved to the backup store.
+
+Testing branch merging `mngr/avoid-api-key-limits` and `mngr/remote-execution`. For this project it carries the backup-store branch's `mngr imbue_cloud backup-repo` group and `bucket freeze` command unchanged; see that branch's entry.
+
+The gen-2 slice VM's container headroom publisher (`mngr-publish-container-meminfo.service`) now renders its container discovery and its two-slot, symlink-refusing writes from the Perl it shares with mngr_vps's VPS-host publisher (`imbue.imbue_common.container_meminfo_publisher`), adding only the disk-quota half. What it publishes, and where, is unchanged.
+
+## 2026-11-05
+
+Changed: this provider's batched listing now collects each agent's work leases alongside its `active` marker, so an agent whose turn has ended while declared work is still outstanding reports the new `RUNNING_BACKGROUND` state rather than `WAITING`.
+
+Creating an Imbue Cloud workspace on the fast path makes fewer round trips between the lease and the started agent. Nothing about what gets installed, rotated or pinned has changed.
+
+- Slice adoption runs all its VM commands over one SSH connection instead of opening a new one for each, and stops probing an endpoint for a host key it generated a moment earlier. After a key install, the first five re-checks of the served key come 0.2 s apart and later ones 1 s apart, within the same 30 s limit. The fast phase stays short so the unauthenticated probes cannot add up to a refusal from an sshd with per-source penalties (OpenSSH 9.8 or later).
+
+- A VM sshd that hangs up on the connection, during the SSH handshake or while a command runs, now fails adoption like any other connection failure (the create continues on the existing trust material, and the next app start retries) instead of aborting the create.
+
+- The fast path no longer waits for the container's sshd before connecting to it, since the lease has just connected to that sshd. It waits and retries only if the first connect fails; a refused host key or client key fails at once.
+
+- While the create holds the host lock, the leased host keeps the host env file and the pre-baked agent's `data.json` in memory until the agent starts, instead of reading them over SSH again and again. In that window the create is the only thing that writes either file: post-host-create commands run before the lock is taken, and if the pre-baked agent state is missing (so full provisioning runs) the host stops keeping them in memory.
+
+- The logs now show how the time splits: how long the lease request took (debug), how long adoption took, and how long the rest of host creation took. Each adoption step also has its own debug span.
+
+`mngr imbue_cloud auth login` now includes `is_email_verified` in its JSON output: `true` or `false` when the hosted page's loopback callback said whether the signed-in address is verified, and `null` when it did not (an older connector) or named a different address. A caller can use it instead of running `auth is-verified` straight after signing in.
+
+Gen-2 slice VMs now publish the data filesystem's host quota into each workspace's volume, at `/mngr-vol/.host-diskinfo` (`QuotaLimitBytes`, `QuotaUsedBytes`, `Timestamp`, rewritten every 2 s), beside `.host-meminfo`. Everything a workspace writes counts against that quota (the disk minus a 4 GiB system reserve), but statfs inside the container reports only the filesystem's free space, and which of the two runs out first depends on how much raw disk btrfs holds for metadata. The existing headroom publisher (`mngr-publish-container-meminfo.service`) reads the quota group's limit and usage from sysfs, so it starts no new processes, and a VM whose data filesystem has no limited quota group publishes no disk file.
+
 ## 2026-11-04
 
 - New `mngr imbue_cloud sync records retire <workspace-id>` retires a workspace record instead of deleting it: a record holding anything to recover is kept as a destroyed tombstone, and the command reports `status: retired`. Against a connector without retirement it fails rather than deleting the record.

@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-09
+
+Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.
+
+## 2026-11-05
+
+`DirectVolume`'s reads and metadata calls (`read_file`, `listdir`, `remove_file`, `get_object_id`) no longer wait forever on a request Modal never answers (MIND-290). An attempt that makes no progress for 20s -- no answer, or for `read_file` no further bytes -- is cancelled and re-issued under the existing 60s transient retry as the new transient `ModalProxyCallTimeoutError`. The cancel goes through synchronicity's `_future=True` convention, so a stalled attempt cannot complete later. `read_file` reads through `Volume.read_file_into_fileobj`, whose progress callback keeps a long download alive.
+
+The Modal SDK moves from 1.5.4 to 1.6.1 (synchronicity 0.12.5 to 0.12.6), the newest release inside the `exclude-newer` cooldown.
+
+`DirectVolume.write_files` no longer waits forever on an upload Modal never answers (MIND-290). An attempt that has not finished within 20s plus time for its payload at 256 KiB/s is cancelled and re-issued under the existing transient retry, as `ModalProxyCallTimeoutError`. The upload runs in `batch_upload`'s exit, which synchronicity will not return as a future, so this step uses its private `_translate_in` and `_run_function_sync_future`. A stalled upload therefore cannot commit after a newer write to the same path. The volume is hydrated under the same deadline first, because entering `batch_upload` would otherwise hydrate it unbounded.
+
 ## 2026-11-03
 
 `VolumeInterface` gains `get_created_at()`, the volume's creation time when known. Volumes returned by `volume_list` know it: Modal's listing already carries it, so reading it makes no extra request. A handle from `volume_from_name` returns `None`.
