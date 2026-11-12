@@ -190,7 +190,16 @@ class TmuxHeight(PositiveInt):
 
 
 class ActivitySource(UpperCaseStrEnum):
-    """Sources of activity for idle detection."""
+    """Sources of activity for idle detection.
+
+    Each source is a clock: a file at ``activity/<source>``, host-level or per-agent, whose
+    mtime is the activity time and whose contents no reader parses. The host's idle watcher
+    stops the host once the newest enabled clock falls behind by ``idle_timeout_seconds``, so a
+    clock that stops being refreshed reads as idleness.
+
+    ``AGENT`` is refreshed by the agent's own harness loop, which makes it a view of that
+    loop's notion of the agent working rather than a direct observation of it.
+    """
 
     CREATE = auto()
     BOOT = auto()

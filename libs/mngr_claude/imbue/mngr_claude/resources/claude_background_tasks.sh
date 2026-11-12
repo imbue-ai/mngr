@@ -5,7 +5,10 @@
 # performing these tasks:
 #   1. Activity tracking: updates $MNGR_AGENT_STATE_DIR/activity/agent
 #      whenever the agent is actively processing (indicated by the
-#      $MNGR_AGENT_STATE_DIR/active file)
+#      $MNGR_AGENT_STATE_DIR/active file). That clock is a view of the agent
+#      working and no wider than the condition below, and its mtime is the
+#      whole signal: the host's idle watcher and `mngr ls` read the mtime,
+#      and nothing parses the contents.
 #   2. Transcript streaming: launches stream_transcript.sh which watches
 #      all session JSONL files and streams new lines to
 #      $MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl

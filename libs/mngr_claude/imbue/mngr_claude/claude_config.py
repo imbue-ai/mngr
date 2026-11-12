@@ -804,6 +804,9 @@ _CLAIM_MAIN_PID: Final[str] = (
 PERMISSIONS_WAITING_FILENAME: Final[str] = "permissions_waiting"
 
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) storing the ISO timestamp when the agent became idle.
+# A derived view of the ``active`` marker, not an independent fact: it is written wherever that
+# marker is cleared and removed wherever it is created. See the file semantics in
+# ``build_readiness_hooks_config``.
 IDLE_SINCE_FILENAME: Final[str] = "idle_since"
 
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) storing the idle_since ISO timestamp for which compaction was executed.
@@ -942,6 +945,15 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
     - permissions_waiting: Claude is blocked on a permission dialog (always WAITING when present)
+    - idle_since: a derived view of 'active' -- the UTC ISO instant it was last cleared,
+      written where that happens and removed where 'active' is created. So it dates the turn
+      boundary rather than the agent's last work, and it is one of the sources
+      ``get_agent_idle_since`` resolves rather than the idle epoch itself.
+    - activity/agent: a derived view of the whole "is this agent working" condition, projected
+      into the time domain -- the agent's activity clock, refreshed by
+      claude_background_tasks.sh for as long as that loop counts the agent as working, and so
+      only ever as wide as the condition written there. Its mtime is the signal: the host's
+      idle watcher and ``mngr ls`` read the mtime, and nothing parses the contents.
     - leases/task-<id>: one work lease per background task a turn left running, holding
       its ``until:`` epoch second. Written by wait_for_stop_hook.sh
       through mngr_work_lease_lib.sh, which
