@@ -37,6 +37,14 @@ WORK_LEASE_DIR_NAME: Final[str] = "leases"
 # without breaking one that has already shipped.
 WORK_LEASE_UNTIL_KEY: Final[str] = "until"
 
+# How far ahead a turn-end hook dates the leases it writes, and the environment variable that
+# overrides it for one agent. The bound is a backstop against work that died silently rather
+# than a prediction of how long work takes; see specs/agent-running-background. A hook runs
+# from the agent's own state dir against its own interpreter and cannot import this module, so
+# each one spells the pair out again and a test in its package pins it to these.
+WORK_LEASE_TTL_ENV_VAR: Final[str] = "HOOK_WORK_LEASE_TTL_SECONDS"
+DEFAULT_WORK_LEASE_TTL_SECONDS: Final[int] = 86400
+
 # Marks each half of a work-state read, so one command collects the turn marker and the leases.
 _ACTIVE_PREFIX: Final[str] = "ACTIVE="
 LEASE_PREFIX: Final[str] = "LEASE="

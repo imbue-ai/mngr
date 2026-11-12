@@ -194,7 +194,16 @@ has_blocked_stop_hook() {
 # How long a work lease stays valid. Nothing refreshes it: a turn end rewrites the whole
 # set, so this only has to outlast the longest background task that runs without waking
 # the agent, and it bounds how long work that died silently can hold an agent working.
-WORK_LEASE_TTL_SECONDS="${HOOK_WORK_LEASE_TTL_SECONDS:-14400}"
+# The default and the variable that overrides it are DEFAULT_WORK_LEASE_TTL_SECONDS and
+# WORK_LEASE_TTL_ENV_VAR in imbue.mngr.hosts.work_leases, which every turn-end hook spells
+# out again; test_stop_hook_dates_a_lease_by_the_default_ttl pins this writer to them.
+WORK_LEASE_TTL_SECONDS_DEFAULT=86400
+WORK_LEASE_TTL_SECONDS="${HOOK_WORK_LEASE_TTL_SECONDS:-$WORK_LEASE_TTL_SECONDS_DEFAULT}"
+# Only a positive decimal count of seconds holds a lease: arithmetic expansion reads a leading
+# zero as octal, and every other spelling as zero.
+case "$WORK_LEASE_TTL_SECONDS" in
+    '' | *[!0-9]* | 0*) WORK_LEASE_TTL_SECONDS="$WORK_LEASE_TTL_SECONDS_DEFAULT" ;;
+esac
 
 # Names the leases this hook writes, and so the ones it may clear. The directory belongs to
 # the agent and anything that starts work may lease there, so a lease under another name is

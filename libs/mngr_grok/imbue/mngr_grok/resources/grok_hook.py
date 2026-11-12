@@ -106,7 +106,12 @@ _SUBAGENT_TASK_TYPE: Final[str] = "subagent"
 # ``test_a_leased_grok_task_parses_the_way_mngr_reads_it`` pins this writer to that reader.
 WORK_LEASE_DIRNAME: Final[str] = "leases"
 WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
-WORK_LEASE_TTL_SECONDS: Final[int] = 14400
+# How far ahead a lease is dated, and the environment variable that overrides it for one agent.
+# They are DEFAULT_WORK_LEASE_TTL_SECONDS and WORK_LEASE_TTL_ENV_VAR in
+# imbue.mngr.hosts.work_leases, which every turn-end hook spells out again;
+# ``test_a_grok_lease_is_dated_by_the_default_ttl`` pins this writer to them.
+WORK_LEASE_TTL_ENV_VAR: Final[str] = "HOOK_WORK_LEASE_TTL_SECONDS"
+DEFAULT_WORK_LEASE_TTL_SECONDS: Final[int] = 86400
 _LEASE_NAME_DISALLOWED_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
 # grok's task statuses, of which these end the work. A status this does not name is leased,
 # because a lease withheld from live work is the error the state exists to prevent.
@@ -415,7 +420,7 @@ def _end_root_session(state_dir: Path, host_dir: str, session_id: str, now: date
     _remove_file(_pending_wake_path(state_dir, session_id))
     removed_subagent_count = _remove_subagents_of_parent(state_dir, session_id)
     # The leases this session declared stood for work inside it.
-    _write_work_leases(state_dir, [], now)
+    _clear_work_leases(state_dir)
     _clear_session_permission_waiting(state_dir, session_id)
     outcome = f"root:end turn-removed={str(is_turn_removed).lower()} subagents-removed={removed_subagent_count}"
     return outcome + _recompute_active_marker(state_dir, host_dir, now)
@@ -454,20 +459,39 @@ def _in_flight_task_ids(background_tasks: Sequence[Any]) -> list[str]:
     return ids
 
 
-def _write_work_leases(state_dir: Path, background_tasks: Sequence[Any], now: datetime) -> str:
-    """Rewrite this writer's whole lease set, so work that has finished stops counting.
+def _work_lease_ttl_seconds(environ: Mapping[str, str]) -> int:
+    """How far ahead a lease written now is dated.
 
-    Only leases under this writer's own prefix are cleared: the directory belongs to the agent
-    and anything may lease there, and another writer's lease expires on its own bound.
+    Only a positive decimal count of seconds holds a lease, with no leading zero, which is the
+    spelling the shell writer of this protocol also takes as decimal.
+    """
+    override = environ.get(WORK_LEASE_TTL_ENV_VAR, "")
+    if override.isdecimal() and not override.startswith("0"):
+        return int(override)
+    return DEFAULT_WORK_LEASE_TTL_SECONDS
+
+
+def _clear_work_leases(state_dir: Path) -> str:
+    """Drop every lease under this writer's own prefix, so work that has ended stops counting.
+
+    The directory belongs to the agent and anything may lease there, so another writer's lease
+    is left to expire on its own bound.
     """
     lease_dir = _lease_dir(state_dir)
     for lease_name in _visible_entry_names(lease_dir):
         if lease_name.startswith(WORK_LEASE_NAME_PREFIX):
             _remove_file(lease_dir / lease_name)
+    return " leases=0"
+
+
+def _write_work_leases(state_dir: Path, background_tasks: Sequence[Any], now: datetime, ttl_seconds: int) -> str:
+    """Rewrite this writer's whole lease set, so work that has finished stops counting."""
+    cleared_outcome = _clear_work_leases(state_dir)
     lease_names = _in_flight_task_ids(background_tasks)
     if not lease_names:
-        return " leases=0"
-    expires_at = int(now.timestamp()) + WORK_LEASE_TTL_SECONDS
+        return cleared_outcome
+    expires_at = int(now.timestamp()) + ttl_seconds
+    lease_dir = _lease_dir(state_dir)
     for lease_name in lease_names:
         _write_text_atomically(lease_dir / lease_name, f"until:{expires_at}\n")
     return f" leases={len(lease_names)}"
@@ -507,7 +531,7 @@ def _handle_session_start(state_dir: Path, host_dir: str, payload: Mapping[str, 
     _remove_file(plugin_dir / _FORK_FROM_FILENAME)
     _touch(state_dir / SESSION_STARTED_FILENAME)
     # The tasks these stood for were processes the restart killed.
-    lease_outcome = _write_work_leases(state_dir, [], now)
+    lease_outcome = _clear_work_leases(state_dir)
     return ("root:new" if is_new_root else "root:known") + lease_outcome
 
 
@@ -545,7 +569,7 @@ def _handle_stop(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now
     )
     # Ahead of the recompute, so no probe falls between the marker coming off and the leases
     # landing and reads the agent as waiting on its user.
-    lease_outcome = _write_work_leases(state_dir, background_tasks, now)
+    lease_outcome = _write_work_leases(state_dir, background_tasks, now, _work_lease_ttl_seconds(os.environ))
     return f"stop {reconcile_outcome}" + lease_outcome + _recompute_active_marker(state_dir, host_dir, now)
 
 

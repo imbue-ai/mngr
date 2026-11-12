@@ -23,6 +23,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.tui_utils import NORMALIZED_PROBE_MAX_LENGTH
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.work_leases import DEFAULT_WORK_LEASE_TTL_SECONDS
+from imbue.mngr.hosts.work_leases import WORK_LEASE_TTL_ENV_VAR
 from imbue.mngr.hosts.work_leases import parse_work_leases
 from imbue.mngr.utils.testing import file_lock_held_by_another_process
 from imbue.mngr_grok.resources import grok_hook
@@ -40,6 +42,8 @@ _EVENT_DETAIL_KEY_BY_EVENT: Final[Mapping[str, str]] = {
     "post_tool_use": "toolName",
 }
 _TIMESTAMP_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z\Z")
+# How much later than the test's own clock the hook may date a lease from
+_LEASE_TTL_SLACK_SECONDS: Final[float] = 30.0
 _HOLD_LOCK_SCRIPT: Final[str] = (
     "import fcntl, sys\n"
     "lock_file = open(sys.argv[1], 'a')\n"
@@ -855,6 +859,67 @@ def test_a_leased_grok_task_parses_the_way_mngr_reads_it(temp_host_dir: Path) ->
     assert [lease.name for lease in leases] == [lease_names[0]]
     assert leases[0].expires_at is not None
     assert leases[0].expires_at > datetime.now(timezone.utc)
+
+
+def _lease_ttl_seconds_at_turn_end(temp_host_dir: Path) -> float:
+    """How far ahead the hook dates the lease of the task the bgshell capture leaves running.
+
+    Measured from this test's clock before the replay, and read back through the parser the
+    probe uses.
+    """
+    started_at = datetime.now(timezone.utc)
+    fixture = _load_fixture("bgshell")
+    target = _make_target(temp_host_dir)
+    through_the_turn_end = [
+        step
+        for step in fixture.steps[: 1 + _step_index(fixture, "R stop end_turn p1")]
+        if step["kind"] != "turn_completed"
+    ]
+
+    _replay(target, fixture, through_the_turn_end)
+
+    lease_dir = target.state_dir / "leases"
+    lease_names = _visible_names(lease_dir)
+    assert len(lease_names) == 1, lease_names
+    leases = parse_work_leases(f"{lease_names[0]}\t{(lease_dir / lease_names[0]).read_text().strip()}")
+    assert len(leases) == 1
+    expires_at = leases[0].expires_at
+    assert expires_at is not None
+    return (expires_at - started_at).total_seconds()
+
+
+def _assert_lease_ttl_is(observed_ttl_seconds: float, expected_ttl_seconds: int) -> None:
+    """The hook dates a lease from its own clock, truncated to a whole second."""
+    assert expected_ttl_seconds - 1 <= observed_ttl_seconds <= expected_ttl_seconds + _LEASE_TTL_SLACK_SECONDS, (
+        observed_ttl_seconds
+    )
+
+
+def test_a_grok_lease_is_dated_by_the_default_ttl(temp_host_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bound an agent that sets nothing gets, which is the one mngr documents for every writer."""
+    monkeypatch.delenv(WORK_LEASE_TTL_ENV_VAR, raising=False)
+
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(temp_host_dir), DEFAULT_WORK_LEASE_TTL_SECONDS)
+
+
+def test_a_grok_lease_is_dated_by_the_agents_own_ttl(temp_host_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent whose work is short can say so, rather than holding its host for the default.
+
+    The hook reads the setting from the process it runs in, which is the agent's environment.
+    """
+    monkeypatch.setenv(WORK_LEASE_TTL_ENV_VAR, "600")
+
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(temp_host_dir), 600)
+
+
+@pytest.mark.parametrize("override", ["", " ", "0", "007", "4h", "-600", "1.5"])
+def test_a_grok_lease_ignores_a_ttl_that_is_not_a_positive_count_of_seconds(
+    temp_host_dir: Path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    """A lease dated by one of these would be expired on arrival, which reads as work that ended."""
+    monkeypatch.setenv(WORK_LEASE_TTL_ENV_VAR, override)
+
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(temp_host_dir), DEFAULT_WORK_LEASE_TTL_SECONDS)
 
 
 def test_repeated_subagent_start_and_stop_listing_keep_one_background_subagent(temp_host_dir: Path) -> None:

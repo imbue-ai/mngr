@@ -13,6 +13,8 @@ import pytest
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.hosts.work_leases import DEFAULT_WORK_LEASE_TTL_SECONDS
+from imbue.mngr.hosts.work_leases import WORK_LEASE_TTL_ENV_VAR
 from imbue.mngr.hosts.work_leases import parse_work_leases
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude.resources.testing import make_assistant_record
@@ -24,6 +26,8 @@ _WORK_LEASE_LIB_NAME: Final[str] = "mngr_work_lease_lib.sh"
 _HOOK_TIMEOUT_SECONDS: Final[float] = 30.0
 # Long enough that the race test can append a record while the hook waits to re-check
 _SLOW_REQUEUE_RECHECK_DELAY_SECONDS: Final[float] = 2.0
+# How much later than the test's own clock the hook may date a lease from
+_LEASE_TTL_SLACK_SECONDS: Final[float] = 30.0
 
 
 class _StopHook(FrozenModel):
@@ -103,6 +107,7 @@ def _prepare_stop_hook(
     requeue_recheck_delay_seconds: float = 0.0,
     background_tasks: list[dict[str, Any]] | None = None,
     is_work_lease_lib_installed: bool = True,
+    work_lease_ttl_override: str = "",
 ) -> _StopHook:
     """Set up the stop hook for the end of a turn that set the ``active`` marker.
 
@@ -113,6 +118,9 @@ def _prepare_stop_hook(
     ``commands/`` dir the way ``Host._ensure_shared_shell_libs`` does, which is the state
     every provisioned agent is in. Clearing it reproduces an agent provisioned before the
     library existed.
+
+    ``work_lease_ttl_override`` is the agent's setting for how long its leases hold; empty
+    is the agent that sets none, whatever the test runner's own environment holds.
     """
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
@@ -138,6 +146,7 @@ def _prepare_stop_hook(
             "HOOK_GRACE_PERIOD": "0",
             "HOOK_MAX_WAIT": "0",
             "HOOK_REQUEUE_RECHECK_DELAY": str(requeue_recheck_delay_seconds),
+            WORK_LEASE_TTL_ENV_VAR: work_lease_ttl_override,
         },
         transcript=transcript,
         active_marker=agent_state_dir / "active",
@@ -173,6 +182,7 @@ def _run_stop_hook_at_turn_end(
     hook_event_name: str = "Stop",
     background_tasks: list[dict[str, Any]] | None = None,
     is_work_lease_lib_installed: bool = True,
+    work_lease_ttl_override: str = "",
 ) -> _StopHook:
     hook = _prepare_stop_hook(
         tmp_path,
@@ -180,6 +190,7 @@ def _run_stop_hook_at_turn_end(
         hook_event_name,
         background_tasks=background_tasks,
         is_work_lease_lib_installed=is_work_lease_lib_installed,
+        work_lease_ttl_override=work_lease_ttl_override,
     )
     result = _run_prepared_stop_hook(hook, tmp_path)
     assert result.returncode == 0, result.stderr
@@ -389,6 +400,46 @@ def test_stop_hook_writes_a_lease_mngr_can_parse_and_date(tmp_path: Path) -> Non
     assert leases[0].name == "task-abc-123"
     assert leases[0].expires_at is not None
     assert leases[0].expires_at > datetime.now(timezone.utc)
+
+
+def _lease_ttl_seconds_at_turn_end(tmp_path: Path, work_lease_ttl_override: str) -> float:
+    """How far ahead the hook dates a lease, measured from the test's clock before it ran."""
+    started_at = datetime.now(timezone.utc)
+    hook = _run_stop_hook_at_turn_end(
+        tmp_path,
+        [_prompt("hello"), _reply("done")],
+        background_tasks=[{"task_id": "abc-123"}],
+        work_lease_ttl_override=work_lease_ttl_override,
+    )
+    lease_path = hook.lease_dir / "task-abc-123"
+    leases = parse_work_leases(f"{lease_path.name}\t{lease_path.read_text().strip()}")
+    assert len(leases) == 1
+    expires_at = leases[0].expires_at
+    assert expires_at is not None
+    return (expires_at - started_at).total_seconds()
+
+
+def _assert_lease_ttl_is(observed_ttl_seconds: float, expected_ttl_seconds: int) -> None:
+    """The hook dates a lease from its own clock, truncated to a whole second."""
+    assert expected_ttl_seconds - 1 <= observed_ttl_seconds <= expected_ttl_seconds + _LEASE_TTL_SLACK_SECONDS, (
+        observed_ttl_seconds
+    )
+
+
+def test_stop_hook_dates_a_lease_by_the_default_ttl(tmp_path: Path) -> None:
+    """The bound an agent that sets nothing gets, which is the one mngr documents for every writer."""
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, ""), DEFAULT_WORK_LEASE_TTL_SECONDS)
+
+
+def test_stop_hook_dates_a_lease_by_the_agents_own_ttl(tmp_path: Path) -> None:
+    """An agent whose work is short can say so, rather than holding its host for the default."""
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, "600"), 600)
+
+
+@pytest.mark.parametrize("override", ["", " ", "0", "007", "4h", "-600", "1.5"])
+def test_stop_hook_ignores_a_lease_ttl_that_is_not_a_positive_count_of_seconds(tmp_path: Path, override: str) -> None:
+    """A lease dated by one of these would be expired on arrival, which reads as work that ended."""
+    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, override), DEFAULT_WORK_LEASE_TTL_SECONDS)
 
 
 def test_stop_hook_leaves_the_turn_signal_alone_when_the_lease_library_is_missing(tmp_path: Path) -> None:
