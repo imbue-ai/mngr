@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
-- Added: Claude agents declare a work lease per in-flight background task at turn end (from the Stop payload's `background_tasks`), so they report `RUNNING_BACKGROUND` until that work wakes them; a restart drops the leases.
+- Added: Claude agents declare a work lease per in-flight background task at turn end (from the Stop payload's `background_tasks`), so they report `RUNNING_BACKGROUND` until that work wakes them; leases hold 24 hours by default (`HOOK_WORK_LEASE_TTL_SECONDS` overrides it; a value that is not a positive count of seconds is ignored), and a restart drops them.
 
 ### Changed
 

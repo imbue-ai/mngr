@@ -25,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The latchkey forward daemon no longer crashes its remote gateway provisioning thread when an SSH connection loses its local address (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake); the failure is retried on a rebuilt connection and recorded as a transient wiring-step failure.
 - Fixed: A machine policy with no rules is treated as unprovisioned, so a read or provisioning pass seeds it from this computer's policy instead of adopting the deny-all default.
 - Fixed: Host policies are sent without whitespace, so long-lived remote workspaces no longer exceed the 100,000-byte remote command cap on sign-ins and grants.
+- Fixed: `mngr latchkey register-agent` adopts the remote machine's policy before registering and pushing, so grants made from another computer survive.
 
 ## [v0.2.1] - 2026-10-28
 

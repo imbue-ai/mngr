@@ -11,7 +11,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr create --publish <port>[/<protocol>]` declares ports to publish on a new host (create-template key `publish`), reported as `published_endpoints` by `mngr create`/`mngr list --format json` and the discovery stream.
 - Added: Support for the `grok` agent type via the separately installed `imbue-mngr-grok` plugin, listed in the plugin catalog and offered unchecked by the install wizard.
 - Added: `imbue.mngr.agents.tui_utils.is_shell_command_message` (moved from `imbue.mngr_claude.dialogs`).
-- Added: `RUNNING_BACKGROUND` agent state for an agent whose turn ended while declared work is outstanding, tracked by deadline-bounded work leases under the agent's `leases/` directory (`resources/mngr_work_lease_lib.sh` writes them); `--running` selects it too and `mngr ls` reports `leases`.
+- Added: `RUNNING_BACKGROUND` agent state for an agent whose turn ended while declared work is outstanding, tracked by deadline-bounded work leases under the agent's `leases/` directory (`resources/mngr_work_lease_lib.sh` writes them; turn-end hooks date them 24 hours ahead by default, overridable per agent with `HOOK_WORK_LEASE_TTL_SECONDS`, both defined in `hosts/work_leases.py`); `--running` selects it too and `mngr ls` reports `leases`.
 - Added: `ssh_utils.load_ssh_private_key_file`, loading any paramiko key type, with `SSHPrivateKeyError` subclasses `SSHPrivateKeyEncryptedError` and `SSHPrivateKeyUnparseableError`.
 - Added: The docker/VPS container entrypoint runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restoring sshd on a container restart.
 
@@ -22,6 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr event TARGET SOURCE...` lists only the named sources' directories, cutting remote round trips (a Modal follow's first event ~9.9 s to ~5.9 s).
 - Changed: `mngr event` with an id-pinned address uses only a provider discovery would load; a removed or disabled provider now fails as target-not-found.
 - Changed: The `agent_release_testing` helpers and `DEFAULT_HOST_LOCK_TIMEOUT_SECONDS` are public.
+- Changed: The in-host idle watcher (`activity_watcher.sh`) reads `data.json` with one `jq` call per check instead of six (~0.84% to ~0.17% of a core); its per-check `DEBUG` event is gone.
 
 ### Fixed
 

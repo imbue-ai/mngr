@@ -1,3 +1,0 @@
-`HOOK_WORK_LEASE_TTL_SECONDS` now sets how long the work leases the hook handler writes hold for, the way it already did for claude; the handler had a fixed 4 hours that nothing could change. The default is now 24 hours, the same one claude's turn-end hook uses, and a value that is not a positive count of seconds is ignored rather than used to write a lease that is expired on arrival.
-
-The README's Lifecycle section says the same: a lease nothing ends sooner expires a day after the last `Stop` that listed its task, or `HOOK_WORK_LEASE_TTL_SECONDS` after it for an agent whose environment sets that.

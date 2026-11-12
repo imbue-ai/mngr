@@ -393,6 +393,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The desktop writes `data/.secrets/share_identities.json` beside the grants so the workspace roster names grantees who have not arrived yet.
 - Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
 - Changed: The pool-host runbook (`docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag (a newer checkout can fail every slice of an older tag), that a pre-`minds-v0.10.0` tag needs a box with no `minds-v0.10.0`+ slice, and that the baking machine must stay awake until the bake exits.
+- Changed: A workspace created through `POST /api/v1/workspaces` with an `account_id` and no `backup_provider` now gets Imbue backups by default, as desktop-created ones do.
 
 ### Deprecated
 
@@ -568,6 +569,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Long-lived remote workspaces no longer fail new sign-ins and grants with a policy past the 100,000-byte remote command cap: the Minds API allowlist is pinned to discovered agents and sent without whitespace.
 - Fixed: Workspaces can again be created on AWS, GCP and Azure connections from templates that publish ports; new connections get the Screen ports in `firewall_published_ports` (existing ones need their cloud's `prepare` rerun).
 - Fixed: The desktop app again refuses `openExternal`, routing custom-scheme launches through the ask-first link router instead of silently granting them.
+- Fixed: Starting the desktop app no longer wipes a remote workspace's connector grants made from another computer; policy writes now read the machine's policy first and are refused when it cannot be read.
 
 ### Security
 

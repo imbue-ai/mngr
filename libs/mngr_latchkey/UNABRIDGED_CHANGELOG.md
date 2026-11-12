@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-11
+
+`mngr latchkey register-agent` now reads a remote host's policy back from its machine, and adopts it here, before registering the agent and handing the file over, so a grant the machine gained from another of the user's computers survives the registration. A machine that cannot be read, or whose key record here cannot be read to tell whether there is one, still gets the agent registered in this computer's copy, and the command fails saying so, as it already did for a machine it could not reach.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

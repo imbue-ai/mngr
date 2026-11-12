@@ -1,1 +1,0 @@
-Documentation only. `ActivitySource` now says what an activity source is: a clock at `activity/<source>`, host-level or per-agent, whose mtime is the activity time and whose contents nothing reads, and which an idle host is shut down for falling behind. `AGENT` is noted as a view of the agent's harness loop rather than a direct observation of the agent working.

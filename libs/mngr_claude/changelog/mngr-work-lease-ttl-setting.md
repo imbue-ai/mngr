@@ -1,1 +1,0 @@
-The turn-end hook now dates the work leases it writes 24 hours ahead by default, up from 4, which is the same default grok's hook uses. `HOOK_WORK_LEASE_TTL_SECONDS` still overrides it for one agent, and a value that is not a positive count of seconds is now ignored instead of being used to write a lease that is expired on arrival.

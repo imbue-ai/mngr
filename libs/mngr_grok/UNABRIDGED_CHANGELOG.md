@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-11
+
+Fixed: a host no longer idle-stops itself out from under an agent that is working.
+
+An agent's activity file was refreshed only while a turn was in progress. An agent whose turn ended with work it started still running has no turn marker -- that is what `RUNNING_BACKGROUND` means -- so nothing refreshed the file, and the host's idle watcher saw an agent that had gone quiet. Every provider defaults to a 800-second idle timeout, so against a four-hour lease a host could stop itself about thirteen minutes into work that had hours left to run. The same stale file is what `mngr ls` reported as `idle_seconds`, so a listing showed an agent idling for hours beside a state saying it was working.
+
+Work outstanding past a turn now counts as activity, so the host stays up for it and the idle time reads as zero. Only agents created from this version report it: the activity tracker and the work-lease library are both written into an agent's own area when the agent is made.
+
+`HOOK_WORK_LEASE_TTL_SECONDS` now sets how long the work leases the hook handler writes hold for, the way it already did for claude; the handler had a fixed 4 hours that nothing could change. The default is now 24 hours, the same one claude's turn-end hook uses, and a value that is not a positive count of seconds is ignored rather than used to write a lease that is expired on arrival.
+
+The README's Lifecycle section says the same: a lease nothing ends sooner expires a day after the last `Stop` that listed its task, or `HOOK_WORK_LEASE_TTL_SECONDS` after it for an agent whose environment sets that.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

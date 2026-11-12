@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-11
+
+A workspace created through `POST /api/v1/workspaces` under an account now gets Imbue backups by default, as one created from the desktop's create form does: when the body leaves `backup_provider` out and names an `account_id`, the new workspace gets a repository of its own in the account's backup store, keyed by its own random password. A create under no account still defaults to "configure later", and an explicit `backup_provider` is honoured as before. Before, every agent-driven create (the `imbue-studio` skill's, say, or a migration's replacement workspace) came up without backups until the user enabled them by hand.
+
+The `imbue-studio` skill now says to leave the backup fields out so a workspace created from inside another is backed up, to send `CONFIGURE_LATER` only when the user asks for no backups, and never to send a user's own backup credentials.
+
+Fixed a bug where starting the desktop app could wipe a remote workspace's connector grants. Each remote workspace's machine enforces its own copy of the host's latchkey policy, and the app keeps a mirror of it. On startup, and whenever discovery listed a different set of agents on the host, the app rewrote the mirror's registered-agent list and pushed the whole mirror to the machine without reading the machine first, so a mirror that had never learned of grants made from another of the user's computers replaced the machine's policy with its own stale copy, deleting those grants. Every write to a workspace's policy now reads the machine back and adopts its policy first, in the same operation: the registration worker reads, pins the registered agents again on what it read (keeping an agent the machine registers that this computer has yet to list, as well as its grants), and pushes only when that changed anything; the Permissions tab's writes and every request grant read the machine before they edit, and refuse the change (leaving a request pending) when the machine cannot be read.
+
 ## 2026-11-10
 
 The pool-host runbook (`apps/minds/docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag, since a newer checkout can fail every slice of an older tag with `Host data file has incompatible schema` or a build step the older template lacks. It also says a tag before `minds-v0.10.0` needs a box with no slice at `minds-v0.10.0` or later, and that the machine running a bake must stay awake until the bake exits.

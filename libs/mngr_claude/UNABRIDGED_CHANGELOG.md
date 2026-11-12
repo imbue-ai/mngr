@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-11
+
+Fixed: a host no longer idle-stops itself out from under an agent that is working.
+
+An agent's activity file was refreshed only while a turn was in progress. An agent whose turn ended with work it started still running has no turn marker -- that is what `RUNNING_BACKGROUND` means -- so nothing refreshed the file, and the host's idle watcher saw an agent that had gone quiet. Every provider defaults to a 800-second idle timeout, so against a four-hour lease a host could stop itself about thirteen minutes into work that had hours left to run. The same stale file is what `mngr ls` reported as `idle_seconds`, so a listing showed an agent idling for hours beside a state saying it was working.
+
+Work outstanding past a turn now counts as activity, so the host stays up for it and the idle time reads as zero. Only agents created from this version report it: the activity tracker and the work-lease library are both written into an agent's own area when the agent is made.
+
+Documentation only. The agent state dir's file semantics now cover the two files in it that are derived views rather than facts of their own: `idle_since`, written wherever the `active` marker is cleared and removed wherever it is created, so it dates the turn boundary and is one source of the idle epoch rather than the epoch itself; and `activity/agent`, the agent's activity clock, which the background-task loop refreshes for as long as that loop counts the agent as working and whose mtime is the whole signal.
+
+The turn-end hook now dates the work leases it writes 24 hours ahead by default, up from 4, which is the same default grok's hook uses. `HOOK_WORK_LEASE_TTL_SECONDS` still overrides it for one agent, and a value that is not a positive count of seconds is now ignored instead of being used to write a lease that is expired on arrival.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

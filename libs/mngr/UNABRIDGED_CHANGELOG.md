@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-11
+
+The in-host idle-shutdown watcher (`activity_watcher.sh`) now reads the four `data.json` fields it needs -- `activity_sources`, `idle_timeout_seconds`, `max_host_age` and `tmux_session_prefix` -- in one `jq` invocation per 15-second check, and every decision in that check runs off that one snapshot. It previously spawned `jq` six times per check, measured at 20.8 ms a call on a `debian:bookworm` host and accounting for ~99% of the watcher's CPU: ~0.84% of a core, tripled under gVisor. A single call takes the watcher to ~0.17% of a core.
+
+`data.json` is still re-read on every check, so a change to a host's idle configuration still takes effect within one interval. The per-check `DEBUG` event the watcher wrote to its event log is gone; the timestamped `--- Activity watcher check at ... ---` line in `activity_watcher.log` remains the per-check breadcrumb.
+
+Fixed: a host no longer idle-stops itself out from under an agent that is working.
+
+An agent's activity file was refreshed only while a turn was in progress. An agent whose turn ended with work it started still running has no turn marker -- that is what `RUNNING_BACKGROUND` means -- so nothing refreshed the file, and the host's idle watcher saw an agent that had gone quiet. Every provider defaults to a 800-second idle timeout, so against a four-hour lease a host could stop itself about thirteen minutes into work that had hours left to run. The same stale file is what `mngr ls` reported as `idle_seconds`, so a listing showed an agent idling for hours beside a state saying it was working.
+
+Work outstanding past a turn now counts as activity, so the host stays up for it and the idle time reads as zero. Only agents created from this version report it: the activity tracker and the work-lease library are both written into an agent's own area when the agent is made.
+
+Documentation only. `ActivitySource` now says what an activity source is: a clock at `activity/<source>`, host-level or per-agent, whose mtime is the activity time and whose contents nothing reads, and which an idle host is shut down for falling behind. `AGENT` is noted as a view of the agent's harness loop rather than a direct observation of the agent working.
+
+Regenerated the `mngr latchkey` command docs: `register-agent`'s help now says a remote host's policy is read back from its machine and adopted before the agent is registered and the file is pushed, and that the command fails saying so when the machine cannot be read.
+
+A work lease now holds for 24 hours by default, up from 4, and `HOOK_WORK_LEASE_TTL_SECONDS` sets it per agent for both harnesses that declare leases. The default and the variable's name live beside the rest of the lease protocol in `hosts/work_leases.py`, so the two turn-end hooks that spell them out cannot drift apart; `mngr_work_lease_lib.sh` still holds no number of its own, because the bound belongs to whoever declares the work.
+
+The bound is a backstop against work that died without reporting rather than a guess at how long work takes: a dead agent is settled from tmux and the process table before any lease is read, and any turn end rewrites its writer's whole lease set, so the bound only caps work that runs with no intervening turn. Too short reverts a working agent to `WAITING`; too long costs a bounded idle window.
+
 ## 2026-11-10
 
 `Host.execute_stateful_command` and `OuterHost.execute_stateful_command` now run the command inside a `host.exec` span of the `imbue_common` tracer behind Imbue Studio's opt-in profiling mode, with the arguments `host_id`, `provider` (the provider instance the host belongs to; an outer host has none, so its span names the host alone), and `is_success` from the command's result. The span is what makes a workspace exec show up as its own slice in a Studio trace, beside the `log_span` and `log_call` slices `mngr exec` already records. Until a profiling mode is enabled the tracer is a no-op, so `mngr` runs unchanged.

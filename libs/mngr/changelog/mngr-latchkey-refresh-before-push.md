@@ -1,1 +1,0 @@
-Regenerated the `mngr latchkey` command docs: `register-agent`'s help now says a remote host's policy is read back from its machine and adopted before the agent is registered and the file is pushed, and that the command fails saying so when the machine cannot be read.
