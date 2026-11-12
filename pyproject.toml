@@ -28,8 +28,17 @@ required-version = ">=0.13.4"
 # emSign root above, so it postdates the cutoff. Override just this package rather
 # than advancing the global cutoff, which would adopt every dep's newer
 # releases at once. Mirrors the same override in the private root pyproject.
-# CLEANUP: remove once exclude-newer above reaches 2026-10-21.
-exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
+# filelock 4.2.4 (uploaded 2026-10-19), paramiko 5.0.1 (2026-10-18T01:50Z) and
+# pyasn1 0.6.5 (2026-10-27) carry the fixes for advisories reported against the
+# versions before them, so they postdate the cutoff as well. Mirrors the root.
+# CLEANUP: remove certifi once exclude-newer above reaches 2026-10-21, filelock
+# once it reaches 2026-10-20, paramiko once it reaches 2026-10-18T02:00 and
+# pyasn1 once it reaches 2026-10-28.
+exclude-newer-package = { certifi = "2026-10-21T00:00:00Z", filelock = "2026-10-20T00:00:00Z", paramiko = "2026-10-18T02:00:00Z", pyasn1 = "2026-10-28T00:00:00Z" }
+# Same paramiko override as the root: pyinfra caps paramiko below 5 up to
+# 3.10.0, and the release lifting the cap postdates the cutoff.
+# CLEANUP: drop once exclude-newer above admits pyinfra 3.11.0 (uploaded 2026-11-09).
+override-dependencies = ["paramiko==5.0.1"]
 
 [tool.uv.sources]
 imbue-common = { workspace = true }

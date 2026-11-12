@@ -1195,7 +1195,7 @@ def test_paramiko_is_pinned_to_the_version_whose_private_transport_method_the_re
     the local sshd acceptance test) against the new version, then move the pin
     in ``pyproject.toml`` and here together.
     """
-    assert importlib_metadata.version("paramiko") == "3.5.1"
+    assert importlib_metadata.version("paramiko") == "5.0.1"
 
 
 def test_read_file_tail_from_offset_local_returns_delta_and_size(local_outer_host: OuterHost, tmp_path: Path) -> None:

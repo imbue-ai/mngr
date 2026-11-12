@@ -1,0 +1,1 @@
+The desktop app now bundles filelock 4.2.4, paramiko 5.0.1 and pyasn1 0.6.5, which fix the security advisories reported against the versions it shipped before. Paramiko 5 can no longer reach SSH servers that offer only SHA-1 key exchange or SHA-1 RSA signatures.

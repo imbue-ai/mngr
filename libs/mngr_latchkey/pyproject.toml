@@ -19,7 +19,7 @@ dependencies = [
     "psutil>=5.9",
     # Cross-process read/write file lock; its read side is what lets a probe ask
     # who owns a latchkey directory without contending with another probe.
-    "filelock>=3.31",
+    "filelock>=4.2.1",
     # Renders the Debian package that provisions a remote host's gateway.
     "jinja2>=3.1",
     "pydantic>=2.0",

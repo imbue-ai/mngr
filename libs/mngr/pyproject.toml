@@ -39,7 +39,7 @@ dependencies = [
     # Exact: the remote write in hosts/outer_host.py sends its exec request through
     # paramiko's private Transport._send_user_message, so a bump has to be checked
     # against a real server first (see outer_host_test.py's version test).
-    "paramiko==3.5.1",
+    "paramiko==5.0.1",
     "pluggy>=1.5.0",
     "pygtail>=0.14.0",
     "markdown-it-py>=2.2.0",
