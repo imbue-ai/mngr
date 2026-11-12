@@ -27,6 +27,13 @@ click is waiting on it, to the log when nothing is. An edit left behind here
 unpushed is not merely late: the next refresh adopts the machine's policy over
 it and it is gone.
 
+And why the read is not optional either. A push carries this computer's copy
+whole, so an edit is made on a copy that was read back from the machine first,
+in the same operation: every writer refreshes, then edits, then pushes. A copy
+that lagged the machine -- by a grant made from another of the user's
+computers, or by anything this computer has not read since -- pushed as it
+stood would erase on the machine whatever it never knew about.
+
 A local workspace has no machine of its own -- its agents run here, on the
 credentials and the permissions file this computer keeps -- so for those every
 method is a no-op and the local edit is the whole change.
@@ -100,11 +107,14 @@ class MachineOperator(MutableModel):
         Run before the Permissions tab is built, so what it shows is the
         machine's own credentials and policy -- including anything another of
         the user's computers granted -- rather than whatever was left here by
-        the last change. One round trip for both halves.
+        the last change; and before every edit that is then pushed whole, so
+        the push carries those grants rather than this computer's stale copy
+        (see the module docstring). One round trip for both halves.
 
         Raises:
             MachineOperationError: when the machine cannot be read. The caller
-                decides whether that is worth failing the whole view for.
+                decides whether that is worth failing the whole view, or the
+                write, for.
         """
         with self._machine(workspace_agent_id, "read that workspace's connections") as machine:
             if machine is not None:
@@ -206,7 +216,10 @@ class MachineOperator(MutableModel):
 
         Called once the edit has been made to the canonical file here, because
         what travels is a snapshot of that file: a whole policy rather than a
-        delta, so what lands is exactly what the edit left behind.
+        delta, so what lands is exactly what the edit left behind. The edit
+        has to have been made on a copy :meth:`refresh` brought up to date in
+        the same operation, or the snapshot erases what the machine holds and
+        this computer never read.
 
         Raises:
             MachineOperationError: when the snapshot cannot be read, or the

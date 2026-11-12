@@ -142,6 +142,7 @@ from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_update_state import UpdateAvailability
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.errors import WorkspaceNameInUseError
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
 from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
@@ -244,6 +245,7 @@ class _RecordingAgentCreator(AgentCreator):
             "account_id": account_id,
             "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
             "on_created": on_created,
+            "backup_request": backup_request,
         }
         return CreateAttemptId()
 
@@ -312,6 +314,30 @@ def _make_recording_creator(
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
+
+
+def _recording_creator_and_client_under_account(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    *,
+    user_id: str,
+    email: str,
+) -> tuple[_RecordingAgentCreator, FlaskClient]:
+    """A recording creator and a client whose session store knows one signed-in account."""
+    fake_cli = make_fake_imbue_cloud_cli()
+    fake_cli.add_account(user_id=user_id, email=email)
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=fake_cli)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, agent_creator=creator, session_store=session_store
+    )
+    return creator, client
+
+
+def _recorded_backup_request(creator: _RecordingAgentCreator) -> BackupSetupRequest:
+    backup_request = creator.last_call["backup_request"]
+    assert isinstance(backup_request, BackupSetupRequest)
+    return backup_request
 
 
 def _feed_entries(app: Flask) -> tuple[UiNotificationEntry, ...]:
@@ -6425,15 +6451,8 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 ) -> None:
     # The account id must reach start_create_attempt so the pending-create-attempt record
     # (the crash-safe association) can carry it.
-    fake_cli = make_fake_imbue_cloud_cli()
-    fake_cli.add_account(user_id="user-77120", email="user-77120@example.com")
-    session_store = make_session_store_for_test(tmp_path / "sessions", cli=fake_cli)
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(
-        tmp_path,
-        root_concurrency_group,
-        agent_creator=creator,
-        session_store=session_store,
+    creator, client = _recording_creator_and_client_under_account(
+        tmp_path, root_concurrency_group, user_id="user-77120", email="user-77120@example.com"
     )
 
     response = client.post(
@@ -6444,6 +6463,76 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
+
+
+def test_create_workspace_under_an_account_defaults_to_imbue_backups(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A create that names an account and no backup provider is backed up like one from the form.
+
+    Every agent-driven create leaves the backup fields out, so without this
+    default a workspace created from inside another came up with no backups
+    until the user enabled them by hand.
+    """
+    creator, client = _recording_creator_and_client_under_account(
+        tmp_path, root_concurrency_group, user_id="user-48213", email="user-48213@example.com"
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "backed-up", "account_id": "user-48213"},
+    )
+
+    assert response.status_code == 202
+    backup_request = _recorded_backup_request(creator)
+    assert backup_request.backup_provider is BackupProvider.IMBUE_CLOUD
+    assert backup_request.account_email == "user-48213@example.com"
+
+
+def test_create_workspace_under_no_account_defaults_to_no_backups(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Without an account there is no backup store to back up to, so the default stays "configure later"."""
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "private"},
+    )
+
+    assert response.status_code == 202
+    backup_request = _recorded_backup_request(creator)
+    assert backup_request.backup_provider is BackupProvider.CONFIGURE_LATER
+
+
+def test_create_workspace_honours_an_explicit_backup_provider_under_an_account(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The default only fills a body that names no provider; a create that asks for no backups gets none."""
+    creator, client = _recording_creator_and_client_under_account(
+        tmp_path, root_concurrency_group, user_id="user-59301", email="user-59301@example.com"
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "host_name": "unbacked",
+            "account_id": "user-59301",
+            "backup_provider": "CONFIGURE_LATER",
+        },
+    )
+
+    assert response.status_code == 202
+    backup_request = _recorded_backup_request(creator)
+    assert backup_request.backup_provider is BackupProvider.CONFIGURE_LATER
 
 
 def test_create_workspace_threads_the_onboarding_examples_flag_off_unless_the_body_turns_it_on(

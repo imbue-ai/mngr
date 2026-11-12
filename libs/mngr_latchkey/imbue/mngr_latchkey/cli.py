@@ -26,6 +26,8 @@ import signal
 import socket
 import threading
 from collections.abc import Callable
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -463,9 +465,14 @@ def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
     subtree. Idempotent: re-running for an already-registered agent is a
     no-op.
 
-    A host with a machine of its own (a remote workspace whose gateway was
-    provisioned from this computer) is then handed the updated file, since
-    its gateway enforces its own copy.
+    A host with a machine of its own (a remote host whose gateway was
+    provisioned from this computer) owns its policy, and another of the
+    user's computers may have granted something to it that this computer's
+    copy has never seen. So the machine's policy is read and adopted first,
+    the agent is registered on that fresh copy, and the result is handed back
+    to the machine, since its gateway enforces its own copy. A machine that
+    cannot be read still gets the agent registered in the copy here, which
+    the desktop gateway's own per-agent gate reads, and the exit says so.
     """
     del kwargs
     mngr_ctx, _output_opts, opts = setup_command_context(
@@ -487,63 +494,118 @@ def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
         raise click.UsageError(f"--agent-id is not a valid agent ID: {e}") from e
 
     try:
+        is_machine_to_update = has_machine_of_its_own(latchkey.plugin_data_dir, host_id)
+    except LatchkeyStoreError as e:
+        _register_agent_locally(latchkey, host_id, agent_id)
+        raise click.ClickException(
+            f"Registered locally, but could not tell whether host {host_id} has a machine of its own: {e}"
+        ) from e
+    if not is_machine_to_update:
+        _register_agent_locally(latchkey, host_id, agent_id)
+        return
+
+    try:
+        with _machine_of_host(mngr_ctx, latchkey, host_id, agent_id) as machine:
+            _read_machine_policy(mngr_ctx, machine)
+            is_file_changed = _register_agent_locally(latchkey, host_id, agent_id)
+            if is_file_changed:
+                _push_host_permissions(latchkey, machine)
+                logger.info("Pushed the updated permissions of host {} to its machine", host_id)
+    except _MachineUnavailableError as e:
+        _register_agent_locally(latchkey, host_id, agent_id)
+        raise click.ClickException(f"Registered locally, but {e}") from e
+
+
+def _register_agent_locally(latchkey: Latchkey, host_id: HostId, agent_id: AgentId) -> bool:
+    """Register ``agent_id`` in this computer's copy of ``host_id``'s policy; whether the copy changed."""
+    try:
         is_file_changed = register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
     except LatchkeyStoreError as e:
         raise click.ClickException(f"register_agent_for_host failed: {e}") from e
-
     logger.info("Registered agent {} on host {}; access to the Minds API proxy granted", agent_id, host_id)
-
-    try:
-        is_machine_to_update = is_file_changed and has_machine_of_its_own(latchkey.plugin_data_dir, host_id)
-    except LatchkeyStoreError as e:
-        raise click.ClickException(f"Could not tell whether host {host_id} has a machine of its own: {e}") from e
-    if is_machine_to_update:
-        _push_host_permissions_to_machine(mngr_ctx, latchkey, host_id, agent_id)
-        logger.info("Pushed the updated permissions of host {} to its machine", host_id)
+    return is_file_changed
 
 
-def _push_host_permissions_to_machine(
+class _MachineUnavailableError(LatchkeyError):
+    """Raised when a host's machine cannot be reached or read, so a registration has to stop at the copy here."""
+
+
+@contextmanager
+def _machine_of_host(
     mngr_ctx: MngrContext, latchkey: Latchkey, host_id: HostId, agent_id: AgentId
-) -> None:
-    """Make this computer's canonical policy for ``host_id`` the one its machine enforces.
+) -> Generator[MachineCredentials, None, None]:
+    """Open ``host_id``'s machine for one exchange, reached through the provider that owns the host.
 
-    The machine is reached through the provider that owns the host, which the
-    SSH-free discovery event stream records against the agent. Every failure
-    is a ``ClickException`` that says the local registration stands: the
-    machine catches up on the next read of it (a Permissions tab open).
+    The provider is what the SSH-free discovery event stream records against
+    the agent. Raises :class:`_MachineUnavailableError` when there is no
+    machine to open, so the caller can say the local registration stands.
     """
-    permissions_json = read_host_permissions(latchkey.plugin_data_dir, host_id)
-    if permissions_json is None:
-        raise click.ClickException(f"Host {host_id} has no permissions file to push right after registering into it")
     try:
         resolved = resolve_hosts_for_identifiers(mngr_ctx, [str(agent_id)])[str(agent_id)]
     except MngrError as e:
-        raise click.ClickException(
-            f"Registered locally, but could not find which provider runs agent {agent_id} to reach its machine: {e}"
+        raise _MachineUnavailableError(
+            f"could not find which provider runs agent {agent_id} to reach its machine: {e}"
         ) from e
     if resolved.host_id != host_id:
-        raise click.ClickException(
-            f"Registered locally, but agent {agent_id} is recorded on host {resolved.host_id}, not {host_id}; "
-            "not pushing to a machine the agent does not run on"
+        raise _MachineUnavailableError(
+            f"agent {agent_id} is recorded on host {resolved.host_id}, not {host_id}; "
+            "not touching a machine the agent does not run on"
         )
     try:
         provider = get_provider_instance(resolved.provider_name, mngr_ctx)
     except MngrError as e:
-        raise click.ClickException(
-            f"Registered locally, but could not load provider {resolved.provider_name} to reach the machine of host "
-            f"{host_id}: {e}"
+        raise _MachineUnavailableError(
+            f"could not load provider {resolved.provider_name} to reach the machine of host {host_id}: {e}"
         ) from e
+    is_machine_handed_over = False
     try:
         with provider.outer_host_for(host_id) as outer:
             if outer is None or outer.is_local:
-                raise click.ClickException(
-                    f"Registered locally, but provider {resolved.provider_name} offers no remote machine for host "
-                    f"{host_id}"
+                raise _MachineUnavailableError(
+                    f"provider {resolved.provider_name} offers no remote machine for host {host_id}"
                 )
-            MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).set_permissions(permissions_json)
-    except (MngrError, RemoteGatewayError, OSError) as e:
+            is_machine_handed_over = True
+            yield MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id)
+    except (MngrError, OSError) as e:
+        # Past the handover the caller's exchange owns the failure and reports it itself.
+        if is_machine_handed_over:
+            raise
+        raise _MachineUnavailableError(f"the machine of host {host_id} could not be reached: {e}") from e
+
+
+def _read_machine_policy(mngr_ctx: MngrContext, machine: MachineCredentials) -> None:
+    """Make this computer's copy of the host's policy say what its machine holds (see ``MachineCredentials.refresh``).
+
+    The read is an SSH exchange, so a connection that drops surfaces as an
+    ``MngrError`` or ``OSError`` rather than a gateway error, and is reported
+    the same way.
+    """
+    device = _resolve_device_identity(mngr_ctx, None)
+    try:
+        machine.refresh(PermissionsMigrationContext(device_id=device.device_id))
+    except (MngrError, OSError, RemoteGatewayError, PermissionsMigrationError, LatchkeyStoreError) as e:
+        raise _MachineUnavailableError(
+            f"the permissions of host {machine.host_id} could not be read from its machine first: {e}"
+        ) from e
+
+
+def _push_host_permissions(latchkey: Latchkey, machine: MachineCredentials) -> None:
+    """Make this computer's canonical policy for the host the one its machine enforces."""
+    try:
+        permissions_json = read_host_permissions(latchkey.plugin_data_dir, machine.host_id)
+    except LatchkeyStoreError as e:
         raise click.ClickException(
-            f"Registered locally, but the machine of host {host_id} did not take the updated permissions: {e}"
+            f"Registered locally, but the permissions of host {machine.host_id} could not be read to push them: {e}"
+        ) from e
+    if permissions_json is None:
+        raise click.ClickException(
+            f"Host {machine.host_id} has no permissions file to push right after registering into it"
+        )
+    try:
+        machine.set_permissions(permissions_json)
+    except (MngrError, OSError, RemoteGatewayError) as e:
+        raise click.ClickException(
+            f"Registered locally, but the machine of host {machine.host_id} did not take the updated permissions: {e}"
         ) from e
 
 
@@ -561,10 +623,13 @@ the supplied agent ID to that enum so the gateway will let that
 agent through to its own ``/api/v1/agents/<id>/...`` subtree.
 Idempotent: re-running for an already-registered agent is a no-op.
 
-When the edit changes the file and the host has a machine of its own
-(a remote workspace whose gateway was provisioned from this computer),
-the updated file is pushed to that machine, since its gateway enforces
-its own copy.""",
+A host with a machine of its own (a remote host whose gateway was
+provisioned from this computer) owns its policy, so that policy is read
+back and adopted here first, the agent is registered on that fresh copy,
+and when that changed the file it is pushed to the machine, since its
+gateway enforces its own copy. A machine that cannot be read or will not
+take the file still gets the agent registered in the copy here, and the
+command fails saying so.""",
     examples=(
         (
             "Register an agent for the Minds API proxy",

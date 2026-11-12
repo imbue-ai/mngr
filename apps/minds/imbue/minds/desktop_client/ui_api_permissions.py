@@ -274,18 +274,21 @@ def _build_waiting_requests(agent_id: str) -> tuple[UiWaitingPermissionRequest, 
 
 
 def _read_machine_state(agent_id: str) -> None:
-    """Bring this computer's copies of a workspace's machine up to date before the pane is built.
+    """Bring this computer's copies of a workspace's machine up to date, before the pane is built or a write is made.
 
     The pane shows what the workspace's own machine holds -- which accounts it
     is connected to and what its agents may do with them -- so it is read from
     the machine every time it is opened, in one round trip, rather than from
-    whatever this computer last wrote. A local workspace has nothing to read:
-    its agents run here, on the copies this computer keeps.
+    whatever this computer last wrote. A write is pushed to the machine whole,
+    so it is made on the same fresh copy (see :func:`_write_prelude`). A local
+    workspace has nothing to read: its agents run here, on the copies this
+    computer keeps.
 
     Raises:
         MachineOperationError: when the machine cannot be reached, which the
             pane reports as "permissions can't be loaded" rather than showing a
-            stale answer as if it were current.
+            stale answer as if it were current, and a write refuses rather than
+            pushing a copy that may lag the machine.
     """
     operator = get_state().machine_operator
     if operator is not None:
@@ -481,11 +484,16 @@ def build_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
 
 
 def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPermissionGrantHandler]:
-    """Auth + agent-id + JSON-body + handler lookup shared by every write route.
+    """Auth + agent-id + JSON-body + handler lookup + machine read shared by every write route.
+
+    Every write edits this computer's copies and pushes them to the
+    workspace's machine whole, so the copies are first made to say what the
+    machine holds: a pane opened a while ago, or a change another of the
+    user's computers made since, would otherwise be erased by the push.
 
     Returns an error :class:`Response` (401 unauthenticated, 404 malformed
-    workspace id, 400 invalid body, 503 with no permission handler wired), or
-    ``(body, handler)`` on success.
+    workspace id, 400 invalid body, 503 with no permission handler wired, 502
+    when the machine cannot be read), or ``(body, handler)`` on success.
     """
     if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", 401)
@@ -499,6 +507,13 @@ def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPe
     handler = _find_permission_grant_handler()
     if handler is None:
         return make_json_error_response("Permission management is unavailable", 503)
+    try:
+        _read_machine_state(agent_id)
+    except MachineOperationError as e:
+        logger.warning("Could not read the machine of workspace {} before a permission change: {}", agent_id, e)
+        return make_json_error_response(
+            f"Could not read that workspace's machine before applying the change: {e}", 502
+        )
     return body, handler
 
 

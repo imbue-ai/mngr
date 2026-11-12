@@ -301,6 +301,7 @@ from imbue.minds.desktop_client.workspace_create import available_cloud_account_
 from imbue.minds.desktop_client.workspace_create import available_connection_views
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
+from imbue.minds.desktop_client.workspace_create import default_backup_provider_for_account
 from imbue.minds.desktop_client.workspace_create import is_cloud_account_owned_by
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
@@ -1547,10 +1548,11 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         docker_runtime = DockerRuntime(str(body.get("runtime", default_docker_runtime().value)))
     except ValueError:
         return _json_error(f"Invalid runtime: {body.get('runtime')!r}", 400)
+    raw_backup_provider = body.get("backup_provider")
     try:
-        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+        submitted_backup_provider = None if raw_backup_provider is None else BackupProvider(str(raw_backup_provider))
     except ValueError:
-        return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
+        return _json_error(f"Invalid backup_provider: {raw_backup_provider!r}", 400)
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     is_web_access_enabled = bool(body.get("enable_web_access", False))
@@ -1667,9 +1669,15 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if account_id and session_store is not None:
         account_email = session_store.get_account_email(account_id) or ""
 
-    # Build the same restic setup request the create form builds. Fail fast on
-    # a bad config. No password is involved: repositories are keyed by each
+    # Build the same restic setup request the create form builds, under the
+    # form's default when the body names no provider. Fail fast on a bad
+    # config. No password is involved: repositories are keyed by each
     # workspace's own random password.
+    backup_provider = (
+        default_backup_provider_for_account(account_email)
+        if submitted_backup_provider is None
+        else submitted_backup_provider
+    )
     backup_request, backup_error = build_backup_request_or_error(
         backup_provider=backup_provider,
         api_key_env=backup_api_key_env,

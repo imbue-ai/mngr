@@ -77,14 +77,16 @@ mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 # request whose ``<id>`` is not in the host's allowed-agent enum, so
 # every agent that wants to call the Minds API must be registered
 # here. Idempotent: re-running for an already-registered agent is a no-op.
-# A host with a machine of its own (a remote workspace whose gateway was
+# A host with a machine of its own (a remote host whose gateway was
 # provisioned from this computer) is also handed the updated file: the
 # machine owns the policy, and a registration its copy lacks is lost on the
-# next read. The command fails if it cannot be. The machine's copy carries
-# the registered-agent list but not the gate rule itself, which only the
-# desktop gateway runs (the machine forwards every per-agent route there),
-# and travels without whitespace: the whole policy has to fit one remote
-# command, and the list is most of it.
+# next read. Its policy is read back and adopted here first, so the file
+# handed over carries whatever the machine gained since this computer last
+# read it. The command fails if the machine cannot be read or will not take
+# the file. The machine's copy carries the registered-agent list but not the
+# gate rule itself, which only the desktop gateway runs (the machine forwards
+# every per-agent route there), and travels without whitespace: the whole
+# policy has to fit one remote command, and the list is most of it.
 mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
@@ -726,11 +728,17 @@ gets this desktop's copy, which is how a freshly provisioned gateway stops
 permitting everything.
 
 What keeps that safe is that the copy here is never edited *without* being
-pushed. Every writer of `latchkey_permissions.json` -- a UI toggle, a grant, an
-agent registration, a recovery repair -- pushes the result to the machine in the
-same breath, and a push that fails is reported (to the user when there is one to
-report to, to the log otherwise) rather than left behind as a local edit that a
-later refresh would silently discard.
+pushed, and never pushed without having been read first. Every writer of
+`latchkey_permissions.json` -- a UI toggle, a grant, an agent registration, a
+recovery repair -- reads the machine's policy back (adopting it over the copy
+here) at the start of the same operation, makes its edit on that fresh copy,
+and pushes the result to the machine in the same breath. A push that fails is
+reported (to the user when there is one to report to, to the log otherwise)
+rather than left behind as a local edit that a later refresh would silently
+discard; a read that fails stops the push, since a snapshot of a copy that may
+lag the machine would replace whatever the machine gained since -- a grant
+made from another of the user's computers, say -- with this computer's stale
+idea of it.
 
 The one write `refresh` makes after adopting is the migration: a machine whose
 policy is in a format older than this build writes has it brought up to date here

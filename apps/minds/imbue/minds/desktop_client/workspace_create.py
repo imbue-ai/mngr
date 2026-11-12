@@ -572,6 +572,19 @@ def build_on_created_callback(
 # Backup request
 
 
+@pure
+def default_backup_provider_for_account(account_email: str) -> BackupProvider:
+    """The backup provider a create that names none gets: Imbue backups under an account, nothing without one.
+
+    The same default the create form preselects, applied to the API's create
+    (an agent's, or any client that leaves ``backup_provider`` out), so a
+    workspace created from inside another is backed up like one created from
+    the form. Each workspace gets a repository of its own, keyed by its own
+    random password; nothing of another workspace's setup is copied.
+    """
+    return BackupProvider.IMBUE_CLOUD if account_email else BackupProvider.CONFIGURE_LATER
+
+
 def build_backup_request_or_error(
     *,
     backup_provider: BackupProvider,

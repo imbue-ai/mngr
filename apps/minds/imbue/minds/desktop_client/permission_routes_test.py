@@ -36,11 +36,13 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
 from imbue.minds.desktop_client.latchkey.handlers.predefined import NO_DESKTOP_EGRESS_CHANGE
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
+from imbue.minds.desktop_client.mock_machine_operator_test import build_recording_machine_operator
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
@@ -284,6 +286,7 @@ def _build_authenticated_client(
     inbox: StaticPendingRequests,
     agent_id: AgentId | None = None,
     host_id: HostId | None = None,
+    machine_operator: MachineOperator | None = None,
 ) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -305,6 +308,7 @@ def _build_authenticated_client(
         paths=paths,
         pending_requests=inbox,
         request_event_handlers=(handler,),
+        machine_operator=machine_operator,
     )
     client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
@@ -382,6 +386,72 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
     # The request must no longer appear as pending after grant.
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.list_pending() == ()
+
+
+def test_post_permission_grant_reads_the_machine_before_the_handler_runs(tmp_path: Path) -> None:
+    """A grant pushes this computer's copies to the asking workspace's machine whole, so they are read back first.
+
+    A grant another of the user's computers made since this one last read the
+    machine would otherwise be erased by the push.
+    """
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    handler = _make_recording_handler(tmp_path)
+    operator = build_recording_machine_operator(_make_stub_latchkey(tmp_path))
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, machine_operator=operator)
+
+    response = client.post(
+        f"/requests/{request.request_id}/grant",
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
+    )
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert len(handler.grant_calls) == 1
+    assert _get_app_request_inbox(client).list_pending() == ()
+
+
+def test_post_permission_grant_reports_a_machine_that_cannot_be_read_as_502_and_keeps_the_request_pending(
+    tmp_path: Path,
+) -> None:
+    """A copy that may lag the machine must not be pushed over it, so an unreadable machine fails the grant."""
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    handler = _make_recording_handler(tmp_path)
+    operator = build_recording_machine_operator(
+        _make_stub_latchkey(tmp_path), refresh_refusal="Could not reach that workspace: it is asleep"
+    )
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, machine_operator=operator)
+
+    response = client.post(
+        f"/requests/{request.request_id}/grant",
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
+    )
+
+    assert response.status_code == 502
+    assert "it is asleep" in response.get_json()["error"]
+    assert handler.grant_calls == []
+    assert _get_app_request_inbox(client).list_pending() != ()
+
+
+def test_post_permission_deny_does_not_read_the_machine(tmp_path: Path) -> None:
+    """A deny edits nothing on the machine, so it costs no round trip to it."""
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    handler = _make_recording_handler(tmp_path)
+    operator = build_recording_machine_operator(
+        _make_stub_latchkey(tmp_path), refresh_refusal="Could not reach that workspace: it is asleep"
+    )
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, machine_operator=operator)
+
+    response = client.post(f"/requests/{request.request_id}/deny")
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == []
+    assert len(handler.deny_calls) == 1
 
 
 def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None:

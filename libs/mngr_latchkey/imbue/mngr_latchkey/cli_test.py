@@ -60,6 +60,7 @@ from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import machine_key_path
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
@@ -771,6 +772,37 @@ def test_register_agent_fails_loudly_when_the_host_has_a_machine_it_cannot_reach
 
     assert result.exit_code != 0
     assert "Registered locally" in result.output
+    assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root is not held to file permissions")
+def test_register_agent_registers_locally_when_it_cannot_tell_whether_the_host_has_a_machine(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A machine key record that cannot be read leaves the registration standing here, and the exit says so."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store_machine_encryption_key(plugin_data_dir(latchkey_root), _HOST_ID_ONE, generate_machine_encryption_key())
+    machine_key_path(plugin_data_dir(latchkey_root), _HOST_ID_ONE).chmod(0)
+    agent_id = AgentId.generate()
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["register-agent", "--host-id", str(_HOST_ID_ONE), "--agent-id", str(agent_id)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0
+    assert "Registered locally, but could not tell whether host" in result.output
     assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
 
 

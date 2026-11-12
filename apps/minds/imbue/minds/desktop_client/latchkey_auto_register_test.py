@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
@@ -16,8 +17,11 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
+from imbue.minds.desktop_client.latchkey_auto_register import _PendingCarry
+from imbue.minds.desktop_client.latchkey_auto_register import _coalesced_carry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -28,8 +32,13 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
+from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
+
+# A grant another of the user's computers made to a machine, which this computer's copy never held.
+_SLACK_RULE_KEY = "slack-api"
 
 
 def _make_discovered(host_id: HostId, agent_id: AgentId, agent_name: AgentName | None = None) -> DiscoveredAgent:
@@ -59,17 +68,38 @@ def _push_agents(resolver: MngrCliBackendResolver, *agents: DiscoveredAgent) -> 
     )
 
 
-def _read_allowed_anyof(plugin_data_dir: Path, host_id: HostId) -> list[dict[str, str]]:
-    """Return the ``anyOf`` allow-list for ``host_id`` from its permissions file."""
-    config = json.loads(permissions_path_for_host(plugin_data_dir, host_id).read_text())
+def _allowed_anyof_of_policy(permissions_json: str) -> list[dict[str, str]]:
+    """The ``anyOf`` allow-list of a policy."""
+    config = json.loads(permissions_json)
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
 
 
-def _registered_agent_ids(plugin_data_dir: Path, host_id: HostId) -> set[str]:
-    """The agent ids ``host_id``'s permissions file registers, read back out of their path patterns."""
+def _read_allowed_anyof(plugin_data_dir: Path, host_id: HostId) -> list[dict[str, str]]:
+    """Return the ``anyOf`` allow-list for ``host_id`` from its permissions file."""
+    return _allowed_anyof_of_policy(permissions_path_for_host(plugin_data_dir, host_id).read_text())
+
+
+def _registered_agent_ids_of_policy(permissions_json: str) -> set[str]:
+    """The agent ids a policy registers, read back out of their path patterns."""
     return {
-        entry["pattern"].split("/agents/")[1].split("/")[0] for entry in _read_allowed_anyof(plugin_data_dir, host_id)
+        entry["pattern"].split("/agents/")[1].split("/")[0] for entry in _allowed_anyof_of_policy(permissions_json)
     }
+
+
+def _registered_agent_ids(plugin_data_dir: Path, host_id: HostId) -> set[str]:
+    """The agent ids ``host_id``'s permissions file registers."""
+    return _registered_agent_ids_of_policy(permissions_path_for_host(plugin_data_dir, host_id).read_text())
+
+
+def _rule_keys_of_policy(permissions_json: str) -> list[str]:
+    return [next(iter(rule)) for rule in json.loads(permissions_json)["rules"]]
+
+
+def _policy_with_slack_grant(permissions_json: str) -> str:
+    """``permissions_json`` with a Slack grant another computer made, which this computer's copy never held."""
+    config = json.loads(permissions_json)
+    config["rules"].append({_SLACK_RULE_KEY: ["slack-read-all"]})
+    return json.dumps(config)
 
 
 def _register_all(latchkey: Latchkey, host_id: HostId, *agent_ids: AgentId) -> None:
@@ -87,31 +117,130 @@ def _build_local_auto_register(
 ) -> LatchkeyAutoRegister:
     """An auto-register whose hosts have no machine of their own, for tests about the local edit."""
     return build(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        refresh_permissions_from_machine=leave_copies_on_this_computer_as_they_are,
+        push_permissions_to_machine=leave_permissions_on_this_computer,
     )
 
 
-class _PushRecorder(MutableModel):
-    """Records every workspace whose policy the auto-register asked to have pushed, in order."""
+class _FakeMachine(MutableModel):
+    """Stands in for one host's machine: holds the policy last handed to it, and hands it back on a read.
 
+    A read adopts the machine's policy over this computer's copy, as the real
+    machine operator does, so a test sees exactly what a push would carry
+    after the read; a machine holding nothing yet is seeded from the copy here
+    on its first read, as the real read seeds an unprovisioned one. Every read
+    and push is recorded by the workspace agent it was addressed by, in order.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    latchkey: Latchkey = Field(frozen=True)
+    host_id: HostId = Field(frozen=True)
+    policy_json: str | None = Field(default=None, description="The policy the machine holds; None before any push.")
     pushed_workspace_agent_ids: list[str] = Field(default_factory=list)
-    failing_workspace_agent_ids: frozenset[str] = Field(default_factory=frozenset)
+    refreshed_workspace_agent_ids: list[str] = Field(default_factory=list)
+    failing_workspace_agent_ids: frozenset[str] = Field(
+        default_factory=frozenset, description="The addresses whose pushes the machine refuses."
+    )
+    unreadable_workspace_agent_ids: frozenset[str] = Field(
+        default_factory=frozenset, description="The addresses whose reads the machine fails."
+    )
+    during_read: Callable[[], None] | None = Field(
+        default=None,
+        description="Run while a read is in flight, before its adopt lands: what another thread does meanwhile.",
+    )
+    read_counts_at_push: list[int] = Field(
+        default_factory=list, description="How many reads the machine had taken when each push arrived."
+    )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def refresh(self, workspace_agent_id: str) -> None:
+        with self._lock:
+            self.refreshed_workspace_agent_ids.append(workspace_agent_id)
+            if workspace_agent_id in self.unreadable_workspace_agent_ids:
+                raise MachineOperationError(f"machine of {workspace_agent_id} could not be read")
+            if self.during_read is not None:
+                self.during_read()
+            if self.policy_json is None:
+                self.policy_json = read_host_permissions(self.latchkey.plugin_data_dir, self.host_id)
+            else:
+                adopt_machine_permissions(self.latchkey.latchkey_directory, self.host_id, self.policy_json)
 
     def push(self, workspace_agent_id: str) -> None:
         with self._lock:
             self.pushed_workspace_agent_ids.append(workspace_agent_id)
-        if workspace_agent_id in self.failing_workspace_agent_ids:
-            raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot")
+            self.read_counts_at_push.append(len(self.refreshed_workspace_agent_ids))
+            if workspace_agent_id in self.failing_workspace_agent_ids:
+                raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot")
+            self.policy_json = read_host_permissions(self.latchkey.plugin_data_dir, self.host_id)
 
     def pushed_count(self) -> int:
         with self._lock:
             return len(self.pushed_workspace_agent_ids)
 
+    def refreshed_count(self) -> int:
+        with self._lock:
+            return len(self.refreshed_workspace_agent_ids)
 
-def _wait_for_pushes(recorder: _PushRecorder, expected_count: int) -> None:
-    assert poll_until(lambda: recorder.pushed_count() >= expected_count, timeout=5.0, poll_interval=0.01), (
-        f"expected {expected_count} push(es), saw {recorder.pushed_workspace_agent_ids}"
+    def registered_agent_ids(self) -> set[str]:
+        with self._lock:
+            assert self.policy_json is not None, "the machine holds no policy"
+            return _registered_agent_ids_of_policy(self.policy_json)
+
+
+def _machine_seeded_from_this_computer(latchkey: Latchkey, host_id: HostId, **fields: frozenset[str]) -> _FakeMachine:
+    """A machine holding what this computer's copy of ``host_id``'s policy says now, as a provisioning pass seeds it."""
+    return _FakeMachine(
+        latchkey=latchkey,
+        host_id=host_id,
+        policy_json=read_host_permissions(latchkey.plugin_data_dir, host_id),
+        **fields,
+    )
+
+
+def _machine_registering_an_agent_this_computer_has_not_seen(
+    latchkey: Latchkey, host_id: HostId, other_computers_agent: AgentId
+) -> _FakeMachine:
+    """A machine registering ``other_computers_agent``, carried to it by another computer, which this computer's
+    copy of ``host_id``'s policy does not register."""
+    policy_before_the_other_computer_registered = read_host_permissions(latchkey.plugin_data_dir, host_id)
+    assert policy_before_the_other_computer_registered is not None
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, other_computers_agent)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    permissions_path_for_host(latchkey.plugin_data_dir, host_id).write_text(
+        policy_before_the_other_computer_registered
+    )
+    return machine
+
+
+def _build_auto_register_carrying_to(
+    build: Callable[..., LatchkeyAutoRegister],
+    resolver: MngrCliBackendResolver,
+    latchkey: Latchkey,
+    machine: _FakeMachine,
+    **fields: float,
+) -> LatchkeyAutoRegister:
+    """An auto-register that reads from and pushes to ``machine``, for tests about the carry."""
+    return build(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        refresh_permissions_from_machine=machine.refresh,
+        push_permissions_to_machine=machine.push,
+        **fields,
+    )
+
+
+def _wait_for_pushes(machine: _FakeMachine, expected_count: int) -> None:
+    assert poll_until(lambda: machine.pushed_count() >= expected_count, timeout=5.0, poll_interval=0.01), (
+        f"expected {expected_count} push(es), saw {machine.pushed_workspace_agent_ids}"
+    )
+
+
+def _wait_for_reads(machine: _FakeMachine, expected_count: int) -> None:
+    assert poll_until(lambda: machine.refreshed_count() >= expected_count, timeout=5.0, poll_interval=0.01), (
+        f"expected {expected_count} read(s), saw {machine.refreshed_workspace_agent_ids}"
     )
 
 
@@ -362,17 +491,174 @@ def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
     _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
-    recorder = _PushRecorder()
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
-    ).start()
+    _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine).start()
 
-    _wait_for_pushes(recorder, 1)
-    assert recorder.pushed_workspace_agent_ids == [str(new_agent)]
+    _wait_for_pushes(machine, 1)
+    assert machine.pushed_workspace_agent_ids == [str(new_agent)]
+    assert str(new_agent) in machine.registered_agent_ids()
+
+
+def test_a_grant_only_the_machine_holds_survives_the_push_of_a_registration(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A registration is carried as a read-modify-write, so a grant another computer made to the machine stays.
+
+    The machine owns the policy, and this computer's copy can lag it by
+    whatever the user's other computers granted since this one last read it.
+    Pushing that copy as it stood after the registration replaced the
+    machine's grants with it; reading first, pinning the agents again on what
+    was read, and pushing that keeps the grant and registers the agent.
+    """
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    assert machine.policy_json is not None
+    machine.policy_json = _policy_with_slack_grant(machine.policy_json)
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+
+    _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine).start()
+
+    _wait_for_pushes(machine, 1)
+    assert machine.refreshed_workspace_agent_ids == [str(new_agent)]
+    assert machine.policy_json is not None
+    assert _SLACK_RULE_KEY in _rule_keys_of_policy(machine.policy_json)
+    assert str(new_agent) in machine.registered_agent_ids()
+    local_policy = read_host_permissions(latchkey.plugin_data_dir, host_id)
+    assert local_policy is not None
+    assert _SLACK_RULE_KEY in _rule_keys_of_policy(local_policy)
+
+
+def test_a_read_a_reconcile_wrote_during_is_repeated_so_the_pin_is_on_the_machines_policy(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A reconcile that rewrites the file while the machine is being read cannot put the stale copy back.
+
+    The read runs outside the reconcile lock, so a reconcile can read the
+    file before the adopt lands and write after it, leaving this computer's
+    stale copy over the machine's policy; a carry that pinned on that would
+    push the stale copy and lose the machine's grant. The carry notices the
+    reconcile's write and reads the machine again before pinning.
+    """
+    host_id = HostId.generate()
+    first_agent, second_agent = AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    assert machine.policy_json is not None
+    machine.policy_json = _policy_with_slack_grant(machine.policy_json)
+    # Discovery lists a second agent while the first carry's read is in flight, so
+    # a reconcile rewrites the file between that read's start and its adopt.
+    machine.during_read = lambda: _push_agents(
+        resolver, _make_discovered(host_id, first_agent), _make_discovered(host_id, second_agent)
+    )
+    _push_agents(resolver, _make_discovered(host_id, first_agent))
+
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+
+    _wait_for_pushes(machine, 2)
+    _wait_until_pushes_settle(auto_register)
+    # The first carry read twice before its push (the reconcile wrote during the first read); the second carry,
+    # scheduled by that reconcile, read once more and carried the second agent.
+    assert machine.read_counts_at_push == [2, 3]
+    assert machine.policy_json is not None
+    assert _SLACK_RULE_KEY in _rule_keys_of_policy(machine.policy_json)
+    assert {str(first_agent), str(second_agent)} <= machine.registered_agent_ids()
+    local_policy = read_host_permissions(latchkey.plugin_data_dir, host_id)
+    assert local_policy is not None
+    assert _SLACK_RULE_KEY in _rule_keys_of_policy(local_policy)
+
+
+def test_an_agent_only_the_machine_registers_survives_the_push_of_a_registration(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The pin is applied again on what the machine holds, so a registration another computer carried to it stays.
+
+    That agent is not in this computer's listing yet, and a registered agent
+    is dropped only once two complete listings lack it; a pin of the list this
+    computer's copy produced would have taken it out of the machine's policy.
+    """
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    other_computers_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_registering_an_agent_this_computer_has_not_seen(latchkey, host_id, other_computers_agent)
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+
+    _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine).start()
+
+    _wait_for_pushes(machine, 1)
+    assert {str(new_agent), str(other_computers_agent)} <= machine.registered_agent_ids()
+    assert {str(new_agent), str(other_computers_agent)} <= _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+
+
+def test_a_machine_that_cannot_be_read_is_not_pushed(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A push without a read first would replace whatever the machine holds, so a failed read pushes nothing.
+
+    The registration still stands in this computer's copy, which the desktop
+    gateway's own per-agent gate reads.
+    """
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(
+        latchkey, host_id, unreadable_workspace_agent_ids=frozenset({str(new_agent)})
+    )
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+
+    _wait_for_reads(machine, 1)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.pushed_workspace_agent_ids == []
+    assert str(new_agent) not in machine.registered_agent_ids()
+    assert str(new_agent) in _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+
+
+def test_a_machine_that_already_registers_the_pinned_agents_is_not_pushed(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A registration another computer already carried to the machine costs one read and no push."""
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_registering_an_agent_this_computer_has_not_seen(latchkey, host_id, new_agent)
+    machine_policy_before = machine.policy_json
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+
+    _wait_for_reads(machine, 1)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.pushed_workspace_agent_ids == []
+    assert machine.policy_json == machine_policy_before
 
 
 def test_does_not_push_when_the_registration_changed_nothing(
@@ -390,20 +676,17 @@ def test_does_not_push_when_the_registration_changed_nothing(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
     _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
-    recorder = _PushRecorder()
 
-    auto = build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
-    )
+    auto = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
     auto.start()
     resolver.notify_change()
 
     # The registration is a synchronous no-op, so no push thread was ever
-    # started: nothing to wait for, and the recorder must still be empty.
-    assert recorder.pushed_workspace_agent_ids == []
+    # started: nothing to wait for, and the machine must not have been touched.
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
 
 
 def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
@@ -423,22 +706,20 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
     _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(
+        latchkey, host_id, failing_workspace_agent_ids=frozenset({str(first_agent)})
+    )
     _push_agents(resolver, _make_discovered(host_id, first_agent))
-    recorder = _PushRecorder(failing_workspace_agent_ids=frozenset({str(first_agent)}))
 
-    build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
-    ).start()
-    _wait_for_pushes(recorder, 1)
+    _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine).start()
+    _wait_for_pushes(machine, 1)
 
     _push_agents(resolver, _make_discovered(host_id, first_agent), _make_discovered(host_id, second_agent))
 
-    _wait_for_pushes(recorder, 2)
-    assert len(recorder.pushed_workspace_agent_ids) == 2
-    assert recorder.pushed_workspace_agent_ids[0] == str(first_agent)
-    assert recorder.pushed_workspace_agent_ids[1] in {str(first_agent), str(second_agent)}
+    _wait_for_pushes(machine, 2)
+    assert len(machine.pushed_workspace_agent_ids) == 2
+    assert machine.pushed_workspace_agent_ids[0] == str(first_agent)
+    assert machine.pushed_workspace_agent_ids[1] in {str(first_agent), str(second_agent)}
 
 
 def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it_is(
@@ -459,33 +740,31 @@ def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it
     agent_id = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
-    recorder = _PushRecorder()
 
-    auto_register = build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
-        machine_poll_interval_seconds=0.05,
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register, resolver, latchkey, machine, machine_poll_interval_seconds=0.05
     )
     auto_register.start()
     _wait_until_push_is_held(auto_register, host_id)
     # A resolver change before the machine exists carries nothing, and does not drop the push either.
     resolver.notify_change()
     _wait_until_pushes_settle(auto_register)
-    assert recorder.pushed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
     assert host_id in auto_register._hosts_awaiting_machine
 
     # No resolver change follows the key: the watch alone carries the push.
     _provision_machine(latchkey, host_id)
 
-    _wait_for_pushes(recorder, 1)
+    _wait_for_pushes(machine, 1)
     _wait_until_pushes_settle(auto_register)
-    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
+    assert str(agent_id) in machine.registered_agent_ids()
     # The held push is consumed: later changes do not push it again.
     resolver.notify_change()
     _wait_until_pushes_settle(auto_register)
-    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
     assert host_id not in auto_register._hosts_awaiting_machine
 
 
@@ -499,13 +778,14 @@ def test_a_held_push_is_carried_by_a_resolver_change_after_its_watch_has_ended(
     agent_id = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
-    recorder = _PushRecorder()
 
-    auto_register = build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register,
+        resolver,
+        latchkey,
+        machine,
         machine_poll_interval_seconds=0.01,
         machine_watch_seconds=0.0,
     )
@@ -515,12 +795,12 @@ def test_a_held_push_is_carried_by_a_resolver_change_after_its_watch_has_ended(
 
     _provision_machine(latchkey, host_id)
     _wait_until_pushes_settle(auto_register)
-    assert recorder.pushed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
 
     resolver.notify_change()
-    _wait_for_pushes(recorder, 1)
+    _wait_for_pushes(machine, 1)
     _wait_until_pushes_settle(auto_register)
-    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
     assert host_id not in auto_register._hosts_awaiting_machine
 
 
@@ -535,13 +815,14 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     agent_id = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    machine = _FakeMachine(latchkey=latchkey, host_id=host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
-    recorder = _PushRecorder()
 
-    auto_register = build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register,
+        resolver,
+        latchkey,
+        machine,
         machine_poll_interval_seconds=0.01,
         machine_watch_seconds=0.1,
     )
@@ -552,7 +833,8 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     resolver.notify_change()
     _wait_until_pushes_settle(auto_register)
 
-    assert recorder.pushed_workspace_agent_ids == []
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
     assert host_id in auto_register._hosts_awaiting_machine
 
 
@@ -571,18 +853,20 @@ def test_a_push_scheduled_while_the_app_shuts_down_is_kept_without_a_worker(
     host_id = HostId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
-    recorder = _PushRecorder()
-    auto_register = build_latchkey_auto_register(
-        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=recorder.push
-    )
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
     auto_register.start()
     root_concurrency_group.shutdown()
 
     agent_id = AgentId.generate()
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    assert recorder.pushed_workspace_agent_ids == []
-    assert auto_register._hosts_awaiting_push == {host_id: agent_id}
+    assert machine.pushed_workspace_agent_ids == []
+    assert set(auto_register._hosts_awaiting_push) == {host_id}
+    pending = auto_register._hosts_awaiting_push[host_id]
+    assert pending.address_agent_id == agent_id
+    assert pending.listed_agent_ids == {agent_id}
+    assert pending.dropped_agent_ids == frozenset()
     assert host_id not in auto_register._hosts_being_pushed
 
 
@@ -741,20 +1025,218 @@ def test_pushes_a_pinned_policy_to_the_hosts_machine_addressed_by_its_services_a
     latchkey = make_full_fake_latchkey(tmp_path)
     _register_all(latchkey, host_id, services, live, gone)
     _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
     _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
-    recorder = _PushRecorder()
-    build_latchkey_auto_register(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=recorder.push,
-    ).start()
-    assert recorder.pushed_workspace_agent_ids == []
+    _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine).start()
+    assert machine.pushed_workspace_agent_ids == []
 
     _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
 
-    _wait_for_pushes(recorder, 1)
-    assert recorder.pushed_workspace_agent_ids == [str(services)]
+    _wait_for_pushes(machine, 1)
+    assert machine.pushed_workspace_agent_ids == [str(services)]
     assert _registered_agent_ids(latchkey.plugin_data_dir, host_id) == {str(services), str(live)}
+    assert machine.registered_agent_ids() == {str(services), str(live)}
+
+
+def test_a_carry_scheduled_over_one_still_waiting_keeps_the_drop_only_the_earlier_one_knew(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """Two reconciles that schedule while one carry runs fold into one carry that drops what either one dropped.
+
+    The machine's policy is read back before the pin and still registers the
+    dropped agent; only the reconcile that dropped it knew to take it out, so
+    a carry that replaced that one would have left the agent registered there.
+    The group is shut down so no worker claims the first carry before the
+    second is scheduled.
+    """
+    host_id = HostId.generate()
+    services, live, gone, new = AgentId.generate(), AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    _push_agents(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+    root_concurrency_group.shutdown()
+
+    _report_listing(resolver, _make_services_agent(host_id, services), _make_discovered(host_id, live))
+    assert auto_register._hosts_awaiting_push[host_id].dropped_agent_ids == {gone}
+    _push_agents(
+        resolver,
+        _make_services_agent(host_id, services),
+        _make_discovered(host_id, live),
+        _make_discovered(host_id, new),
+    )
+
+    pending = auto_register._hosts_awaiting_push[host_id]
+    assert pending.address_agent_id == services
+    assert pending.listed_agent_ids == {services, live, new}
+    assert pending.dropped_agent_ids == {gone}
+    assert machine.pushed_workspace_agent_ids == []
+
+
+def test_a_carry_folded_into_a_later_one_keeps_the_agents_only_it_listed_unless_the_later_one_dropped_them() -> None:
+    """The earlier carry's listing survives the fold, minus what the later carry dropped.
+
+    An agent only the earlier listing had, which the later complete listing
+    lacked for the first time, is still registered in the file here (a drop
+    takes two complete listings), and the machine never received the earlier
+    carry; a pin of the later listing alone would unregister it on the machine
+    and, through the adopt, here, after one absence. An agent the later carry
+    dropped is taken out all the same, listed earlier or not.
+    """
+    services, absent_once, dropped_later, new = (
+        AgentId.generate(),
+        AgentId.generate(),
+        AgentId.generate(),
+        AgentId.generate(),
+    )
+    earlier = _PendingCarry(
+        address_agent_id=services,
+        listed_agent_ids=frozenset({services, absent_once, dropped_later}),
+        dropped_agent_ids=frozenset(),
+    )
+    later = _PendingCarry(
+        address_agent_id=services,
+        listed_agent_ids=frozenset({services, new}),
+        dropped_agent_ids=frozenset({dropped_later}),
+    )
+
+    folded = _coalesced_carry(earlier, later)
+
+    assert folded.address_agent_id == services
+    assert folded.listed_agent_ids == {services, absent_once, new}
+    assert folded.dropped_agent_ids == {dropped_later}
+
+
+def test_a_carry_held_over_one_already_held_for_a_machine_keeps_the_drop_only_the_earlier_one_knew(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A worker holding a carry for a host with no machine yet folds it into the carry already held there.
+
+    A reconcile that schedules between the worker's claim of a carry and its
+    hold finds nothing to fold into, so it leaves its carry waiting beside the
+    held one; the worker holds that one next, and replacing the earlier carry
+    would lose the drop only it knew of. The two carries are placed where that
+    race leaves them, and the group is shut down so the worker's body runs
+    here, with no thread of its own and no watch started.
+    """
+    host_id = HostId.generate()
+    services, live, gone, new = AgentId.generate(), AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live, gone)
+    machine = _FakeMachine(latchkey=latchkey, host_id=host_id)
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+    root_concurrency_group.shutdown()
+    earlier = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services, live}), dropped_agent_ids=frozenset({gone})
+    )
+    later = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services, live, new}), dropped_agent_ids=frozenset()
+    )
+    with auto_register._push_lock:
+        auto_register._hosts_awaiting_machine[host_id] = earlier
+        auto_register._hosts_awaiting_push[host_id] = later
+        auto_register._hosts_being_pushed.add(host_id)
+
+    auto_register._push_until_settled(host_id)
+
+    held = auto_register._hosts_awaiting_machine[host_id]
+    assert held.listed_agent_ids == {services, live, new}
+    assert held.dropped_agent_ids == {gone}
+    assert host_id not in auto_register._hosts_being_pushed
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
+
+
+def test_a_carry_scheduled_over_a_held_and_a_waiting_one_folds_them_oldest_first(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The held carry was claimed before the waiting one was scheduled, and both before the new one.
+
+    An agent the held carry listed, the waiting carry lacked for the first
+    time, and the new carry then dropped must stay out of the listing, as it
+    would after the drop; folding the new carry in ahead of the held one would
+    put it back and the pin would register it again. The worker slot is marked
+    taken so the scheduling starts no worker, leaving the folded carry where
+    the test can read it.
+    """
+    host_id = HostId.generate()
+    services, dropped_later, new = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services)
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register, resolver, latchkey, _FakeMachine(latchkey=latchkey, host_id=host_id)
+    )
+    held = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services, dropped_later}), dropped_agent_ids=frozenset()
+    )
+    waiting = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services}), dropped_agent_ids=frozenset()
+    )
+    newest = _PendingCarry(
+        address_agent_id=services,
+        listed_agent_ids=frozenset({services, new}),
+        dropped_agent_ids=frozenset({dropped_later}),
+    )
+    with auto_register._push_lock:
+        auto_register._hosts_awaiting_machine[host_id] = held
+        auto_register._hosts_awaiting_push[host_id] = waiting
+        auto_register._hosts_being_pushed.add(host_id)
+
+    auto_register._schedule_push(host_id, newest)
+
+    folded = auto_register._hosts_awaiting_push[host_id]
+    assert folded.listed_agent_ids == {services, new}
+    assert folded.dropped_agent_ids == {dropped_later}
+    assert host_id not in auto_register._hosts_awaiting_machine
+
+
+def test_a_held_carry_carried_over_a_waiting_one_is_folded_in_as_the_older_of_the_two(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A held carry its machine's appearance brings back is older than a carry scheduled while it was held.
+
+    An agent the held carry dropped and the waiting carry listed again is
+    registered by the pin, since the newer listing has it; folding the held
+    carry in as the newer of the two would take it out of the listing instead.
+    """
+    host_id = HostId.generate()
+    services, live, back = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _register_all(latchkey, host_id, services, live)
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register, resolver, latchkey, _FakeMachine(latchkey=latchkey, host_id=host_id)
+    )
+    held = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services, live}), dropped_agent_ids=frozenset({back})
+    )
+    waiting = _PendingCarry(
+        address_agent_id=services, listed_agent_ids=frozenset({services, live, back}), dropped_agent_ids=frozenset()
+    )
+    with auto_register._push_lock:
+        auto_register._hosts_awaiting_machine[host_id] = held
+        auto_register._hosts_awaiting_push[host_id] = waiting
+        auto_register._hosts_being_pushed.add(host_id)
+
+    auto_register._carry_held(host_id)
+
+    folded = auto_register._hosts_awaiting_push[host_id]
+    assert folded.listed_agent_ids == {services, live, back}
+    assert folded.dropped_agent_ids == {back}
+    assert host_id not in auto_register._hosts_awaiting_machine
 
 
 def test_reconciles_a_host_file_that_arrives_after_its_listing_was_seen(

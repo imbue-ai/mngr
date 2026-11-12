@@ -777,29 +777,32 @@ of a workspace may call under its own id) are all covered by the same rule.
 The same stream also *unregisters* agents: the allowlist is pinned to the
 agents discovery lists on the host, in one write
 (`imbue.mngr_latchkey.agent_setup.set_registered_agents_for_host`), and the
-pinned file is pushed to the workspace's machine like a registration. Adding
-is immediate; dropping waits. A listing that includes a host's
-`system-services` agent is a complete enumeration of the host (the criterion
-the resolver's last-good topology uses), and only a complete listing can say
-an agent is gone; one without it (a partial read, a stopped host) only ever
-adds. Even a complete listing can be wrong once, for an agent whose record
-could not be read that cycle, so a registered agent is dropped only when two
-consecutive complete listings, from two different discovery snapshots, both
-lack it; a listing that brings it back in between starts the count over, and
-a listing without the services agent in between carries it. A host is looked
-at only when discovery says something new about it (its listing changed, or a
-newer snapshot arrived while a drop is pending), never on the many resolver
-changes discovery did not drive, which is also what protects an agent
-registered outside discovery (a permission request's file repair, `mngr
-latchkey register-agent`) until discovery has twice confirmed it gone. A
-destroyed host that still lingers in discovery is left alone. Without this
-the allowlist only ever grew -- every chat and helper the workspace ever ran
--- and since the whole policy travels to the machine in one remote command
-capped at 100,000 bytes, a long-lived remote workspace eventually could not
-take a sign-in or a grant at all. Existing workspaces are cleaned up on the
-second complete listing after the app starts, or, for a workspace whose policy
-this computer does not hold yet (it is adopted from the machine on the first
-read), on the second complete listing once the file is there.
+pin is carried to the workspace's machine like a registration: the machine's
+policy is read back and adopted first, the list is pinned again on that
+fresh copy, and the result is pushed (see "Per-machine credentials" below
+for why the read comes first). Adding is immediate; dropping waits. A
+listing that includes a host's `system-services` agent is a complete
+enumeration of the host (the criterion the resolver's last-good topology
+uses), and only a complete listing can say an agent is gone; one without it
+(a partial read, a stopped host) only ever adds. Even a complete listing can
+be wrong once, for an agent whose record could not be read that cycle, so a
+registered agent is dropped only when two consecutive complete listings, from
+two different discovery snapshots, both lack it; a listing that brings it
+back in between starts the count over, and a listing without the services
+agent in between carries it. A host is looked at only when discovery says
+something new about it (its listing changed, or a newer snapshot arrived
+while a drop is pending), never on the many resolver changes discovery did
+not drive, which is also what protects an agent registered outside discovery
+(a permission request's file repair, `mngr latchkey register-agent`) until
+discovery has twice confirmed it gone. A destroyed host that still lingers in
+discovery is left alone. Without this the allowlist only ever grew -- every
+chat and helper the workspace ever ran -- and since the whole policy travels
+to the machine in one remote command capped at 100,000 bytes, a long-lived
+remote workspace eventually could not take a sign-in or a grant at all.
+Existing workspaces are cleaned up on the second complete listing after the
+app starts, or, for a workspace whose policy this computer does not hold yet
+(it is adopted from the machine on the first read), on the second complete
+listing once the file is there.
 
 The bug-report route (`POST .../agents/<...>/report`) is the one
 exception: it sits in a rule *ahead* of the unauthorized gate, so it
@@ -1171,12 +1174,18 @@ one granted every time the tab was opened. The machine's answer is therefore
 adopted here as well, and the copy here is a cache -- which is also what walks
 back an edit whose push failed, with no separate error reconcile. That is only
 safe because the copy here is never edited *without* being pushed in the same
-breath: the UI's edits while the user waits, and the discovery-driven ones (an
-agent registration, the baseline reconciliation that rides along with it) from
-a background thread, coalesced per host, since the resolver callback they run
-in must not block. An edit that could not be pushed is discarded by the next
-read rather than carried over later, so a writer that cannot push has to say
-so.
+breath, and never pushed without having been read from the machine first in
+that same breath: the UI's edits while the user waits (every write route
+reads the machine before it edits), the request grants (the grant dispatch
+reads it before the handler runs), and the discovery-driven ones (an agent
+registration, the baseline reconciliation that rides along with it) from a
+background thread, coalesced per host, since the resolver callback they run
+in must not block -- that thread reads the machine, pins the registered
+agents again on what it read, and pushes the result. An edit that could not
+be pushed is discarded by the next read rather than carried over later, so a
+writer that cannot push has to say so; a machine that cannot be read fails
+the edit before anything is pushed, since a snapshot of a copy that may lag
+the machine would erase what another of the user's computers granted since.
 
 The one write that read makes *toward* the machine is the seed: a machine with
 no policy at all permits everything, so it is handed this computer's copy

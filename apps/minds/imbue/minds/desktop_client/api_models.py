@@ -423,7 +423,11 @@ class CreateWorkspaceRequest(ApiRequestModel):
         ),
     )
     backup_provider: BackupProvider | None = Field(
-        default=None, description="Restic backup provider (default CONFIGURE_LATER)"
+        default=None,
+        description=(
+            "Restic backup provider. Left out, a create under an account gets IMBUE_CLOUD backups (a repository "
+            "of the workspace's own in the account's backup store) and one under no account CONFIGURE_LATER."
+        ),
     )
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
     enable_web_access: bool | None = Field(

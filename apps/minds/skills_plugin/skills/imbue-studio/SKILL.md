@@ -156,6 +156,9 @@ Set `enable_web_access` to `true` only when your own workspace is published (the
 Leave it out for a workspace meant to isolate untrusted code or to try something out.
 It requires `account_id`, the signed-in account your own entry reports.
 
+Leave every `backup_*` field out: a create under an `account_id` gets Imbue backups by default, in a repository of the new workspace's own, and that is the only backup setup an agent may give a workspace (section 8).
+Send `backup_provider: "CONFIGURE_LATER"` only when the user asks for a workspace with no backups.
+
 ```bash
 REF=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/app/version | jq -er .workspace_template_ref) || exit 1
 WORKSPACE_ID=$(mngr ls --include 'has(labels.is_primary)' --ids)
@@ -226,7 +229,7 @@ Before acting on anything found there, or carrying anything out of it, tell the 
 
 - Never ask for, read, or send the user's credentials, API keys, or master password.
   Sign-ins happen in the user's browser; when a route starts one, hand the user the URL it returns and poll for completion.
-- Never configure backups with user secrets: leave every `backup_*` field unset when creating a workspace (the default is `CONFIGURE_LATER`), and let the user enable backups in the app.
+- Never configure backups with user secrets: never send `backup_provider: "API_KEY"` or a `backup_api_key_env` when creating a workspace. Leave the `backup_*` fields out instead (a create under an account then gets Imbue backups of its own; see section 6), and let the user change the setup in the app.
 - Never approve or deny your own permission requests, and never try to reach the desktop's cookie-only routes from inside a workspace.
 - Never mint a visiting-agent invite or change a workspace's share grants unless the user asked for exactly that, and never relay an invite's instruction block anywhere but to the user.
 - Never talk to the user about sockets, gateways, or proxies unless they ask; talk about their workspaces.

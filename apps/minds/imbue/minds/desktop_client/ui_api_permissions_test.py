@@ -7,13 +7,11 @@ from typing import Any
 
 import pytest
 from flask.testing import FlaskClient
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
@@ -24,9 +22,7 @@ from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
-from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
-from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
@@ -34,12 +30,12 @@ from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClien
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
+from imbue.minds.desktop_client.mock_machine_operator_test import build_recording_machine_operator
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
 from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
-from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.mngr.primitives import AgentId
@@ -147,51 +143,6 @@ def _build_client(
         device_id=device_id,
     )
     return client
-
-
-class _RecordingMachineOperator(MachineOperator):
-    """A machine operator that records what it was told to carry, and carries nothing.
-
-    The push to a workspace's machine is the half of a permissions write that
-    nothing else here can see: this computer's copy looks right either way, and
-    the difference only shows on the next read, when the machine's policy is
-    adopted back over it.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    pushed_agent_ids: list[str] = Field(default_factory=list, description="Workspaces whose policy was pushed")
-    pushed_with_desktop_egress_rules_agent_ids: list[str] = Field(
-        default_factory=list, description="Workspaces whose policy and desktop egress rules were pushed together"
-    )
-    refreshed_agent_ids: list[str] = Field(
-        default_factory=list, description="Workspaces whose machine was read back, one SSH round trip each"
-    )
-    push_refusal: str = Field(default="", description="When set, the reason every push is refused with")
-
-    def push_permissions(self, workspace_agent_id: str) -> None:
-        self.pushed_agent_ids.append(workspace_agent_id)
-
-    def push_permissions_and_desktop_egress_rules(self, workspace_agent_id: str) -> None:
-        if self.push_refusal:
-            raise MachineOperationError(self.push_refusal)
-        self.pushed_with_desktop_egress_rules_agent_ids.append(workspace_agent_id)
-
-    def refresh(self, workspace_agent_id: str) -> None:
-        self.refreshed_agent_ids.append(workspace_agent_id)
-
-
-def _recording_operator(tmp_path: Path, latchkey: Latchkey, push_refusal: str = "") -> _RecordingMachineOperator:
-    """An operator whose machine access is never opened, because nothing here reaches one."""
-    return _RecordingMachineOperator(
-        access=MachineAccess(
-            latchkey=latchkey,
-            device_id=device_id_for_test("permissions"),
-            concurrency_group=ConcurrencyGroup(name="test-machine-access"),
-            backend_resolver=MngrCliBackendResolver(),
-        ),
-        push_refusal=push_refusal,
-    )
 
 
 def _latchkey(tmp_path: Path, accounts_by_service: dict[str, list[str]] | None = None) -> FakeAccountsLatchkey:
@@ -890,7 +841,7 @@ def _write_desktop_egress_rules_copy(latchkey: Latchkey, host_id: HostId, rules:
 def test_desktop_egress_route_through_this_computer_is_set_and_returns_the_refreshed_view(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     before = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
@@ -936,7 +887,7 @@ def test_desktop_egress_route_other_than_this_computer_alone_is_custom_and_grant
 ) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = _post_desktop_egress_route(client, agent_id, "slack", hops)
@@ -959,7 +910,7 @@ def test_desktop_egress_route_that_replaces_another_drops_the_grants_of_the_desk
 ) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     first_response = _post_desktop_egress_route(client, agent_id, "slack", [_OTHER_DEVICE_ID, _DEVICE_ID, "self"])
@@ -1002,7 +953,7 @@ def test_desktop_egress_route_that_replaces_another_drops_the_grants_of_the_desk
 def test_desktop_egress_route_of_one_service_leaves_the_routes_of_the_others_in_place(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     slack_response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
@@ -1034,7 +985,7 @@ def test_desktop_egress_route_of_one_service_leaves_the_routes_of_the_others_in_
 def test_desktop_egress_route_rejects_a_malformed_body(tmp_path: Path, body: dict[str, object]) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-route", json=body)
@@ -1060,7 +1011,7 @@ def test_desktop_egress_route_rejects_hops_that_do_not_form_a_route(
 ) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = _post_desktop_egress_route(client, agent_id, "slack", hops)
@@ -1077,7 +1028,7 @@ def test_desktop_egress_route_rejects_hops_that_do_not_form_a_route(
 def test_desktop_egress_route_rejects_an_unknown_service(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = _post_desktop_egress_route(client, agent_id, "no-such-service", [_DEVICE_ID])
@@ -1122,7 +1073,7 @@ def test_desktop_egress_route_back_to_the_machine_itself_is_accepted_for_a_works
 def test_desktop_egress_route_rejects_a_workspace_that_cannot_be_resolved(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
@@ -1138,7 +1089,7 @@ def test_desktop_egress_route_rejects_a_workspace_that_cannot_be_resolved(tmp_pa
 def test_desktop_egress_route_through_a_desktop_is_refused_without_a_device_id(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id="")
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
@@ -1153,7 +1104,7 @@ def test_desktop_egress_route_through_a_desktop_is_refused_without_a_device_id(t
 def test_desktop_egress_route_reports_a_machine_that_would_not_take_it_as_502(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey, push_refusal="Could not reach that workspace: it is asleep")
+    operator = build_recording_machine_operator(latchkey, push_refusal="Could not reach that workspace: it is asleep")
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
@@ -1167,7 +1118,7 @@ def test_workspace_permissions_lists_this_computer_first_then_the_other_desktops
 ) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     # The file names slack first, so listing the desktops in file order would put them the other way round.
     _write_desktop_egress_rules_copy(
         latchkey,
@@ -1203,7 +1154,7 @@ def test_workspace_permissions_reads_the_route_of_a_service_turned_on_before_rou
 ) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
     for granted_device_id in granted_device_ids:
         build_fake_gateway_client().set_permission_rule(
@@ -1233,7 +1184,7 @@ def test_workspace_permissions_reads_the_route_of_a_service_turned_on_before_rou
 def test_desktop_egress_route_rewrites_a_rules_copy_from_before_routes_as_routes(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     build_fake_gateway_client().set_permission_rule(
         permissions_path_for_host(latchkey.plugin_data_dir, host_id),
         *build_desktop_egress_grant("slack-api", _OTHER_DEVICE_ID, None),
@@ -1274,7 +1225,7 @@ def test_revoke_all_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> Non
     """The machine's gateway checks the account before it routes, so a grant left behind allows nothing."""
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
     _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
@@ -1356,6 +1307,50 @@ def test_connector_toggle_reports_a_gateway_failure_as_502(tmp_path: Path) -> No
     )
 
     assert response.status_code == 502
+
+
+def test_connector_toggle_reads_the_machine_before_the_edit_and_pushes_the_result(tmp_path: Path) -> None:
+    """A write is pushed to the machine whole, so the copy here is made to say what the machine holds first.
+
+    A grant another of the user's computers made since this pane was opened
+    would otherwise be erased by the push.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = build_recording_machine_operator(latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-toggle",
+        json={"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-write", "enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert operator.pushed_agent_ids == [str(agent_id)]
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read", "slack-chat-write"]},)
+
+
+def test_connector_toggle_reports_a_machine_that_cannot_be_read_as_502_and_changes_nothing(tmp_path: Path) -> None:
+    """A copy that may lag the machine must not be pushed over it, so an unreadable machine fails the write."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = build_recording_machine_operator(
+        latchkey, refresh_refusal="Could not reach that workspace: it is asleep"
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-toggle",
+        json={"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-write", "enabled": True},
+    )
+
+    assert response.status_code == 502
+    assert "it is asleep" in json.loads(response.data)["error"]
+    assert operator.pushed_agent_ids == []
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read"]},)
 
 
 def test_workspace_permissions_is_unavailable_without_a_permission_handler(tmp_path: Path) -> None:
@@ -1671,7 +1666,7 @@ def test_sharing_a_path_hands_the_grant_to_the_workspaces_own_machine(tmp_path: 
     """
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     shared = tmp_path / "pictures"
     shared.mkdir()
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator)
@@ -1699,7 +1694,7 @@ def test_the_folder_sync_poll_never_touches_the_workspaces_machine(
     """
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
-    operator = _recording_operator(tmp_path, latchkey)
+    operator = build_recording_machine_operator(latchkey)
     shared = tmp_path / "notes"
     shared.mkdir()
     manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
@@ -2190,7 +2185,7 @@ def test_workspace_permissions_offer_only_the_custom_services_of_the_workspaces_
         (local_agent_id, remote_agent_id),
         local_host_id,
         host_by_agent={str(remote_agent_id): str(remote_host_id)},
-        machine_operator=_recording_operator(tmp_path, latchkey),
+        machine_operator=build_recording_machine_operator(latchkey),
     )
 
     local_offered = {

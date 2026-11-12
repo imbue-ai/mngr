@@ -169,10 +169,13 @@ the supplied agent ID to that enum so the gateway will let that
 agent through to its own ``/api/v1/agents/<id>/...`` subtree.
 Idempotent: re-running for an already-registered agent is a no-op.
 
-When the edit changes the file and the host has a machine of its own
-(a remote workspace whose gateway was provisioned from this computer),
-the updated file is pushed to that machine, since its gateway enforces
-its own copy.
+A host with a machine of its own (a remote host whose gateway was
+provisioned from this computer) owns its policy, so that policy is read
+back and adopted here first, the agent is registered on that fresh copy,
+and when that changed the file it is pushed to the machine, since its
+gateway enforces its own copy. A machine that cannot be read or will not
+take the file still gets the agent registered in the copy here, and the
+command fails saying so.
 
 **Usage:**
 

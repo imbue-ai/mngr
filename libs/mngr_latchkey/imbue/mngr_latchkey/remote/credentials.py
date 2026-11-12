@@ -607,10 +607,14 @@ def read_host_permissions(data_dir: Path, host_id: HostId) -> str | None:
     edit that prompted it. Snapshots rather than deltas, so applying the newest
     one is always right regardless of what came before it.
 
-    Every writer of this file must push what it wrote, in the same operation.
-    The machine owns the policy (see :meth:`MachineCredentials.refresh`), so an
-    edit that is not pushed is not merely late -- it is discarded by the next
-    refresh, silently. A writer that cannot push must at least say so.
+    Every writer of this file must push what it wrote, in the same operation,
+    and must have read the machine (:meth:`MachineCredentials.refresh`) in that
+    same operation before writing. The machine owns the policy, so an edit that
+    is not pushed is not merely late -- it is discarded by the next refresh,
+    silently -- and a snapshot taken from a copy that was not read first
+    carries this computer's stale idea of the policy over whatever the machine
+    gained since, a grant from another of the user's computers included. A
+    writer that cannot read or push must at least say so.
 
     Raises:
         LatchkeyStoreError: when the file exists but cannot be read.

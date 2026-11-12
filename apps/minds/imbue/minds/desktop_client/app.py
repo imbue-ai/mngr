@@ -107,6 +107,7 @@ from imbue.minds.desktop_client.kernel_security import kernel_machine_access_for
 from imbue.minds.desktop_client.kernel_security import read_kernel_probe
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
@@ -2041,6 +2042,13 @@ def _dispatch_request_action(
 
     Authenticates, looks up the request event, picks the right handler,
     and forwards. ``action`` must be ``"grant"`` or ``"deny"``.
+
+    A grant edits this computer's copies of the asking workspace's policy
+    (and, for some kinds, its credentials and routes) and pushes them to the
+    workspace's machine whole, so the copies are first made to say what the
+    machine holds; a grant another of the user's computers made since this one
+    last read the machine would otherwise be erased by the push. A machine
+    that cannot be read fails the grant and leaves the request pending.
     """
     if not _is_request_authenticated():
         return make_json_error_response("Not authenticated", status_code=403)
@@ -2074,6 +2082,20 @@ def _dispatch_request_action(
             request_id,
         )
     if action == "grant":
+        machine_operator = get_state().machine_operator
+        if machine_operator is not None:
+            try:
+                machine_operator.refresh(permission_request.agent_id)
+            except MachineOperationError as e:
+                logger.warning(
+                    "Could not read the machine of workspace {} before granting request {}: {}",
+                    permission_request.agent_id,
+                    request_id,
+                    e,
+                )
+                return make_json_error_response(
+                    f"Could not read that workspace's machine before applying the grant: {e}", status_code=502
+                )
         return handler.apply_grant_request(request, permission_request)
     if action == "deny":
         return handler.apply_deny_request(request, permission_request)

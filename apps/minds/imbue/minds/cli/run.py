@@ -1011,10 +1011,12 @@ def run(
 
     # Every newly-discovered agent on a host Imbue Studio manages gets
     # its id appended to the host's ``latchkey_permissions.json``
-    # allowed-agent list, and a remote host's machine is handed the result.
+    # allowed-agent list, and a remote host's machine is handed the result,
+    # pinned again on the policy read back from that machine first.
     LatchkeyAutoRegister(
         backend_resolver=backend_resolver,
         latchkey=latchkey,
+        refresh_permissions_from_machine=machine_operator.refresh,
         push_permissions_to_machine=push_permissions_to_machine,
         concurrency_group=root_concurrency_group,
     ).start()
