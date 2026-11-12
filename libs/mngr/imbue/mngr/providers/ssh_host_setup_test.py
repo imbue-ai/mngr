@@ -4,10 +4,12 @@ import importlib.resources
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -345,34 +347,88 @@ def _run_bash_function(script_path: str, host_data_dir: str, function_call: str)
     )
 
 
-def test_get_tmux_session_prefix_returns_empty_when_no_data_json(tmp_path: Path) -> None:
-    """get_tmux_session_prefix should return empty when data.json doesn't exist."""
+# The data.json fields read_host_config sets, in the order it reads them.
+_WATCHER_CONFIG_FIELDS: Final[tuple[str, ...]] = (
+    "CONFIG_ACTIVITY_SOURCES",
+    "CONFIG_IDLE_TIMEOUT_SECONDS",
+    "CONFIG_MAX_HOST_AGE",
+    "CONFIG_TMUX_SESSION_PREFIX",
+)
+
+_EMPTY_WATCHER_CONFIG: Final[dict[str, str]] = dict.fromkeys(_WATCHER_CONFIG_FIELDS, "")
+
+
+def _read_host_config(host_data_dir: str) -> dict[str, str]:
+    """Run read_host_config in bash and return the CONFIG_* globals it set."""
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_tmux_session_prefix")
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    printf_args = " ".join(f'"${field}"' for field in _WATCHER_CONFIG_FIELDS)
+    result = _run_bash_function(script_path, host_data_dir, f'read_host_config\nprintf "%s\\n" {printf_args}')
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.split("\n")
+    assert lines[-1] == "", result.stdout
+    return dict(zip(_WATCHER_CONFIG_FIELDS, lines[:-1], strict=True))
 
 
-def test_get_tmux_session_prefix_returns_empty_when_field_missing(tmp_path: Path) -> None:
-    """get_tmux_session_prefix should return empty when field is not in data.json."""
+def test_read_host_config_is_empty_when_no_data_json(tmp_path: Path) -> None:
+    """Every field is empty when data.json doesn't exist."""
+    assert _read_host_config(str(tmp_path)) == _EMPTY_WATCHER_CONFIG
+
+
+def test_read_host_config_is_empty_when_fields_are_absent(tmp_path: Path) -> None:
+    """Every field is empty when data.json carries none of them."""
     data_json = tmp_path / "data.json"
     data_json.write_text(json.dumps({"host_id": "test", "host_name": "test"}))
 
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_tmux_session_prefix")
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    assert _read_host_config(str(tmp_path)) == _EMPTY_WATCHER_CONFIG
 
 
-def test_get_tmux_session_prefix_returns_prefix_value(tmp_path: Path) -> None:
-    """get_tmux_session_prefix should return the prefix from data.json."""
+def test_read_host_config_is_empty_for_null_and_blank_fields(tmp_path: Path) -> None:
+    """A null, empty-array or empty-string field is as good as absent (an empty source list is DISABLED mode)."""
     data_json = tmp_path / "data.json"
-    data_json.write_text(json.dumps({"tmux_session_prefix": "mngr-"}))
+    data_json.write_text(
+        json.dumps(
+            {
+                "activity_sources": [],
+                "idle_timeout_seconds": None,
+                "max_host_age": None,
+                "tmux_session_prefix": "",
+            }
+        )
+    )
 
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_tmux_session_prefix")
-    assert result.returncode == 0
-    assert result.stdout.strip() == "mngr-"
+    assert _read_host_config(str(tmp_path)) == _EMPTY_WATCHER_CONFIG
+
+
+def test_read_host_config_reads_every_field(tmp_path: Path) -> None:
+    """One read picks up all four fields, with activity sources lowercased and space-separated."""
+    data_json = tmp_path / "data.json"
+    data_json.write_text(
+        json.dumps(
+            {
+                "activity_sources": ["BOOT", "AGENT"],
+                "idle_timeout_seconds": 800,
+                "max_host_age": 3600,
+                "tmux_session_prefix": "mngr-",
+            }
+        )
+    )
+
+    assert _read_host_config(str(tmp_path)) == {
+        "CONFIG_ACTIVITY_SOURCES": "boot agent",
+        "CONFIG_IDLE_TIMEOUT_SECONDS": "800",
+        "CONFIG_MAX_HOST_AGE": "3600",
+        "CONFIG_TMUX_SESSION_PREFIX": "mngr-",
+    }
+
+
+def test_read_host_config_keeps_zero_valued_fields(tmp_path: Path) -> None:
+    """Zero is a configured timeout, not an absent one."""
+    data_json = tmp_path / "data.json"
+    data_json.write_text(json.dumps({"idle_timeout_seconds": 0, "max_host_age": 0}))
+
+    config = _read_host_config(str(tmp_path))
+    assert config["CONFIG_IDLE_TIMEOUT_SECONDS"] == "0"
+    assert config["CONFIG_MAX_HOST_AGE"] == "0"
 
 
 def test_has_running_agent_sessions_returns_true_when_no_prefix(tmp_path: Path) -> None:
@@ -381,7 +437,7 @@ def test_has_running_agent_sessions_returns_true_when_no_prefix(tmp_path: Path) 
     data_json.write_text(json.dumps({"host_id": "test"}))
 
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "has_running_agent_sessions")
+    result = _run_bash_function(script_path, str(tmp_path), "read_host_config\nhas_running_agent_sessions")
     assert result.returncode == 0
 
 
@@ -391,7 +447,7 @@ def test_has_running_agent_sessions_returns_true_when_no_agents_dir(tmp_path: Pa
     data_json.write_text(json.dumps({"tmux_session_prefix": "mngr-"}))
 
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "has_running_agent_sessions")
+    result = _run_bash_function(script_path, str(tmp_path), "read_host_config\nhas_running_agent_sessions")
     assert result.returncode == 0
 
 
@@ -403,7 +459,7 @@ def test_has_running_agent_sessions_returns_true_when_agents_dir_empty(tmp_path:
     agents_dir.mkdir()
 
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "has_running_agent_sessions")
+    result = _run_bash_function(script_path, str(tmp_path), "read_host_config\nhas_running_agent_sessions")
     assert result.returncode == 0
 
 
@@ -418,7 +474,7 @@ def test_has_running_agent_sessions_returns_true_during_grace_period(
     (agents_dir / "agent-abc123").mkdir()
 
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "has_running_agent_sessions")
+    result = _run_bash_function(script_path, str(tmp_path), "read_host_config\nhas_running_agent_sessions")
     assert result.returncode == 0
 
 
@@ -441,40 +497,56 @@ def test_has_running_agent_sessions_returns_false_when_agents_exist_but_no_sessi
     script_path = _get_activity_watcher_script_path()
     # Override AGENT_SESSION_GRACE_PERIOD to 0 so the container uptime check
     # doesn't cause a false positive on freshly started CI runners.
-    result = _run_bash_function(script_path, str(tmp_path), "AGENT_SESSION_GRACE_PERIOD=0\nhas_running_agent_sessions")
+    result = _run_bash_function(
+        script_path, str(tmp_path), "AGENT_SESSION_GRACE_PERIOD=0\nread_host_config\nhas_running_agent_sessions"
+    )
     assert result.returncode != 0
 
 
-def test_get_activity_sources_returns_empty_when_no_data_json(tmp_path: Path) -> None:
-    """get_activity_sources should return empty when data.json doesn't exist."""
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+def _write_counting_jq_stub(bin_dir: Path, counter_path: Path) -> None:
+    """Install a jq on PATH that records each invocation in counter_path and delegates to the real jq."""
+    real_jq = shutil.which("jq")
+    assert real_jq is not None, "jq must be installed to exercise the activity watcher"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "jq"
+    stub.write_text(f'#!/bin/sh\necho call >> {shlex.quote(str(counter_path))}\nexec {shlex.quote(real_jq)} "$@"\n')
+    stub.chmod(0o755)
 
 
-def test_get_activity_sources_returns_empty_when_disabled(tmp_path: Path) -> None:
-    """get_activity_sources should return empty when activity_sources is an empty array (disabled mode)."""
+def test_one_watcher_check_reads_data_json_with_a_single_jq_call(tmp_path: Path) -> None:
+    """A whole check of the main loop reads data.json exactly once."""
     data_json = tmp_path / "data.json"
-    data_json.write_text(json.dumps({"activity_sources": []}))
+    data_json.write_text(
+        json.dumps(
+            {
+                "activity_sources": ["BOOT", "AGENT"],
+                "idle_timeout_seconds": 800,
+                "max_host_age": 3600,
+                "tmux_session_prefix": "mngr-",
+            }
+        )
+    )
+    counter_path = tmp_path / "jq_calls"
+    bin_dir = tmp_path / "bin"
+    _write_counting_jq_stub(bin_dir, counter_path)
 
     script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
-
-
-def test_get_activity_sources_returns_sources_when_configured(tmp_path: Path) -> None:
-    """get_activity_sources should return space-separated lowercase sources when configured."""
-    data_json = tmp_path / "data.json"
-    data_json.write_text(json.dumps({"activity_sources": ["BOOT", "AGENT"]}))
-
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
-    assert result.returncode == 0
-    sources = result.stdout.strip().split()
-    assert "boot" in sources
-    assert "agent" in sources
+    # Stub out the log library the real script sources above the tested body, and
+    # make the end-of-check sleep end the loop so exactly one check runs.
+    one_check = "\n".join(
+        [
+            f"PATH={shlex.quote(str(bin_dir))}:$PATH",
+            "log() { :; }",
+            "log_info() { :; }",
+            "log_debug() { :; }",
+            "log_warn() { :; }",
+            "sleep() { exit 0; }",
+            "main",
+        ]
+    )
+    result = _run_bash_function(script_path, str(tmp_path), one_check)
+    assert result.returncode == 0, result.stderr
+    assert counter_path.read_text().count("call") == 1, result.stdout
 
 
 # sshd start + self-healing entrypoint commands

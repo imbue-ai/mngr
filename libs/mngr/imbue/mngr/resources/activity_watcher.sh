@@ -85,41 +85,41 @@ is_host_level_source() {
     return 1
 }
 
-# Read activity_sources from data.json and return as space-separated lowercase list
-get_activity_sources() {
-    if [ ! -f "$DATA_JSON_PATH" ]; then
-        echo ""
-        return
-    fi
-    # Extract activity_sources array, convert to lowercase, output as space-separated
-    jq -r '.activity_sources // [] | .[] | ascii_downcase' "$DATA_JSON_PATH" 2>/dev/null | tr '\n' ' '
-}
+# The data.json fields the watcher reads, refreshed by read_host_config at the
+# start of every check. CONFIG_ACTIVITY_SOURCES is a space-separated lowercase
+# list; the rest are scalars. A field data.json does not set reads as empty.
+CONFIG_ACTIVITY_SOURCES=""
+CONFIG_IDLE_TIMEOUT_SECONDS=""
+CONFIG_MAX_HOST_AGE=""
+CONFIG_TMUX_SESSION_PREFIX=""
 
-# Read idle_timeout_seconds from data.json
-get_idle_timeout_seconds() {
-    if [ ! -f "$DATA_JSON_PATH" ]; then
-        echo ""
-        return
-    fi
-    jq -r '.idle_timeout_seconds // empty' "$DATA_JSON_PATH" 2>/dev/null
-}
+# jq program printing those four fields on one line, separated by ASCII unit
+# separators (\u001f), in the order the globals are declared above.
+CONFIG_JQ_PROGRAM='[
+    (.activity_sources // [] | map(ascii_downcase) | join(" ")),
+    (.idle_timeout_seconds // "" | tostring),
+    (.max_host_age // "" | tostring),
+    (.tmux_session_prefix // "" | tostring)
+] | join("\u001f")'
 
-# Read max_host_age from data.json (optional field)
-get_max_host_age() {
+# Read the data.json fields the watcher uses into the CONFIG_* globals.
+# All four are empty when data.json does not exist; a data.json jq cannot parse
+# terminates the watcher (set -e on the read).
+read_host_config() {
+    CONFIG_ACTIVITY_SOURCES=""
+    CONFIG_IDLE_TIMEOUT_SECONDS=""
+    CONFIG_MAX_HOST_AGE=""
+    CONFIG_TMUX_SESSION_PREFIX=""
     if [ ! -f "$DATA_JSON_PATH" ]; then
-        echo ""
         return
     fi
-    jq -r '.max_host_age // empty' "$DATA_JSON_PATH" 2>/dev/null
-}
-
-# Read tmux_session_prefix from data.json (optional field)
-get_tmux_session_prefix() {
-    if [ ! -f "$DATA_JSON_PATH" ]; then
-        echo ""
-        return
-    fi
-    jq -r '.tmux_session_prefix // empty' "$DATA_JSON_PATH" 2>/dev/null
+    local fields
+    fields=$(jq -r "$CONFIG_JQ_PROGRAM" "$DATA_JSON_PATH" 2>/dev/null)
+    IFS=$'\x1f' read -r \
+        CONFIG_ACTIVITY_SOURCES \
+        CONFIG_IDLE_TIMEOUT_SECONDS \
+        CONFIG_MAX_HOST_AGE \
+        CONFIG_TMUX_SESSION_PREFIX <<<"$fields"
 }
 
 # Check if there are any running tmux sessions with the configured prefix.
@@ -140,11 +140,8 @@ get_tmux_session_prefix() {
 AGENT_SESSION_GRACE_PERIOD=120
 
 has_running_agent_sessions() {
-    local prefix
-    prefix=$(get_tmux_session_prefix)
-
     # If no prefix configured, skip this check (return true to avoid false positives)
-    if [ -z "$prefix" ]; then
+    if [ -z "$CONFIG_TMUX_SESSION_PREFIX" ]; then
         return 0
     fi
 
@@ -202,17 +199,14 @@ has_running_agent_sessions() {
     sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null) || return 1
 
     # Check if any session name starts with the prefix
-    echo "$sessions" | grep -q "^${prefix}" 2>/dev/null
+    echo "$sessions" | grep -q "^${CONFIG_TMUX_SESSION_PREFIX}" 2>/dev/null
 }
 
 # Check if the host has exceeded its maximum age (hard timeout)
 # Returns 0 (true) if the host should be shut down due to age, 1 (false) otherwise
 check_max_host_age() {
-    local max_host_age_seconds
-    max_host_age_seconds=$(get_max_host_age)
-
     # If no max_host_age, no hard timeout applies
-    if [ -z "$max_host_age_seconds" ]; then
+    if [ -z "$CONFIG_MAX_HOST_AGE" ]; then
         return 1
     fi
 
@@ -227,10 +221,10 @@ check_max_host_age() {
     # Check if we've exceeded max age
     local current_time
     current_time=$(date +%s)
-    local max_age_deadline=$((boot_mtime + max_host_age_seconds))
+    local max_age_deadline=$((boot_mtime + CONFIG_MAX_HOST_AGE))
 
     if [ "$current_time" -ge "$max_age_deadline" ]; then
-        echo "Host has exceeded maximum age (boot: $boot_mtime, max_age: $max_host_age_seconds, deadline: $max_age_deadline, now: $current_time)"
+        echo "Host has exceeded maximum age (boot: $boot_mtime, max_age: $CONFIG_MAX_HOST_AGE, deadline: $max_age_deadline, now: $current_time)"
         return 0
     fi
 
@@ -240,16 +234,14 @@ check_max_host_age() {
 # Get the maximum mtime across all activity files for the configured sources
 get_max_activity_mtime() {
     local max_mtime=0
-    local activity_sources
-    activity_sources=$(get_activity_sources)
 
     # If no activity sources configured (DISABLED mode), return 0
-    if [ -z "$activity_sources" ]; then
+    if [ -z "$CONFIG_ACTIVITY_SOURCES" ]; then
         echo "0"
         return
     fi
 
-    for source in $activity_sources; do
+    for source in $CONFIG_ACTIVITY_SOURCES; do
         if is_host_level_source "$source"; then
             # Host-level source: single file at <host_data_dir>/activity/<source>
             local file="$HOST_DATA_DIR/activity/$source"
@@ -331,14 +323,14 @@ main() {
 
     while true; do
         echo "--- Activity watcher check at $(date) ---"
-        log_debug "Activity watcher check"
+
+        # The whole check runs off this one snapshot of data.json
+        read_host_config
 
         # Log current state for debugging
         if [ -f "$DATA_JSON_PATH" ]; then
             echo "data.json exists"
-            local max_host_age_val
-            max_host_age_val=$(get_max_host_age)
-            echo "max_host_age from data.json: $max_host_age_val"
+            echo "max_host_age from data.json: $CONFIG_MAX_HOST_AGE"
         else
             echo "data.json NOT found at $DATA_JSON_PATH"
         fi
@@ -377,18 +369,13 @@ main() {
             shutdown_host_with_lock ""
         fi
 
-        # Read activity sources early -- needed by both the session check and
-        # the idle-timeout check below.
-        local activity_sources
-        activity_sources=$(get_activity_sources)
-
         # Check if all agent tmux sessions have exited.
         # If the prefix is configured and no sessions with that prefix exist,
         # the host should be stopped (not just paused) since all agents are gone.
         # Skip this check when activity sources are empty (DISABLED idle mode),
         # since that means the host should never be automatically shut down.
-        if [ -n "$activity_sources" ] && ! has_running_agent_sessions; then
-            log "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
+        if [ -n "$CONFIG_ACTIVITY_SOURCES" ] && ! has_running_agent_sessions; then
+            log "No agent tmux sessions found with prefix '$CONFIG_TMUX_SESSION_PREFIX'"
             shutdown_host_with_lock STOPPED
         fi
 
@@ -398,16 +385,13 @@ main() {
             continue
         fi
 
-        # Read idle timeout from data.json
-        local idle_timeout_seconds
-        idle_timeout_seconds=$(get_idle_timeout_seconds)
-        if [ -z "$idle_timeout_seconds" ]; then
+        if [ -z "$CONFIG_IDLE_TIMEOUT_SECONDS" ]; then
             sleep "$CHECK_INTERVAL"
             continue
         fi
 
         # Skip idle timeout check when no activity sources (DISABLED mode)
-        if [ -z "$activity_sources" ]; then
+        if [ -z "$CONFIG_ACTIVITY_SOURCES" ]; then
             sleep "$CHECK_INTERVAL"
             continue
         fi
@@ -425,7 +409,7 @@ main() {
         # Calculate idle deadline
         local current_time
         current_time=$(date +%s)
-        local idle_deadline=$((max_mtime + idle_timeout_seconds))
+        local idle_deadline=$((max_mtime + CONFIG_IDLE_TIMEOUT_SECONDS))
 
         # Check if we're past the idle deadline
         if [ "$current_time" -ge "$idle_deadline" ]; then
