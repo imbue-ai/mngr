@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "15";
+export const CONTRACT_VERSION = "16";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -163,13 +163,16 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks?, opensLocalFiles?, immersive? }: `opensExternalLinks: true`
-// says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
-// custom-scheme links there too, `opensLocalFiles: true` that it takes
-// OPEN_LOCAL_FILES, and `immersive: true` that it takes IMMERSIVE_REQUEST. A
-// workspace that never receives it (an older chrome, a plain browser) keeps
-// its pull-out gesture off, opens external links itself, offers no way to
-// reach the Local files settings, and never asks for immersive mode.
+// opensCustomSchemeLinks?, opensLocalFiles?, immersive?, drawsContextMenus? }:
+// `opensExternalLinks: true` says it takes OPEN_EXTERNAL,
+// `opensCustomSchemeLinks: true` that it takes custom-scheme links there too,
+// `opensLocalFiles: true` that it takes OPEN_LOCAL_FILES, `immersive: true`
+// that it takes IMMERSIVE_REQUEST, and `drawsContextMenus: true` that it draws
+// the workspace's right-click menus natively, reading a page's own rows from
+// the page (docs/embed-contract.md). A workspace that never receives it (an
+// older chrome, a plain browser) keeps its pull-out gesture off, opens
+// external links itself, offers no way to reach the Local files settings,
+// never asks for immersive mode, and draws its own right-click menus.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -428,7 +431,8 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
-      isOptionalBoolean(data.immersive)
+      isOptionalBoolean(data.immersive) &&
+      isOptionalBoolean(data.drawsContextMenus)
     );
   },
   [REATTACH_WINDOW]: function (data) {

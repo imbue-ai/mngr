@@ -1,0 +1,10 @@
+{
+  "global": "__studioContextMenu",
+  "sections": ["page", "link", "reference"],
+  "row_kinds": ["action", "check", "submenu", "divider"],
+  "submenu_row_kinds": ["action", "check", "divider"],
+  "max_rows_per_section": 20,
+  "max_rows_per_submenu": 20,
+  "max_label_length": 120,
+  "symbol_pattern": "^[a-z0-9]+(\\.[a-z0-9]+)*$"
+}

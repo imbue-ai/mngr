@@ -781,7 +781,13 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
   wireBundleWindowEvents(bundle);
   wireBundleNavigationEvents(bundle);
   registerShortcutsFor(bundle, win.webContents);
-  registerContextMenuFor(win, win.webContents, Menu);
+  registerContextMenuFor(win, win.webContents, {
+    Menu,
+    clipboard,
+    createMenuSymbol: (name) => nativeImage.createMenuSymbol(name),
+    platform: process.platform,
+    showsInspectElement: !app.isPackaged,
+  });
   wireBundleShowLogic(bundle);
 
   win.webContents.on('did-finish-load', () => {

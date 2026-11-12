@@ -101,6 +101,14 @@ A workspace Screen window (the streamed Linux desktop the template specifies) ca
 
 A popout window (`kind: 'popout'`) enters immersive mode the same way for its own OS window. Design: `specs/screen-studio-integration/spec.md`, section 5.
 
+### Right-click menu
+
+Every right-click a page leaves alone, in any frame of a window, the Imbue Studio page's and the workspace's alike, gets one native menu (`electron/context-menu.js`, wired per window in `createBundle`); a right-click whose page calls `preventDefault` on it never reaches main, so that page's own menu shows instead. In order it offers spelling suggestions with Add to Dictionary, the clicked page's own rows, Look Up, Cut / Copy / Paste / Select All (greyed per Chromium's edit flags), the link and image items (Copy Link, Copy Image, Copy Image Address), Share, Speech and Services, the page's reference rows (Copy reference, Explain..., Modify...), and, in a dev build only, Inspect Element. Look Up, Share, Speech, Services, and the items' SF Symbol icons are macOS-only. A right-click with nothing to offer opens no menu.
+
+On macOS, a workspace page running the template's element menu learns from the embed contract's `drawsContextMenus` capability that the app draws its menu, so it leaves its right-clicks alone and keeps its rows; elsewhere the app does not announce it (the native menu there would add only spelling suggestions and Copy Image), so a page with an element menu keeps drawing its own and only pages without one get the native menu. On each right-click main reads them from the clicked frame through the page's `__studioContextMenu` bridge, whose name, sections, and bounds `electron/page-menu-bridge.json` pins for both repos ([embed-contract.md](./embed-contract.md), "Out-of-band signals"), and a picked row runs back in that frame once the page has focus. A row is an action, a check row (a native checkbox), a divider, or a submenu of those, one level deep; a row can name an SF Symbol (`symbol`) that the menu shows beside it on macOS. Holding Shift while right-clicking leaves the page's rows out.
+
+The template routes every right-click menu of its own apps through the element menu, so on macOS they all come out native. A page still draws its own HTML menu where it handles the right-click itself, which the template allows only for a stated reason: a surface that forwards the right-click (the Screen app's remote desktop), a press that only dismisses or raises something (an open menu's backdrop, the shield over an unfocused window), and a menu whose content a native menu cannot show (a search field, rows that change while it is open).
+
 ### Keyboard shortcuts
 
 - **Open DevTools**: `Ctrl+Shift+C` (Windows/Linux) or `Cmd+Option+I` (macOS)

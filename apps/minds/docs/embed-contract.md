@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 15 (tracks `CONTRACT_VERSION` in
+Version: 16 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v15)
+## Message inventory (v16)
 
 ### workspace -> embedder
 
@@ -79,7 +79,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:provider-sign-in-ack` | `{ relay, reason? }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. `reason` says why not: `port_taken` (something already answers on the callback port), `no_forward_channel`, or `no_browser`. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
-| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, and never asks for immersive mode. |
+| `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive?, drawsContextMenus? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. `drawsContextMenus: true` says the desktop app draws the workspace's right-click menus natively and reads a page's own rows from it (the page menu bridge, under "Out-of-band signals"); `false` or absent means each page draws its own. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, never asks for immersive mode, and draws its own right-click menus. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when given, else at its kept frame. This desktop app sends no `frame`. |
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:`, `tel:` or custom-scheme URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`; a custom-scheme link, only to one that announced `opensCustomSchemeLinks: true` too. |
@@ -166,6 +166,21 @@ payloads -- to the console.
   request by asking first. The question offers to stop asking for
   that scheme's links from the workspace that asked, for `mailto:` and `tel:`
   too.
+- The page menu bridge, which `drawsContextMenus` promises, is not a message
+  either: the Electron main process reads a right-clicked frame's rows by
+  running script in that frame (`WebFrameMain.executeJavaScript`), calling
+  `globalThis.__studioContextMenu.sections()`, and runs a picked row with
+  `select(key)` under a user gesture (`electron/context-menu.js`). The
+  template's element menu installs that global (workspace_ui's
+  `context_menu.ts`). `electron/page-menu-bridge.json` pins the global's
+  name, the sections, and the bounds below; the template fetches it with its
+  other mngr assets and tests its element menu's answers against it. Main
+  treats the answer as untrusted: it keeps only well-formed rows of the kinds
+  the file lists (an action, a check row, a divider, or a submenu holding the
+  first three), within the row counts, with each label and tooltip cut to the
+  label length and a symbol kept only when its name has the symbol shape, and
+  shows the native items alone for a frame that has no bridge or does not
+  answer within 300 ms.
 - Workspace health and URL state flow through the Imbue Studio backend's `/ui/ws`
   WebSocket channel, not through postMessage: the shell derives titlebar state
   from its own route plus the channel, identically in Electron and browser
@@ -307,3 +322,15 @@ payloads -- to the console.
   workspace from before v15 announces no `reportsChatOnScreen`, so a v15 chrome
   knows the report will never come and lifts the wash once the seed has
   answered rather than waiting out its bound.
+- **16** -- added the optional `drawsContextMenus` field on
+  `embedder-capabilities`, and the page menu bridge it promises. The desktop
+  app draws one native menu for every right-click a page leaves to it,
+  workspace pages included, with the items a page cannot reach (spelling
+  suggestions, Look Up, Share, Speech, Services, Inspect Element in a dev
+  build); on macOS it announces `drawsContextMenus`, and a workspace page
+  told so leaves its right-clicks to it and keeps its rows for it. A v16
+  workspace facing an older chrome never hears the field and draws its own
+  menu, which the older chrome's subframe filter leaves alone; a v16 chrome
+  facing an older workspace gets no rows from its pages and shows the native
+  items, except where a page still draws its own menu, which keeps the
+  chrome's away.

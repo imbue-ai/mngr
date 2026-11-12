@@ -149,6 +149,7 @@ function makeHandlers(
     relayAnswer?: ProviderRelayAnswer;
     opensExternalLinks?: boolean;
     canImmerse?: boolean;
+    drawsContextMenus?: boolean;
   } = {},
 ) {
   const contract = makeContract();
@@ -217,6 +218,7 @@ function makeHandlers(
       options.canImmerse === false
         ? null
         : { request: (on) => immersiveRequests.push(on) },
+    drawsContextMenus: options.drawsContextMenus === true,
   });
   return {
     contract,
@@ -295,9 +297,14 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
         immersive: true,
+        drawsContextMenus: false,
       },
     ]);
-    const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
+    const desktop = makeHandlers({
+      canPopOut: true,
+      opensExternalLinks: true,
+      drawsContextMenus: true,
+    });
     desktop.handlers[desktop.contract.WORKSPACE_READY]({});
     expect(desktop.ackPayloads).toEqual([
       {
@@ -306,6 +313,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: true,
         opensLocalFiles: true,
         immersive: true,
+        drawsContextMenus: true,
       },
     ]);
     const frameless = makeHandlers({ canImmerse: false });
@@ -317,6 +325,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
         immersive: false,
+        drawsContextMenus: false,
       },
     ]);
   });

@@ -557,8 +557,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 15', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '15');
+test('the contract is at version 16', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '16');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {
@@ -633,6 +633,24 @@ test('workspace endpoint reads the immersive capability only as a boolean or abs
   deliver({ immersive: false });
   deliver({ immersive: 'yes' });
   deliver({ immersive: 1 });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});
+
+test('workspace endpoint reads the context-menu capability only as a boolean or absent', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.drawsContextMenus) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: parentWin,
+      origin: 'http://chrome',
+      data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, ...payload },
+    });
+  deliver({});
+  deliver({ drawsContextMenus: true });
+  deliver({ drawsContextMenus: false });
+  deliver({ drawsContextMenus: 'yes' });
   assert.deepStrictEqual(seen, [undefined, true, false]);
 });
 

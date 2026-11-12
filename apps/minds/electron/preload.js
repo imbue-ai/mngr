@@ -125,6 +125,13 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // close-active-tab) pause, so every key reaches the frame.
   setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
 
+  // Whether a workspace page leaves its right-clicks to main's native menu
+  // (electron/context-menu.js), which takes the page's rows in. Only on
+  // macOS, where that menu brings Look Up, Share, Speech, Services and the
+  // rows' icons; elsewhere it would add only spelling suggestions and Copy
+  // Image, so a page keeps its own menu there.
+  drawsContextMenus: process.platform === 'darwin',
+
   // Link routing (electron/link-routing.js).
   reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
   openExternalLink: (url) => ipcRenderer.send('open-external-link', url),

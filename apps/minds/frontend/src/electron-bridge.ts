@@ -198,6 +198,11 @@ interface MindsNativeSurface {
   // Optional: a preload from before immersive mode lacks it, and the browser
   // build has no accelerators or relays to silence.
   setImmersive?(on: boolean): void;
+  // Whether a workspace page leaves its right-clicks to main's native menu,
+  // which takes the page's rows in (electron/context-menu.js); true on macOS
+  // only. Optional: a preload from before it lacks it, and the browser build
+  // has no native menu.
+  drawsContextMenus?: boolean;
   // This window's renderer process id, which names its lane in a profiling
   // trace beside Chromium's own. Optional: a preload from before profiling
   // lacks it, and the browser build has no process of its own to name.
@@ -515,6 +520,10 @@ export const electronBridge = {
    * menu shortcuts and key relays stay out of the way while it lasts. */
   setImmersive(on: boolean): void {
     native()?.setImmersive?.(on);
+  },
+  /** Whether main draws the workspace's right-click menus natively, a page's own rows included. */
+  get drawsContextMenus(): boolean {
+    return native()?.drawsContextMenus === true;
   },
   /** This window's renderer process id; null in the browser, and on a
    * desktop build older than profiling. */

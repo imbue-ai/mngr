@@ -184,6 +184,8 @@ export interface EmbedHandlerDeps {
    * then never answers with the capability either. Called synchronously from
    * the handler, so the fullscreen request keeps the click's activation. */
   immersive: { request: (on: boolean) => void } | null;
+  /** Whether main draws the workspace's right-click menus natively from the rows a page keeps for them. */
+  drawsContextMenus: boolean;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -283,6 +285,7 @@ export function buildEmbedHandlers(
       immersive: deps.immersive !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
       opensLocalFiles: true,
+      drawsContextMenus: deps.drawsContextMenus,
     });
   };
   handlers[contract.CHAT_ON_SCREEN] = (message) =>
@@ -713,6 +716,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             shell.highlightedChromeAnchor = anchor;
             m.redraw();
           },
+          drawsContextMenus: electronBridge.drawsContextMenus,
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
