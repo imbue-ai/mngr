@@ -29,7 +29,12 @@ the rest of the app.
 ## Layout
 
 - `program_support.py`: helpers any program can use (running a tool, reading
-  argv, polling, printing the answer).
+  argv, polling, printing the answer), plus `AGENT_LIFECYCLE_STATES`, the one
+  mirror of mngr's `AgentLifecycleState` a program may classify against. Name
+  the states your program treats as idle or ended and take the rest, so a state
+  mngr adds later reads as one the agent will move itself out of;
+  `desktop_client/workspace_program_agent_states_test.py` holds the mirror to
+  the enum and every program's classification to the mirror.
 - `backup_protocol.py`, `backup_support.py`: what the backup programs share.
   The `*_protocol.py` module holds the constants the app and the programs both
   read (answer markers, the values an answer carries, the official remote), so

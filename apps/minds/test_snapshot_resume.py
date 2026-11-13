@@ -108,6 +108,7 @@ from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import get_short_random_string
 
 _SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
@@ -125,14 +126,18 @@ _SHED_LEDGER_PATH: Final[str] = f"{WORKSPACE_CONTAINER_ROOT}/data/.state/oom_pri
 # supervisord's own log; source of the browser-shed signal.
 _SUPERVISORD_LOG_PATH: Final[str] = "/var/log/supervisor/supervisord.log"
 
-# mngr lifecycle states that mean the agent's tmux window is alive (as opposed
-# to STOPPED / DONE). The system-services agent is a plain ``command``-type
-# agent whose window-0 command is ``sleep infinity`` (see the minds README),
-# which mngr reports as RUNNING. REPLACED covers workspaces from older template
-# revisions, whose claude-typed services agent held its window with a non-claude
-# process. All of these indicate the agent is up.
+# mngr lifecycle states that are no evidence the agent's tmux window is alive: its window is
+# gone (STOPPED), it ran to the end (DONE), or mngr could not read it at all (UNKNOWN).
+_NOT_ALIVE_AGENT_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {AgentLifecycleState.STOPPED, AgentLifecycleState.DONE, AgentLifecycleState.UNKNOWN}
+)
+# Every other state means the window is held by a live program, so a state mngr adds later reads
+# as alive rather than failing a resume that worked. The system-services agent is a plain
+# ``command``-type agent whose window-0 command is ``sleep infinity`` (see the minds README), which
+# mngr reports as RUNNING. REPLACED covers workspaces from older template revisions, whose
+# claude-typed services agent held its window with a non-claude process.
 _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
-    {"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"}
+    state.value for state in AgentLifecycleState if state not in _NOT_ALIVE_AGENT_STATES
 )
 
 # HTTP status codes that mean system_interface is serving (as opposed to a

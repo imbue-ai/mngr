@@ -1,0 +1,1 @@
+The gate every mutating backup program runs first, and the update watchdog's busy check, now count a chat whose agent type mngr's config does not name -- which mngr reports as `RUNNING_UNKNOWN_AGENT_TYPE` while its process runs -- as working, so neither interrupts it.

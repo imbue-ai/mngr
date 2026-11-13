@@ -487,7 +487,7 @@ def _is_agent_busy(agent: Mapping[str, str] | None, busy: BusyAgents) -> bool:
     """Running, or waiting on a background task that will resume it."""
     if agent is None or _is_agent_ended(agent):
         return False
-    if agent.get("state") in ("RUNNING", "RUNNING_BACKGROUND"):
+    if agent.get("state") in ("RUNNING", "RUNNING_BACKGROUND", "RUNNING_UNKNOWN_AGENT_TYPE"):
         return True
     names, agent_ids, chat_ids = busy
     return agent.get("name") in names or agent.get("id") in agent_ids or chat_id_of(agent) in chat_ids
