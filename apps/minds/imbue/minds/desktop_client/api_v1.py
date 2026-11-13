@@ -316,6 +316,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationSt
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
+from imbue.minds.desktop_client.workspace_recovery import HostRecoveryTrigger
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
 from imbue.minds.desktop_client.workspace_update_state import ORIGINAL_MINDS_VERSION_LABEL
@@ -2102,6 +2103,7 @@ def _dispatch_host_recovery_or_refusal(
         mngr_forward_port=state.mngr_forward_port or 0,
         mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
         kind=kind,
+        trigger=HostRecoveryTrigger.API,
         connectivity_detector=state.connectivity_detector,
     )
     match outcome:

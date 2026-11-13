@@ -24,6 +24,7 @@ from paramiko.ssh_exception import NoValidConnectionsError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
+from pyinfra.connectors.ssh_util import raise_connect_error
 from pyinfra.connectors.util import CommandOutput
 
 from imbue.imbue_common.profiling import drain_events
@@ -552,19 +553,41 @@ class _FakePyinfraHostRecoveringOnConnect:
     transient-connect-failure retry without touching the network or paramiko.
     """
 
-    def __init__(self, failure_count: int, message: str) -> None:
+    def __init__(self, failure_count: int, message: str, underlying: Exception | None = None) -> None:
+        # With ``underlying`` set, pyinfra's own helper builds the message from it instead.
         self.connected = False
         self.name = "fake-ssh-host"
         self.connector_cls = type("SSHConnector", (), {})
         self.connect_call_count = 0
         self._failure_count = failure_count
         self._message = message
+        self._underlying = underlying
 
     def connect(self, raise_exceptions: bool = False) -> None:
         self.connect_call_count += 1
         if self.connect_call_count <= self._failure_count:
-            raise ConnectError(self._message)
+            if self._underlying is None:
+                raise ConnectError(self._message)
+            # Raised the way pyinfra's SSH connector raises it: by its own helper,
+            # while handling paramiko's exception, so that is only the implicit context.
+            try:
+                raise self._underlying
+            except type(self._underlying) as e:
+                raise_connect_error(cast(PyinfraHost, self), "SSH error", e)
         self.connected = True
+
+
+class _FakePyinfraHostFailingThenRefusing(_FakePyinfraHostRecoveringOnConnect):
+    """Pyinfra-host stand-in whose handshake fails transiently once, then whose connection is refused."""
+
+    def __init__(self) -> None:
+        super().__init__(failure_count=0, message="")
+
+    def connect(self, raise_exceptions: bool = False) -> None:
+        self.connect_call_count += 1
+        if self.connect_call_count == 1:
+            raise ConnectError("SSH error (No existing session)")
+        raise ConnectError("Could not connect (Connection refused)")
 
 
 class _FakePyinfraHostFailingOnCommand:
@@ -724,6 +747,7 @@ def test_banner_read_retry_recovers_after_more_than_three_consecutive_failures()
     assert fake.connect_call_count == 6
 
 
+@pytest.mark.allow_warnings(match=r"^Gave up connecting to the host")
 def test_banner_read_retry_gives_up_after_the_deadline_elapses() -> None:
     """A host that never answers the banner is retried until the deadline, then the failure surfaces.
 
@@ -745,6 +769,69 @@ def test_banner_read_retry_gives_up_after_the_deadline_elapses() -> None:
 
     # The deadline, not a fixed attempt count, bounds the retry, so it makes many attempts.
     assert fake.connect_call_count > 3
+
+
+def test_banner_read_retry_logs_how_long_it_rode_out_the_failure_when_it_gives_up() -> None:
+    """A retried connect that still fails says how many attempts it made, over how long, and what paramiko raised.
+
+    That record is what tells a handshake that kept failing transiently until
+    the deadline apart from a host that refused the connection outright.
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=1_000_000,
+        message="SSH error (No existing session)",
+        underlying=SSHException("No existing session"),
+    )
+
+    with capture_loguru(level="WARNING") as log_output:
+        with pytest.raises(ConnectError, match=r"^SSH error \(No existing session\)$"):
+            _connect_pyinfra_host_retrying_transient_handshake_failures(
+                cast(PyinfraHost, fake),
+                deadline_seconds=0.2,
+                backoff_seconds=0.01,
+            )
+
+    logged = log_output.getvalue()
+    assert f"Gave up connecting to the host after {fake.connect_call_count} attempts over " in logged
+    assert (
+        "(deadline 0.2s, stopped because the deadline passed); the last attempt's underlying error was SSHException"
+        in logged
+    )
+
+
+def test_the_give_up_warning_says_when_a_non_retried_failure_ended_the_retry() -> None:
+    """A transient failure followed by a refusal stops before the deadline, and the warning says so."""
+    fake = _FakePyinfraHostFailingThenRefusing()
+
+    with capture_loguru(level="WARNING") as log_output:
+        with pytest.raises(ConnectError, match="Connection refused"):
+            _connect_pyinfra_host_retrying_transient_handshake_failures(
+                cast(PyinfraHost, fake),
+                deadline_seconds=5.0,
+                backoff_seconds=0.0,
+            )
+
+    assert "Gave up connecting to the host after 2 attempts" in log_output.getvalue()
+    assert "stopped because the last failure is not retried" in log_output.getvalue()
+
+
+def test_a_connect_failure_that_was_never_retried_logs_nothing() -> None:
+    """A refusal fails on its first attempt and is reported by the caller alone, with no give-up warning."""
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5,
+        message="Could not connect (Connection refused)",
+    )
+
+    with capture_loguru(level="WARNING") as log_output:
+        with pytest.raises(ConnectError):
+            _connect_pyinfra_host_retrying_transient_handshake_failures(
+                cast(PyinfraHost, fake),
+                deadline_seconds=5.0,
+                backoff_seconds=0.0,
+            )
+
+    assert fake.connect_call_count == 1
+    assert "Gave up connecting" not in log_output.getvalue()
 
 
 def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:

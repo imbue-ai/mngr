@@ -22,6 +22,7 @@ import re
 import shlex
 import stat
 import threading
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -459,14 +460,36 @@ def _connect_pyinfra_host_retrying_transient_handshake_failures(
     deadline_seconds: float,
     backoff_seconds: float,
 ) -> None:
-    """Connect a pyinfra host, retrying transient handshake failures until it answers or the deadline passes."""
+    """Connect a pyinfra host, retrying transient handshake failures until it answers or the deadline passes.
+
+    A connect that was retried and still failed logs how long it was ridden out
+    and how it last failed, so a host whose handshake stays flaky for longer than
+    ``deadline_seconds`` can be told apart from one that refused outright.
+    """
     retrying = Retrying(
         retry=retry_if_exception(_is_transient_ssh_connect_error),
         stop=stop_after_delay(deadline_seconds),
         wait=wait_fixed(backoff_seconds),
         reraise=True,
     )
-    retrying(lambda: pyinfra_host.connect(raise_exceptions=True))
+    try:
+        retrying(lambda: pyinfra_host.connect(raise_exceptions=True))
+    except ConnectError as e:
+        attempt_count = retrying.statistics["attempt_number"]
+        if attempt_count > 1:
+            # pyinfra raises its ConnectError inside the ``except`` that caught
+            # paramiko's exception, so that is where the underlying class is.
+            underlying = e.__cause__ if e.__cause__ is not None else e.__context__
+            logger.warning(
+                "Gave up connecting to the host after {} attempts over {:.1f}s (deadline {}s, stopped because {}); "
+                "the last attempt's underlying error was {}",
+                attempt_count,
+                time.monotonic() - retrying.statistics["start_time"],
+                deadline_seconds,
+                "the deadline passed" if _is_transient_ssh_connect_error(e) else "the last failure is not retried",
+                None if underlying is None else type(underlying).__name__,
+            )
+        raise
 
 
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:

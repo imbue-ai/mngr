@@ -1074,6 +1074,16 @@ class RecoveryDispatchOutcome(UpperCaseStrEnum):
     SPAWN_FAILED = auto()
 
 
+class HostRecoveryTrigger(UpperCaseStrEnum):
+    """What asked for a host recovery; recorded on the recovery worker's log records."""
+
+    # The ``/api/v1`` restart or machine-resize routes: a recovery card click, or
+    # an agent inside a workspace calling the route.
+    API = auto()
+    # The STUCK-edge dispatch (``UnattendedRecoveryDispatcher``), which nobody asked for.
+    UNATTENDED = auto()
+
+
 def dispatch_host_recovery(
     workspace_agent_id: AgentId,
     tracker: SystemInterfaceHealthTracker,
@@ -1085,6 +1095,7 @@ def dispatch_host_recovery(
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
     kind: HostRecoveryKind,
+    trigger: HostRecoveryTrigger,
     connectivity_detector: ConnectivityDetector | None = None,
 ) -> RecoveryDispatchOutcome:
     """Claim the recovery for ``workspace_agent_id`` and spawn its worker.
@@ -1092,8 +1103,9 @@ def dispatch_host_recovery(
     The single dispatch path -- the ``/api/v1`` restart route and the unattended
     STUCK dispatch both come through here -- so there is exactly one place that
     claims RECOVERING, opens the operation record, and spawns the worker.
-    ``kind`` is the only thing that differs between them, and it decides whether
-    the worker stops the host before starting it.
+    Only ``kind`` and ``trigger`` differ between them: ``kind`` decides whether
+    the worker stops the host before starting it, and ``trigger`` only labels
+    the worker's log records.
 
     ``registry.start_if_idle`` is the one claim, and winning it is what makes
     this caller the recovery's owner. Workspace operations are serialized, so
@@ -1136,8 +1148,9 @@ def dispatch_host_recovery(
     # claimed, end it the same way.
     try:
         concurrency_group.start_new_thread(
-            target=run_host_recovery_sequence,
+            target=_run_host_recovery_sequence_with_log_context,
             kwargs={
+                "trigger": trigger,
                 "workspace_agent_id": workspace_agent_id,
                 "tracker": tracker,
                 "backend_resolver": backend_resolver,
@@ -1171,6 +1184,48 @@ def dispatch_host_recovery(
         _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return RecoveryDispatchOutcome.SPAWN_FAILED
     return RecoveryDispatchOutcome.DISPATCHED
+
+
+def _run_host_recovery_sequence_with_log_context(
+    trigger: HostRecoveryTrigger,
+    workspace_agent_id: AgentId,
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str | None,
+    registry: WorkspaceOperationRegistryInterface,
+    kind: HostRecoveryKind,
+    connectivity_detector: ConnectivityDetector | None,
+) -> None:
+    """Run the recovery with which recovery it is bound onto every log record it writes.
+
+    A failed step's error record otherwise says neither whether the stop step
+    ran first, nor whether anyone asked for the recovery, nor which provider the
+    machine is on -- the facts that separate one population of failures from
+    another once they are grouped together in error reporting.
+    """
+    display_info = backend_resolver.get_agent_display_info(workspace_agent_id)
+    with logger.contextualize(
+        recovery_kind=kind.value,
+        recovery_trigger=trigger.value,
+        provider_name=display_info.provider_name if display_info is not None else None,
+    ):
+        run_host_recovery_sequence(
+            workspace_agent_id=workspace_agent_id,
+            tracker=tracker,
+            backend_resolver=backend_resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=mngr_host_dir,
+            concurrency_group=concurrency_group,
+            mngr_forward_port=mngr_forward_port,
+            mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
+            registry=registry,
+            kind=kind,
+            connectivity_detector=connectivity_detector,
+        )
 
 
 class UnattendedRecoveryDispatcher(MutableModel):
@@ -1550,6 +1605,7 @@ class UnattendedRecoveryDispatcher(MutableModel):
             mngr_forward_port=self.mngr_forward_port,
             mngr_forward_preauth_cookie=self.mngr_forward_preauth_cookie,
             kind=HostRecoveryKind.START,
+            trigger=HostRecoveryTrigger.UNATTENDED,
             connectivity_detector=self.connectivity_detector,
         )
         logger.info("Unattended recovery for {}: {}", agent_id, outcome.value)

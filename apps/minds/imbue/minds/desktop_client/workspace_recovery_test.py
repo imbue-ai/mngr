@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -60,6 +61,7 @@ from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOpe
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import HOST_ACCESS_REJECTED_REASON
+from imbue.minds.desktop_client.workspace_recovery import HostRecoveryTrigger
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessOutcome
@@ -1499,6 +1501,7 @@ def test_dispatch_host_recovery_does_not_stack_a_second_worker(tmp_path: Path) -
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             kind=HostRecoveryKind.START,
+            trigger=HostRecoveryTrigger.UNATTENDED,
         )
 
     assert outcome == RecoveryDispatchOutcome.ALREADY_RUNNING
@@ -1555,6 +1558,52 @@ def test_unattended_recovery_never_takes_a_backup_operation_s_slot(tmp_path: Pat
     assert tracker.get_health(workspace_agent) != AgentHealth.RECOVERING
 
 
+def test_a_dispatched_recovery_s_failure_record_says_which_recovery_it_was(tmp_path: Path) -> None:
+    """The failed step's error record carries the recovery's kind, what asked for it, and the machine's provider.
+
+    Those are what separate one population of start-step failures from another
+    once error reporting has grouped them together under one message.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = InMemoryWorkspaceOperationRegistry()
+    error_extras: list[dict[str, object]] = []
+    sink_id = logger.add(lambda msg: error_extras.append(dict(msg.record["extra"])), level="ERROR")
+
+    try:
+        with ConcurrencyGroup(name="test-dispatch-context") as cg:
+            outcome = dispatch_host_recovery(
+                workspace_agent_id=workspace_agent,
+                tracker=tracker,
+                backend_resolver=resolver,
+                registry=registry,
+                concurrency_group=cg,
+                mngr_binary=_write_fake_mngr(tmp_path, start_exit=1),
+                mngr_host_dir=tmp_path,
+                mngr_forward_port=0,
+                mngr_forward_preauth_cookie=None,
+                kind=HostRecoveryKind.START,
+                trigger=HostRecoveryTrigger.UNATTENDED,
+            )
+            assert poll_until(
+                lambda: tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED,
+                timeout=_DISPATCH_WAIT_SECONDS,
+                poll_interval=0.02,
+            )
+    finally:
+        logger.remove(sink_id)
+
+    assert outcome == RecoveryDispatchOutcome.DISPATCHED
+    assert len(error_extras) == 1, error_extras
+    assert error_extras[0] == {
+        "recovery_kind": "start",
+        "recovery_trigger": "UNATTENDED",
+        "provider_name": str(SYSTEM_SERVICES_PROVIDER_NAME),
+    }
+
+
 def test_dispatch_host_recovery_reports_a_conflicting_operation(tmp_path: Path) -> None:
     """The route turns this outcome into its 409, so the enum has to name the case."""
     tracker = SystemInterfaceHealthTracker()
@@ -1576,6 +1625,7 @@ def test_dispatch_host_recovery_reports_a_conflicting_operation(tmp_path: Path) 
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             kind=HostRecoveryKind.RESTART,
+            trigger=HostRecoveryTrigger.API,
         )
 
     assert outcome == RecoveryDispatchOutcome.OPERATION_CONFLICT
@@ -1632,6 +1682,7 @@ def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_recovery(tmp_
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             kind=HostRecoveryKind.START,
+            trigger=HostRecoveryTrigger.UNATTENDED,
         )
 
     assert outcome == RecoveryDispatchOutcome.OPERATION_CONFLICT
