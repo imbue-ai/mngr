@@ -174,6 +174,14 @@ Connecting a machine to Claude or ChatGPT runs the provider's own CLI inside the
 
 After the callback, the backend publishes a `bring_app_to_front` frame naming the machine on `/ui/ws`, and the window showing that machine comes forward. The page opens in the browser chosen under **Settings > Sign-ins** ("Open sign-ins in": the default browser, or any browser found installed), stored as `sign_in_browser` in `config.toml`, at most once a second per machine. The hosted web chrome cannot listen on the user's computer, so it answers every sign-in with `relay: false`.
 
+### Local network access
+
+The app has no feature that needs the user's local network on its own, and macOS asks before any app reaches it ([TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)).
+
+WebRTC stays off the local network: `electron/main.js` gives every WebContents the `default_public_interface_only` WebRTC IP handling policy and disables Chromium's `WebRtcHideLocalIpsWithMdns` feature. The Screen's peer is a workspace behind a loopback port or a cloud host, which reaches the viewer through its own connectivity checks, so the viewer signals no host candidate. Without this, a viewer frame (cross-origin, without camera or microphone) would name the Mac's address `<uuid>.local` and announce it over mDNS.
+
+A prompt that does appear may name another app. macOS identifies the app behind a local network operation by its main executable's Mach-O UUID, and Electron's prebuilt executable carries the same UUID in every app on the same Electron version, so the prompt can name another installed Electron app (seen as "Logi Options+") and one Allow or Don't Allow then applies to both. That is an Electron issue, [electron/electron#55101](https://github.com/electron/electron/issues/55101).
+
 ### Titlebar accent and the neutral chrome
 
 The full-width titlebar (and the thin shell around the workspace iframe) adopt the active workspace's accent color while you're on a workspace-scoped screen, and fall back to a **neutral** chrome on every other Imbue Studio screen. The neutral chrome background comes from the SPA shell's `--titlebar-bg` fallback (`var(--c-surface-primary)`: white in light mode, black in dark); its foreground is not a stored value but is derived from the background in pure CSS by the `.titlebar-surface` recipe in `frontend/src/style.css` (an `lch(from …)` relative-color contrast), the same recipe that re-bases the foreground tokens under an active workspace accent. The loading document (`shell.html`) is white regardless of theme. Workspace accent swatches deliberately exclude pure black and white so a workspace's color can never collide with this neutral chrome (users can still type either into the settings hex input).

@@ -226,6 +226,10 @@ if (process.env.MINDS_REMOTE_DEBUGGING_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.MINDS_REMOTE_DEBUGGING_PORT);
 }
 
+// Keeps WebRTC from starting Chromium's mDNS responder, which joins the
+// multicast group that macOS gates behind its local network prompt.
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+
 // Imported for ToDesktop's smoke test, which the import itself arms when
 // TODESKTOP_SMOKE_TEST is set. Never `init()`ed: that builds an updater agent
 // whose constructor sets `allowDowngrade = true` on the shared electron-updater
@@ -2293,9 +2297,10 @@ async function onReady() {
     hasRunBefore: fs.existsSync(getSessionStatePath()),
   });
   // Route the links every WebContents the app ever creates opens, by the rule
-  // in ./link-routing.
+  // in ./link-routing, and keep its WebRTC from signalling a local address.
   app.on('web-contents-created', (_event, contents) => {
     linkRouter.install(contents);
+    contents.setWebRTCIPHandlingPolicy('default_public_interface_only');
   });
   registerAppImageDesktopEntry();
   installApplicationMenu();

@@ -1,0 +1,1 @@
+Opening the Screen (the agent's browser view) in Imbue Studio no longer triggers macOS's "find devices on local networks" prompt. Studio's WebRTC no longer announces the Mac's address on the local network. On Macs with another app on the same Electron version installed, that prompt could carry that app's name, for example "Logi Options+".
