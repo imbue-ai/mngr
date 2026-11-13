@@ -25,6 +25,9 @@ from imbue.mngr_claude.testing import wait_for_turn_to_end
 _GROUPING_CONSUMER: Final[str] = (
     "common_transcript_convert._group_assistant_records, which builds one step per message.id"
 )
+_METRICS_CONSUMER: Final[str] = (
+    "common_transcript_convert._build_metrics, which reads usage.output_tokens as the step's completion_tokens"
+)
 _FAN_OUT_PROMPT: Final[str] = (
     "In a single reply, first write the word PLANNING, then call the Bash tool twice in parallel: one call "
     "runs exactly `echo FANOUT-ONE` and the other runs exactly `echo FANOUT-TWO`. After both finish, reply "
@@ -49,7 +52,7 @@ def test_claude_response_written_over_several_lines_becomes_one_agent_step(tmp_p
     """A response claude writes over several assistant lines reaches the common transcript as one agent step.
 
     Pins how claude writes one API response: assistant records, one per content block, that share a
-    ``message.id`` and each repeat the response's ``usage``.
+    ``message.id`` and each repeat the response's ``usage``, whose ``output_tokens`` is an integer.
     """
     profile = ClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -81,6 +84,10 @@ def test_claude_response_written_over_several_lines_becomes_one_agent_step(tmp_p
             assert all(isinstance(usage, dict) for usage in usages) and all(u == usages[0] for u in usages), (
                 f"the {len(lines)} assistant records of response {message_id} do not each carry the same "
                 f"message.usage {drift}; consumer: {_GROUPING_CONSUMER}, which reads one usage per response"
+            )
+            assert isinstance(usages[0].get("output_tokens"), int), (
+                f"response {message_id}'s message.usage has no integer output_tokens (keys: {sorted(usages[0])}) "
+                f"{drift}; consumer: {_METRICS_CONSUMER}"
             )
 
         common_records = wait_for_records(
