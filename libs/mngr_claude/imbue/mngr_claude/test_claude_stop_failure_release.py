@@ -47,7 +47,7 @@ def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path
     """A turn that dies on an API error ends with the agent reporting WAITING, not RUNNING until claude's idle notice.
 
     Pins that claude routes such a turn end to the StopFailure hook event and records the error as an
-    ``isApiErrorMessage: true`` record.
+    assistant record with ``isApiErrorMessage: true`` and a timestamp.
     """
     profile = _UnavailableModelClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -64,9 +64,12 @@ def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path
 
         wait_for_session_record(
             wait_for_native_session_file(ctx),
-            lambda record: record.get("isApiErrorMessage") is True,
-            failure=f"a turn asking for the unavailable model {_UNAVAILABLE_MODEL!r} wrote no record with "
-            f"isApiErrorMessage true {drift}; consumer: {_STOP_FAILURE_CONSUMER}",
+            lambda record: record.get("type") == "assistant"
+            and record.get("isApiErrorMessage") is True
+            and isinstance(record.get("timestamp"), str),
+            failure=f"a turn asking for the unavailable model {_UNAVAILABLE_MODEL!r} wrote no assistant record with "
+            f"isApiErrorMessage true and a timestamp {drift}; consumers: {_STOP_FAILURE_CONSUMER}, "
+            "mngr_claude_subagent_proxy.subagent_wait.is_api_error_event",
         )
         assert poll_until(
             lambda: any(p.get("hook_event_name") == _STOP_FAILURE_EVENT for p in read_saved_payloads(dump_dir)),

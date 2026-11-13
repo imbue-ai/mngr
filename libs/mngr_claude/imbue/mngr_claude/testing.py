@@ -34,6 +34,7 @@ from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
+from imbue.mngr_claude.dialogs import has_input_prompt_line
 
 # Shell-mode input rows verbatim from `capture-pane -e` captures of the claude build
 # `CLAUDE_CODE_VERSION` names.
@@ -290,46 +291,30 @@ SESSION_RECORD_TIMEOUT_SECONDS: Final[float] = 90.0
 _TURN_END_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
 
-def create_agent(profile: ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> None:
-    create = profile.run_mngr(
-        ctx,
-        "create",
-        agent_name,
-        profile.agent_type,
-        "--no-connect",
-        "--yes",
-        *profile.create_extra_args(ctx),
-        timeout=AGENT_CREATE_TIMEOUT_SECONDS,
-    )
-    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-
-
-def tear_down_context(ctx: AgentReleaseContext) -> None:
-    """Run ``ctx``'s teardown, if it has one."""
-    if ctx.teardown is not None:
-        ctx.teardown()
-
-
-def destroy_agent_and_tear_down_context(
-    profile: ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, *, timeout: float
-) -> None:
-    """Force-destroy ``agent_name``, then tear ``ctx`` down even if the destroy raises."""
-    try:
-        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=timeout)
-    finally:
-        tear_down_context(ctx)
-
-
 @contextmanager
 def created_agent(
     profile: ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, *, destroy_timeout: float
 ) -> Generator[None, None, None]:
     """Create the agent, and on exit force-destroy it and tear ``ctx`` down, including after a create that failed part-way."""
     try:
-        create_agent(profile, ctx, agent_name)
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            timeout=AGENT_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
         yield
     finally:
-        destroy_agent_and_tear_down_context(profile, ctx, agent_name, timeout=destroy_timeout)
+        try:
+            profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=destroy_timeout)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()
 
 
 def drift_note(ctx: AgentReleaseContext, subject: str) -> str:
@@ -374,7 +359,7 @@ def wait_for_agent_to_stop_running_before_idle_notification(
         f"consumer: {consumer}",
     )
     assert poll_until(
-        lambda: _every_saved_payload_is_complete(payload_dump_dir),
+        lambda: len(read_saved_payloads(payload_dump_dir)) == len(list(payload_dump_dir.glob("payload.*"))),
         timeout=SESSION_RECORD_TIMEOUT_SECONDS,
         poll_interval=0.2,
     ), f"a hook payload saved in {payload_dump_dir} never finished writing"
@@ -548,6 +533,24 @@ def wait_for_agent_pane(
     return captured[-1]
 
 
+_INPUT_PROMPT_TIMEOUT_SECONDS: Final[float] = 60.0
+
+
+def wait_for_agent_prompt(ctx: AgentReleaseContext, agent_name: str, *, failure: str) -> str:
+    """Poll the agent pane until claude draws its ``❯`` input prompt; return that pane.
+
+    ``mngr create`` returns once the launch command has been sent, a beat before the TUI draws its prompt.
+    """
+    return wait_for_agent_pane(
+        ctx,
+        agent_name,
+        has_input_prompt_line,
+        capture=capture_agent_pane,
+        timeout=_INPUT_PROMPT_TIMEOUT_SECONDS,
+        failure=failure,
+    )
+
+
 def send_keys_to_agent_pane(ctx: AgentReleaseContext, agent_name: str, key: str, *, is_literal: bool) -> None:
     """Send ``key`` to the agent's primary tmux window pane, as literal text when ``is_literal``."""
     literal_flag = ["-l"] if is_literal else []
@@ -570,7 +573,6 @@ PROMPT_TOKEN_USAGE_FIELDS: Final[tuple[str, ...]] = (
 def read_session_records(session_file: Path) -> list[dict[str, Any]]:
     """The JSON object records of a JSONL file, skipping any other line, such as a last line still being written."""
     records = []
-    # A partial write can split a character; replacing it leaves that line invalid JSON, so it is skipped.
     for line in session_file.read_text(errors="replace").splitlines():
         try:
             record = json.loads(line)
@@ -668,7 +670,3 @@ def read_saved_payloads(dump_dir: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             payloads.append(payload)
     return payloads
-
-
-def _every_saved_payload_is_complete(dump_dir: Path) -> bool:
-    return len(read_saved_payloads(dump_dir)) == len(list(dump_dir.glob("payload.*")))

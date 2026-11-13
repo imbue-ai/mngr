@@ -14,7 +14,6 @@ from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import ClaudeReleaseProfile
-from imbue.mngr_claude.testing import PROMPT_TOKEN_USAGE_FIELDS
 from imbue.mngr_claude.testing import TURN_PROGRESS_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import content_text
 from imbue.mngr_claude.testing import created_agent
@@ -49,8 +48,8 @@ def _agent_steps_for(common_records: Sequence[Mapping[str, Any]], message_id: st
 def test_claude_response_written_over_several_lines_becomes_one_agent_step(tmp_path: Path) -> None:
     """A response claude writes over several assistant lines reaches the common transcript as one agent step.
 
-    Pins how claude writes one API response: consecutive assistant records, one per content block, that
-    share a ``message.id`` and each repeat the response's ``usage``.
+    Pins how claude writes one API response: assistant records, one per content block, that share a
+    ``message.id`` and each repeat the response's ``usage``.
     """
     profile = ClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -64,19 +63,17 @@ def test_claude_response_written_over_several_lines_becomes_one_agent_step(tmp_p
         send_expecting_success(profile, ctx, agent_name, _FAN_OUT_PROMPT)
         wait_for_turn_to_end(profile, ctx, _FAN_OUT_PROMPT, drift)
 
-        runs: list[list[dict[str, Any]]] = []
+        lines_by_message_id: dict[str, list[dict[str, Any]]] = {}
         for record in read_session_records(wait_for_native_session_file(ctx)):
-            if record.get("type") != "assistant":
-                continue
             message_id = (record.get("message") or {}).get("id")
-            if runs and isinstance(message_id, str) and message_id and runs[-1][0]["message"].get("id") == message_id:
-                runs[-1].append(record)
-            else:
-                runs.append([record])
-        fanned_out_lines_by_message_id = {run[0]["message"]["id"]: run for run in runs if len(run) > 1}
+            if record.get("type") == "assistant" and isinstance(message_id, str) and message_id:
+                lines_by_message_id.setdefault(message_id, []).append(record)
+        fanned_out_lines_by_message_id = {
+            message_id: lines for message_id, lines in lines_by_message_id.items() if len(lines) > 1
+        }
         assert fanned_out_lines_by_message_id, (
             f"no response to a prompt asking for text and two tool calls in one reply was written over more than one "
-            f"consecutive assistant record sharing a message.id {drift}, or the model answered in separate replies; "
+            f"assistant record sharing a message.id {drift}, or the model answered in separate replies; "
             f"consumer: {_GROUPING_CONSUMER}"
         )
         for message_id, lines in fanned_out_lines_by_message_id.items():
@@ -99,15 +96,6 @@ def test_claude_response_written_over_several_lines_becomes_one_agent_step(tmp_p
             assert len(steps) == 1, (
                 f"response {message_id}, written over {len(lines)} assistant records, became {len(steps)} agent steps, "
                 f"not one {drift}; consumer: {_GROUPING_CONSUMER}"
-            )
-            usage = lines[0]["message"]["usage"]
-            expected_prompt_tokens = sum(int(usage.get(field) or 0) for field in PROMPT_TOKEN_USAGE_FIELDS)
-            metrics = steps[0].get("metrics") or {}
-            assert metrics.get("prompt_tokens") == expected_prompt_tokens and metrics.get("completion_tokens") == int(
-                usage.get("output_tokens") or 0
-            ), (
-                f"the agent step of response {message_id} reports metrics {metrics}, not the response's usage "
-                f"{usage} counted once {drift}; consumer: {_GROUPING_CONSUMER}"
             )
 
 

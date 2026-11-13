@@ -47,7 +47,7 @@ def test_claude_idle_notification_clears_a_stranded_running_marker(tmp_path: Pat
 
     ctx = profile.setup(tmp_path)
     dump_dir = tmp_path / "notification-payloads"
-    commit_hook_payload_saver(ctx.project_dir, dump_dir, (NOTIFICATION_HOOK_EVENT,), "*")
+    commit_hook_payload_saver(ctx.project_dir, dump_dir, (NOTIFICATION_HOOK_EVENT,), None)
     agent_name = f"claude-idlenotice-{get_short_random_string()}"
     drift = drift_note(ctx, "the idle notification")
     with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):

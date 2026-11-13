@@ -28,8 +28,7 @@ _APPEND_CONSUMER: Final[str] = (
 def test_claude_agent_sends_every_stacked_system_prompt_block(tmp_path: Path) -> None:
     """An agent whose config stacks two append_system_prompt blocks sends both in one system prompt.
 
-    Pins that the text of claude's last ``--append-system-prompt`` flag reaches the system prompt
-    it sends; the flag is last-wins.
+    Pins that claude sends its ``--append-system-prompt`` text in the request's system prompt.
     """
     reason = ClaudeReleaseProfile().unavailable_reason()
     if reason is not None:

@@ -46,9 +46,7 @@ from imbue.mngr_claude.testing import append_project_settings
 from imbue.mngr_claude.testing import capture_agent_pane
 from imbue.mngr_claude.testing import capture_agent_pane_with_scrollback
 from imbue.mngr_claude.testing import commit_project_claude_settings
-from imbue.mngr_claude.testing import create_agent
 from imbue.mngr_claude.testing import created_agent
-from imbue.mngr_claude.testing import destroy_agent_and_tear_down_context
 from imbue.mngr_claude.testing import drift_note
 from imbue.mngr_claude.testing import held_tool_command
 from imbue.mngr_claude.testing import is_queue_operation_carrying
@@ -57,8 +55,8 @@ from imbue.mngr_claude.testing import read_session_records
 from imbue.mngr_claude.testing import session_message_text
 from imbue.mngr_claude.testing import setup_ctx_that_answers_dialogs
 from imbue.mngr_claude.testing import start_held_tool_call
-from imbue.mngr_claude.testing import tear_down_context
 from imbue.mngr_claude.testing import wait_for_agent_pane
+from imbue.mngr_claude.testing import wait_for_agent_prompt
 from imbue.mngr_claude.testing import wait_for_agent_to_stop_running
 from imbue.mngr_claude.testing import wait_for_native_session_file
 from imbue.mngr_claude.testing import wait_for_session_record
@@ -121,15 +119,10 @@ def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
     run_concurrent_message_delivery(ClaudeReleaseProfile(), tmp_path)
 
 
-_MODEL_PICKER_SEND_TIMEOUT_SECONDS: Final[float] = 120.0
-_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS: Final[float] = 150.0
-
 # Bare ``/model`` opens Claude Code's interactive model picker: a numbered selector (a rule line
 # followed by indented options, one highlighted with ``❯``) that blocks until a choice is made.
-# We use the bare command (not ``/model <name>``, which on a session with no completed turn
-# switches directly with no dialog) because the picker is opened reliably and
-# version-independently. The highlighted default is the agent's current model, so accepting it
-# (Enter) is a benign no-op that just closes the picker.
+# The highlighted default is the agent's current model, so accepting it (Enter) is a benign no-op
+# that just closes the picker.
 _MODEL_PICKER_COMMAND: Final[str] = "/model"
 
 
@@ -154,9 +147,7 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
 
     Note on scope: mngr's send-confirmation retry already clears an Enter-dismissable selector like
     the picker, so this exercises the end-to-end "``/model`` does not wedge the agent" outcome
-    rather than the dialog-clearing path specifically. That path -- a dialog present when the NEXT
-    send starts, cleared at preflight or refused -- is covered deterministically by the plugin unit
-    tests (see ``plugin_test.py``), which script a selector that persists.
+    rather than the dialog-clearing path specifically.
     """
     profile = ClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -166,13 +157,8 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
     ctx = setup_ctx_that_answers_dialogs(profile, tmp_path)
     agent_name = f"claude-modelpicker-{get_short_random_string()}"
     run_id = get_short_random_string()
-    with created_agent(profile, ctx, agent_name, destroy_timeout=_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS):
-        result = profile.run_mngr(
-            ctx, "message", agent_name, "--message", _MODEL_PICKER_COMMAND, timeout=_MODEL_PICKER_SEND_TIMEOUT_SECONDS
-        )
-        assert result.returncode == 0, (
-            f"expected /model to deliver and exit 0, got {result.returncode}:\n{result.stdout}\n{result.stderr}"
-        )
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        send_expecting_success(profile, ctx, agent_name, _MODEL_PICKER_COMMAND)
         pane = capture_agent_pane(ctx, agent_name)
         # `classify` is what the send path itself uses to decide whether anything holds the
         # input, so asserting through it tests the same judgement the product makes.
@@ -236,18 +222,14 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
     agent_name = f"claude-contract-{get_short_random_string()}"
     run_id = get_short_random_string()
     drift = drift_note(ctx, "the record shape")
-    destroyed = False
-
-    try:
-        create_agent(profile, ctx, agent_name)
-
-        # Contract 1: an idle prompt lands as {"type":"user","message":{"content":...}}.
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        # An idle prompt lands as {"type":"user","message":{"content":...}}.
         idle_token = f"contract-idle-{run_id}"
         send_expecting_success(
             profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK."
         )
 
-        # Contract 5: the native session JSONL is <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl,
+        # The native session JSONL is <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl,
         # named by the claude_session_id marker.
         session_file = wait_for_native_session_file(ctx)
         user_record = wait_for_session_record(
@@ -256,12 +238,12 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             failure=f"no user record with message.content carrying the sent text {drift}; "
             "consumers: content probes, common-transcript converter",
         )
-        # Contract 6: records carry a top-level uuid (raw-streamer offset reconciliation).
+        # Records carry a top-level uuid (raw-streamer offset reconciliation).
         assert isinstance(user_record.get("uuid"), str) and user_record["uuid"] != "", (
             f"user record lost its top-level uuid {drift}; consumer: stream_transcript.sh offset reconciliation"
         )
 
-        # Contract 4: the reply lands as {"type":"assistant","message":{"content":...}}.
+        # The reply lands as {"type":"assistant","message":{"content":...}}.
         wait_for_session_record(
             session_file,
             lambda r: r.get("type") == "assistant" and session_message_text(r) != "",
@@ -269,7 +251,7 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             "consumers: common-transcript converter, transcript readers",
         )
 
-        # Contract 7: a turn's Stop hook pass lands as
+        # A turn's Stop hook pass lands as
         # {"type":"system","subtype":"stop_hook_summary"} (mngr always installs Stop hooks).
         wait_for_session_record(
             session_file,
@@ -278,46 +260,7 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             "consumers: wait_for_stop_hook.sh queued-prompt check, wait_for_stop_hook.sh has_blocked_stop_hook",
         )
 
-        # Contract 2: a message sent while a turn runs lands as
-        # {"type":"queue-operation","operation":"enqueue","content":...}.
-        busy_token = f"contract-busy-{run_id}"
-        tool_release = start_held_tool_call(profile, ctx, agent_name, tmp_path / "contract-tool-running")
-        send_expecting_success(profile, ctx, agent_name, f"Also remember: {busy_token}. Reply with just OK.")
-        wait_for_session_record(
-            session_file,
-            lambda r: is_queue_operation_carrying(r, "enqueue", busy_token),
-            failure=f"no queue-operation/enqueue record carrying a message sent during a tool call {drift}; "
-            "consumers: busy-send accept evidence, content probes",
-        )
-        tool_release.touch()
-
-        # Contract 2b: the queued message then either dequeues as a user record
-        # or is removed from the queue and injected into the running turn (a
-        # queue-operation/remove record carrying the text, no user record).
-        # Both are single deliveries; anything else is drift.
-        wait_for_session_record(
-            session_file,
-            lambda r: (r.get("type") == "user" and busy_token in session_message_text(r))
-            or is_queue_operation_carrying(r, "remove", busy_token),
-            failure=f"queued message neither dequeued as a user record nor removed-and-injected {drift}; "
-            "consumers: release-test delivery counting, content probes",
-        )
-
-        # Contract 2c: the queue-operation vocabulary, as (operation, reason) pairs.
-        seen_operations = {
-            (str(r.get("operation")), r.get("reason"))
-            for r in read_session_records(session_file)
-            if r.get("type") == "queue-operation"
-        }
-        unknown_operations = seen_operations - _KNOWN_QUEUE_OPERATIONS
-        assert not unknown_operations, (
-            f"unknown queue-operation (operation, reason) pairs {sorted(unknown_operations, key=str)} {drift}; "
-            "consumers: accept-evidence probes, release-test delivery counting, "
-            "wait_for_stop_hook.sh queued-prompt check, common_transcript_convert mid-turn messages, "
-            "stream_transcript.sh interrupt heal's queued-prompt guard"
-        )
-
-        # Contract 3: an unknown slash command lands as
+        # An unknown slash command lands as
         # {"type":"system","level":"warning","content":"Unknown command: ..."}.
         typo = f"/mngr-invalid-command-{run_id}"
         send_expecting_success(profile, ctx, agent_name, typo)
@@ -330,15 +273,6 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             failure=f"no system/warning 'Unknown command' record for {typo!r} {drift}; "
             "consumer: _REJECTED_COMMAND_JQ_FILTER (rejection probe)",
         )
-
-        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=AGENT_DESTROY_TIMEOUT_SECONDS)
-        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
-        destroyed = True
-    finally:
-        if destroyed:
-            tear_down_context(ctx)
-        else:
-            destroy_agent_and_tear_down_context(profile, ctx, agent_name, timeout=AGENT_DESTROY_TIMEOUT_SECONDS)
 
 
 _STOP_HOOK_FEEDBACK_PREFIX: Final[str] = "Stop hook feedback:"
@@ -441,7 +375,8 @@ def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: P
     """A message sent while a tool call runs reaches the common transcript as exactly one user step.
 
     Claude Code writes no user line for such a message, so this also pins the queue removal and
-    ``queued_command`` attachment common_transcript_convert reads instead.
+    ``queued_command`` attachment common_transcript_convert reads instead. It also pins the
+    (operation, reason) pairs of the session's queue-operation records.
     """
     profile = ClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -471,7 +406,7 @@ def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: P
             session_file,
             lambda r: is_queue_operation_carrying(r, "remove", token),
             failure=f"the message sent during a tool call was never removed from the queue into the running turn "
-            f"{drift}; consumer: common_transcript_convert mid-turn messages",
+            f"{drift}; consumers: common_transcript_convert mid-turn messages, release-test delivery counting",
         )
         command_uuid = removal.get("commandUuid")
         assert (
@@ -534,6 +469,18 @@ def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: P
             read_common_records(ctx.host_dir, profile.common_transcript_subdir), token
         )
         assert user_steps == 1, f"the mid-turn message reached the common transcript {user_steps} times, not once"
+        seen_operations = {
+            (str(r.get("operation")), r.get("reason"))
+            for r in read_session_records(session_file)
+            if r.get("type") == "queue-operation"
+        }
+        unknown_operations = seen_operations - _KNOWN_QUEUE_OPERATIONS
+        assert not unknown_operations, (
+            f"unknown queue-operation (operation, reason) pairs {sorted(unknown_operations, key=str)} {drift}; "
+            "consumers: accept-evidence probes, release-test delivery counting, "
+            "wait_for_stop_hook.sh queued-prompt check, common_transcript_convert mid-turn messages, "
+            "stream_transcript.sh interrupt heal's queued-prompt guard"
+        )
 
 
 # MIND-171: a `!`-prefixed message strands the agent in Claude's shell mode
@@ -542,7 +489,6 @@ def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: P
 # (ClaudeAgent.confirmation_timeout_seconds) before it fails, so the send
 # timeout must sit comfortably above it.
 _BANG_SEND_TIMEOUT_SECONDS: Final[float] = 150.0
-_BANG_DESTROY_TIMEOUT_SECONDS: Final[float] = 150.0
 
 
 def _login_home() -> Path:
@@ -635,23 +581,6 @@ class _BangShellModeProfile(ClaudeReleaseProfile):
         return args
 
 
-def _wait_for_agent_prompt(ctx: AgentReleaseContext, agent_name: str, *, timeout: float = 60.0) -> str:
-    """Poll the agent pane until Claude renders its ``❯`` input prompt; return that pane.
-
-    ``mngr create`` returns once the launch command has been sent, a beat before the
-    TUI finishes rendering, so a single immediate capture can catch the launch line
-    instead of the prompt. Fails with the last pane on timeout.
-    """
-    return wait_for_agent_pane(
-        ctx,
-        agent_name,
-        has_input_prompt_line,
-        capture=capture_agent_pane,
-        timeout=timeout,
-        failure=f"agent never rendered the ❯ input prompt within {timeout:.0f}s",
-    )
-
-
 # The continuation glyph Claude renders before a shell command's captured output
 # (e.g. ``⎿  mngr-behaviors-probe``). Its presence in the pane means a command ran and
 # produced output; its absence means no shell command ran.
@@ -709,8 +638,8 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
     agent_name = f"claude-bang-{get_short_random_string()}"
     subdir = profile.common_transcript_subdir
     run_id = get_short_random_string()
-    with created_agent(profile, ctx, agent_name, destroy_timeout=_BANG_DESTROY_TIMEOUT_SECONDS):
-        _wait_for_agent_prompt(ctx, agent_name)
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        wait_for_agent_prompt(ctx, agent_name, failure="the agent never drew the ❯ input prompt before the bare `!`")
         # Baseline: the freshly-created agent (no seed message) has no conversation turns yet.
         baseline_records = read_common_records(ctx.host_dir, subdir)
 
@@ -782,8 +711,8 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
 
     ctx = profile.setup(tmp_path)
     agent_name = f"claude-bang-{get_short_random_string()}"
-    with created_agent(profile, ctx, agent_name, destroy_timeout=_BANG_DESTROY_TIMEOUT_SECONDS):
-        _wait_for_agent_prompt(ctx, agent_name)
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        wait_for_agent_prompt(ctx, agent_name, failure="the agent never drew the ❯ input prompt before the `!echo`")
 
         # The send's exit code is not asserted; the observable contract is the command's output.
         profile.run_mngr(

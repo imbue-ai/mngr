@@ -1,0 +1,1 @@
+The statusline-cost release test is leaner: it drops the human-output check, which pins mngr's own formatting rather than a claude internal, and the session-count check, which its `mngr usage` API-spend check already implies, and validates the statusline's `cost` as a `CostSnapshot` only when it is an object, as mngr's reader does.

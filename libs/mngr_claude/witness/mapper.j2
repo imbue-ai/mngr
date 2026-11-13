@@ -19,10 +19,9 @@ are end-to-end release tests:
   `@pytest.mark.timeout(1500)`, a profile class with an
   `unavailable_reason()` guard that skips cleanly when the host cannot run
   the test, and pane-capture/poll helpers for observing the agent. The
-  shared claude profile (`ClaudeReleaseProfile`) and the pane-capture and
-  pane-poll helpers live in `imbue/mngr_claude/testing.py`, and the `❯`-prompt poll
-  (`_wait_for_agent_prompt`) in the e2e file; build on them rather than
-  writing new ones.
+  shared claude profile (`ClaudeReleaseProfile`), the pane-capture and
+  pane-poll helpers, and the `❯`-prompt poll (`wait_for_agent_prompt`) live in
+  `imbue/mngr_claude/testing.py`; build on them rather than writing new ones.
 - A witness must assert what a CLIENT observes -- the conversation content
   and the agent's readiness for the next message -- never mngr's terminal
   internals. Readiness is observed via the `❯` input prompt, as the existing
