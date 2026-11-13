@@ -48,10 +48,10 @@ MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 # the ``default_image_url_*`` provider config fields override these for anyone
 # who wants another source.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20261026-2643/debian-13-genericcloud-arm64-20261026-2643.qcow2"
+    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20261103-2651/debian-13-genericcloud-arm64-20261103-2651.qcow2"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20261026-2643/debian-13-genericcloud-amd64-20261026-2643.qcow2"
+    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20261103-2651/debian-13-genericcloud-amd64-20261103-2651.qcow2"
 )
 
 # Default host directory inside the VM

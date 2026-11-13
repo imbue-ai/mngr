@@ -33,16 +33,29 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import ssh_ca_trust_files
 # qemu-img-resized) disk, and the agent host container's memory cap follows the
 # VM's own RAM; being every-boot units, a restore or an in-place resize applies
 # the new size on boot with no cloud-init involvement. A long-running service
-# publishes the container's memory and disk headroom into its volume.
+# publishes the container's memory and disk headroom into its volume, and a third
+# oneshot turns on the data filesystem's automatic block-group reclaim.
 GUEST_GROW_DATA_FS_UNIT_NAME: Final[str] = "mngr-grow-data-fs.service"
 GUEST_CONTAINER_MEMORY_UNIT_NAME: Final[str] = "mngr-reconcile-container-memory.service"
 GUEST_CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-publish-container-meminfo.service"
+GUEST_BTRFS_RECLAIM_UNIT_NAME: Final[str] = "mngr-btrfs-reclaim.service"
 _GUEST_GROW_DATA_FS_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-grow-data-fs.sh"
 _GUEST_CONTAINER_MEMORY_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-reconcile-container-memory.sh"
 _GUEST_CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-publish-container-meminfo.pl"
+_GUEST_BTRFS_RECLAIM_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-btrfs-reclaim.sh"
 _GUEST_SYSTEMD_UNIT_DIR: Final[str] = "/etc/systemd/system"
 
 _GUEST_MEMINFO_PATH: Final[str] = "/proc/meminfo"
+_GUEST_KERNEL_RELEASE_PATH: Final[str] = "/proc/sys/kernel/osrelease"
+# The kernels automatic reclaim is turned on under: those carrying "btrfs: fix
+# EEXIST abort due to non-consecutive gaps in chunk allocation"
+# (CVE-2026-45934), a transaction abort (and a read-only filesystem) when a DUP
+# metadata chunk is allocated into the holes that relocating data block groups
+# leaves behind. Mainline has it from 7.0; it was backported per stable series,
+# so a release between those series (6.13 to 6.17, 6.18 before 6.18.14, or
+# 6.19) is newer than 6.12.114 yet lacks it.
+GUEST_BTRFS_RECLAIM_FIXED_MAINLINE_RELEASE: Final[str] = "7.0"
+GUEST_BTRFS_RECLAIM_FIXED_STABLE_RELEASES: Final[tuple[str, ...]] = ("6.12.114", "6.18.14")
 # Where docker (systemd cgroup driver, cgroup v2) puts each container's memory cgroup.
 _GUEST_DOCKER_CGROUP_PARENT: Final[str] = "/sys/fs/cgroup/system.slice"
 
@@ -311,6 +324,88 @@ WantedBy=multi-user.target
 """
 
 
+@pure
+def render_guest_btrfs_reclaim_script(kernel_release_path: str, btrfs_sysfs_root: str) -> str:
+    """The every-boot in-guest script that turns on automatic reclaim of the data filesystem's sparse data block groups.
+
+    btrfs hands a data block group back to unallocated space on its own only
+    once it is completely empty, so on a busy disk partly used data block
+    groups come to own the whole device and a metadata block group can no
+    longer be allocated: writes, and even deletes, fail with ENOSPC while
+    statfs still shows free space. With ``dynamic_reclaim`` and
+    ``periodic_reclaim`` on, the kernel relocates the emptiest data block
+    groups whenever unallocated space is below ten data block groups, scaling
+    how full a block group may be by how far below that it is. The settings
+    live only as long as the mount, so this runs at every boot, and only on a
+    kernel carrying the chunk-allocation fix (at or above
+    ``GUEST_BTRFS_RECLAIM_FIXED_MAINLINE_RELEASE``, or at or above the
+    ``GUEST_BTRFS_RECLAIM_FIXED_STABLE_RELEASES`` entry of its own stable
+    series); on any other it leaves them off. The data filesystem is found by
+    its label, as the publisher finds it; with none mounted there is nothing
+    to do.
+    """
+    return f"""\
+#!/bin/bash
+# Managed by mngr (gen-2 slices).
+set -euo pipefail
+# Whether the dotted version $1 is at or above $2, comparing each part as a number.
+version_at_least() {{
+    local IFS=.
+    local -a have=($1) want=($2)
+    local idx
+    for idx in 0 1 2; do
+        [ "${{have[idx]:-0}}" -gt "${{want[idx]:-0}}" ] && return 0
+        [ "${{have[idx]:-0}}" -lt "${{want[idx]:-0}}" ] && return 1
+    done
+    return 0
+}}
+# Whether the kernel version $1 carries the chunk-allocation fix. A version that
+# is not plain dotted numbers cannot be compared, so it counts as lacking it.
+has_chunk_gap_fix() {{
+    local fixed
+    [[ "$1" =~ ^[0-9]+([.][0-9]+){{1,2}}$ ]] || return 1
+    version_at_least "$1" "{GUEST_BTRFS_RECLAIM_FIXED_MAINLINE_RELEASE}" && return 0
+    for fixed in {" ".join(GUEST_BTRFS_RECLAIM_FIXED_STABLE_RELEASES)}; do
+        [ "${{1%.*}}" = "${{fixed%.*}}" ] && version_at_least "$1" "$fixed" && return 0
+    done
+    return 1
+}}
+release=$(cat "{kernel_release_path}")
+if ! has_chunk_gap_fix "${{release%%[+-]*}}"; then
+    echo "kernel $release lacks the btrfs chunk-allocation fix; leaving btrfs automatic reclaim off"
+    exit 0
+fi
+for label_file in "{btrfs_sysfs_root}"/*/label; do
+    [ -f "$label_file" ] || continue
+    [ "$(cat "$label_file")" = "{GEN2_GUEST_DATA_FS_LABEL}" ] || continue
+    allocation_dir="${{label_file%/label}}/allocation/data"
+    echo 1 > "$allocation_dir/dynamic_reclaim"
+    echo 1 > "$allocation_dir/periodic_reclaim"
+    echo "turned on dynamic and periodic reclaim of data block groups in $allocation_dir"
+    exit 0
+done
+echo "no mounted {GEN2_GUEST_DATA_FS_LABEL} filesystem; nothing to turn on"
+"""
+
+
+@pure
+def render_guest_btrfs_reclaim_unit() -> str:
+    """The systemd unit for the reclaim oneshot; it stays active once run, so a probe can tell it ran this boot."""
+    return f"""\
+[Unit]
+Description=mngr: turn on automatic reclaim of the agent host data filesystem's sparse data block groups
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={_GUEST_BTRFS_RECLAIM_SCRIPT_PATH}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 class GuestManagedFile(FrozenModel):
     """One file mngr installs on a gen-2 slice VM."""
 
@@ -320,8 +415,13 @@ class GuestManagedFile(FrozenModel):
 
 
 @pure
-def guest_container_memory_files() -> tuple[GuestManagedFile, ...]:
-    """The container-memory reconciler and the meminfo publisher, scripts and units, as a gen-2 slice VM carries them."""
+def guest_operator_installable_unit_files() -> tuple[GuestManagedFile, ...]:
+    """The in-guest units an operator can install on a running VM, scripts and units, as a gen-2 slice VM carries them.
+
+    The container-memory reconciler, the headroom publisher and the btrfs
+    reclaim oneshot; ``minds-admin install-vm-guest-units`` installs exactly
+    these on VMs carved before a change to them.
+    """
     return (
         GuestManagedFile(
             path=_GUEST_CONTAINER_MEMORY_SCRIPT_PATH,
@@ -345,12 +445,22 @@ def guest_container_memory_files() -> tuple[GuestManagedFile, ...]:
             permissions="0644",
             content=render_guest_container_meminfo_publisher_unit(),
         ),
+        GuestManagedFile(
+            path=_GUEST_BTRFS_RECLAIM_SCRIPT_PATH,
+            permissions="0755",
+            content=render_guest_btrfs_reclaim_script(_GUEST_KERNEL_RELEASE_PATH, GUEST_BTRFS_SYSFS_ROOT),
+        ),
+        GuestManagedFile(
+            path=f"{_GUEST_SYSTEMD_UNIT_DIR}/{GUEST_BTRFS_RECLAIM_UNIT_NAME}",
+            permissions="0644",
+            content=render_guest_btrfs_reclaim_unit(),
+        ),
     )
 
 
 @pure
 def guest_every_boot_units_write_files() -> list[dict[str, str]]:
-    """The cloud-init ``write_files`` entries installing the sizing oneshots and the meminfo publisher."""
+    """The cloud-init ``write_files`` entries installing the every-boot oneshots and the meminfo publisher."""
     return [
         {
             "path": _GUEST_GROW_DATA_FS_SCRIPT_PATH,
@@ -364,20 +474,20 @@ def guest_every_boot_units_write_files() -> list[dict[str, str]]:
         },
         *(
             {"path": managed.path, "permissions": managed.permissions, "content": managed.content}
-            for managed in guest_container_memory_files()
+            for managed in guest_operator_installable_unit_files()
         ),
     ]
 
 
 @pure
 def guest_every_boot_units_enable_command() -> list[str]:
-    """The cloud-init ``runcmd`` entry that enables + first-runs the sizing oneshots and the publisher."""
+    """The cloud-init ``runcmd`` entry that enables + first-runs the every-boot oneshots and the publisher."""
     return [
         "bash",
         "-c",
         "systemctl daemon-reload && "
         f"systemctl enable --now {GUEST_GROW_DATA_FS_UNIT_NAME} {GUEST_CONTAINER_MEMORY_UNIT_NAME} "
-        f"{GUEST_CONTAINER_MEMINFO_UNIT_NAME}",
+        f"{GUEST_CONTAINER_MEMINFO_UNIT_NAME} {GUEST_BTRFS_RECLAIM_UNIT_NAME}",
     ]
 
 

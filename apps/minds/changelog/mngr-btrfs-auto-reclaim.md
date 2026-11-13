@@ -1,0 +1,1 @@
+The next-deployment checklist gains the fleet rollout of btrfs automatic reclaim: re-prep boxes onto the `20261103-2651` guest image, install the reclaim oneshot on every leased VM with `minds-admin install-vm-guest-units`, then reboot each VM onto a 6.12.114 or later kernel with `minds-admin reboot-guest-kernel`.

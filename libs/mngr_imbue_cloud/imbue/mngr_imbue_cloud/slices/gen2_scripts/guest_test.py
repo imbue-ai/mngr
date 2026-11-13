@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import pytest
 import yaml
 from inline_snapshot import snapshot
 
@@ -18,6 +19,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import Gen2SliceCidata
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_meta_data
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_network_config
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import build_qemu_slice_user_data
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import render_guest_btrfs_reclaim_script
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import render_guest_container_meminfo_publisher_script
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import render_guest_container_memory_script
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import render_guest_data_disk_selection_lines
@@ -125,12 +127,18 @@ def test_user_data_installs_the_every_boot_units() -> None:
     publisher_unit = content_by_path["/etc/systemd/system/mngr-publish-container-meminfo.service"]
     assert "Restart=always" in publisher_unit
     assert "/usr/local/sbin/mngr-publish-container-meminfo.pl" in content_by_path
-    # All three units are enabled and first-run by cloud-init.
+    # The reclaim oneshot stays active once run, which is what an install's probe reads.
+    reclaim_unit = content_by_path["/etc/systemd/system/mngr-btrfs-reclaim.service"]
+    assert "RemainAfterExit=yes" in reclaim_unit
+    assert "/usr/local/sbin/mngr-btrfs-reclaim.sh" in content_by_path
+    # Every unit is enabled and first-run by cloud-init, after the first-boot
+    # script has mounted the data disk the reclaim oneshot acts on.
     enable_command = " ".join(parsed["runcmd"][-1])
     assert (
         "systemctl enable --now mngr-grow-data-fs.service mngr-reconcile-container-memory.service "
-        "mngr-publish-container-meminfo.service" in enable_command
+        "mngr-publish-container-meminfo.service mngr-btrfs-reclaim.service" in enable_command
     )
+    assert parsed["runcmd"][0] == ["bash", "/usr/local/sbin/mngr-slice-firstboot.sh"]
 
 
 _FIRSTBOOT_PACKAGE_TOOLS = ("tmux", "git", "jq", "rsync", "curl", "xxd", "flock", "mkfs.btrfs", "inotifywait")
@@ -379,6 +387,89 @@ def test_reconciler_only_updates_a_stopped_container(tmp_path: Path) -> None:
 def test_reconciler_leaves_a_container_already_on_the_cap_alone(tmp_path: Path) -> None:
     calls = _run_reconciler(tmp_path, {"c0ffee": (_RECONCILED_CAP_BYTES, True)})
     assert not any(call.startswith(("update", "restart")) for call in calls)
+
+
+def _make_btrfs_filesystem_with_reclaim_settings(btrfs_sysfs_root: Path, label: str) -> Path:
+    """A btrfs sysfs directory carrying ``label`` with both reclaim settings off; returns its data allocation dir."""
+    filesystem_dir = btrfs_sysfs_root / uuid4().hex
+    allocation_dir = filesystem_dir / "allocation" / "data"
+    allocation_dir.mkdir(parents=True)
+    (filesystem_dir / "label").write_text(f"{label}\n")
+    for setting in ("dynamic_reclaim", "periodic_reclaim"):
+        (allocation_dir / setting).write_text("0\n")
+    return allocation_dir
+
+
+def _run_reclaim_script(tmp_path: Path, kernel_release: str) -> subprocess.CompletedProcess[str]:
+    kernel_release_file = tmp_path / "osrelease"
+    kernel_release_file.write_text(f"{kernel_release}\n")
+    script = tmp_path / "reclaim.sh"
+    script.write_text(render_guest_btrfs_reclaim_script(str(kernel_release_file), str(tmp_path / "sysfs-btrfs")))
+    return subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+
+
+def _reclaim_settings(allocation_dir: Path) -> tuple[str, str]:
+    return (
+        (allocation_dir / "dynamic_reclaim").read_text().strip(),
+        (allocation_dir / "periodic_reclaim").read_text().strip(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kernel_release", "expected_settings"),
+    [
+        ("6.12.115rc1-cloud-amd64", ("0", "0")),
+        ("6.12.113+deb13-cloud-amd64", ("0", "0")),
+        ("6.12.114+deb13-cloud-amd64", ("1", "1")),
+        ("6.12.115+deb13.1-cloud-amd64", ("1", "1")),
+        ("6.11.9-cloud-amd64", ("0", "0")),
+        ("6.17.13+deb13-cloud-amd64", ("0", "0")),
+        ("6.18.13+deb13-cloud-amd64", ("0", "0")),
+        ("6.18.14+deb13-cloud-amd64", ("1", "1")),
+        ("7.0-cloud-amd64", ("1", "1")),
+        ("7.2.12+bpo-cloud-amd64", ("1", "1")),
+    ],
+)
+def test_reclaim_oneshot_turns_on_data_reclaim_only_on_a_kernel_carrying_the_chunk_gap_fix(
+    tmp_path: Path, kernel_release: str, expected_settings: tuple[str, str]
+) -> None:
+    data_allocation_dir = _make_btrfs_filesystem_with_reclaim_settings(tmp_path / "sysfs-btrfs", "mngr-data")
+
+    result = _run_reclaim_script(tmp_path, kernel_release)
+
+    assert result.returncode == 0, result.stderr
+    assert _reclaim_settings(data_allocation_dir) == expected_settings
+
+
+def test_reclaim_oneshot_touches_only_the_data_filesystem(tmp_path: Path) -> None:
+    other_allocation_dir = _make_btrfs_filesystem_with_reclaim_settings(tmp_path / "sysfs-btrfs", "other-fs")
+    data_allocation_dir = _make_btrfs_filesystem_with_reclaim_settings(tmp_path / "sysfs-btrfs", "mngr-data")
+
+    result = _run_reclaim_script(tmp_path, "6.12.116+deb13-cloud-amd64")
+
+    assert result.returncode == 0, result.stderr
+    assert _reclaim_settings(data_allocation_dir) == ("1", "1")
+    assert _reclaim_settings(other_allocation_dir) == ("0", "0")
+
+
+def test_reclaim_oneshot_succeeds_with_no_data_filesystem_mounted(tmp_path: Path) -> None:
+    (tmp_path / "sysfs-btrfs").mkdir()
+
+    result = _run_reclaim_script(tmp_path, "6.12.116+deb13-cloud-amd64")
+
+    assert result.returncode == 0, result.stderr
+    assert "no mounted mngr-data filesystem" in result.stdout
+
+
+def test_reclaim_oneshot_fails_when_the_kernel_refuses_the_setting(tmp_path: Path) -> None:
+    # A failed unit is what an install's probe and rollback key on.
+    data_allocation_dir = _make_btrfs_filesystem_with_reclaim_settings(tmp_path / "sysfs-btrfs", "mngr-data")
+    (data_allocation_dir / "periodic_reclaim").unlink()
+    (data_allocation_dir / "periodic_reclaim").mkdir()
+
+    result = _run_reclaim_script(tmp_path, "6.12.116+deb13-cloud-amd64")
+
+    assert result.returncode != 0
 
 
 # A stub docker for the publisher, logging each call: one running labeled
