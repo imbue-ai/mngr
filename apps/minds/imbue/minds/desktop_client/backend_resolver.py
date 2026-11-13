@@ -568,6 +568,13 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
     )
+    host_ids_reported_this_session: frozenset[str] = Field(
+        default=frozenset(),
+        description=(
+            "The hosts a provider snapshot taken since the app started has reported. Any other host is known "
+            "only from the snapshots replayed at startup, which say what it was doing when the app last ran"
+        ),
+    )
     host_name_by_host_id: Mapping[str, str] = Field(
         default_factory=dict,
         description="Normalized host name (slug) keyed by host ID string, for hosts whose name is known",
@@ -1769,6 +1776,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         with self._lock:
             return self._resolve_host_state_locked(str(host_id))
+
+    def is_host_reported_this_session(self, host_id: HostId) -> bool:
+        """Whether a provider snapshot taken since the app started has reported ``host_id``.
+
+        Until one has, what is known of the host is replayed from before the
+        app started, so :meth:`get_host_state` may say it is running when it
+        has stopped since.
+        """
+        with self._lock:
+            return str(host_id) in self._agents_result.host_ids_reported_this_session
 
     def get_host_size(self, host_id: HostId) -> DiscoveredHostSize | None:
         with self._lock:

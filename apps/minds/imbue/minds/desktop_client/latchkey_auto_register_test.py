@@ -57,13 +57,24 @@ def _make_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
     return _make_discovered(host_id, agent_id, agent_name=AgentName(SYSTEM_SERVICES_AGENT_NAME))
 
 
-def _push_agents(resolver: MngrCliBackendResolver, *agents: DiscoveredAgent) -> None:
-    """Update the resolver with the given agents (and matching id list)."""
+def _push_agents(
+    resolver: MngrCliBackendResolver,
+    *agents: DiscoveredAgent,
+    host_state: HostState | None = None,
+    is_replayed_from_before_the_app_started: bool = False,
+) -> None:
+    """Update the resolver with the agents a discovery snapshot lists, each of their hosts in ``host_state``.
+
+    The snapshot is one this session's discovery took, unless it is said to be replayed.
+    """
+    host_ids = frozenset(str(a.host_id) for a in agents)
     resolver.update_agents(
         ParsedAgentsResult(
             agent_ids=tuple(a.agent_id for a in agents),
             discovered_agents=tuple(agents),
             ssh_info_by_agent_id={},
+            host_state_by_host_id={} if host_state is None else dict.fromkeys(host_ids, host_state),
+            host_ids_reported_this_session=frozenset() if is_replayed_from_before_the_app_started else host_ids,
         )
     )
 
@@ -836,6 +847,127 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     assert machine.refreshed_workspace_agent_ids == []
     assert machine.pushed_workspace_agent_ids == []
     assert host_id in auto_register._hosts_awaiting_machine
+
+
+def test_a_registration_on_a_stopped_host_is_pushed_once_the_host_runs_again(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A stopped workspace is still listed, but its provider has no machine to open for it, so its push is held
+    without touching the machine and carried by the resolver change that reports the host running.
+
+    No watch polls for it meanwhile: the host's state reaches the resolver, unlike a machine key.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    agent = _make_discovered(host_id, agent_id)
+    _push_agents(resolver, agent, host_state=HostState.STOPPED)
+
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
+    _wait_until_pushes_settle(auto_register)
+    assert host_id not in auto_register._hosts_watched_for_machine
+    assert str(agent_id) in _registered_agent_ids(latchkey.plugin_data_dir, host_id)
+
+    # A host on its way up has no machine to open yet either.
+    _push_agents(resolver, agent, host_state=HostState.STARTING)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
+    assert host_id in auto_register._hosts_awaiting_machine
+
+    _push_agents(resolver, agent, host_state=HostState.RUNNING)
+
+    _wait_for_pushes(machine, 1)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
+    assert str(agent_id) in machine.registered_agent_ids()
+    assert host_id not in auto_register._hosts_awaiting_machine
+
+
+def test_a_registration_on_a_host_only_a_replayed_snapshot_reports_waits_for_this_sessions_discovery(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """At startup the resolver holds what the events file kept from before the app started, in which a workspace
+    that has stopped since still reads as running. Its push is held until this session's discovery has reported
+    the host's provider, and then goes by what that says."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    agent = _make_discovered(host_id, agent_id)
+    _push_agents(resolver, agent, host_state=HostState.RUNNING, is_replayed_from_before_the_app_started=True)
+
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.refreshed_workspace_agent_ids == []
+    assert host_id not in auto_register._hosts_watched_for_machine
+
+    # This session's first look finds the workspace stopped: there is still no machine to open.
+    _push_agents(resolver, agent, host_state=HostState.STOPPED)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
+    assert host_id in auto_register._hosts_awaiting_machine
+
+    _push_agents(resolver, agent, host_state=HostState.RUNNING)
+
+    _wait_for_pushes(machine, 1)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
+    assert host_id not in auto_register._hosts_awaiting_machine
+
+
+def test_a_held_push_whose_machine_key_lands_while_the_host_is_down_waits_for_the_host(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A machine key alone does not release a held push: the watch that finds it leaves the push held while the
+    host is down, and the resolver change that reports the host running carries it."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    agent = _make_discovered(host_id, agent_id)
+    _push_agents(resolver, agent, host_state=HostState.STOPPED)
+
+    auto_register = _build_auto_register_carrying_to(
+        build_latchkey_auto_register,
+        resolver,
+        latchkey,
+        machine,
+        machine_poll_interval_seconds=0.01,
+        machine_watch_seconds=0.2,
+    )
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
+    _provision_machine(latchkey, host_id)
+    _wait_until_machine_watch_has_ended(auto_register, host_id)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.refreshed_workspace_agent_ids == []
+    assert machine.pushed_workspace_agent_ids == []
+    assert host_id in auto_register._hosts_awaiting_machine
+
+    _push_agents(resolver, agent, host_state=HostState.RUNNING)
+
+    _wait_for_pushes(machine, 1)
+    _wait_until_pushes_settle(auto_register)
+    assert machine.pushed_workspace_agent_ids == [str(agent_id)]
+    assert host_id not in auto_register._hosts_awaiting_machine
 
 
 def test_a_push_scheduled_while_the_app_shuts_down_is_kept_without_a_worker(

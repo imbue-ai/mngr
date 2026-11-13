@@ -601,6 +601,40 @@ def test_clean_pre_start_snapshot_still_records_provider_freshness() -> None:
     assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) == _DISCOVERY_FINISHED_AT
 
 
+def test_a_host_is_reported_this_session_only_once_a_clean_snapshot_from_after_the_start_lists_it() -> None:
+    """A replayed snapshot says what a host was doing when the app last ran, so its state is not this session's
+    until a clean snapshot taken after the consumer came up has reported the host's provider."""
+    consumer = _replay_consumer()
+    agent = _make_primary_agent(_AGENT_ID_1, _HOST_ID_1, "local")
+    after_the_start = consumer.started_at + timedelta(seconds=30)
+
+    _dispatch(
+        consumer, _observe_envelope(_provider_snapshot((agent,), hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),)))
+    )
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.RUNNING
+    assert not consumer.resolver.is_host_reported_this_session(_HOST_ID_1)
+
+    # A poll that failed at the provider leaves the replayed state in place.
+    _dispatch(
+        consumer,
+        _observe_envelope(_provider_snapshot((), error=_stale_error(), discovery_finished_at=after_the_start)),
+    )
+    assert not consumer.resolver.is_host_reported_this_session(_HOST_ID_1)
+
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                (agent,),
+                hosts=(_make_host(_HOST_ID_1, HostState.STOPPED),),
+                discovery_finished_at=after_the_start + timedelta(seconds=30),
+            )
+        ),
+    )
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.STOPPED
+    assert consumer.resolver.is_host_reported_this_session(_HOST_ID_1)
+
+
 def test_a_host_the_last_completed_poll_could_not_read_is_reported_unread() -> None:
     """A snapshot's per-host-timeout misses reach the resolver, and the next poll that reads the host clears them."""
     consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver(), started_at=_DISCOVERY_STARTED_AT)

@@ -61,6 +61,20 @@ which tells this app nothing, so a held push watches for the record itself: it
 polls the host's machine key for a bounded while, and after that is carried by
 the next resolver change that finds the key there (the resolver fires only on a
 real change of its state, which a provisioning pass is not).
+
+A push for a host discovery reports as down is held too. A stopped workspace
+stays in discovery with the agents it last ran, so it is reconciled like any
+other, but its provider has no machine to open for it until it runs again, and
+no agent on it makes a call the policy would gate meanwhile. Its state reaches
+the resolver, so the resolver change that reports the host up again is what
+carries the held push, and no watch is needed for it.
+
+So is a push for a host this session's discovery has not reported yet. At
+startup the resolver is fed the snapshots the events file kept from before the
+app started, and those say what a host was doing when the app last ran: a
+workspace that has stopped since still reads as running. A push therefore
+waits for the resolver change that brings the host's state as this session's
+discovery read it.
 """
 
 import functools
@@ -108,6 +122,22 @@ DEFAULT_MACHINE_WATCH_SECONDS: Final[float] = 600.0
 # whose adopt landed while a reconcile was rewriting the file is repeated, and a host whose listing changes faster
 # than its machine can be read is pinned on the last read all the same rather than read forever.
 _MAX_MACHINE_READS_PER_CARRY: Final[int] = 3
+
+# The states in which a host's machine is not there to be opened, or runs nothing its policy would gate: a carry
+# for a host in one of them is held. A host that could not be observed (``UNKNOWN``, ``UNAUTHENTICATED``) is not
+# among them, since it may well be up, and the read that fails against it says what is wrong.
+_DOWN_HOST_STATES: Final[frozenset[HostState]] = frozenset(
+    {
+        HostState.BUILDING,
+        HostState.STARTING,
+        HostState.STOPPING,
+        HostState.STOPPED,
+        HostState.PAUSED,
+        HostState.CRASHED,
+        HostState.FAILED,
+        HostState.DESTROYED,
+    }
+)
 
 
 class _HostListing(FrozenModel):
@@ -347,10 +377,12 @@ class LatchkeyAutoRegister(MutableModel):
     # rather than by a second, racing thread.
     _hosts_awaiting_push: dict[HostId, _PendingCarry] = PrivateAttr(default_factory=dict)
     _hosts_being_pushed: set[HostId] = PrivateAttr(default_factory=set)
-    # Hosts whose changed file found no machine to go to yet, each with the
-    # carry that is held; re-scheduled once the machine has been provisioned,
-    # by the host's machine watch or by a later resolver change. The watched
-    # set keeps one watch per held host. Both guarded by ``_push_lock``.
+    # Hosts whose changed file found no machine to go to yet (none provisioned,
+    # the host down, or not reported by this session's discovery), each with
+    # the carry that is held; re-scheduled once there is one, by the host's
+    # machine watch or by a later resolver change.
+    # The watched set keeps one watch per host held for its machine key. Both
+    # guarded by ``_push_lock``.
     _hosts_awaiting_machine: dict[HostId, _PendingCarry] = PrivateAttr(default_factory=dict)
     _hosts_watched_for_machine: set[HostId] = PrivateAttr(default_factory=set)
     _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -460,7 +492,7 @@ class LatchkeyAutoRegister(MutableModel):
         return plan
 
     def _collect_hosts_whose_machine_appeared(self) -> list[HostId]:
-        """The hosts with a held carry that now have a machine of their own.
+        """The hosts with a held carry that now have a machine to carry it to.
 
         One ``stat`` of the host's machine key per held host per resolver
         change, like a file-less host's ``stat`` of its permissions file --
@@ -473,7 +505,17 @@ class LatchkeyAutoRegister(MutableModel):
             held = [
                 host_id for host_id in self._hosts_awaiting_machine if host_id not in self._hosts_watched_for_machine
             ]
-        return [host_id for host_id in held if self._has_machine(host_id)]
+        return [host_id for host_id in held if self._is_machine_there_to_carry_to(host_id)]
+
+    def _is_machine_there_to_carry_to(self, host_id: HostId) -> bool:
+        """Whether a carry for ``host_id`` can go out now: it has a machine of its own, and this session's
+        discovery has reported it and did not find it down."""
+        # Asked before the state, so the state read is at least as new as the report that vouches for it.
+        return (
+            self._has_machine(host_id)
+            and self.backend_resolver.is_host_reported_this_session(host_id)
+            and self.backend_resolver.get_host_state(host_id) not in _DOWN_HOST_STATES
+        )
 
     def _has_machine(self, host_id: HostId) -> bool:
         """Whether ``host_id`` has a machine a push could go to (see ``has_machine_of_its_own``).
@@ -579,10 +621,13 @@ class LatchkeyAutoRegister(MutableModel):
         provisioned, enforced the default it was seeded with instead. A watch
         (:meth:`_watch_for_machine`) polls for the machine's key and carries
         the push when it appears; after the watch ends, a later resolver change
-        does (:meth:`_collect_hosts_whose_machine_appeared`). A carry held
-        over one already held for the host -- scheduled between this worker's
-        claim and its hold, when :meth:`_schedule_push` found nothing to fold
-        it into -- is folded into it here, as it would have been there.
+        does (:meth:`_collect_hosts_whose_machine_appeared`). A host that is
+        down, or that this session's discovery has not reported yet, keeps its
+        change held the same way, for the resolver change that reports it up.
+        A carry held over one already held for the host --
+        scheduled between this worker's claim and its hold, when
+        :meth:`_schedule_push` found nothing to fold it into -- is folded into
+        it here, as it would have been there.
 
         A machine that cannot be read, or will not take a push, is logged as
         an error and not retried here. There is no user waiting on a reconcile
@@ -593,22 +638,36 @@ class LatchkeyAutoRegister(MutableModel):
         once the machine is reachable).
         """
         while (pending := self._claim_pending_push(host_id)) is not None:
-            if not self._has_machine(host_id):
-                with self._push_lock:
-                    self._hosts_awaiting_machine[host_id] = _folded_carries(
-                        (self._hosts_awaiting_machine.get(host_id),), pending
-                    )
-                    is_watch_needed = host_id not in self._hosts_watched_for_machine
-                    if is_watch_needed:
-                        self._hosts_watched_for_machine.add(host_id)
-                logger.debug(
-                    "Holding the latchkey permissions push for host {} until it has a machine to carry them to",
-                    host_id,
-                )
-                if is_watch_needed:
-                    self._start_machine_watch(host_id)
-                continue
-            self._carry_pinned_agents_to_machine(host_id, pending)
+            if self._is_machine_there_to_carry_to(host_id):
+                self._carry_pinned_agents_to_machine(host_id, pending)
+            else:
+                self._hold_carry(host_id, pending)
+
+    def _hold_carry(self, host_id: HostId, pending: _PendingCarry) -> None:
+        """Hold ``pending`` until ``host_id`` has a machine to carry it to, folding it into a carry already held.
+
+        Only a missing machine key gets a watch: nothing tells the resolver
+        when one is recorded, whereas a host coming up, or this session's
+        first report of it, is a resolver change. That change may have fired
+        just before the hold, when it found nothing held, so the host is
+        looked at once more after it.
+        """
+        is_machine_key_missing = not self._has_machine(host_id)
+        with self._push_lock:
+            self._hosts_awaiting_machine[host_id] = _folded_carries(
+                (self._hosts_awaiting_machine.get(host_id),), pending
+            )
+            is_watch_needed = is_machine_key_missing and host_id not in self._hosts_watched_for_machine
+            if is_watch_needed:
+                self._hosts_watched_for_machine.add(host_id)
+        logger.debug(
+            "Holding the latchkey permissions push for host {} until it has a machine to carry them to",
+            host_id,
+        )
+        if is_watch_needed:
+            self._start_machine_watch(host_id)
+        if self._is_machine_there_to_carry_to(host_id):
+            self._carry_held(host_id)
 
     def _carry_pinned_agents_to_machine(self, host_id: HostId, pending: _PendingCarry) -> None:
         """Read the machine's policy, pin the registered agents again on it, and push the result.
@@ -633,10 +692,12 @@ class LatchkeyAutoRegister(MutableModel):
         except MachineOperationError as e:
             logger.error(
                 "Failed to push the latchkey permissions of host {} to its machine (addressed by agent {}); "
-                "the change to the registered agents will be lost when the machine is next read: {}",
+                "the change to the registered agents will be lost when the machine is next read: {} "
+                "[discovery reports the host as {}]",
                 host_id,
                 pending.address_agent_id,
                 e,
+                self.backend_resolver.get_host_state(host_id),
             )
 
     def _pin_on_the_machines_policy(self, host_id: HostId, pending: _PendingCarry) -> bool | None:
@@ -661,10 +722,12 @@ class LatchkeyAutoRegister(MutableModel):
             except MachineOperationError as e:
                 logger.error(
                     "Failed to read the latchkey permissions of host {} from its machine (addressed by agent {}) "
-                    "before pushing the registered agents; the change will be lost when the machine is next read: {}",
+                    "before pushing the registered agents; the change will be lost when the machine is next read: {} "
+                    "[discovery reports the host as {}]",
                     host_id,
                     address,
                     e,
+                    self.backend_resolver.get_host_state(host_id),
                 )
                 return None
             with self._lock:
@@ -720,7 +783,8 @@ class LatchkeyAutoRegister(MutableModel):
                 self._hosts_watched_for_machine.discard(host_id)
 
     def _watch_for_machine(self, host_id: HostId) -> None:
-        """Poll for ``host_id``'s machine key while its push is held, and carry the push once the key is there.
+        """Poll for ``host_id``'s machine key while its push is held, and carry the push once the key is there
+        and the host is known to be up.
 
         The watch is bounded by ``machine_watch_seconds``: the provisioning pass
         that records the key runs seconds after the host file lands, and a host
@@ -736,7 +800,7 @@ class LatchkeyAutoRegister(MutableModel):
         """
         deadline = time.monotonic() + self.machine_watch_seconds
         while self._is_held_after_a_poll(host_id, deadline):
-            if self._has_machine(host_id):
+            if self._is_machine_there_to_carry_to(host_id):
                 logger.debug(
                     "Carrying the held latchkey permissions push for host {}: its machine key appeared", host_id
                 )

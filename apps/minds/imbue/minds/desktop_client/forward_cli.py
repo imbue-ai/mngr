@@ -539,6 +539,10 @@ class EnvelopeStreamConsumer(MutableModel):
     # (it carries no agent/host membership), so it is tracked here and joined onto
     # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    # The providers a clean snapshot finished since this consumer came up has
+    # reported: their hosts' states are this session's, not events-file replay.
+    # Guarded by ``_lock``.
+    _provider_names_reported_this_session: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
     # The same event carries the host's published endpoints; tracked beside the SSH info.
     _published_endpoints_by_host_id: dict[str, tuple[PublishedEndpoint, ...]] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
@@ -971,6 +975,9 @@ class EnvelopeStreamConsumer(MutableModel):
                 # leased, perfectly healthy staging host whose provider had been failing for
                 # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
                 is_snapshot_state_current = True
+                if event.error is None and event.discovery_finished_at >= self.started_at:
+                    with self._lock:
+                        self._provider_names_reported_this_session.add(event.provider_name)
                 if event.discovery_finished_at < self.started_at:
                     if error is not None:
                         self._pre_start_drop_logger.record_dropped_error(
@@ -1112,6 +1119,7 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             ssh_by_host_id = dict(self._ssh_by_host_id)
             published_endpoints_by_host_id = dict(self._published_endpoints_by_host_id)
+            provider_names_reported_this_session = frozenset(self._provider_names_reported_this_session)
         ssh_info_by_agent_id = {
             str(agent.agent_id): ssh_by_host_id[str(agent.host_id)]
             for agent in agents
@@ -1133,6 +1141,9 @@ class EnvelopeStreamConsumer(MutableModel):
             discovered_agents=tuple(agents),
             ssh_info_by_agent_id=ssh_info_by_agent_id,
             host_state_by_host_id=host_state_by_host_id,
+            host_ids_reported_this_session=frozenset(
+                str(host.host_id) for host in hosts if host.provider_name in provider_names_reported_this_session
+            ),
             host_name_by_host_id=host_name_by_host_id,
             host_size_by_host_id=host_size_by_host_id,
             published_endpoints_by_agent_id=published_endpoints_by_agent_id,

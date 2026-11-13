@@ -780,7 +780,13 @@ agents discovery lists on the host, in one write
 pin is carried to the workspace's machine like a registration: the machine's
 policy is read back and adopted first, the list is pinned again on that
 fresh copy, and the result is pushed (see "Per-machine credentials" below
-for why the read comes first). Adding is immediate; dropping waits. A
+for why the read comes first). A workspace discovery reports as not running
+(stopped, starting, crashed) has no machine to open, so the carry for it is
+held and goes out once it is reported running. A carry also waits for the
+first snapshot of the workspace's provider taken since the app started: until
+then discovery only replays what it saw when the app last ran, in which a
+workspace that has stopped since still reads as running. Adding is immediate;
+dropping waits. A
 listing that includes a host's `system-services` agent is a complete
 enumeration of the host (the criterion the resolver's last-good topology
 uses), and only a complete listing can say an agent is gone; one without it
