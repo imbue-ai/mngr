@@ -637,6 +637,12 @@ def registration_login_url(registration: Mapping[str, JsonValue]) -> str | None:
     return login_url if isinstance(login_url, str) else None
 
 
+def is_mcp_login_registration(registration: Mapping[str, JsonValue]) -> bool:
+    """Whether a registration signs in through latchkey's ``mcp`` login flow."""
+    login_flow = registration.get("loginFlow")
+    return isinstance(login_flow, dict) and login_flow.get("name") == LoginFlow.MCP
+
+
 def registration_credential_header(registration: Mapping[str, JsonValue]) -> str | None:
     """Return the header a registration sends a pasted token as, or ``None`` when it names none.
 

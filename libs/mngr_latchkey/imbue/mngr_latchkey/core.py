@@ -63,6 +63,7 @@ from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogErr
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
+from imbue.mngr_latchkey.custom_services import is_mcp_login_registration
 from imbue.mngr_latchkey.custom_services import readable_custom_service_entries
 from imbue.mngr_latchkey.custom_services import without_custom_service_entries
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
@@ -186,12 +187,12 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # It moves in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template). The newest release with a
-# hard dependency here is 3.22.0, the first to know the ``mcp`` login flow a
-# custom service may register (:class:`imbue.mngr_latchkey.custom_services.LoginFlow`);
-# 3.23.0's ``--system`` sign-in is only requested for a service whose
-# ``services info`` reports the capability, so an older CLI would merely never
-# be asked for it.
-LATCHKEY_MIN_VERSION: Final[str] = "3.23.1"
+# hard dependency here is 3.24.0, the first to accept an ``auth prepare`` for a
+# registered service with the ``mcp`` login flow, which is how the sign-in to
+# such a custom service has its redirect URI pinned
+# (:data:`MINDS_OAUTH_REDIRECT_URI`); an older CLI refuses the preparation, and
+# with it the sign-in.
+LATCHKEY_MIN_VERSION: Final[str] = "3.24.0"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
@@ -371,19 +372,21 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
-# Services whose OAuth client is registered dynamically at sign-in (no client
-# of ours to hand over), but whose sign-in must land on a redirect page Imbue
-# Studio hosts rather than latchkey's loopback callback. Registered for the
-# service via ``latchkey auth prepare <service> '{"redirectUri": ...}'``
-# (latchkey >= 3.15) right before the sign-in that would register the client;
-# the page forwards the authorization result to the loopback port latchkey
-# encodes in ``state``.
-MINDS_OAUTH_REDIRECT_URI_BY_SERVICE: Final[Mapping[str, str]] = {
-    # This leads to a page that forwards the OAuth callback to the loopback port latchkey encodes in ``state``.
-    # That way the user doesn't get to see the scary-looking localhost URL.
-    # The page is updated from here: https://github.com/imbue-ai/oauth-callback.
-    "notion-mcp": "https://imbue-ai.github.io/oauth-callback/",
-}
+# The redirect page Imbue Studio hosts for an MCP server's OAuth sign-in
+# (:func:`is_mcp_oauth_service`). Such a service registers its OAuth client
+# dynamically at sign-in (no client of ours to hand over), and would send the
+# user back through latchkey's loopback callback, a scary-looking localhost URL
+# on the consent screen. Pinned for the service via ``latchkey auth prepare
+# <service> '{"redirectUri": ...}'`` right before the sign-in that would
+# register the client; the page forwards the authorization result to the
+# loopback port latchkey encodes in ``state``. It is updated from
+# https://github.com/imbue-ai/oauth-callback.
+MINDS_OAUTH_REDIRECT_URI: Final[str] = "https://imbue-ai.github.io/oauth-callback/"
+
+# How latchkey names its builtin services that are remote MCP servers, every
+# one of which signs in through the same OAuth flow with dynamic client
+# registration.
+_BUILTIN_MCP_SERVICE_NAME_SUFFIX: Final[str] = "-mcp"
 
 
 class EncryptedCredentialStore(FrozenModel):
@@ -912,6 +915,20 @@ def read_registered_services(latchkey_directory: Path) -> dict[str, JsonValue]:
         logger.debug("No latchkey config to read custom services from at {}: {}", config_path, e)
         return {}
     return registered_services_from_config_text(raw, str(config_path))
+
+
+def is_mcp_oauth_service(service_name: str, registered_services: Mapping[str, JsonValue]) -> bool:
+    """Whether ``service_name`` signs in through an MCP server's OAuth flow, registering its client at sign-in.
+
+    ``registered_services`` is the ``registeredServices`` block of the latchkey
+    directory the sign-in runs against. A service registered there (a custom
+    one included) is decided by the login flow its entry names; any other
+    service is a builtin, decided by how latchkey names its remote MCP servers.
+    """
+    registration = registered_services.get(service_name)
+    if isinstance(registration, dict):
+        return is_mcp_login_registration(registration)
+    return service_name.endswith(_BUILTIN_MCP_SERVICE_NAME_SUFFIX)
 
 
 def custom_service_registration_entries(latchkey_directory: Path) -> dict[str, JsonValue]:
@@ -2199,9 +2216,11 @@ class Latchkey(MutableModel):
         so a fresh account is never bound to the client/session an existing
         account already left behind.
 
-        A service in :data:`MINDS_OAUTH_REDIRECT_URI_BY_SERVICE` needs no client
-        of ours but does need the redirect URI Imbue Studio hosts in place before
-        the sign-in registers a client, so that is pinned first (via
+        An MCP server's OAuth sign-in (:func:`is_mcp_oauth_service`: a builtin
+        MCP service, or a custom service registered with the ``mcp`` login
+        flow) needs no client of ours but does need the redirect URI Imbue
+        Studio hosts (:data:`MINDS_OAUTH_REDIRECT_URI`) in place before the
+        sign-in registers a client, so that is pinned first (via
         :meth:`auth_prepare_redirect_uri`) whenever the sign-in draws on the
         service-level preparation -- that is, unless ``account`` names a stored
         account, whose own stored client and redirect URI latchkey reuses
@@ -2209,10 +2228,9 @@ class Latchkey(MutableModel):
         exactly what the pin exists to avoid.
         """
         _require_browser_modes_compatible(is_ephemeral=is_ephemeral, is_system_browser=is_system_browser)
-        minds_redirect_uri = MINDS_OAUTH_REDIRECT_URI_BY_SERVICE.get(service_name)
-        if minds_redirect_uri is not None and account is None:
+        if account is None and is_mcp_oauth_service(service_name, read_registered_services(self.latchkey_directory)):
             is_redirect_prepared, redirect_prepare_detail = self.auth_prepare_redirect_uri(
-                service_name, minds_redirect_uri
+                service_name, MINDS_OAUTH_REDIRECT_URI
             )
             if not is_redirect_prepared:
                 return False, redirect_prepare_detail
@@ -2331,11 +2349,11 @@ class Latchkey(MutableModel):
     def auth_prepare_redirect_uri(self, service_name: str, redirect_uri: str) -> tuple[bool, str]:
         """Pin the redirect URI a service's next dynamic client registration uses, via ``latchkey auth prepare``.
 
-        Runs ``latchkey auth prepare <service> '{"redirectUri":...}'`` (latchkey
-        >= 3.15) so a subsequent :meth:`auth_browser_login` registers its OAuth
-        client with, and sends the user back through, that page instead of
-        latchkey's loopback callback. Stores nothing but the preparation: no
-        browser, no network. Returns ``(True, "")`` on a clean exit, otherwise
+        Runs ``latchkey auth prepare <service> '{"redirectUri":...}'`` so a
+        subsequent :meth:`auth_browser_login` registers its OAuth client with,
+        and sends the user back through, that page instead of latchkey's
+        loopback callback. Stores nothing but the preparation: no browser, no
+        network. Returns ``(True, "")`` on a clean exit, otherwise
         ``(False, detail)``.
         """
         return self._auth_prepare_with_payload(service_name, {"redirectUri": redirect_uri})

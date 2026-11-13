@@ -20,6 +20,7 @@ import pytest
 from loguru import logger
 from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 from pyinfra.api.exceptions import ConnectError
@@ -69,7 +70,7 @@ from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
-from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
+from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINES
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS
 from imbue.mngr_latchkey.core import _GatewayOutputTail
@@ -78,9 +79,14 @@ from imbue.mngr_latchkey.core import _allocate_free_port
 from imbue.mngr_latchkey.core import _describe_port_bindability
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import _terminate_and_diagnose_unbound_gateway
+from imbue.mngr_latchkey.core import is_mcp_oauth_service
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import parse_coded_latchkey_failure
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
+from imbue.mngr_latchkey.core import write_custom_service_registration
+from imbue.mngr_latchkey.custom_services import LoginFlow
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
@@ -4146,14 +4152,76 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
-# The exact ``auth prepare`` invocation that pins the redirect URI Imbue Studio hosts
-# for Notion MCP before a sign-in registers its OAuth client.
-_NOTION_MCP_REDIRECT_PREPARE_ARGV = [
-    "auth",
-    "prepare",
-    "notion-mcp",
-    json.dumps({"redirectUri": MINDS_OAUTH_REDIRECT_URI_BY_SERVICE["notion-mcp"]}),
-]
+def _redirect_prepare_argv(service_name: str) -> list[str]:
+    """The exact ``auth prepare`` invocation that pins the redirect URI Imbue Studio hosts for a service."""
+    return ["auth", "prepare", service_name, json.dumps({"redirectUri": MINDS_OAUTH_REDIRECT_URI})]
+
+
+_NOTION_MCP_REDIRECT_PREPARE_ARGV = _redirect_prepare_argv("notion-mcp")
+
+_CUSTOM_SERVICE_NAME = custom_service_name("mcp.example.com", "https")
+
+_MCP_LOGIN_FLOW_PARAMS: dict[str, JsonValue] = {
+    "mcpEndpoint": "https://mcp.example.com/mcp",
+    "tokenEndpoint": "https://mcp.example.com/token",
+    "registrationEndpoint": "https://mcp.example.com/register",
+}
+
+_COOKIE_CAPTURE_LOGIN_FLOW_PARAMS: dict[str, JsonValue] = {"cookieKeys": ["session"]}
+
+
+def _build_custom_service_registration_with_login(
+    login_flow: LoginFlow, params: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """The registration of a custom service on ``mcp.example.com`` that signs in through ``login_flow``."""
+    return build_custom_service_registration(
+        "mcp.example.com",
+        "https",
+        login_url="https://mcp.example.com/authorize",
+        login_flow=login_flow,
+        login_flow_params=params,
+    )
+
+
+def _register_custom_service_with_login(tmp_path: Path, login_flow: LoginFlow, params: dict[str, JsonValue]) -> str:
+    """Register a custom service on ``mcp.example.com`` that signs in through ``login_flow``, and return its name."""
+    registration = _build_custom_service_registration_with_login(login_flow, params)
+    write_custom_service_registration(tmp_path, _CUSTOM_SERVICE_NAME, registration)
+    return _CUSTOM_SERVICE_NAME
+
+
+@pytest.mark.parametrize(
+    "service_name,is_expected_mcp",
+    [
+        ("notion-mcp", True),
+        ("airtable-mcp", True),
+        ("notion", False),
+        ("slack", False),
+        ("google-gmail", False),
+        ("dropbox", False),
+    ],
+)
+def test_is_mcp_oauth_service_recognizes_a_builtin_mcp_service_by_its_name(
+    service_name: str, is_expected_mcp: bool
+) -> None:
+    assert is_mcp_oauth_service(service_name, {}) is is_expected_mcp
+
+
+def test_is_mcp_oauth_service_goes_by_the_login_flow_of_a_registered_service() -> None:
+    token_service_name = custom_service_name("token.example.com", "https")
+    registered_services: dict[str, JsonValue] = {
+        _CUSTOM_SERVICE_NAME: _build_custom_service_registration_with_login(LoginFlow.MCP, _MCP_LOGIN_FLOW_PARAMS),
+        # Named like a builtin MCP service, but its own login flow is what counts.
+        "my-mcp": _build_custom_service_registration_with_login(
+            LoginFlow.COOKIE_CAPTURE, _COOKIE_CAPTURE_LOGIN_FLOW_PARAMS
+        ),
+        token_service_name: build_custom_service_registration("token.example.com", "https"),
+    }
+
+    assert is_mcp_oauth_service(_CUSTOM_SERVICE_NAME, registered_services) is True
+    assert is_mcp_oauth_service("my-mcp", registered_services) is False
+    assert is_mcp_oauth_service(token_service_name, registered_services) is False
+    assert is_mcp_oauth_service("notion-mcp", registered_services) is True
 
 
 def test_auth_prepare_redirect_uri_invokes_prepare_with_redirect_payload(tmp_path: Path) -> None:
@@ -4224,6 +4292,51 @@ def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_p
     # Only the browser flows run from a fresh session; pinning the redirect
     # URI opens no browser.
     assert [record["env_ephemeral"] for record in records] == ["", "1", "1"]
+
+
+def test_auth_browser_pins_minds_redirect_uri_for_any_builtin_mcp_service(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("airtable-mcp", is_system_browser=True)
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_argv_calls(tmp_path) == [
+        _redirect_prepare_argv("airtable-mcp"),
+        ["auth", "browser", "airtable-mcp", "--strict", "--system"],
+    ]
+
+
+def test_auth_browser_pins_minds_redirect_uri_for_a_custom_service_with_the_mcp_login_flow(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    service_name = _register_custom_service_with_login(tmp_path, LoginFlow.MCP, _MCP_LOGIN_FLOW_PARAMS)
+
+    is_success, detail = latchkey.auth_browser(service_name, is_system_browser=True)
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_argv_calls(tmp_path) == [
+        _redirect_prepare_argv(service_name),
+        ["auth", "browser", service_name, "--strict", "--system"],
+    ]
+
+
+def test_auth_browser_does_not_pin_a_redirect_uri_for_a_custom_service_with_a_capture_login_flow(
+    tmp_path: Path,
+) -> None:
+    """Latchkey refuses a preparation for the capture flows, which involve no OAuth redirect at all."""
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    service_name = _register_custom_service_with_login(
+        tmp_path, LoginFlow.COOKIE_CAPTURE, _COOKIE_CAPTURE_LOGIN_FLOW_PARAMS
+    )
+
+    is_success, _detail = latchkey.auth_browser(service_name)
+
+    assert is_success is True
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", service_name, "--strict"]]
 
 
 def test_import_chrome_browser_state_reports_a_clean_exit_as_success(tmp_path: Path) -> None:

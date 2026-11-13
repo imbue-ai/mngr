@@ -21,7 +21,7 @@
     "@todesktop/runtime": "^2.1.4",
     "builder-util-runtime": "9.7.0",
     "electron-updater": "6.8.9",
-    "latchkey": "^3.23.1",
+    "latchkey": "^3.24.0",
     "semver": "^7.6.3",
     "smol-toml": "^1.9.1"
   },

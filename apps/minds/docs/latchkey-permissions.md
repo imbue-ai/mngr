@@ -126,11 +126,13 @@ second gateway URL or a different agent skill.
       a `google-*` service is signed in against the OAuth client Imbue Studio
       provides (and only that one: it is never self-set-up through
       `browser-prepare`, so a sign-in that fails against it is reported as-is
-      rather than followed by a second browser flow), and Notion MCP, which
-      registers its OAuth client at sign-in, first has its redirect URI
-      pinned to the callback page Imbue Studio hosts (`latchkey auth prepare
-      notion-mcp '{"redirectUri": ...}'`, latchkey >= 3.15) so the sign-in
-      returns through that page rather than latchkey's loopback callback.
+      rather than followed by a second browser flow), and an MCP server's
+      OAuth sign-in (every builtin `*-mcp` service, and a custom service
+      registered with the `mcp` login flow), which registers its OAuth client
+      at sign-in, first has its redirect URI pinned to the callback page
+      Imbue Studio hosts (`latchkey auth prepare <service> '{"redirectUri":
+      ...}'`, latchkey >= 3.24 for a custom service) so the consent screen
+      names that page rather than latchkey's loopback callback.
       The pin only applies to a sign-in that draws on the service-level
       preparation; re-signing in to a stored account reuses that account's
       own client and redirect URI.
