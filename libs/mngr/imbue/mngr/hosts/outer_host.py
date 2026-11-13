@@ -66,12 +66,14 @@ from tenacity import stop_after_delay
 from tenacity import wait_chain
 from tenacity import wait_fixed
 
+from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import CommandStartError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
@@ -87,6 +89,19 @@ from imbue.mngr.utils.command_logging import withheld_command_label
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS
+
+
+@contextmanager
+def _raise_local_spawn_failure_as_command_start_error(command: str) -> Generator[None, None, None]:
+    """Turn a local process that could not be spawned (e.g. its argv holds a NUL byte) into a ``CommandStartError``.
+
+    The concurrency group reports a failed spawn as ``ProcessSetupError``, which is not a ``MngrError``,
+    so it would escape every caller that handles a host's failures as one.
+    """
+    try:
+        yield
+    except ProcessSetupError as e:
+        raise CommandStartError(f"Could not start command ({e.stderr}): {loggable_command(command)}") from e
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
@@ -1015,19 +1030,23 @@ class OuterHost(OuterHostInterface):
         so opt-in callers can treat a timeout as a hard failure uniformly across
         backends. Left off by default because most callers want a timeout to look
         like any other failed command (``success=False``).
+
+        A command that cannot be started at all raises ``CommandStartError`` rather
+        than reporting a failed result, so "never ran" is not mistaken for "ran and failed".
         """
         full_env: dict[str, str] | None = None
         if _env is not None:
             full_env = {**os.environ, **_env}
         cwd_path = Path(_chdir) if _chdir is not None else None
-        finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            [_shell_executable, "-c", command.get_raw_value()],
-            timeout=float(_timeout) if _timeout is not None else None,
-            is_checked_after=False,
-            cwd=cwd_path,
-            env=full_env,
-            name=withheld_command_label(command.get_raw_value()),
-        )
+        with _raise_local_spawn_failure_as_command_start_error(command.get_raw_value()):
+            finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
+                [_shell_executable, "-c", command.get_raw_value()],
+                timeout=float(_timeout) if _timeout is not None else None,
+                is_checked_after=False,
+                cwd=cwd_path,
+                env=full_env,
+                name=withheld_command_label(command.get_raw_value()),
+            )
         if _raise_on_timeout and finished.is_timed_out:
             # check() inspects is_timed_out before the return code, so this raises
             # ProcessTimeoutError (not a plain ProcessError) for the timeout case.
@@ -1390,15 +1409,16 @@ class OuterHost(OuterHostInterface):
         if env is not None:
             full_env = {**os.environ, **env}
         accumulator = _StreamingOutputAccumulator(on_output=on_output)
-        finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["sh", "-c", command],
-            timeout=timeout_seconds,
-            is_checked_after=False,
-            cwd=cwd,
-            env=full_env,
-            on_output=accumulator,
-            name=withheld_command_label(command),
-        )
+        with _raise_local_spawn_failure_as_command_start_error(command):
+            finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
+                ["sh", "-c", command],
+                timeout=timeout_seconds,
+                is_checked_after=False,
+                cwd=cwd,
+                env=full_env,
+                on_output=accumulator,
+                name=withheld_command_label(command),
+            )
         return CommandResult(
             stdout=accumulator.stdout,
             stderr=accumulator.stderr,

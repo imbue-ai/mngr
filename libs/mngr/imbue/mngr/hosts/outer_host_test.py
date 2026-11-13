@@ -29,6 +29,7 @@ from pyinfra.connectors.util import CommandOutput
 
 from imbue.imbue_common.profiling import drain_events
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import CommandStartError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
@@ -456,6 +457,19 @@ def test_outer_host_stateful_without_on_output_still_returns_result(local_outer_
     result = local_outer_host.execute_stateful_command("echo hello-buffered")
     assert result.success
     assert "hello-buffered" in result.stdout
+
+
+@pytest.mark.parametrize("is_streamed", [False, True], ids=["buffered", "streamed"])
+def test_outer_host_raises_command_start_error_for_a_local_command_that_cannot_start(
+    local_outer_host: OuterHost, is_streamed: bool
+) -> None:
+    """A NUL byte cannot be passed in a process's arguments, so the shell is never spawned."""
+    command = "echo before-61027\0after"
+    with pytest.raises(CommandStartError, match="embedded null byte"):
+        if is_streamed:
+            local_outer_host.execute_streaming_command(command, lambda _line: None)
+        else:
+            local_outer_host.execute_idempotent_command(command)
 
 
 def test_outer_host_stateful_command_runs_inside_a_host_exec_span(

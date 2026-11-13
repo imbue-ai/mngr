@@ -885,12 +885,25 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         with self._message_lock():
             self._send_message_holding_lock(message)
 
+    def _refuse_message_containing_nul(self, message: str) -> None:
+        """Refuse a message holding a NUL character, before anything touches the pane.
+
+        NUL cannot be typed into a terminal, nor carried in the command line that types the text.
+        Every ``_send_message_holding_lock`` calls this first, since callers that take the lock
+        themselves enter there rather than through ``send_message``.
+        """
+        if "\0" in message:
+            raise SendMessageError(
+                str(self.name), "the message contains a NUL character, which cannot be typed into the agent's terminal"
+            )
+
     def _send_message_holding_lock(self, message: str) -> None:
         """Deliver a message; the caller must already hold the message lock.
 
         Separate from ``send_message`` so a caller can take the lock itself, to bound the wait or
         to re-check the agent before sending.
         """
+        self._refuse_message_containing_nul(message)
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
             target_arg = self._send_target_arg(self.tmux_target)
             self._preflight_send_message(target_arg)

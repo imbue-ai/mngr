@@ -229,6 +229,15 @@ def test_send_message_refuses_blank_message_without_touching_the_pane(blank_mess
     assert cast(ScriptedHost, agent.host).sent_commands == []
 
 
+def test_a_caller_holding_the_message_lock_cannot_send_a_message_containing_nul() -> None:
+    """Compaction takes the lock itself and enters here rather than through ``send_message``."""
+    agent = _make_recording_agent("probe-banner")
+    with pytest.raises(SendMessageError, match="NUL character"):
+        agent._send_message_holding_lock("/compact keep\0this")
+    assert agent.steps == []
+    assert cast(ScriptedHost, agent.host).captured == []
+
+
 _UNCONFIRMED_WINDOW: Final[CommandResult] = CommandResult(
     stdout="MNGR_UNCONFIRMED\nMNGR_PROBE never base=[] final=[]\n", stderr="", success=False
 )

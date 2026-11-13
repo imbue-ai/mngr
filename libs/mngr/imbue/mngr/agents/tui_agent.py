@@ -238,6 +238,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         and often leave no observable evidence, so an unconfirmed send logs a
         warning and records an agent event instead of failing.
         """
+        self._refuse_message_containing_nul(message)
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
             # A TUI ignores Enter on an empty input box, so a blank message leaves no evidence
             # and would otherwise poll out the whole confirmation window before failing.

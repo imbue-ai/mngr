@@ -42,6 +42,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -208,6 +209,45 @@ def test_send_message_to_agents_fails_for_stopped_agent(
     assert result.failed_agents[0][0] == "stopped-test"
     assert "not running" in result.failed_agents[0][1]
     assert "STOPPED" in result.failed_agents[0][1]
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize("message_length", [64, LONG_MESSAGE_THRESHOLD + 64], ids=["send-keys", "paste-buffer"])
+def test_send_message_to_agents_records_a_message_containing_nul_as_failed_without_typing_it(
+    message_length: int,
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    agent = host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("nul-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847291"),
+        ),
+    )
+    host.start_agents([agent.id])
+    marker = f"marker-{uuid4().hex}"
+    message = f"{marker}\0" + "x" * (message_length - len(marker) - 1)
+    matches = find_all_agents(addresses=(), filter_all=True, target_state=None, mngr_ctx=temp_mngr_ctx)
+
+    result = send_message_to_agents(
+        mngr_ctx=temp_mngr_ctx,
+        message_content=message,
+        agents_to_message=matches,
+        error_behavior=ErrorBehavior.CONTINUE,
+    )
+    pane_content = agent.capture_pane_content() or ""
+    host.destroy_agent(agent)
+
+    assert result.successful_agents == []
+    assert len(result.failed_agents) == 1
+    assert result.failed_agents[0][0] == "nul-test"
+    assert "NUL character" in result.failed_agents[0][1]
+    assert marker not in pane_content
 
 
 @pytest.mark.tmux

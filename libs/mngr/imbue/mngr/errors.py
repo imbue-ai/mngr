@@ -195,6 +195,10 @@ class CommandTimeoutError(HostError):
     """Raised when a command execution times out."""
 
 
+class CommandStartError(HostError):
+    """Raised when a command could not be started at all, as opposed to running and failing."""
+
+
 class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
