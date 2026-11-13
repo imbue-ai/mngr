@@ -12,6 +12,7 @@ import {
   sharePanelOptions,
   withAttr,
 } from "../../../testing";
+import type { RequestResult, ResponseBody } from "../../../models/errors";
 import { createAppQueryClient } from "../../../models/queryClient";
 import type {
   MachineSharingResponse,
@@ -276,7 +277,7 @@ describe("ShareTab publish widget", () => {
   });
 
   /** A loaded panel whose publish the backend refuses with `body`. */
-  async function refusingPanel(status: number, body: unknown): Promise<SharePanelModel> {
+  async function refusingPanel(status: number, body: ResponseBody): Promise<SharePanelModel> {
     const share = await readyPanel(
       {},
       {
@@ -1980,11 +1981,7 @@ describe("ShareTab invitations", () => {
   interface InvitationFixture {
     outcomes?: unknown[];
     isSynced?: boolean;
-    respondToInvite?: () => Promise<{
-      ok: boolean;
-      status: number;
-      body: unknown;
-    }>;
+    respondToInvite?: () => Promise<RequestResult>;
   }
 
   /** A published, synced panel over one address, one account and one domain,
@@ -2207,11 +2204,7 @@ describe("ShareTab invitations", () => {
   });
 
   it("shows the row inviting with no button, then the refusal in its words and a re-invite", async () => {
-    let answer: (result: {
-      ok: boolean;
-      status: number;
-      body: unknown;
-    }) => void = () => undefined;
+    let answer: (result: RequestResult) => void = () => undefined;
     const { share } = await invitationPanel({
       respondToInvite: () =>
         new Promise((resolve) => {

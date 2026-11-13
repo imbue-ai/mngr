@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { settle } from "../testing";
+import { failedResult, settle } from "../testing";
+import {
+  errorCodeFromBody,
+  errorFromSentenceResponse,
+  errorMessageFromBody,
+  reasonFromBody,
+} from "./errors";
+import type { RequestResult } from "./errors";
 import {
   WorkspaceOptionsModel,
   colorErrorMessageFor,
   defaultFetchJson,
-  errorMessageFromBody,
   formatPendingMachineSize,
   machineSizeChangeBody,
   machineSizeDraftError,
@@ -17,6 +23,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** A response body whose stream fails on read, as a connection reset mid-body does. */
+function brokenBody(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.error(new TypeError("network error"));
+    },
+  });
+}
+
 describe("defaultFetchJson", () => {
   it("resolves with a status-0 error body on network failure instead of rejecting", async () => {
     vi.stubGlobal(
@@ -26,13 +41,91 @@ describe("defaultFetchJson", () => {
       }),
     );
 
-    const result = await defaultFetchJson("/api/v1/anything");
+    const result = failedResult(await defaultFetchJson("/api/v1/anything"));
 
-    expect(result.ok).toBe(false);
     expect(result.status).toBe(0);
     expect(errorMessageFromBody(result.body, "fallback")).toBe(
       "Could not reach the app server.",
     );
+  });
+
+  it("resolves status 0 when a success's body breaks off, so no caller takes it for data", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(brokenBody(), { status: 200 })),
+    );
+
+    const result = failedResult(await defaultFetchJson("/api/v1/anything"));
+
+    expect(result.status).toBe(0);
+    expect(errorMessageFromBody(result.body, "fallback")).toBe(
+      "Could not reach the app server.",
+    );
+  });
+
+  it("keeps a refusal's status when its body breaks off", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(brokenBody(), { status: 500 })),
+    );
+
+    const result = failedResult(await defaultFetchJson("/api/v1/anything"));
+
+    expect(result.status).toBe(500);
+    expect(result.body).toBeNull();
+  });
+
+  it("keeps a non-JSON body's text as the reason the settings surfaces show", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Bad Gateway", { status: 502 })),
+    );
+
+    const result = failedResult(await defaultFetchJson("/api/v1/anything"));
+
+    expect(result.status).toBe(502);
+    expect(errorMessageFromBody(result.body, "fallback")).toBe("Bad Gateway");
+  });
+
+  it("never shows a non-JSON body as a route's own sentence, keeping it for the details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("Internal Server Error: KeyError('host')", {
+            status: 500,
+          }),
+      ),
+    );
+
+    const result = failedResult(await defaultFetchJson("/api/v1/anything"));
+    const error = errorFromSentenceResponse("Couldn't connect Slack", result);
+
+    expect(error.message).toMatch(/^Couldn't connect Slack\. Try again\./);
+    expect(error.details).toBe(
+      "HTTP 500\nInternal Server Error: KeyError('host')",
+    );
+  });
+
+  it("reads a JSON refusal's reason and code, and neither from a non-JSON body", async () => {
+    const respond = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ reason: "AGENT_GONE", code: "LEASE_ACTIVE" }),
+          { status: 409 },
+        ),
+    );
+    vi.stubGlobal("fetch", respond);
+    const refusal = failedResult(await defaultFetchJson("/api/v1/anything"));
+    respond.mockImplementation(
+      async () => new Response("Bad Gateway", { status: 502 }),
+    );
+    const proxyPage = failedResult(await defaultFetchJson("/api/v1/anything"));
+
+    expect(reasonFromBody(refusal.body)).toBe("AGENT_GONE");
+    expect(errorCodeFromBody(refusal.body)).toBe("LEASE_ACTIVE");
+    expect(reasonFromBody(proxyPage.body)).toBeNull();
+    expect(errorCodeFromBody(proxyPage.body)).toBeNull();
   });
 });
 
@@ -45,10 +138,7 @@ interface RecordedRequest {
 }
 
 function makeFetchStub(
-  responder: (
-    url: string,
-    init?: RequestInit,
-  ) => { ok: boolean; status: number; body: unknown },
+  responder: (url: string, init?: RequestInit) => RequestResult,
 ): {
   requests: RecordedRequest[];
   fetchJson: (
@@ -178,7 +268,7 @@ describe("WorkspaceOptionsModel", () => {
   });
 
   describe("color picks during a slow save", () => {
-    type Reply = { ok: boolean; status: number; body: unknown };
+    type Reply = RequestResult;
 
     function makeHeldColorModel(): {
       model: WorkspaceOptionsModel;
@@ -552,7 +642,7 @@ describe("WorkspaceOptionsModel machine size load", () => {
   });
 });
 
-type FetchResult = { ok: boolean; status: number; body: unknown };
+type FetchResult = RequestResult;
 
 /** A model holding `size` (none while it is still to be read), whose requests
  * are recorded and answered by `respond`, and whose re-reads of a restarting

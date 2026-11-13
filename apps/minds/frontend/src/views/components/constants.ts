@@ -14,11 +14,14 @@ export const BTN_BASE =
   "cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
-export type ButtonSize = "md" | "lg" | "icon";
+export type ButtonSize = "xs" | "md" | "lg" | "icon";
 
 // All sizes share the md control radius (rounded-md = 6px); they differ only
-// in padding and (for icon) shape.
+// in padding and (for icon) shape. `xs` is the compact size an error's own
+// buttons sit at inside a notice, where a full-size row would outweigh the
+// sentence it answers.
 export const BTN_SIZES: Record<ButtonSize, string> = {
+  xs: "px-1.5 py-1 rounded-md type-label",
   md: "px-4 py-2 rounded-md type-label",
   lg: "px-4 py-3 rounded-md type-label",
   icon: "p-1.5 rounded-md type-label",

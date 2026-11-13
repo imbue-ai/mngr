@@ -6,6 +6,7 @@ import {
   settle,
   sharePanelOptions,
 } from "../testing";
+import type { RequestResult } from "./errors";
 import { createAppQueryClient } from "./queryClient";
 import type {
   MachineSharingResponse,
@@ -19,11 +20,7 @@ import type { Grant, SharePanelModelOptions } from "./sharePanel";
 
 const WHOLE = "system_interface";
 
-interface FetchResult {
-  ok: boolean;
-  status: number;
-  body: unknown;
-}
+type FetchResult = RequestResult;
 
 interface RecordedRequest {
   url: string;

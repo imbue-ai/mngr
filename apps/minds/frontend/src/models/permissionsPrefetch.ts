@@ -12,14 +12,9 @@
 // read costs that machine a command.
 
 import type { UiWorkspacePermissions } from "../generated/ui";
+import type { RequestResult } from "./errors";
 
-export interface FetchJsonResult {
-  ok: boolean;
-  status: number;
-  body: unknown;
-}
-
-export type FetchJsonLike = (url: string) => Promise<FetchJsonResult>;
+export type FetchJsonLike = (url: string) => Promise<RequestResult>;
 
 /**
  * How long a warm may answer for. The gap it covers is pointing at the key and
@@ -30,7 +25,7 @@ export type FetchJsonLike = (url: string) => Promise<FetchJsonResult>;
 const WARM_TTL_MS = 15_000;
 
 /** One machine's warm: a window shows one panel, so a second warm replaces it. */
-let warmed: { agentId: string; startedAt: number; pending: Promise<FetchJsonResult> } | null = null;
+let warmed: { agentId: string; startedAt: number; pending: Promise<RequestResult> } | null = null;
 
 export function permissionsOverviewUrl(agentId: string): string {
   return `/ui/api/workspaces/${encodeURIComponent(agentId)}/permissions`;
@@ -49,7 +44,7 @@ export function warmPermissionsOverview(agentId: string, fetchJson: FetchJsonLik
 }
 
 /** The warm for `agentId`, or null when there is none live for it. */
-export function readWarmedPermissionsOverview(agentId: string): Promise<FetchJsonResult> | null {
+export function readWarmedPermissionsOverview(agentId: string): Promise<RequestResult> | null {
   if (warmed === null || warmed.agentId !== agentId || isExpired(warmed.startedAt)) return null;
   return warmed.pending;
 }

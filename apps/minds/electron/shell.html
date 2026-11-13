@@ -250,17 +250,50 @@
       min-height: 0;
     }
     body.error #error-view { display: flex; }
-    h1 {
+    /* The takeover is a surface that exists because of the error, so it leads
+       with the mark on its title, as the app's error dialog does. The app
+       draws that mark red; this page has no red that reads on the brown, so
+       it takes the page's ink and knocks the glyph out in the page itself --
+       the same re-inking every other shape in the stack gets. */
+    .error-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .error-title h1 {
       font-size: 24px;
       font-weight: 600;
-      margin-bottom: 12px;
+      margin: 0;
       color: var(--ink);
     }
+    .error-mark {
+      width: 22px;
+      height: 22px;
+      flex-shrink: 0;
+      color: var(--ink);
+    }
+    .error-mark .glyph { fill: var(--ink-inverse, var(--surface)); }
     .message {
       font-size: 14px;
-      color: var(--ink-secondary);
+      color: var(--ink);
       margin-bottom: 24px;
       max-width: 400px;
+    }
+    /* The step the sentence asks for, set apart from the "Try again. If this
+       persists, report a bug." around it; a command it names is set as code. */
+    .message em {
+      font-style: italic;
+      font-weight: 600;
+    }
+    .message code {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 0.92em;
+      font-style: normal;
+      font-weight: 400;
+      background: var(--fill-subtle);
+      border-radius: 4px;
+      padding: 1px 4px;
     }
     .actions {
       display: flex;
@@ -300,17 +333,28 @@
       -webkit-app-region: no-drag;
     }
     .status-row:hover .status { text-decoration: underline; }
+    /* "See details" trails the sentence it belongs to, on that sentence's own
+       baseline, and its chevron turns down when the panel under it opens. */
     .toggle-details {
+      display: inline;
+      white-space: nowrap;
       background: none;
       border: none;
+      padding: 0;
+      font: inherit;
       color: var(--ink-secondary);
-      font-size: 12px;
       cursor: pointer;
-      text-decoration: underline;
-      margin-bottom: 12px;
       -webkit-app-region: no-drag;
     }
     .toggle-details:hover { color: var(--ink); }
+    .toggle-details .chevron {
+      width: 1em;
+      height: 1em;
+      vertical-align: -0.2em;
+      margin-left: 0.15em;
+      transition: transform 150ms;
+    }
+    .toggle-details[aria-expanded="true"] .chevron { transform: rotate(90deg); }
     .details {
       display: none;
       width: 100%;
@@ -325,10 +369,27 @@
       color: var(--ink);
       white-space: pre-wrap;
       word-break: break-all;
+      text-align: left;
       -webkit-app-region: no-drag;
       user-select: text;
     }
     .details.visible { display: block; }
+    /* "View full log" is a developer's way in, so it sits with the details. */
+    #log-row {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    #log-row.visible { display: flex; }
+    #log-open-failure {
+      font-size: 12px;
+      color: var(--ink-secondary);
+      max-width: 600px;
+      word-break: break-all;
+      user-select: text;
+    }
     /* One-shot report outcome (shown when the backend is down and we report the
        on-screen error directly via the main-process Sentry). */
     #report-result {
@@ -376,20 +437,28 @@
       <pre class="details" id="startup-log"></pre>
     </div>
     <div id="error-view">
-    <h1>Something went wrong</h1>
-    <p class="message" id="error-message">Imbue Studio stopped unexpectedly.</p>
-    <div class="actions">
-      <button class="btn-primary" id="retry-btn">Retry</button>
-      <button class="btn-secondary" id="report-btn">Report a bug</button>
-      <button class="btn-secondary" id="log-btn">View full log</button>
-    </div>
-    <div id="report-result">
-      <span id="report-result-text"></span>
-      <code id="report-event-id"></code>
-      <button id="report-copy-btn" type="button">Copy</button>
-    </div>
-      <button class="toggle-details" id="toggle-details-btn">Show details</button>
+      <div class="error-title">
+        <svg class="error-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <rect x="1.73" y="1.73" width="12.54" height="12.54" rx="3"/>
+          <path class="glyph" d="M8.49 9.8C8.72 9.8 8.9 9.98 8.9 10.2V11.05C8.9 11.27 8.72 11.45 8.49 11.45H7.7C7.47 11.45 7.29 11.27 7.29 11.05V10.2C7.29 9.98 7.47 9.8 7.7 9.8H8.49ZM8.26 4.57C8.48 4.55 8.67 4.72 8.68 4.94L8.87 8.19C8.89 8.41 8.72 8.6 8.5 8.61L8.1 8.64L7.7 8.66C7.48 8.67 7.29 8.51 7.28 8.29L7.08 5.04C7.07 4.82 7.24 4.63 7.46 4.62L8.26 4.57Z"/>
+        </svg>
+        <h1>Something went wrong</h1>
+      </div>
+      <p class="message"><span id="error-message">Imbue Studio stopped unexpectedly.</span><span id="details-trigger"> <button class="toggle-details" id="toggle-details-btn" type="button" aria-expanded="false" aria-controls="error-details">See details<svg class="chevron" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.58 3.58C5.81 3.34 6.19 3.34 6.42 3.58L10.42 7.58C10.66 7.81 10.66 8.19 10.42 8.42L6.42 12.42C6.19 12.66 5.81 12.66 5.58 12.42C5.34 12.19 5.34 11.81 5.58 11.58L9.15 8L5.58 4.42C5.34 4.19 5.34 3.81 5.58 3.58Z"/></svg></button></span></p>
       <pre class="details" id="error-details"></pre>
+      <div class="actions" id="log-row">
+        <button class="btn-secondary" id="log-btn">View full log</button>
+        <span id="log-open-failure"></span>
+      </div>
+      <div class="actions">
+        <button class="btn-primary" id="retry-btn">Retry</button>
+        <button class="btn-secondary" id="report-btn">Report a bug</button>
+      </div>
+      <div id="report-result">
+        <span id="report-result-text"></span>
+        <code id="report-event-id"></code>
+        <button id="report-copy-btn" type="button">Copy</button>
+      </div>
     </div>
   </div>
 
@@ -429,6 +498,12 @@
     if (location.hash === '#quitting') {
       document.body.classList.add('quitting');
       statusLine.textContent = 'Quitting…';
+    }
+    // A load with no hash is a loading screen with no film to wait out (the
+    // error takeover comes in on `#error`, and a window that waits only on its
+    // route on `#route`), so its status shows from the start.
+    if (location.hash === '') {
+      document.body.classList.add('loading');
     }
 
     // The intro
@@ -724,14 +799,23 @@
 
     // The error takeover
 
-    // The latest error-details payload (message/details/actionLabel).
+    // The latest error-details payload (message/details).
     var lastErrorData = null;
 
     document.getElementById('retry-btn').addEventListener('click', function() {
       if (window.mindsNative) window.mindsNative.retry();
     });
+    var logOpenFailure = document.getElementById('log-open-failure');
     document.getElementById('log-btn').addEventListener('click', function() {
-      if (window.mindsNative) window.mindsNative.openLogFile();
+      if (!window.mindsNative) return;
+      logOpenFailure.textContent = '';
+      window.mindsNative.openLogFile().then(function(result) {
+        if (result && !result.ok) {
+          logOpenFailure.textContent = "Couldn't open the log. It is saved at: " + result.path;
+        }
+      }, function() {
+        logOpenFailure.textContent = "Couldn't open the log.";
+      });
     });
 
     var reportBtn = document.getElementById('report-btn');
@@ -785,9 +869,35 @@
     });
     document.getElementById('toggle-details-btn').addEventListener('click', function() {
       var el = document.getElementById('error-details');
-      el.classList.toggle('visible');
-      this.textContent = el.classList.contains('visible') ? 'Hide details' : 'Show details';
+      var isVisible = el.classList.toggle('visible');
+      document.getElementById('log-row').classList.toggle('visible', isVisible);
+      this.setAttribute('aria-expanded', isVisible ? 'true' : 'false');
     });
+
+    // An error sentence as it was written: *the ask* -- the step the user is to
+    // follow -- is set apart, and a `command` it names is set as code. The
+    // markup is ours and never arrives from a server, so splitting on it leaves
+    // any other sentence as the plain text it is.
+    var COPY_MARKUP = /(`[^`]+`|\*(?:`[^`]+`|[^*])+\*)/;
+    function writeRichText(el, text) {
+      el.textContent = '';
+      text.split(COPY_MARKUP).forEach(function(chunk, index) {
+        if (index % 2 === 0) {
+          el.appendChild(document.createTextNode(chunk));
+          return;
+        }
+        var inner = chunk.slice(1, -1);
+        if (chunk.charAt(0) === '`') {
+          var code = document.createElement('code');
+          code.textContent = inner;
+          el.appendChild(code);
+          return;
+        }
+        var ask = document.createElement('em');
+        writeRichText(ask, inner);
+        el.appendChild(ask);
+      });
+    }
 
     if (window.mindsNative) {
       // Drives the status line under the bar: environment setup progress and
@@ -808,15 +918,13 @@
         // report outcome and re-enable the button for the new error.
         reportResult.classList.remove('visible');
         reportBtn.disabled = false;
+        logOpenFailure.textContent = '';
         document.body.classList.add('error');
-        if (data.message) document.getElementById('error-message').textContent = data.message;
+        if (data.message) writeRichText(document.getElementById('error-message'), data.message);
         if (data.details) document.getElementById('error-details').textContent = data.details;
-        // Optional per-takeover label for the primary action (e.g. "Restart
-        // Imbue Studio" for the discovery-pipeline takeover). Falls back to the static
-        // "Retry" label for the generic backend-crash case. Always reassigned so
-        // a label set by a prior takeover (this page is reused, not reloaded,
-        // when the chrome view is already on shell.html) does not linger.
-        document.getElementById('retry-btn').textContent = data.actionLabel || 'Retry';
+        // Nothing to disclose when the takeover carries no raw output: the
+        // sentence then ends at its full stop rather than at a dead trigger.
+        document.getElementById('details-trigger').style.display = data.details ? '' : 'none';
       });
     }
   </script>

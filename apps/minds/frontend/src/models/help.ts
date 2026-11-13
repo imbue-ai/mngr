@@ -6,12 +6,23 @@
 // open_help channel message stages a pending launch here (via
 // setPendingHelpLaunch) before the shell routes to /help.
 
+import { defaultFetch, startAssistChat } from "./assistChat";
+import type { FetchLike } from "./assistChat";
+import { refusalDetailFromBody, routeSentenceFromBody } from "./errors";
+
 export interface HelpLaunchContext {
   workspaceAgentId: string;
   isAssistAvailable: boolean;
   description: string;
   isAgentReport: boolean;
   workspaceName: string;
+  /** What an error display attached when its "Report a bug" opened this
+   * form: the sentence the user saw and everything under it; "" for none. */
+  errorDetails: string;
+  /** The workspace that error was about, when the form is not floating over
+   * it: the report still collects from it, but the route names no workspace,
+   * so its frame is not mounted in place of the page the error was on. */
+  errorWorkspaceAgentId: string;
 }
 
 const EMPTY_LAUNCH: HelpLaunchContext = {
@@ -20,6 +31,8 @@ const EMPTY_LAUNCH: HelpLaunchContext = {
   description: "",
   isAgentReport: false,
   workspaceName: "",
+  errorDetails: "",
+  errorWorkspaceAgentId: "",
 };
 
 // Staged by the open_help handler just before routing to /help; consumed
@@ -113,6 +126,8 @@ export function stageHelpLaunchFromRoute(params: HelpRouteParams): void {
         ? base.isAgentReport
         : params.agent_report === "1",
     workspaceName: params.workspace_name ?? base.workspaceName,
+    errorDetails: base.errorDetails,
+    errorWorkspaceAgentId: base.errorWorkspaceAgentId,
   });
 }
 
@@ -122,10 +137,6 @@ const STICKY_INCLUDE_TRANSCRIPT_KEY = "minds.help.help-include-transcript";
 
 export type HelpMode = "agent" | "report";
 export type HelpPhase = "form" | "agent_loading" | "agent_error" | "sent";
-
-interface FetchLike {
-  (url: string, init?: RequestInit): Promise<Response>;
-}
 
 export interface HelpModelOptions {
   fetcher?: FetchLike;
@@ -154,6 +165,7 @@ export class HelpModel {
   /** The refusing machine's own words, shown under `agentErrorMessage`. */
   agentErrorDetail = "";
   sentEventId: string | null = null;
+  isAttachedDetailsOpen = false;
   isReportIdCopied = false;
   private copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
   isSubmitBusy = false;
@@ -169,9 +181,12 @@ export class HelpModel {
     this.description = this.launch.description;
     // Agent help is the default when available -- except for an /assist
     // agent's escalated diagnosis (pre-filled description), which must land
-    // on the report form for a human to review (legacy parity).
+    // on the report form for a human to review (legacy parity), and for a
+    // "Report a bug" pressed on an error, which asked for the report.
     this.mode =
-      this.launch.isAssistAvailable && !this.launch.description
+      this.launch.isAssistAvailable &&
+      !this.launch.description &&
+      !this.launch.errorDetails
         ? "agent"
         : "report";
     const stored = this.storage().getItem(STICKY_REMOTE_ACCESS_KEY);
@@ -186,10 +201,7 @@ export class HelpModel {
   }
 
   private fetcher(): FetchLike {
-    return (
-      this.options.fetcher ??
-      ((url, init) => fetch(url, { credentials: "same-origin", ...init }))
-    );
+    return this.options.fetcher ?? defaultFetch;
   }
 
   private storage(): Pick<Storage, "getItem" | "setItem"> {
@@ -198,6 +210,18 @@ export class HelpModel {
 
   private redraw(): void {
     this.options.redraw?.();
+  }
+
+  /** The workspace the report collects from: the one the form floats over,
+   * else the one the error that opened it was about; "" for none. */
+  get reportWorkspaceAgentId(): string {
+    return this.launch.workspaceAgentId || this.launch.errorWorkspaceAgentId;
+  }
+
+  /** Submitting starts an agent chat rather than sending a report. An
+   * agent's own report is always a report, whatever the mode. */
+  get isAgentHelp(): boolean {
+    return this.mode === "agent" && !this.launch.isAgentReport;
   }
 
   /** On the form with nothing being sent, no failed send on screen, and
@@ -277,7 +301,7 @@ export class HelpModel {
       this.redraw();
       return;
     }
-    if (this.mode === "agent" && !this.launch.isAgentReport) {
+    if (this.isAgentHelp) {
       await this.submitAgentHelp(description);
       return;
     }
@@ -288,35 +312,32 @@ export class HelpModel {
     this.isSubmitBusy = true;
     this.phase = "agent_loading";
     this.redraw();
-    try {
-      const response = await this.fetcher()("/help/assist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          description,
-          workspace_agent_id: this.launch.workspaceAgentId,
-        }),
-      });
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        detail?: string;
-      };
-      if (response.ok) {
-        // The chat exists and its tab already auto-opened in the workspace.
-        this.close();
-      } else {
-        this.phase = "agent_error";
-        this.agentErrorMessage = data.error ?? "Could not start an agent.";
-        this.agentErrorDetail = data.detail ?? "";
-      }
-    } catch {
+    const outcome = await startAssistChat(
+      {
+        workspaceAgentId: this.launch.workspaceAgentId,
+        description: this.launch.errorDetails
+          ? `${description}\n\n${this.launch.errorDetails}`
+          : description,
+      },
+      this.fetcher(),
+    );
+    this.isSubmitBusy = false;
+    if (outcome.ok) {
+      // The chat exists and its tab already auto-opened in the workspace.
+      this.close();
+    } else if (outcome.status === 0) {
       this.phase = "agent_error";
       this.agentErrorMessage = "Network error starting the agent.";
       this.agentErrorDetail = "";
-    } finally {
-      this.isSubmitBusy = false;
-      this.redraw();
+    } else {
+      this.phase = "agent_error";
+      this.agentErrorMessage = routeSentenceFromBody(
+        outcome.body,
+        "Could not start an agent.",
+      );
+      this.agentErrorDetail = refusalDetailFromBody(outcome.body);
     }
+    this.redraw();
   }
 
   private async submitReport(description: string): Promise<void> {
@@ -333,9 +354,10 @@ export class HelpModel {
         body: JSON.stringify({
           description,
           remote_access: this.isRemoteAccessAllowed,
-          workspace_agent_id: this.launch.workspaceAgentId,
+          workspace_agent_id: this.reportWorkspaceAgentId,
           include_logs: this.isLogsIncluded,
           include_transcript: this.isTranscriptIncluded,
+          error_details: this.launch.errorDetails,
         }),
       });
       const data = (await response.json().catch(() => ({}))) as {

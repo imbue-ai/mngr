@@ -18,7 +18,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const UNUSED_DEPS: LifecycleDeps = {
   getJson: () => Promise.resolve(null),
-  postJson: () => Promise.resolve({ status: 500, json: null }),
+  postJson: () => Promise.resolve({ status: 500, body: null }),
   deleteResource: () => Promise.resolve(500),
   openEventSource: () => {
     throw new Error("the page's view opens no stream");

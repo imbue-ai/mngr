@@ -39,11 +39,9 @@ import type {
   VisitingAgentInviteResponse,
   VisitingAgentsResponse,
 } from "./workspaceOptions";
-import {
-  RESOLVE_USER_URL,
-  defaultFetchJson,
-  errorMessageFromBody,
-} from "./workspaceOptions";
+import { RESOLVE_USER_URL, defaultFetchJson } from "./workspaceOptions";
+import { errorMessageFromBody } from "./errors";
+import type { RequestResult } from "./errors";
 
 // Mirrors share_grant_validation.py, which the grants route runs over the same
 // entries.
@@ -1192,7 +1190,7 @@ export class SharePanelModel {
   private adoptInviteAnswer(
     target: string,
     grantee: Grantee,
-    result: { ok: boolean; status: number; body: unknown },
+    result: RequestResult,
   ): InviteState {
     const key = outcomeKey(target, grantee);
     if (result.ok) {
@@ -2149,7 +2147,7 @@ function outcomesByKey(
 
 /** The panel's reading of what the mobile-link route answered. */
 function adoptMobileLinkAnswer(
-  result: { ok: boolean; status: number; body: unknown },
+  result: RequestResult,
   granterEmail: string,
 ): MobileLinkState {
   if (result.ok) {

@@ -105,6 +105,9 @@ interface MindsNativeSurface {
   /** Optional: a preload from before the tray lacks it. Quits the whole app
    * through the same sequence the tray's Quit runs. */
   quitApp?(): void;
+  /** Optional: a preload from before it lacks it. Quits the whole app the same
+   * way, then starts it again (macOS only). */
+  relaunchApp?(): void;
   showFilePicker(options: FilePickerOptions): Promise<string | null>;
   /** Open the OS's own notification-settings pane -- no app can force a
    * re-prompt once permission is declined, so this is the escape hatch.
@@ -320,6 +323,15 @@ export const electronBridge = {
   },
   quitApp(): void {
     native()?.quitApp?.();
+  },
+  /** Whether the page can quit and reopen the whole app: the desktop app on
+   * macOS, on a preload that knows how. What a Full Disk Access grant needs
+   * before it applies. */
+  get canRelaunchApp(): boolean {
+    return native()?.relaunchApp !== undefined && electronBridge.isMacPlatform;
+  },
+  relaunchApp(): void {
+    native()?.relaunchApp?.();
   },
   async showFilePicker(options: FilePickerOptions): Promise<string | null> {
     const surface = native();

@@ -3,6 +3,7 @@ import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { takePendingHelpLaunch } from "../../models/help";
+import { ErrorDialogQueue } from "../../models/errorDialog";
 import { WebLoginModel } from "../../models/webLogin";
 import type { UiChannelClient } from "../../channel/client";
 import {
@@ -1095,6 +1096,88 @@ describe("ShellState.openHelpForAgentAsk arriving twice", () => {
   });
 });
 
+describe("ShellState.openHelpForError", () => {
+  const ERROR = { message: "Couldn't rename this workspace.", details: "HTTP 500" };
+
+  it("scopes the report to the workspace on screen and attaches the error", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, WORKSPACE_ID);
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      expect.objectContaining({ workspace: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(takePendingHelpLaunch()).toMatchObject({
+      workspaceAgentId: WORKSPACE_ID,
+      errorDetails: "Couldn't rename this workspace.\n\nHTTP 500",
+    });
+  });
+
+  it("leaves the workspace out of the route, still collecting from it, when it is not on screen", () => {
+    // Scoping the route would mount that workspace's frame in place of Home,
+    // where the error was shown.
+    const shell = makeShell();
+    land(shell, "/");
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, WORKSPACE_ID);
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { account: "local" },
+      undefined,
+    );
+    const launch = takePendingHelpLaunch();
+    expect(launch?.workspaceAgentId).toBe("");
+    expect(launch?.errorWorkspaceAgentId).toBe(WORKSPACE_ID);
+  });
+
+  it("scopes the report from the workspace's recovery page, which stays painted behind the form", () => {
+    const shell = makeShell();
+    land(shell, `/agents/${WORKSPACE_ID}/recovery`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, WORKSPACE_ID);
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      expect.objectContaining({ workspace: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(shell.pageRouteBehindOverlay).toBe(`/agents/${WORKSPACE_ID}/recovery`);
+  });
+
+  it("keeps the recovery page behind the form when raised over the Get help that page opened", () => {
+    const recoveryRoute = `/agents/${WORKSPACE_ID}/recovery`;
+    const shell = makeShell();
+    land(shell, recoveryRoute);
+    shell.rememberPageBehindOverlay();
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=0`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, WORKSPACE_ID);
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      expect.objectContaining({ workspace: WORKSPACE_ID }),
+      { replace: true },
+    );
+    expect(shell.pageRouteBehindOverlay).toBe(recoveryRoute);
+  });
+});
+
 describe("ShellState.dismissAppOverlay", () => {
   it("leaves the popup's window for the machine, replacing the popup's entry", () => {
     // The popup took the panel's window over, so dismissing it leaves the
@@ -1630,6 +1713,20 @@ describe("ShellState.handleEscape", () => {
 
     expect(shell.isSidebarOpen).toBe(false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("gives the key to an error dialog over the switcher popover", () => {
+    const queue = new ErrorDialogQueue();
+    queue.attachHost();
+    shell = new ShellState(createEmptyStores(), undefined, undefined, queue);
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+    queue.show({ error: { message: "Couldn't do that.", details: "" } });
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(queue.current).toBeNull();
+    expect(shell.isSidebarOpen).toBe(true);
   });
 
   it("closes the card once the popover above it is gone", () => {

@@ -16,6 +16,9 @@ import type { Icon12Name, IconName } from "../components/icons";
 import { Link } from "../components/Link";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { Notice, type NoticeVariant } from "../components/Notice";
+import { ErrorNotice } from "../components/ErrorDisplay";
+import { InlineError } from "../components/errorDesign";
+import { showErrorDialog } from "../../models/errorDialog";
 import { PresetCard } from "../components/PresetCard";
 import { Spinner } from "../components/Spinner";
 import {
@@ -722,6 +725,137 @@ export function DevStyleguide(): m.Component {
               body: m("div", [
                 ...NOTICE_VARIANTS.map((variant) =>
                   m(Notice, { variant }, `A ${variant} notice.`),
+                ),
+              ]),
+            },
+            {
+              id: "error-notice",
+              toc: "Error notice",
+              title: "Error notice",
+              body: m("div", { class: "max-w-[520px] space-y-4" }, [
+                m(ErrorNotice, {
+                  id: "styleguide-error-notice",
+                  error: {
+                    message:
+                      "Couldn't rename this workspace. Try again. If this persists, report a bug.",
+                    details:
+                      "HTTP 500\nFailed to rename workspace host: exit 1",
+                  },
+                  actions: [
+                    {
+                      label: "Try again",
+                      onclick: () => undefined,
+                    },
+                  ],
+                }),
+                // The copy asks for something first, so Try again waits on it
+                // and the command it names is set as code.
+                m(ErrorNotice, {
+                  id: "styleguide-ask-notice",
+                  tone: "warn",
+                  error: {
+                    message:
+                      "This connection uses a login that is not set up on this computer. " +
+                      "To use it here, *run `aws sso login`, then check again*.",
+                    details: "",
+                  },
+                  actions: [
+                    { label: "Check again", onclick: () => undefined },
+                  ],
+                  isBugReportOffered: false,
+                }),
+                m(ErrorNotice, {
+                  id: "styleguide-dismissable-notice",
+                  error: {
+                    message:
+                      "Couldn't create my-project. You've reached your plan's limit of " +
+                      "3 running workspaces. *Remove one you no longer need, then select Retry.*",
+                    details:
+                      "Imbue Cloud refused the lease: quota exceeded for " +
+                      "max_remote_workspaces (3 of 3 used).",
+                  },
+                  actions: [
+                    { label: "Retry", onclick: () => undefined },
+                    {
+                      label: "Dismiss",
+                      onclick: () => undefined,
+                      isDismissal: true,
+                    },
+                  ],
+                }),
+                // Nothing has failed while the app is still retrying.
+                m(ErrorNotice, {
+                  id: "styleguide-retrying-notice",
+                  isRetrying: true,
+                  error: {
+                    message: "Imbue Studio couldn't load your requests.",
+                    details: "",
+                  },
+                  isBugReportOffered: false,
+                }),
+                // The surface's own buttons stay in the surface's footer,
+                // below the error's box.
+                m(ErrorNotice, {
+                  id: "styleguide-surface-actions-notice",
+                  error: {
+                    message:
+                      "Imbue Studio hasn't located the machine this workspace runs on yet, " +
+                      "so the change wasn't saved. *Restart Imbue Studio and try again.*",
+                    details: "HTTP 503\nhost not resolved",
+                  },
+                  actions: [
+                    { label: "Restart Imbue Studio", onclick: () => undefined },
+                  ],
+                  surfaceActions: [
+                    m(Button, "Cancel"),
+                    m(Button, { variant: "danger" }, "Yes, disconnect"),
+                  ],
+                }),
+              ]),
+            },
+            {
+              id: "inline-error",
+              toc: "Inline error",
+              title: "Inline error",
+              body: m("div", { class: "max-w-[480px] space-y-1" }, [
+                m(TextInput, {
+                  name: "styleguide-invalid-name",
+                  value: "alpha",
+                  extra: "border-important",
+                }),
+                m(InlineError, {
+                  message:
+                    "A workspace named 'alpha' already exists. *Pick a different name.*",
+                }),
+              ]),
+            },
+            {
+              id: "error-dialog",
+              toc: "Error dialog",
+              title: "Error dialog",
+              body: m("div", { class: "space-y-2" }, [
+                m(
+                  "p",
+                  { class: "type-body text-secondary" },
+                  "Raised over whatever is on screen, in place of a native alert.",
+                ),
+                m(
+                  Button,
+                  {
+                    onclick: () =>
+                      showErrorDialog({
+                        title: 'Couldn\'t start "alpha"',
+                        error: {
+                          message: "Cannot connect to Docker daemon.",
+                          details:
+                            "HTTP 502\nmngr: provider 'docker' unavailable",
+                        },
+                        actions: [
+                          { label: "Try again", onclick: () => undefined },
+                        ],
+                      }),
+                  },
+                  "Raise an error dialog",
                 ),
               ]),
             },

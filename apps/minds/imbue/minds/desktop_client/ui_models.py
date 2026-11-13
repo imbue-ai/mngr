@@ -1223,6 +1223,20 @@ class UiWaitingPermissionRequest(FrozenModel):
     service_name: str = Field(description="Catalog service whose brand mark leads the row; '' for non-service kinds")
 
 
+class ErrorRemedy(UpperCaseStrEnum):
+    """A button the SPA offers beside an error, for a failure whose fix is one the app itself can run.
+
+    A route names one beside its sentence, or the SPA picks one for a failure it
+    words itself; either way the SPA draws the same button for it. ``ASK_AGENT``
+    is drawn only where the surface knows which workspace to ask and what to
+    ask its agent.
+    """
+
+    RESTART_APP = auto()
+    UPDATE_APP = auto()
+    ASK_AGENT = auto()
+
+
 class UiWorkspacePermissions(FrozenModel):
     """Everything the workspace Permissions pane renders, in one response.
 
@@ -1411,3 +1425,4 @@ class UiWireSchema(FrozenModel):
     switch_account: UiSwitchAccountRequest = Field(description="windows/switch-account request body")
     switch_account_response: UiSwitchAccountResponse = Field(description="windows/switch-account response")
     route_account_response: UiRouteAccountResponse = Field(description="windows/route-account response")
+    error_remedy: ErrorRemedy = Field(description="the remedy an error response names beside its sentence")

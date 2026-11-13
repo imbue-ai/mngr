@@ -13,6 +13,7 @@ import {
   slackConnection,
 } from "../../../models/workspacePermissions.testing";
 import type { UiWorkspacePermissions } from "../../../generated/ui";
+import type { RequestResult } from "../../../models/errors";
 import { OPTIONS_TABS, WorkspaceOptionsModel, toOptionsTab } from "../../../models/workspaceOptions";
 import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel } from "../../../models/workspacePermissions";
 import { classifyRoute } from "../../shell/classify";
@@ -110,7 +111,7 @@ async function render(
     /** Answer a request yourself, for a test about how the pane behaves while
      * a write is in flight or after one is refused. Return null to fall
      * through to the ordinary answers below. */
-    respond?: (url: string) => Promise<{ ok: boolean; status: number; body: unknown }> | null;
+    respond?: (url: string) => Promise<RequestResult> | null;
   } = {},
 ): Promise<RenderResult> {
   const requests: { url: string; body: unknown }[] = [];

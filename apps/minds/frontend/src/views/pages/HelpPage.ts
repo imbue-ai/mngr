@@ -13,6 +13,7 @@ import {
   stagedHelpLaunchWorkspace,
 } from "../../models/help";
 import { Button } from "../components/Button";
+import { Disclosure } from "../components/Disclosure";
 import { Icon16 } from "../components/Icon";
 import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
@@ -123,7 +124,7 @@ function diagnosticsChoice(
 function workspaceDiagnosticsChoices(model: HelpModel): m.Children {
   // Both are collected from inside the machine, so they only make sense when
   // the report is scoped to one.
-  if (!model.launch.workspaceAgentId) return null;
+  if (!model.reportWorkspaceAgentId) return null;
   return [
     // "workspace logs", not "logs": Imbue Studio's own app logs (backend, Electron, and
     // their rotations) ride on every Sentry event whatever this is set to, so a
@@ -146,9 +147,10 @@ function workspaceDiagnosticsChoices(model: HelpModel): m.Children {
 }
 
 function withheldDiagnosticsWarning(model: HelpModel): m.Children {
-  // Only inside a machine, where the boxes are actually offered: outside one
-  // there is nothing to withhold and the warning would be a non-sequitur.
-  if (!model.launch.workspaceAgentId) return null;
+  // Only when the report collects from a machine, where the boxes are actually
+  // offered: otherwise there is nothing to withhold and the warning would be a
+  // non-sequitur.
+  if (!model.reportWorkspaceAgentId) return null;
   const withheld = [
     model.isLogsIncluded ? null : "workspace logs",
     model.isTranscriptIncluded ? null : "recent chats",
@@ -160,6 +162,34 @@ function withheldDiagnosticsWarning(model: HelpModel): m.Children {
     // Naming what is missing rather than warning in the abstract: the sentence
     // has to say which box to tick to make it go away.
     `We may not be able to solve this issue without ${withheld.join(" and ")}.`,
+  );
+}
+
+/** What an error's "Report a bug" attached, collapsed: the report (or, in
+ * agent mode, the agent's chat) carries it whether or not it is opened. */
+function attachedErrorDetails(model: HelpModel): m.Children {
+  if (!model.launch.errorDetails) return null;
+  return m(
+    "div",
+    { class: "mt-3" },
+    m(
+      Disclosure,
+      {
+        id: "help-attached-details",
+        isOpen: model.isAttachedDetailsOpen,
+        onToggle: () => {
+          model.isAttachedDetailsOpen = !model.isAttachedDetailsOpen;
+        },
+        summary: m(
+          "span",
+          { class: "type-label text-secondary" },
+          model.isAgentHelp
+            ? "Details the agent will see"
+            : "Details attached to this report",
+        ),
+      },
+      machineVerdict(model.launch.errorDetails),
+    ),
   );
 }
 
@@ -204,7 +234,8 @@ export function formPhase(model: HelpModel): m.Children {
         model.description = (event.target as HTMLTextAreaElement).value;
       },
     }),
-    model.mode === "report" || model.launch.isAgentReport
+    attachedErrorDetails(model),
+    !model.isAgentHelp
       ? m("div", [
           m("div", { class: "flex flex-col gap-2 mt-4" }, [
             workspaceDiagnosticsChoices(model),
@@ -239,9 +270,7 @@ export function formPhase(model: HelpModel): m.Children {
         disabled: model.isSubmitBusy,
         onclick: () => void model.submit(),
       },
-      model.mode === "agent" && !model.launch.isAgentReport
-        ? "Start agent"
-        : "Send report",
+      model.isAgentHelp ? "Start agent" : "Send report",
     ),
     model.statusMessage !== null
       ? m(

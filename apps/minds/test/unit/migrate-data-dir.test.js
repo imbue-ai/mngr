@@ -456,21 +456,25 @@ test('a failed migration leaves an account of itself under the log root', (t) =>
   // It runs before the log tee and Sentry, so this file is the only trace a
   // failed launch leaves behind.
   const { legacyDir, roots } = makeScratch(t);
-  const detail = recordMigrationFailure({ roots, legacyDir, error: new Error('EACCES: denied'), log: quiet });
+  const error = new Error('EACCES: denied');
+  assert.equal(recordMigrationFailure({ roots, legacyDir, error, log: quiet }), true);
 
+  // The stack lives only here: the box the launch shows carries none.
   const recorded = fs.readFileSync(path.join(roots.logs, MIGRATION_FAILURE_LOG_NAME), 'utf8');
-  assert.ok(recorded.includes('EACCES: denied'));
+  assert.ok(recorded.includes(error.stack));
   assert.ok(recorded.includes(legacyDir));
-  assert.ok(detail.includes('EACCES: denied'));
 });
 
 test('a log root that cannot be written does not replace the original failure', (t) => {
   const { base, legacyDir, roots } = makeScratch(t);
-  // A file where the log root should be: mkdir fails, and the caller still has
-  // the text to show and the original error to rethrow.
+  // A file where the log root should be: mkdir fails, and the caller still
+  // gets to tell the person and end the launch, without pointing at a log.
   writeFileAt(path.join(base, 'logs'), 'not a directory');
-  const detail = recordMigrationFailure({ roots, legacyDir, error: new Error('ENOSPC'), log: quiet });
-  assert.ok(detail.includes('ENOSPC'));
+  const error = new Error('ENOSPC');
+  const logged = [];
+  assert.equal(recordMigrationFailure({ roots, legacyDir, error, log: (line) => logged.push(line) }), false);
+  // With no file to hold it, the migration's own error goes to the console.
+  assert.ok(logged.some((line) => line.includes(error.stack)));
 });
 
 test('every destination path really does contain a space', (t) => {

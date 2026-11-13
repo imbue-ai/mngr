@@ -3,6 +3,8 @@
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
+import { errorMessageFromBody, jsonFromText, readResponseBody } from "./errors";
+import type { RequestResult, ResponseBody } from "./errors";
 import type {
   MachineSizeDimension,
   MachineSizeDraft,
@@ -337,10 +339,7 @@ export function toOptionsTab(raw: string | null | undefined): OptionsTab {
 export type SettingsGroup = "general" | "account" | "backup" | "updates";
 export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export interface FetchJson {
-  (
-    url: string,
-    init?: RequestInit,
-  ): Promise<{ ok: boolean; status: number; body: unknown }>;
+  (url: string, init?: RequestInit): Promise<RequestResult>;
 }
 
 /** Schedules `refresh` for later and returns how to cancel it. */
@@ -357,23 +356,17 @@ function defaultScheduleRefresh(refresh: () => void): () => void {
 export async function defaultFetchJson(
   url: string,
   init?: RequestInit,
-): Promise<{
-  ok: boolean;
-  status: number;
-  body: unknown;
-}> {
+): Promise<RequestResult> {
   try {
     const response = await fetch(url, { credentials: "same-origin", ...init });
-    let body: unknown = null;
-    const text = await response.text();
-    if (text) {
-      try {
-        body = JSON.parse(text) as unknown;
-      } catch {
-        body = { error: text };
-      }
+    // A success whose body cannot be read carried no answer, so its read
+    // failure falls to the catch below; a refusal's status stands without its body.
+    if (response.ok) {
+      const body = jsonFromText(await response.text());
+      return { ok: true, status: response.status, body };
     }
-    return { ok: response.ok, status: response.status, body };
+    const body = await readResponseBody(response);
+    return { ok: false, status: response.status, body };
   } catch {
     // A network-level failure must resolve (not reject): callers await this
     // inside void'd async model methods, so a rejection would be unhandled
@@ -385,17 +378,6 @@ export async function defaultFetchJson(
       body: { error: "Could not reach the app server." },
     };
   }
-}
-
-export function errorMessageFromBody(body: unknown, fallback: string): string {
-  if (body !== null && typeof body === "object") {
-    const record = body as Record<string, unknown>;
-    for (const key of ["error", "detail", "message"]) {
-      const value = record[key];
-      if (typeof value === "string" && value.length > 0) return value;
-    }
-  }
-  return fallback;
 }
 
 /** Load + action state for the Workspace settings panes. */
@@ -857,7 +839,10 @@ export class WorkspaceOptionsModel {
   }
 }
 
-export function colorErrorMessageFor(status: number, body: unknown): string {
+export function colorErrorMessageFor(
+  status: number,
+  body: ResponseBody,
+): string {
   const code = errorMessageFromBody(body, "");
   switch (code) {
     case "invalid_hex":

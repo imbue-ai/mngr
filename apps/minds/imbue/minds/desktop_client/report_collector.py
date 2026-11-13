@@ -168,6 +168,7 @@ def build_bug_report(
     include_logs: bool = False,
     include_transcript: bool = False,
     collection_note: str | None = None,
+    error_details: str = "",
 ) -> dict[str, Any]:
     """Assemble the structured report attached to the Sentry event.
 
@@ -180,6 +181,10 @@ def build_bug_report(
     attachment when there is something to say -- why there is no archive, or
     that collection is still running and where its outcome will land. None
     (recorded as null) means the archive speaks for itself.
+
+    ``error_details`` is what an error display attached when its "Report a bug"
+    opened the form (the sentence the user saw and everything under it); it is
+    recorded only when there is some.
     """
     report: dict[str, Any] = {
         "description": description,
@@ -189,6 +194,8 @@ def build_bug_report(
         "transcript_requested": include_transcript,
         "collection_note": collection_note,
     }
+    if error_details:
+        report["error_details"] = error_details
     if include_app_diagnostics:
         report["app_diagnostics"] = _collect_app_diagnostics(
             session_store=session_store,
@@ -216,14 +223,15 @@ def submit_bug_report(
     data_dir: Path | None,
     logs_folder: Path | None,
     collection_note: str | None = None,
+    error_details: str = "",
     report_file_paths: Mapping[str, Path] = _NO_REPORT_FILE_PATHS,
     report_file_uris: Mapping[str, str | None] = _NO_REPORT_FILE_URIS,
 ) -> str | None:
     """Collect the report and submit it to Sentry.
 
-    The workspace archive and console tail are staged by the caller before this
-    runs, so what lands here is what the user asked for (the two include
-    flags), the staged files themselves (``report_file_paths``, attached
+    The workspace archive, console tail and error details are staged by the
+    caller before this runs, so what lands here is what the user asked for
+    (the two include flags), the staged files themselves (``report_file_paths``, attached
     one-shot to exactly this event -- never swept by the process-global groups,
     which would carry them onto unrelated error events), and at most one
     ``collection_note`` sentence about the archive when it needs one.
@@ -248,6 +256,7 @@ def submit_bug_report(
         include_logs=include_logs,
         include_transcript=include_transcript,
         collection_note=collection_note,
+        error_details=error_details,
     )
     return submit_manual_bug_report(
         title=_report_title(description),
@@ -259,11 +268,13 @@ def submit_bug_report(
     )
 
 
-# Extras names for the one-shot report files: the workspace archive and the
-# shell's captured console tail. The names are the ``uploaded_files_<name>``
-# suffixes existing Sentry queries key on.
+# Extras names for the one-shot report files: the workspace archive, the
+# shell's captured console tail, and the details an error display attached.
+# The names are the ``uploaded_files_<name>`` suffixes Sentry queries key on.
 _WORKSPACE_REPORT_FILE_NAME: Final[str] = "bug_report_workspace"
 _CONSOLE_REPORT_FILE_NAME: Final[str] = "bug_report_console"
+_ERROR_DETAILS_REPORT_FILE_NAME: Final[str] = "bug_report_error_details"
+_ERROR_DETAILS_STAGED_FILENAME: Final[str] = "error-details.txt"
 
 # Extras name for the short document a background-path report finishes with,
 # recording what the workspace archive ended up doing. Following it is how a
@@ -370,12 +381,32 @@ def _resolved_report_attachments(
     )
 
 
+def _staged_error_details(error_details: str, staging_dir: Path) -> Path | None:
+    """Stage what an error display attached as a file of its own, or None when there is none.
+
+    The inline copy on the event is the convenient one to read but cannot be
+    relied on: the details are server text and command output, exactly what
+    Sentry's scrubber blanks to ``[Filtered]`` (and truncates past its length
+    cap). The uploaded file is subject to neither.
+    """
+    if not error_details:
+        return None
+    path = staging_dir / _ERROR_DETAILS_STAGED_FILENAME
+    try:
+        path.write_text(error_details, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not stage the bug report's error details: {}", exc)
+        return None
+    return path
+
+
 def _plan_report_attachments(
     state: DesktopClientState,
     *,
     workspace_agent_id: str,
     include_logs: bool,
     include_transcript: bool,
+    staging_dir: Path,
 ) -> _ReportAttachments:
     """Decide what this report can say about its attachments without making the user wait.
 
@@ -390,9 +421,6 @@ def _plan_report_attachments(
     attachment groups, which sweep on every event and would carry one report's
     consented files onto every unrelated automatic error.
     """
-    # Each report stages into its own fresh temp dir: concurrent reports cannot
-    # collide, and nothing on disk is ever deleted up front.
-    staging_dir = make_staging_dir()
     paths = state.api_v1_paths
     logs_dir = paths.log_dir if paths is not None else None
     concurrency_group = state.root_concurrency_group
@@ -598,12 +626,20 @@ def submit_report_with_attachments(*, body: Mapping[str, Any], state: DesktopCli
     """
     workspace_agent_id = str(body.get("workspace_agent_id") or "").strip()
     include_logs, include_transcript = parse_attachment_flags(body)
+    # Each report stages into its own fresh temp dir so concurrent reports cannot collide.
+    staging_dir = make_staging_dir()
     attachments = _plan_report_attachments(
         state,
         workspace_agent_id=workspace_agent_id,
         include_logs=include_logs,
         include_transcript=include_transcript,
+        staging_dir=staging_dir,
     )
+    error_details = str(body.get("error_details") or "").strip()
+    error_details_path = _staged_error_details(error_details, staging_dir)
+    report_file_paths = dict(attachments.report_file_paths)
+    if error_details_path is not None:
+        report_file_paths[_ERROR_DETAILS_REPORT_FILE_NAME] = error_details_path
     paths = state.api_v1_paths
     event_id = submit_bug_report(
         description=str(body.get("description", "")).strip(),
@@ -617,7 +653,8 @@ def submit_report_with_attachments(*, body: Mapping[str, Any], state: DesktopCli
         data_dir=paths.data_dir if paths is not None else None,
         logs_folder=paths.log_dir if paths is not None else None,
         collection_note=attachments.collection_note,
-        report_file_paths=attachments.report_file_paths,
+        error_details=error_details,
+        report_file_paths=report_file_paths,
         report_file_uris=attachments.report_file_uris,
     )
     _start_pending_report_collection(attachments, event_id=event_id)

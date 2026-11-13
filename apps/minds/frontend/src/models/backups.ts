@@ -13,6 +13,8 @@
 // Everything network- or timer-shaped is injected so vitest drives the state
 // machines synchronously; pages construct with the browser defaults.
 
+import { readResponseBody, routeSentenceFromBody } from "./errors";
+import type { RequestOutcome } from "./errors";
 import type { EnvironmentCondition, RecoveryKind } from "./health";
 
 export const BACKUP_HISTORY_PAGE_SIZE = 15;
@@ -40,11 +42,9 @@ export interface EventSourceLike {
 export interface LifecycleDeps {
   /** GET returning parsed JSON, or null on any failure/non-2xx. */
   getJson(url: string): Promise<unknown | null>;
-  /** POST returning {status, json} (json null when unparseable). */
-  postJson(
-    url: string,
-    body: unknown,
-  ): Promise<{ status: number; json: unknown | null }>;
+  /** POST returning its status, and the body when it failed (null when it
+   * succeeded). */
+  postJson(url: string, body: unknown): Promise<RequestOutcome>;
   /** DELETE returning the HTTP status. */
   deleteResource(url: string): Promise<number>;
   openEventSource(url: string): EventSourceLike;
@@ -318,9 +318,8 @@ export class BackupOperationController {
       {},
     );
     if (result.status >= 400) {
-      const detail = result.json as { error?: string; message?: string } | null;
       this.showError(
-        detail?.error ?? detail?.message ?? "Could not cancel the operation.",
+        routeSentenceFromBody(result.body, "Could not cancel the operation."),
       );
     }
     this.deps.redraw();
@@ -363,11 +362,11 @@ export class BackupOperationController {
         return;
       }
       this.setRunning(false, false, "");
-      const detail = result.json as { error?: string; message?: string } | null;
       this.showError(
-        detail?.error ??
-          detail?.message ??
+        routeSentenceFromBody(
+          result.body,
           `Request failed (HTTP ${result.status})`,
+        ),
       );
       this.deps.redraw();
     });
@@ -922,10 +921,10 @@ export class DestroyedWorkspacesModel {
     );
     this.deletingAgentIds.delete(agentId);
     if (result.status >= 400) {
-      const detail = result.json as { error?: string } | null;
-      this.errorMessage =
-        detail?.error ??
-        "Could not delete the backup; see the logs and try again.";
+      this.errorMessage = routeSentenceFromBody(
+        result.body,
+        "Could not delete the backup; see the logs and try again.",
+      );
       this.deps.redraw();
       return;
     }
@@ -975,13 +974,12 @@ export class DestroyingModel {
     );
     // Status 0 is the browser deps' network-failure sentinel.
     if (result.status >= 400 || result.status === 0) {
-      const detail = result.json as { error?: string; message?: string } | null;
-      this.retryErrorMessage =
-        detail?.error ??
-        detail?.message ??
-        (result.status === 0
+      this.retryErrorMessage = routeSentenceFromBody(
+        result.body,
+        result.status === 0
           ? "Could not restart the destroy: the app server is unreachable."
-          : `Could not restart the destroy (HTTP ${result.status}).`);
+          : `Could not restart the destroy (HTTP ${result.status}).`,
+      );
       this.deps.redraw();
       return;
     }
@@ -1304,10 +1302,10 @@ export class RecoveryModel {
     if (this.isStopped) return;
     if (result.status >= 400) {
       this.isRecoveryRunning = false;
-      const detail = result.json as { error?: string } | null;
-      this.recoveryError =
-        detail?.error ??
-        `Could not start the recovery (HTTP ${result.status}).`;
+      this.recoveryError = routeSentenceFromBody(
+        result.body,
+        `Could not start the recovery (HTTP ${result.status}).`,
+      );
       this.deps.redraw();
       return;
     }
@@ -1410,10 +1408,7 @@ export function browserLifecycleDeps(redraw: () => void): LifecycleDeps {
         return null;
       }
     },
-    async postJson(
-      url: string,
-      body: unknown,
-    ): Promise<{ status: number; json: unknown | null }> {
+    async postJson(url: string, body: unknown): Promise<RequestOutcome> {
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -1421,15 +1416,12 @@ export function browserLifecycleDeps(redraw: () => void): LifecycleDeps {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body ?? {}),
         });
-        let parsed: unknown | null = null;
-        try {
-          parsed = (await response.json()) as unknown;
-        } catch {
-          parsed = null;
-        }
-        return { status: response.status, json: parsed };
+        return {
+          status: response.status,
+          body: response.ok ? null : await readResponseBody(response),
+        };
       } catch {
-        return { status: 0, json: null };
+        return { status: 0, body: null };
       }
     },
     async deleteResource(url: string): Promise<number> {

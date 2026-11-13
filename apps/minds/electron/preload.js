@@ -46,11 +46,15 @@ contextBridge.exposeInMainWorld('mindsNative', {
     ipcRenderer.on('error-details', (_event, details) => callback(details));
   },
   retry: () => ipcRenderer.send('retry'),
-  openLogFile: () => ipcRenderer.send('open-log-file'),
+  // Resolves { ok, path }: whether the OS could open the log, and where it is.
+  openLogFile: () => ipcRenderer.invoke('open-log-file'),
   // Quit the whole app (the backend and every window), through the same quit
   // sequence the tray's Quit runs. The page offers it where a desktop has no
   // tray to offer it from.
   quitApp: () => ipcRenderer.send('quit-app'),
+  // Quit the same way, then start the app again (macOS only): what a Full
+  // Disk Access grant needs before it applies.
+  relaunchApp: () => ipcRenderer.send('relaunch-app'),
   // The app is up and the first route decided. The loading document's intro
   // holds on a settled mark until this arrives, and takes it as its cue to
   // leave -- so the lockup's travel to the titlebar always means the same

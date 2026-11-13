@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { UiFolderSyncToggleRequest } from "../generated/ui";
 import { settle } from "../testing";
+import type { RequestResult } from "./errors";
 import {
   forgetWarmedPermissionsOverview,
   readWarmedPermissionsOverview,
@@ -53,11 +54,7 @@ interface RecordedRequest {
   body: unknown;
 }
 
-interface StubResponse {
-  ok: boolean;
-  status: number;
-  body: unknown;
-}
+type StubResponse = RequestResult;
 
 function makeModel(responder: (url: string, init?: RequestInit) => StubResponse | Promise<StubResponse>): {
   model: PermissionsModel;

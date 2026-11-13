@@ -172,6 +172,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "DesktopEgressMode",
             "DiscoveryHealth",
             "EnvironmentCondition",
+            "ErrorRemedy",
             "FileSharingAccess",
             "FolderSyncActivity",
             "FolderSyncConflict",

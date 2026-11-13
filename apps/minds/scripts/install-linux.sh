@@ -94,9 +94,26 @@ fi
 # directories, so a relative --install-dir has to be pinned down here.
 INSTALL_DIR="$(realpath -m "$INSTALL_DIR")"
 
-step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+CURRENT_STEP=""
+step() { CURRENT_STEP="$*"; printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 skip() { printf '\033[2m    (already done: %s)\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# A command that is not one of the script's own checks failed, and set -e is
+# about to stop the script with only that tool's output on screen: say which
+# step it was and that re-running is safe. errtrace carries the trap into
+# functions (run_privileged's sudo). It reaches command substitutions and
+# subshells too, where it does nothing: they report to the shell that started
+# them, which says it once, and they carry on exactly as they would without it.
+on_step_failure() {
+    local status=$?
+    if [ "$BASH_SUBSHELL" -gt 0 ]; then return; fi
+    trap - ERR
+    printf '\n\033[1;31merror: %s failed (its output is above). Fix what it reports, then re-run this script -- steps that are already done are skipped.\033[0m\n' "${CURRENT_STEP:-The install}" >&2
+    exit "$status"
+}
+trap on_step_failure ERR
+set -o errtrace
 
 # Ask a yes/no question on the terminal. Under --yes the answer is yes; under
 # --non-interactive the answer is no. Reads from /dev/tty so it works when the
@@ -274,6 +291,7 @@ if [ -z "$CHECKOUT" ] && [ -f "$INSTALL_DIR/apps/minds/.nvmrc" ]; then
     CHECKOUT="$INSTALL_DIR"
 fi
 
+step "Free disk space"
 # The clone, the venv and node_modules all land under the checkout; measure
 # its filesystem. A fresh --install-dir may not exist yet (git creates the
 # leading directories), so walk up to its nearest existing ancestor.
@@ -445,6 +463,7 @@ fi
 
 # lingering (WSL)
 if [ "$IS_WSL" = 1 ]; then
+    step "Systemd lingering for $CURRENT_USER (WSL)"
     # WSL tears the distro down shortly after the last session exits; a
     # lingering user session keeps the app's background daemons alive.
     if [ "$(loginctl show-user "$CURRENT_USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
@@ -580,7 +599,7 @@ if [ "$IS_WSL" = 1 ]; then
             \$sc.Save()
         " >/dev/null || echo "    (shortcut creation failed; launch with: wsl -d $WSL_DISTRO_NAME -- bash -lc \"$LAUNCHER_WORD\")"
     else
-        echo "    (powershell.exe or WSL_DISTRO_NAME unavailable; skipping the Windows shortcut)"
+        echo "    (couldn't create the Windows desktop shortcut; start Imbue Studio from a WSL terminal with the command below)"
     fi
 fi
 

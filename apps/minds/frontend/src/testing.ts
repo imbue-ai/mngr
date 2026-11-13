@@ -11,6 +11,7 @@ import type {
   UiWorkspacesMessage,
 } from "./channel/messages";
 import { createEmptyStores } from "./models/boot";
+import type { RequestResult } from "./models/errors";
 import type { BrowserImportResult } from "./models/browserImport";
 import type {
   ConnectionBackendOption,
@@ -25,7 +26,19 @@ import type {
 } from "./profiling";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
+import { BTN_VARIANTS } from "./views/components/constants";
 import { ShellState } from "./views/shell/shell-state";
+
+/** A request helper's result a test expects to have failed, narrowed to its
+ * failure so the error helpers can read its body. */
+export function failedResult(
+  result: RequestResult,
+): Extract<RequestResult, { ok: false }> {
+  if (result.ok) {
+    throw new Error(`expected a failed request, got HTTP ${result.status}`);
+  }
+  return result;
+}
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -87,6 +100,8 @@ export function renderedText(vnode: m.Vnode | null): string {
   if (typeof vnode === "string" || typeof vnode === "number")
     return String(vnode);
   if (Array.isArray(vnode)) return vnode.map(renderedText).join(" ");
+  // Trusted markup (`m.trust`) is an icon's path data, not text anyone reads.
+  if ((vnode as unknown as { tag?: unknown }).tag === "<") return "";
   const text = (vnode as unknown as { text?: unknown }).text;
   if (text !== undefined && text !== null) return String(text);
   const children = (vnode as unknown as { children?: unknown }).children;
@@ -439,6 +454,35 @@ export async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Mount `view` into a fresh element appended to document.body (jsdom tests
+ * that click through the real DOM). */
+export function mountInBody(view: () => m.Children): HTMLElement {
+  const root = document.createElement("div");
+  document.body.appendChild(root);
+  m.mount(root, { view });
+  return root;
+}
+
+/** The button under `root` whose text is exactly `label`; throws when there is
+ * none. */
+export function buttonLabelled(
+  root: ParentNode,
+  label: string,
+): HTMLButtonElement {
+  const button = [...root.querySelectorAll("button")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (button === undefined) throw new Error(`no "${label}" button`);
+  return button;
+}
+
+/** The labels of the buttons under `root` drawn as primary, in page order. */
+export function primaryButtonLabels(root: ParentNode): string[] {
+  return [...root.querySelectorAll("button")]
+    .filter((button) => button.className.includes(BTN_VARIANTS.primary))
+    .map((button) => button.textContent?.trim() ?? "");
+}
+
 /** An in-memory stand-in for the sticky-preference `localStorage`, injected
  * through the models' `storage` option (tests run under node, which has no
  * `localStorage` at all). `values` exposes what was written. */
@@ -690,7 +734,9 @@ export function collectVnodes(node: unknown, out: AnyVnode[] = []): AnyVnode[] {
 }
 
 /** Every string in the tree, in render order: bare children and vnode `text`
- * alike, since mithril stores a lone string child as either one. */
+ * alike, since mithril stores a lone string child as either one. Trusted
+ * markup (`m.trust`, which every icon's artwork arrives as) is skipped: its
+ * child is a blob of SVG path data, not text anyone reads. */
 export function collectText(node: unknown, out: string[] = []): string[] {
   if (node === null || node === undefined || typeof node === "boolean")
     return out;
@@ -703,6 +749,7 @@ export function collectText(node: unknown, out: string[] = []): string[] {
     return out;
   }
   const vnode = node as AnyVnode;
+  if (vnode.tag === "<") return out;
   if (typeof vnode.text === "string") out.push(vnode.text);
   return collectText(vnode.children, out);
 }

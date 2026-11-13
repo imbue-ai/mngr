@@ -13,6 +13,7 @@ const { profileFileEnv } = require('./profiling');
 const { bundledGitEnv } = require('./git-env');
 const { dropStdioWriteErrors } = require('./stdio-write-errors');
 const {
+  SelfContainedStartupError,
   createStderrTail,
   describeLaunch,
   formatEarlyExitDetails,
@@ -633,7 +634,7 @@ function startBackend(
         finalizeLog();
         if (!isResolved) {
           isResolved = true;
-          reject(new Error(formatSpawnFailureDetails({ errorMessage: err.message, launch })));
+          reject(new SelfContainedStartupError(formatSpawnFailureDetails({ errorMessage: err.message, launch })));
         }
       });
 
@@ -647,7 +648,7 @@ function startBackend(
         if (earlyExit === null || isEarlyExitReported) return;
         isEarlyExitReported = true;
         clearTimeout(drainTimer);
-        reject(new Error(formatEarlyExitDetails({
+        reject(new SelfContainedStartupError(formatEarlyExitDetails({
           ...earlyExit,
           stdoutEventCount,
           launch,
@@ -670,7 +671,10 @@ function startBackend(
           drainTimer = setTimeout(rejectEarlyExit, STDIO_DRAIN_GRACE_MS);
         }
       });
-    }).catch(reject);
+    }).catch((err) => {
+      // Everything above the spawn: no backend ran, so nothing of this launch is in minds.log.
+      reject(new SelfContainedStartupError(err.message, { cause: err }));
+    });
   });
 }
 

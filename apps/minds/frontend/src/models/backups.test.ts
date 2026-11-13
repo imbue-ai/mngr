@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { settle } from "../testing";
 import {
   BACKUP_HISTORY_PAGE_SIZE,
@@ -8,6 +8,7 @@ import {
   DestroyingModel,
   MAX_CONSECUTIVE_POLL_FAILURES,
   RecoveryModel,
+  browserLifecycleDeps,
   formatRelativeAgo,
   isChatGateFailure,
   isSafetySnapshotFailure,
@@ -15,6 +16,8 @@ import {
   type EventSourceLike,
   type LifecycleDeps,
 } from "./backups";
+import { errorMessageFromBody } from "./errors";
+import type { RequestOutcome } from "./errors";
 
 class FakeEventSource implements EventSourceLike {
   isClosed = false;
@@ -53,7 +56,7 @@ class FakeDeps implements LifecycleDeps {
   isRecoveryInfoHeld = false;
   private heldRecoveryInfo: ((payload: unknown | null) => void) | null = null;
   getUrls: string[] = [];
-  postResponses: Array<{ status: number; json: unknown | null }> = [];
+  postResponses: RequestOutcome[] = [];
   postCalls: Array<{ url: string; body: unknown }> = [];
   deleteStatuses: number[] = [];
   deleteUrls: string[] = [];
@@ -81,14 +84,11 @@ class FakeDeps implements LifecycleDeps {
     return this.getResponses.length > 0 ? this.getResponses.shift()! : null;
   }
 
-  async postJson(
-    url: string,
-    body: unknown,
-  ): Promise<{ status: number; json: unknown | null }> {
+  async postJson(url: string, body: unknown): Promise<RequestOutcome> {
     this.postCalls.push({ url, body });
     return this.postResponses.length > 0
       ? this.postResponses.shift()!
-      : { status: 500, json: null };
+      : { status: 500, body: null };
   }
 
   async deleteResource(url: string): Promise<number> {
@@ -251,7 +251,7 @@ describe("BackupOperationController restore from a previous destination", () => 
   it("names the archive in the restore body, and null for current backups", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.startRestore(
       { snapshot_id: "old-1", time: "2025-12-31T00:00:00Z" },
       "",
@@ -262,7 +262,7 @@ describe("BackupOperationController restore from a previous destination", () => 
       repository: "20260101T000000Z",
     });
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     const current = new BackupOperationController("agent-12", deps);
     current.startRestore(
       { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
@@ -280,7 +280,7 @@ describe("BackupOperationController", () => {
     const controller = new BackupOperationController("agent-11", deps);
     deps.postResponses.push({
       status: 409,
-      json: { error: "already running" },
+      body: { error: "already running" },
     });
 
     controller.dispatch("/x", {}, { label: "Working..." });
@@ -297,7 +297,7 @@ describe("BackupOperationController", () => {
     controller.onSuccess = () => {
       successCount += 1;
     };
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
 
     controller.startRestore(
       { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
@@ -337,7 +337,7 @@ describe("BackupOperationController", () => {
   it("offers the stop-chats retry only when this page dispatched the operation", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.startRestore(
       { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
       "",
@@ -355,7 +355,7 @@ describe("BackupOperationController", () => {
     expect(controller.isStopChatsRetryOffered).toBe(true);
 
     // The retry re-dispatches the same restore with stop_chats flipped on.
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.runStopChatsRetry();
     await settle();
     const retryBody = deps.postCalls[1].body as { stop_chats: boolean };
@@ -392,7 +392,7 @@ describe("BackupOperationController", () => {
   it("gives up after a bounded run of unreadable status polls", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.dispatch("/x", {}, { label: "Working..." });
     await settle();
 
@@ -418,7 +418,7 @@ describe("BackupOperationController", () => {
   it("keeps polling when a null result is followed by a real payload", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.dispatch("/x", {}, { label: "Working..." });
     await settle();
 
@@ -436,7 +436,7 @@ describe("BackupOperationController", () => {
   it("reports a cancelled operation as a neutral outcome", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.dispatch(
       "/x",
       {},
@@ -504,7 +504,7 @@ describe("DestroyingModel", () => {
     await settle();
     expect(model.status).toBe("failed");
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     deps.getResponses.push({ status: "RUNNING" });
     await model.retry();
     expect(model.status).toBe("running");
@@ -521,14 +521,14 @@ describe("DestroyingModel", () => {
 
     deps.postResponses.push({
       status: 409,
-      json: { error: "another destroy is already running" },
+      body: { error: "another destroy is already running" },
     });
     await model.retry();
     expect(model.status).toBe("failed");
     expect(model.retryErrorMessage).toBe("another destroy is already running");
 
     // A later successful retry clears the message.
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     deps.getResponses.push({ status: "RUNNING" });
     await model.retry();
     expect(model.retryErrorMessage).toBeNull();
@@ -538,7 +538,7 @@ describe("DestroyingModel", () => {
   it("reports an unreachable server when the retry post cannot connect", async () => {
     const deps = new FakeDeps();
     const model = new DestroyingModel("agent-22", deps);
-    deps.postResponses.push({ status: 0, json: null });
+    deps.postResponses.push({ status: 0, body: null });
 
     await model.retry();
 
@@ -573,7 +573,7 @@ describe("RecoveryModel", () => {
 
     deps.postResponses.push({
       status: 202,
-      json: { operation_id: "agent-33", kind: "restart" },
+      body: null,
     });
     await model.dispatchRecovery();
     expect(model.isRecoveryRunning).toBe(true);
@@ -600,13 +600,13 @@ describe("RecoveryModel", () => {
 
     deps.postResponses.push({
       status: 409,
-      json: { error: "another operation is running" },
+      body: { error: "another operation is running" },
     });
     await model.dispatchRecovery();
     expect(model.isRecoveryRunning).toBe(false);
     expect(model.recoveryError).toBe("another operation is running");
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
     deps.getResponses.push({
       status: "FAILED",
@@ -626,7 +626,7 @@ describe("RecoveryModel", () => {
     const model = new RecoveryModel("agent-33", deps);
     deps.recoveryInfoResponses.push(info);
     await model.load();
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery("start");
 
     deps.getResponses.push({
@@ -660,7 +660,7 @@ describe("RecoveryModel", () => {
     const model = new RecoveryModel("agent-33", deps);
     deps.recoveryInfoResponses.push(info);
     await model.load();
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
 
     // Every status poll answers null (no queued responses): the model keeps
@@ -696,7 +696,7 @@ describe("RecoveryModel", () => {
     const model = new RecoveryModel("agent-33", deps);
     deps.recoveryInfoResponses.push(info);
     await model.load();
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
     for (
       let attempt = 0;
@@ -826,7 +826,7 @@ describe("RecoveryModel", () => {
     const model = new RecoveryModel("agent-33", deps);
     deps.recoveryInfoResponses.push(info);
     await model.load();
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
 
     // The server moves the tracker out of "recovering" before the operation
@@ -877,7 +877,7 @@ describe("RecoveryModel", () => {
     // postJson resolves on a microtask, so stop() lands first). The POST is
     // already out -- the server may restart the machine -- but a stopped model
     // must not open a log stream nothing will ever close, or arm a poller.
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     const dispatching = model.dispatchRecovery();
     model.stop();
     await dispatching;
@@ -912,7 +912,7 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
 
     expect(deps.getUrls.some((url) => url.includes("/health"))).toBe(false);
@@ -927,7 +927,7 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery("start");
     expect(deps.postCalls.at(-1)?.body).toEqual({
       scope: "host",
@@ -935,7 +935,7 @@ describe("RecoveryModel", () => {
     });
 
     model.isRecoveryRunning = false;
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
     expect(deps.postCalls.at(-1)?.body).toEqual({
       scope: "host",
@@ -1086,7 +1086,7 @@ describe("BackupSettingsModel", () => {
     await model.loadCheck();
     expect(model.isVerificationEnabled).toBe(true);
 
-    deps.postResponses.push({ status: 200, json: null });
+    deps.postResponses.push({ status: 200, body: null });
     deps.checkResponses.push({
       check_state: "DISABLED",
       is_verification_enabled: false,
@@ -1103,7 +1103,7 @@ describe("BackupSettingsModel", () => {
     expect(model.isVerificationPending).toBe(false);
     expect(model.verificationError).toBeNull();
 
-    deps.postResponses.push({ status: 500, json: null });
+    deps.postResponses.push({ status: 500, body: null });
     await model.toggleVerification();
     expect(model.verificationError).toBe(
       "Could not change the verification setting. Try again.",
@@ -1131,7 +1131,7 @@ describe("the backup settings actions", () => {
   it("dispatches the update, and retries it with the stop-chats flag when chats block it", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.startUpdate();
     await settle();
 
@@ -1148,7 +1148,7 @@ describe("the backup settings actions", () => {
     await controller.pollOnce();
     expect(controller.isStopChatsRetryOffered).toBe(true);
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.runStopChatsRetry();
     await settle();
     expect(deps.postCalls[1].body).toEqual({ stop_chats: true });
@@ -1158,7 +1158,7 @@ describe("the backup settings actions", () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.startStorageChange("API_KEY", "RESTIC_REPOSITORY=s3:example\n");
     await settle();
     expect(deps.postCalls[0].url).toBe(
@@ -1169,12 +1169,52 @@ describe("the backup settings actions", () => {
       api_key_env: "RESTIC_REPOSITORY=s3:example\n",
     });
 
-    deps.postResponses.push({ status: 202, json: null });
+    deps.postResponses.push({ status: 202, body: null });
     controller.startStorageChange("NONE", "");
     await settle();
     expect(deps.postCalls[1].url).toBe(
       "/api/v1/workspaces/agent-11/backup-service/disable",
     );
     expect(deps.postCalls[1].body).toEqual({});
+  });
+});
+
+describe("browserLifecycleDeps postJson", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps a plain-text failure's text, and no body for a success", async () => {
+    const respond = vi.fn(
+      async () => new Response("Bad Gateway", { status: 502 }),
+    );
+    vi.stubGlobal("fetch", respond);
+    const deps = browserLifecycleDeps(() => undefined);
+
+    const failure = await deps.postJson("/x", {});
+    respond.mockImplementation(
+      async () => new Response('{"operation_id":"op-1"}', { status: 202 }),
+    );
+    const success = await deps.postJson("/x", {});
+
+    expect(failure.status).toBe(502);
+    expect(errorMessageFromBody(failure.body, "fallback")).toBe("Bad Gateway");
+    expect(success).toEqual({ status: 202, body: null });
+  });
+
+  it("resolves status 0 when the request gets no response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+
+    const outcome = await browserLifecycleDeps(() => undefined).postJson(
+      "/x",
+      {},
+    );
+
+    expect(outcome).toEqual({ status: 0, body: null });
   });
 });

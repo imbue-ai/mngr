@@ -1100,8 +1100,10 @@ def test_discover_hosts_raises_when_daemon_offline(temp_mngr_ctx: MngrContext) -
     way the Modal and Imbue Cloud providers behave.
     """
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    with pytest.raises(ProviderUnavailableError, match="not available"):
+    with pytest.raises(ProviderUnavailableError, match="not available") as excinfo:
         provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+    # The fix travels with the error, so a client can say what to do.
+    assert excinfo.value.short_remediation == "start Docker"
 
 
 @pytest.mark.docker_sdk

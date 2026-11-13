@@ -286,7 +286,8 @@ function ensureLegacyLatchkeyLink({ legacyDir, roots, log = console.log }) {
 }
 
 /**
- * Record why the migration failed, and return the text recorded.
+ * Record why the migration failed, stack and all, in the log root, and return
+ * whether it could be written there.
  *
  * The caller runs before the log tee and Sentry are up (both open files under
  * the roots being moved), so without this a failed migration ends the launch
@@ -300,10 +301,11 @@ function recordMigrationFailure({ roots, legacyDir, error, log = console.error }
   try {
     fs.mkdirSync(roots.logs, { recursive: true });
     fs.appendFileSync(path.join(roots.logs, MIGRATION_FAILURE_LOG_NAME), `${new Date().toISOString()}\n${detail}\n\n`);
+    return true;
   } catch (writeError) {
-    log(`[migrate] could not record the failure under ${roots.logs}: ${writeError && writeError.message}`);
+    log(`[migrate] could not record the failure under ${roots.logs}: ${writeError && writeError.message}\n${detail}`);
+    return false;
   }
-  return detail;
 }
 
 module.exports = {

@@ -1740,6 +1740,28 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
     assert body["event_id"] is None
 
 
+def test_help_report_carries_the_details_an_error_attached(tmp_path: Path) -> None:
+    """A "Report a bug" pressed on an error sends what the error held, and it reaches the event.
+
+    The visible sentence is ours and the raw text sits behind See details, so the report is the one
+    place the raw text has to arrive intact for anyone to read it.
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    # Server text of exactly the kind Sentry's scrubber blanks inline ("auth", "token"), so the
+    # uploaded copy is the one that has to carry it.
+    details = "Couldn't remove this workspace from the list.\n\nHTTP 401\nauthentication token rejected"
+    with recording_s3_bucket() as uploads, registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        with capturing_sentry_client() as captured_events:
+            response = client.post("/help/report", json={"description": "it broke", "error_details": details})
+    assert response.status_code == 200
+    assert _submitted_report(captured_events[0])["error_details"] == details
+    extra: Mapping[str, Any] = captured_events[0]["extra"]
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_error_details" in extra, sorted(extra)
+    detail_uploads = [body for key, body in uploads if key.startswith("error-details")]
+    assert len(detail_uploads) == 1, [key for key, _ in uploads]
+    assert gzip.decompress(detail_uploads[0]).decode("utf-8") == details
+
+
 def _write_console_tail(tmp_path: Path, contents: str) -> Path:
     """Write the rolling console tail the Electron shell keeps, as the route expects to find it."""
     log_dir = InstallationPaths(data_dir=tmp_path).log_dir

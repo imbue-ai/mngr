@@ -55,6 +55,7 @@ import { RecoveryModal } from "../recovery/RecoveryModal";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { WebLoginModal } from "../components/WebLoginModal";
+import { ErrorDialogLayer } from "../components/ErrorDialog";
 import { electronBridge } from "../../electron-bridge";
 
 /** The request popup's overlay attrs: the docked options panel's own window,
@@ -532,6 +533,7 @@ export function Shell(): m.Component<ShellAttrs> {
         // After the overlay slot, which shares its z-[110], so it paints over
         // an app modal (Manage Accounts) that opened it.
         m(WebLoginModal),
+        m(ErrorDialogLayer),
       ]);
     },
   };

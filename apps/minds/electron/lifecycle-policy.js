@@ -102,7 +102,7 @@ function shouldOpenWindowOnActivate({ isShuttingDown, isQuitSequenceRunning, has
  *                     already waiting for it, and reopening an app that has a
  *                     window means showing that window.
  *   'error-takeover'  open shell.html replaying the recorded error, whose
- *                     Retry button restarts the backend.
+ *                     Retry button runs the failed start again.
  *   'loading'         open shell.html's loading screen; the backend is still
  *                     coming up.
  *   'startup-route'   open a window and land the app's FIRST-window route on

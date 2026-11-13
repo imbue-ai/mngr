@@ -26,7 +26,7 @@ const RETURN_TO = "/goto/host-bb22/";
  * page has already reached, they do not fetch one. */
 const IDLE_DEPS: LifecycleDeps = {
   getJson: async () => null,
-  postJson: async () => ({ status: 500, json: null }),
+  postJson: async () => ({ status: 500, body: null }),
   deleteResource: async () => 500,
   openEventSource: () => ({ close: () => {}, onmessage: null, onerror: null }),
   schedule: () => {},

@@ -4,6 +4,7 @@ import pytest
 
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
+from imbue.minds.desktop_client.ui_models import ErrorRemedy
 
 
 @pytest.mark.parametrize(
@@ -44,7 +45,7 @@ def test_safe_local_redirect_path_rejects_unsafe_values(raw: str | None) -> None
     assert safe_local_redirect_path(raw) is None
 
 
-def test_json_error_response_carries_a_detail_key_only_when_one_is_given() -> None:
+def test_json_error_response_carries_detail_and_remedy_keys_only_when_given() -> None:
     plain = make_json_error_response("Not ready", 409)
     assert plain.status_code == 409
     assert plain.mimetype == "application/json"
@@ -54,4 +55,10 @@ def test_json_error_response_carries_a_detail_key_only_when_one_is_given() -> No
     assert json.loads(detailed.get_data(as_text=True)) == {
         "error": "Refused",
         "detail": "the chat app answered HTTP 400",
+    }
+
+    with_remedy = make_json_error_response("Service down", 503, remedy=ErrorRemedy.RESTART_APP)
+    assert json.loads(with_remedy.get_data(as_text=True)) == {
+        "error": "Service down",
+        "remedy": "RESTART_APP",
     }

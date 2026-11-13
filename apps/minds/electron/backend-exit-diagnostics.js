@@ -86,6 +86,16 @@ function formatEarlyExitDetails({ code, signal, elapsedMs, stdoutEventCount, lau
   ].join('\n');
 }
 
+/**
+ * A startup failure whose message already holds everything this launch's
+ * backend left behind: it never got as far as running, or it died and the
+ * message carries its last stderr. The tail of minds.log adds nothing to such
+ * a failure: for a backend that died it repeats those lines (and, written
+ * asynchronously, may not hold the last of them yet when the failure is
+ * reported), and for one that never ran it is an earlier launch's output.
+ */
+class SelfContainedStartupError extends Error {}
+
 /** The startup error for a backend that could not be spawned at all. */
 function formatSpawnFailureDetails({ errorMessage, launch }) {
   return [`Failed to start backend: ${errorMessage}`, launch].join('\n');
@@ -94,6 +104,7 @@ function formatSpawnFailureDetails({ errorMessage, launch }) {
 module.exports = {
   STDERR_TAIL_MAX_LINES,
   STDERR_TAIL_MAX_CHARS,
+  SelfContainedStartupError,
   createStderrTail,
   describeLaunch,
   formatEarlyExitDetails,

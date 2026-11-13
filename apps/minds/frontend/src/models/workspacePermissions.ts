@@ -40,7 +40,8 @@ import type {
   UiWorkspacePermissions,
 } from "../generated/ui";
 import type { FetchJson } from "./workspaceOptions";
-import { defaultFetchJson, errorMessageFromBody } from "./workspaceOptions";
+import { errorMessageFromBody } from "./errors";
+import { defaultFetchJson } from "./workspaceOptions";
 import {
   forgetWarmedPermissionsOverview,
   readWarmedPermissionsOverview,

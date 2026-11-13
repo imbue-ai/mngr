@@ -39,11 +39,14 @@ import type {
 import type { PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
+import { bugReportTextFor } from "../../models/errors";
+import type { UserFacingError } from "../../models/errors";
 import {
   setPendingHelpLaunch,
   stagedHelpLaunchWorkspace,
 } from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
+import { ErrorDialogQueue, errorDialogs } from "../../models/errorDialog";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { rowClickActionFor } from "../pages/landing-controls";
@@ -135,6 +138,7 @@ export class ShellState {
   private pendingUpdatesTabArrival: UpdatesTabArrival | null = null;
   private updatesTabArrivalCount = 0;
   private readonly webLogin: WebLoginModel;
+  private readonly errorDialogs: ErrorDialogQueue;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
    * installed by index.ts like the channel; null only before boot wiring. */
@@ -282,10 +286,12 @@ export class ShellState {
     stores: AppStores,
     webLoginModel: WebLoginModel = webLogin,
     autoUpdatePrompt: AutoUpdatePromptModel = new AutoUpdatePromptModel(),
+    errorDialogQueue: ErrorDialogQueue = errorDialogs,
   ) {
     this.stores = stores;
     this.webLogin = webLoginModel;
     this.autoUpdatePrompt = autoUpdatePrompt;
+    this.errorDialogs = errorDialogQueue;
   }
 
   /** Whether this window's workspace frame is showing the workspace named. */
@@ -1125,9 +1131,11 @@ export class ShellState {
    * plain ordered list rather than something the surfaces negotiate through
    * listener registration order (which follows mount order, not z-order).
    *
-   * The switcher popover (z-[200]) leads, then the browser sign-in modal: the
-   * Shell emits it after every other z-[110] surface, so it sits over the app
-   * modal (Manage Accounts) that opened it, and over the recovery card too.
+   * The error dialog leads: it is drawn above every other surface, the
+   * switcher popover included. Then the switcher popover (z-[200]), then the
+   * browser sign-in modal: the Shell emits it after every other z-[110]
+   * surface, so it sits over the app modal (Manage Accounts) that opened it,
+   * and over the recovery card too.
    * Next the notification feed, which can also open over the recovery card.
    * The card comes before the two route-based overlays because it is not one
    * -- it can be raised over the workspace options overlay, and it sits above
@@ -1137,6 +1145,10 @@ export class ShellState {
    * alone (the route is the popup's) and leaves the panel standing.
    */
   handleEscape(): boolean {
+    if (this.errorDialogs.current !== null) {
+      this.errorDialogs.dismiss();
+      return true;
+    }
     if (this.isSidebarOpen) {
       this.closeSidebar();
       return true;
@@ -1646,14 +1658,65 @@ export class ShellState {
       m.route.set("/help", this.overlayQuery(), routeOptions);
       return;
     }
-    const isHealthy = this.stores.health.isContentAssumedReady(agentScoped);
     m.route.set(
       "/help",
-      this.overlayQuery({
-        workspace: agentScoped,
-        assist: isHealthy ? "1" : "0",
-      }),
+      this.overlayQuery(this.scopedHelpQuery(agentScoped)),
       routeOptions,
+    );
+  }
+
+  /** The /help query naming a workspace: assist is offered only while its
+   * interface is healthy. */
+  private scopedHelpQuery(workspaceAgentId: string): {
+    workspace: string;
+    assist: "1" | "0";
+  } {
+    return {
+      workspace: workspaceAgentId,
+      assist: this.stores.health.isContentAssumedReady(workspaceAgentId)
+        ? "1"
+        : "0",
+    };
+  }
+
+  /**
+   * Open the report form for an error the user was just shown, with the
+   * error's sentence and details attached.
+   *
+   * The report is scoped to `workspaceAgentId` -- so it can collect that
+   * workspace's logs -- only where scoping leaves the surface alone: the
+   * workspace is the one on screen, or the page on screen is its recovery
+   * page (kept painted behind the form). Anywhere else the route's
+   * ?workspace= would mount that workspace's frame in place of the page the
+   * error was on, so the route names no workspace and the launch carries the
+   * one the report still collects from.
+   */
+  openHelpForError(
+    error: UserFacingError,
+    workspaceAgentId: string | null,
+  ): void {
+    const path = this.currentRoutePath();
+    // Raised over an app modal, the page that modal floats over is still the
+    // one behind, and the live route is only the modal's.
+    if (!isAppOverlayPath(path)) this.rememberPageBehindOverlay();
+    const recoveryId = recoveryWorkspaceIdFromPath(
+      (this.pageRouteBehindOverlay ?? path).split("?")[0],
+    );
+    const isScoped =
+      workspaceAgentId !== null &&
+      (workspaceAgentId === this.displayedWorkspaceAgentId() ||
+        (recoveryId !== null &&
+          this.stores.workspaces.toAgentScopedId(recoveryId) ===
+            workspaceAgentId));
+    setPendingHelpLaunch({
+      workspaceAgentId: isScoped ? workspaceAgentId : "",
+      errorDetails: bugReportTextFor(error),
+      errorWorkspaceAgentId: isScoped ? "" : (workspaceAgentId ?? ""),
+    });
+    m.route.set(
+      "/help",
+      this.overlayQuery(isScoped ? this.scopedHelpQuery(workspaceAgentId) : {}),
+      isTitlebarPopupRoutePath(path) ? { replace: true } : undefined,
     );
   }
 

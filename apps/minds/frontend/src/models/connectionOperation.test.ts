@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EventSourceLike, LifecycleDeps } from "./backups";
 import { ConnectionOperationWatcher, connectionOperationStatusUrl } from "./connectionOperation";
 import type { CloudAccountOption } from "./create";
+import type { RequestOutcome } from "./errors";
 import type { OperationProgress } from "./progress";
 
 class FakeEventSource implements EventSourceLike {
@@ -30,7 +31,7 @@ class FakeDeps implements LifecycleDeps {
     return this.getResponses.length > 0 ? this.getResponses.shift()! : null;
   }
 
-  async postJson(): Promise<{ status: number; json: unknown | null }> {
+  async postJson(): Promise<RequestOutcome> {
     throw new Error("not used");
   }
 

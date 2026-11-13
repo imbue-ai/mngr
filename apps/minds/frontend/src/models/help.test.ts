@@ -7,6 +7,22 @@ import {
   takePendingHelpLaunch,
 } from "./help";
 
+/** A fetcher that answers every request with `responseBody` and records each
+ * request's url and parsed JSON body in `calls`. */
+function recordingFetcher(responseBody: unknown): {
+  calls: Array<{ url: string; body: unknown }>;
+  fetcher: (url: string, init?: RequestInit) => Promise<Response>;
+} {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  return {
+    calls,
+    fetcher: (url, init) => {
+      calls.push({ url, body: JSON.parse(String(init?.body)) });
+      return Promise.resolve(jsonResponse(responseBody));
+    },
+  };
+}
+
 describe("HelpModel", () => {
   it("consumes the staged launch exactly once and defaults the mode from it", () => {
     setPendingHelpLaunch({
@@ -31,6 +47,71 @@ describe("HelpModel", () => {
     const model = new HelpModel({ storage: memoryStorage() });
     expect(model.mode).toBe("report");
     expect(model.description).toBe("diagnosis");
+  });
+
+  it("lands a Report a bug on the report form and sends what the error held with the report", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+      errorDetails:
+        "Couldn't rename this workspace.\n\nHTTP 500\nrename failed",
+    });
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
+    });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+    // The user asked to report, so the agent mode is not the default even
+    // where it is offered.
+    expect(model.mode).toBe("report");
+    model.description = "I tried to rename it";
+
+    await model.submit();
+
+    expect(calls[0].url).toBe("/help/report");
+    expect(calls[0].body).toMatchObject({
+      description: "I tried to rename it",
+      error_details:
+        "Couldn't rename this workspace.\n\nHTTP 500\nrename failed",
+    });
+  });
+
+  it("collects from the workspace an error was about even when the form is not over it", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "",
+      errorDetails: "HTTP 502",
+      errorWorkspaceAgentId: "agent-1",
+    });
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
+    });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+    model.description = "it broke";
+
+    await model.submit();
+
+    expect(calls[0].body).toMatchObject({ workspace_agent_id: "agent-1" });
+  });
+
+  it("hands the attached details to the agent too when the user switches to agent help", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+      errorDetails: "HTTP 500\nrename failed",
+    });
+    const { calls, fetcher } = recordingFetcher({ ok: true });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+    model.mode = "agent";
+    model.description = "fix the rename";
+
+    await model.submit();
+
+    expect(calls[0].url).toBe("/help/assist");
+    expect(calls[0].body).toEqual({
+      description: "fix the rename\n\nHTTP 500\nrename failed",
+      workspace_agent_id: "agent-1",
+    });
   });
 
   it("requires a description before submitting", async () => {
@@ -60,14 +141,11 @@ describe("HelpModel", () => {
   });
 
   it("submits a report and surfaces the Sentry event id", async () => {
-    const calls: Array<{ url: string; body: unknown }> = [];
-    const model = new HelpModel({
-      storage: memoryStorage(),
-      fetcher: (url, init) => {
-        calls.push({ url, body: JSON.parse(String(init?.body)) });
-        return Promise.resolve(jsonResponse({ ok: true, event_id: "abc123" }));
-      },
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
     });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
     model.description = "it broke";
     model.setRemoteAccessAllowed(true);
 
@@ -126,6 +204,25 @@ describe("HelpModel", () => {
     model.backToReportFromError();
     expect(model.phase).toBe("form");
     expect(model.mode).toBe("report");
+  });
+
+  it("keeps a plain-text assist failure's text out of the reason", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+    });
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: () =>
+        Promise.resolve(new Response("Bad Gateway", { status: 502 })),
+    });
+    model.description = "help me";
+
+    await model.submit();
+
+    expect(model.phase).toBe("agent_error");
+    expect(model.agentErrorMessage).toBe("Could not start an agent.");
+    expect(model.agentErrorDetail).toBe("");
   });
 
   it("keeps the refusing machine's own verdict", async () => {
@@ -212,15 +309,12 @@ describe("HelpModel", () => {
   });
 
   it("sends the diagnostics choices with the report", async () => {
-    const calls: Array<{ url: string; body: unknown }> = [];
     setPendingHelpLaunch({ workspaceAgentId: "agent-1" });
-    const model = new HelpModel({
-      storage: memoryStorage(),
-      fetcher: (url, init) => {
-        calls.push({ url, body: JSON.parse(String(init?.body)) });
-        return Promise.resolve(jsonResponse({ ok: true, event_id: "abc123" }));
-      },
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
     });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
     model.description = "it broke";
     model.setTranscriptIncluded(false);
 
@@ -235,6 +329,7 @@ describe("HelpModel", () => {
       workspace_agent_id: "agent-1",
       include_logs: true,
       include_transcript: false,
+      error_details: "",
     });
   });
 });
@@ -295,6 +390,8 @@ describe("stageHelpLaunchFromRoute", () => {
       description: "the diagnosis",
       isAgentReport: true,
       workspaceName: "octopus",
+      errorDetails: "",
+      errorWorkspaceAgentId: "",
     });
   });
 
@@ -317,6 +414,8 @@ describe("stageHelpLaunchFromRoute", () => {
       description: "from the link",
       isAgentReport: false,
       workspaceName: "octopus",
+      errorDetails: "",
+      errorWorkspaceAgentId: "",
     });
   });
 
@@ -340,6 +439,8 @@ describe("stageHelpLaunchFromRoute", () => {
       description: "",
       isAgentReport: false,
       workspaceName: "",
+      errorDetails: "",
+      errorWorkspaceAgentId: "",
     });
   });
 

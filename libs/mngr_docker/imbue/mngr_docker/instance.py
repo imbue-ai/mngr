@@ -464,6 +464,13 @@ class DockerProviderInstance(BaseProviderInstance):
     def supports_mutable_tags(self) -> bool:
         return False
 
+    def _daemon_unreachable_error(self, reason: str) -> ProviderUnavailableError:
+        """The error for a Docker daemon this provider cannot reach, naming the fix."""
+        remediation = (
+            "start Docker" if is_docker_daemon_local(self.config.host) else f"start Docker on {self.config.host}"
+        )
+        return ProviderUnavailableError(self.name, reason, short_remediation=remediation)
+
     @cached_property
     def _docker_client(self) -> docker.DockerClient:
         """Lazily create a Docker client.
@@ -482,7 +489,7 @@ class DockerProviderInstance(BaseProviderInstance):
                 return docker.DockerClient(base_url=self.config.host)
             return create_docker_client()
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, str(e)) from e
+            raise self._daemon_unreachable_error(str(e)) from e
 
     @cached_property
     def _daemon_totals(self) -> DockerDaemonTotals:
@@ -496,7 +503,7 @@ class DockerProviderInstance(BaseProviderInstance):
         try:
             info: dict[str, Any] = self._docker_client.info()
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, f"Cannot read Docker daemon info: {e}") from e
+            raise self._daemon_unreachable_error(f"Cannot read Docker daemon info: {e}") from e
         return DockerDaemonTotals(cpu_count=int(info["NCPU"]), memory_bytes=int(info["MemTotal"]))
 
     def _default_size_start_args(self) -> tuple[str, ...]:
@@ -569,7 +576,7 @@ class DockerProviderInstance(BaseProviderInstance):
         except docker.errors.NotFound:
             return False
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, str(e)) from e
+            raise self._daemon_unreachable_error(str(e)) from e
         return True
 
     @cached_property
@@ -1338,7 +1345,7 @@ kill -TERM 1
             # Only a transport failure means the daemon is unreachable. A
             # docker.errors.APIError (the daemon answered with an error) is a
             # real fault and must propagate, not be mislabeled as unavailable.
-            raise ProviderUnavailableError(self.name, f"Cannot connect to Docker daemon: {e}") from e
+            raise self._daemon_unreachable_error(f"Cannot connect to Docker daemon: {e}") from e
 
         prefix = self.mngr_ctx.config.prefix
         filtered: list[docker.models.containers.Container] = []
@@ -2296,7 +2303,7 @@ kill -TERM 1
         try:
             containers = self._list_containers()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+            raise self._daemon_unreachable_error(f"Cannot list Docker hosts: {e}") from e
 
         # A present-but-stopped state container means host records are
         # unreachable: every read exec's into a stopped container, and
@@ -2312,7 +2319,7 @@ kill -TERM 1
         try:
             all_host_records = self._host_store.list_all_host_records()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+            raise self._daemon_unreachable_error(f"Cannot list Docker hosts: {e}") from e
         record_by_host_id = {HostId(record.certified_host_data.host_id): record for record in all_host_records}
 
         # Map running containers by host_id, and harvest host names from labels.

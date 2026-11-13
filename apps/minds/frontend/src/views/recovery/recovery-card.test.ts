@@ -28,7 +28,7 @@ import {
  * they do not drive one. */
 const IDLE_DEPS: LifecycleDeps = {
   getJson: async () => null,
-  postJson: async () => ({ status: 500, json: null }),
+  postJson: async () => ({ status: 500, body: null }),
   deleteResource: async () => 500,
   openEventSource: () => ({ close: () => {}, onmessage: null, onerror: null }),
   schedule: () => {},
@@ -79,7 +79,7 @@ async function modelRecoveringOwn(
 ): Promise<RecoveryModel> {
   const model = new RecoveryModel("agent-33", {
     ...IDLE_DEPS,
-    postJson: async () => ({ status: 202, json: null }),
+    postJson: async () => ({ status: 202, body: null }),
   });
   model.info = info;
   await model.dispatchRecovery(kind);

@@ -10,6 +10,14 @@ const { initSentry, captureManualReport, isNativeCrashReportingEnabled } = requi
 const { createCrashAnnotator } = require('./crash-annotations');
 const { ensureLegacyLatchkeyLink, migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
+const {
+  RETRY_START,
+  crashTakeover,
+  logFileNameFor,
+  retryStartsFrom,
+  setupFailureTakeover,
+  startFailureTakeover,
+} = require('./startup-failure');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
@@ -136,18 +144,26 @@ app.setAppLogsPath(paths.getLogDir());
 
 // Move this tier's files off the legacy ~/.<MINDS_ROOT_NAME> root, once. Runs
 // before logging and Sentry because both open files under the roots it moves.
-// Deliberately allowed to throw: a half-migrated tier has some files at the new
+// A failure ends the launch: a half-migrated tier has some files at the new
 // roots and some at the old, and booting on top of that is worse than not
 // booting. Neither of those two reporting channels exists yet, so the failure
-// gets written to the log root and shown before the throw takes the launch down.
+// is written to the log root and the person is told in a native box, the only
+// surface there is before a window exists.
 const legacyDataDir = paths.getLegacyDataDir();
 const platformRoots = paths.getPlatformRoots();
 try {
   migrateLegacyDataDir({ legacyDir: legacyDataDir, roots: platformRoots });
 } catch (err) {
-  const detail = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
-  dialog.showErrorBox(`${PRODUCT_DISPLAY_NAME} could not move its data`, detail);
-  throw err;
+  const isFailureRecorded = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
+  dialog.showErrorBox(
+    `${PRODUCT_DISPLAY_NAME} couldn't finish moving its files`,
+    `${PRODUCT_DISPLAY_NAME} is moving its files to a new folder and couldn't finish. ` +
+      "Nothing was deleted -- whatever hasn't moved yet is still where it was. " +
+      `Open ${PRODUCT_DISPLAY_NAME} again to finish the move. If this persists, report a bug.` +
+      (isFailureRecorded ? ' See the log for details.' : ''),
+  );
+  app.exit(1);
+  return;
 }
 
 // Tee console output into the tier's log root and record uncaught main-process
@@ -1299,21 +1315,25 @@ function openNewWindow(url, { showInactive = false } = {}) {
 }
 
 // Open a window on the shell.html takeover screen: the recorded error, whose
-// Retry button restarts the backend, when one is current; else the loading
+// Retry button runs the failed start again, when one is current; else the loading
 // screen the startup sequence broadcasts into. This is what makes a windowless
 // app recoverable -- an app whose backend failed or died has no page to load
 // and no window to focus, so without this it could never open a window again.
-function openTakeoverWindow() {
+function openTakeoverWindow({ loadingHash } = {}) {
   const bundle = createBundle();
   const takeover = lastErrorTakeover;
   bundle.isErrorState = !!takeover;
   bundle.isLoadingState = !takeover;
   const wc = bundle.window.webContents;
-  bundle.loadingDocumentLoaded = wc.loadFile(path.join(__dirname, 'shell.html')).catch(() => {});
+  const hash = takeover ? 'error' : loadingHash;
+  bundle.loadingDocumentLoaded = wc
+    .loadFile(path.join(__dirname, 'shell.html'), hash ? { hash } : undefined)
+    .catch(() => {});
   wc.once('did-finish-load', () => {
     if (wc.isDestroyed()) return;
     if (takeover) wc.send('error-details', takeover);
   });
+  if (!takeover) sendLatestLoadingStatusOnLoad(wc);
   return bundle;
 }
 
@@ -1323,7 +1343,9 @@ function openTakeoverWindow() {
 // recomputed here rather than replayed from a snapshot taken at startup, so a
 // session restored an hour later reflects the workspaces that exist NOW.
 function openStartupRoutedWindow() {
-  const bundle = openTakeoverWindow(); // the loading screen, while we ask
+  // The backend is already serving, so there is no wait to report: `#route`
+  // keeps the loader down while the route is computed.
+  const bundle = openTakeoverWindow({ loadingHash: 'route' });
   // Sized from the saved session up front, as the launch's window is, so it
   // does not surface at the default bounds and jump once the route lands.
   const isSizedFromSavedSession = sizeFromSavedSession(bundle);
@@ -1384,7 +1406,8 @@ function openOrFocusWindow({ isReopen = false } = {}) {
 }
 
 // The error currently taking every window over, replayed into any window
-// opened afterwards. Cleared once a backend start succeeds.
+// opened afterwards. Cleared once a backend start succeeds, or when a Retry
+// runs a failed setup again.
 //
 // It is deliberately load-bearing beyond the error screen. After a crash
 // backendBaseUrl is knowingly left naming the DEAD port -- windows record their
@@ -1399,8 +1422,7 @@ function openOrFocusWindow({ isReopen = false } = {}) {
 // a live backend's events, or off a start that just succeeded and cleared this.
 let lastErrorTakeover = null;
 
-function showErrorInAllWindows(message, details, actionLabel) {
-  const takeover = { message, details, actionLabel };
+function showErrorInAllWindows(takeover) {
   lastErrorTakeover = takeover;
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
@@ -1409,7 +1431,7 @@ function showErrorInAllWindows(message, details, actionLabel) {
     if (wc.isDestroyed()) continue;
     const url = wc.getURL();
     if (!url.startsWith('file://')) {
-      wc.loadFile(path.join(__dirname, 'shell.html'));
+      wc.loadFile(path.join(__dirname, 'shell.html'), { hash: 'error' });
       wc.once('did-finish-load', () => {
         if (!wc.isDestroyed()) {
           wc.send('error-details', takeover);
@@ -1425,8 +1447,10 @@ function prepareAllWindowsForRetry() {
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isLoadingState = true;
-    if (!bundle.window.webContents.isDestroyed()) {
-      bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'));
+    const wc = bundle.window.webContents;
+    if (!wc.isDestroyed()) {
+      wc.loadFile(path.join(__dirname, 'shell.html'));
+      sendLatestLoadingStatusOnLoad(wc);
     }
   }
 }
@@ -2603,6 +2627,10 @@ async function runStartupSequence(bundle) {
     }
   }
 
+  await setUpEnvironmentThenStartBackend();
+}
+
+async function setUpEnvironmentThenStartBackend() {
   const envSetupStartedAt = Date.now();
   try {
     await runEnvSetup(
@@ -2612,10 +2640,7 @@ async function runStartupSequence(bundle) {
     console.log(`[startup] env-setup finished in ${((Date.now() - envSetupStartedAt) / 1000).toFixed(1)}s`);
   } catch (err) {
     console.error('[startup] env-setup failed:', err.message);
-    showErrorInAllWindows(
-      'Setup failed -- you may not be connected to the internet',
-      err.message,
-    );
+    showErrorInAllWindows(setupFailureTakeover(err));
     return;
   }
 
@@ -2632,8 +2657,19 @@ function sendToLoadingWindows(channel, payload) {
   }
 }
 
+let latestLoadingStatus = null;
+
 function broadcastStatusToLoadingWindows(status) {
+  latestLoadingStatus = status;
   sendToLoadingWindows('status-update', status);
+}
+
+// An IPC send reaches only a document already listening, so a loading document
+// that finishes loading after the latest status went out is sent it then.
+function sendLatestLoadingStatusOnLoad(wc) {
+  wc.once('did-finish-load', () => {
+    if (!wc.isDestroyed() && latestLoadingStatus) wc.send('status-update', latestLoadingStatus);
+  });
 }
 
 // One line of startup console output for the loading document's "Show
@@ -2819,10 +2855,7 @@ async function startBackendWithRetry() {
         // replayed into the next window the user opens, so they get the error
         // screen and its Retry instead of a fresh window loaded at the dead
         // port -- whose own Reload button only re-loads that same dead port.
-        showErrorInAllWindows(
-          `${PRODUCT_DISPLAY_NAME} stopped unexpectedly`,
-          readLastLogLines(50) || `Process exited with code ${code}`,
-        );
+        showErrorInAllWindows(crashTakeover(code, readLastLogLines(50)));
       });
     }
 
@@ -2885,7 +2918,7 @@ async function startBackendWithRetry() {
 
     flushPendingDeeplink();
   } catch (err) {
-    showErrorInAllWindows(`Failed to start ${PRODUCT_DISPLAY_NAME}`, err.message);
+    showErrorInAllWindows(startFailureTakeover(err, readLastLogLines(50)));
   }
 }
 
@@ -3733,17 +3766,33 @@ ipcMain.on('intro-finished', (event) => {
   if (senderBundle) senderBundle.resolveIntroFinished();
 });
 
+// The takeover's Retry, and "Restart Imbue Studio" from a live app (which has
+// no takeover, so it restarts the backend alone).
 ipcMain.on('retry', async (event) => {
+  const startsFrom = retryStartsFrom(lastErrorTakeover);
   const senderBundle = getBundleFromEvent(event);
   if (senderBundle) focusBundle(senderBundle);
   await shutdown();
   prepareAllWindowsForRetry();
-  await startBackendWithRetry();
+  if (startsFrom === RETRY_START.ENV_SETUP) {
+    // Setup can run for minutes. A failed setup means no backend ever served,
+    // so with the record dropped a window asked for meanwhile gets the loading
+    // screen, not a stale error whose Retry would start a second setup.
+    lastErrorTakeover = null;
+    await setUpEnvironmentThenStartBackend();
+  } else {
+    await startBackendWithRetry();
+  }
 });
 
-ipcMain.on('open-log-file', () => {
-  const logPath = path.join(paths.getLogDir(), 'minds.log');
-  shell.openPath(logPath);
+ipcMain.handle('open-log-file', async () => {
+  const logPath = path.join(paths.getLogDir(), logFileNameFor(lastErrorTakeover));
+  const failure = await shell.openPath(logPath);
+  if (failure) {
+    console.error(`[log] could not open ${logPath}: ${failure}`);
+    return { ok: false, path: logPath };
+  }
+  return { ok: true, path: logPath };
 });
 
 // Electron opens a dialog given no defaultPath in Downloads rather than where
@@ -3801,6 +3850,15 @@ ipcMain.on('window-close', (event) => {
 // Cmd+Q / Ctrl+Q run, prompt included, for a desktop with no tray to offer it.
 ipcMain.on('quit-app', () => {
   runQuitSequence();
+});
+
+// The page's Reopen (macOS only): the same quit, prompt included, then the app
+// starts again, which is when a Full Disk Access grant applies. Not on Linux,
+// where app.relaunch's helper would hand the new process no_new_privs (see
+// linux-relaunch.js).
+ipcMain.on('relaunch-app', () => {
+  if (!isMac) return;
+  runQuitSequence({ isRelaunch: true });
 });
 
 function initiateFullQuit() {
@@ -3893,7 +3951,7 @@ async function flushChromiumTraceAtQuit() {
   });
 }
 
-async function runQuitSequence() {
+async function runQuitSequence({ isRelaunch = false } = {}) {
   if (isShuttingDown || isQuitSequenceRunning) return;
   isQuitSequenceRunning = true;
 
@@ -3942,6 +4000,9 @@ async function runQuitSequence() {
   // last moments before quitting sit in its buffer. Flushing here is what puts
   // the run-up to a shutdown in the file a later bug report reads.
   await closeConsoleCapture();
+  // Only once the quit can no longer be cancelled: a relaunch scheduled before
+  // a cancelled prompt would fire on some later, unrelated quit.
+  if (isRelaunch) app.relaunch();
   app.quit();
 }
 
