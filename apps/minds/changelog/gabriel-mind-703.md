@@ -1,0 +1,1 @@
+`docs/deploy/next_deploy.md` queues a one-time recompute of production's `gold.activity` back to 2026-08-26 after the analytics deploy that counts only typed user turns and leaves out update commits, so the older days are corrected too.
