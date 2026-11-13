@@ -1,0 +1,1 @@
+Claude Fable 5.2 (`anthropic/claude-fable-5-2`) is priced: $8 input, $40 output, $10 cache write and $0.20 cache read per million tokens, and it can be billed in fast mode at twice those rates. Before, a usage source reporting Fable 5.2 tokens recorded the session as unpriced.

@@ -59,7 +59,7 @@ _REAL_MODELS_CACHE = _REAL_HOME / ".codex" / "models_cache.json"
 
 # ChatGPT-account-safe model. codex's compiled default is a ``*-codex`` slug a ChatGPT
 # login rejects with a 400. Update if this account's available models change.
-_CODEX_MODEL = "gpt-5.5"
+_CODEX_MODEL = "gpt-6.1-sol"
 
 # Disable the remote-provider backends for every command: a purely local agent test,
 # and leaving them on makes mngr probe Modal/Docker. ``-S`` is a per-command option, so

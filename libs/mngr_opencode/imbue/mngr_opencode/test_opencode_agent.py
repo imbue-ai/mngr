@@ -50,7 +50,7 @@ from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 
 # A free model on the OpenCode Zen provider that needs no credentials. Pinned so the
 # test does not depend on the developer's configured default model.
-_FREE_MODEL = "opencode/deepseek-v4-flash-free"
+_FREE_MODEL = "opencode/deepseek-v4.1-flash-free"
 
 # Mirror the harness's private timeouts (kept local so this file does not import them).
 _CREATE_TIMEOUT_SECONDS = 600.0
@@ -132,6 +132,9 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
+# Known-flaky: create intermittently fails with "OpenCode did not signal readiness within 10s". Loading
+# mngr's opencode plugins makes the first session take 4-6s to create, leaving little of that budget.
+@pytest.mark.flaky
 @pytest.mark.timeout(1500)
 def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:
     """End-to-end: the opencode agent survives the full shared agent release lifecycle.
@@ -174,6 +177,11 @@ class _OpenCodePermissionReleaseProfile(_OpenCodeReleaseProfile):
         )
         return ctx
 
+    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
+        # Without the base profile's auto_allow_permissions: its wildcard allow replaces the
+        # whole permission block, so the `bash: ask` policy above would never prompt.
+        return ["--no-ensure-clean", "--source", str(ctx.project_dir)]
+
 
 def _opencode_agent_state_dir(host_dir: Path) -> Path:
     candidates = [path for path in (host_dir / "agents").glob("*") if path.is_dir()]
@@ -185,6 +193,8 @@ def _opencode_agent_state_dir(host_dir: Path) -> Path:
 @pytest.mark.harness_internals(harness="opencode")
 @pytest.mark.tmux
 @pytest.mark.rsync
+# Known-flaky: the same create-readiness timeout as test_opencode_agent_full_lifecycle.
+@pytest.mark.flaky
 @pytest.mark.timeout(900)
 def test_opencode_waiting_reason_reports_permissions(tmp_path: Path) -> None:
     """End-to-end: a blocking approval prompt raises the ``permissions_waiting`` marker.

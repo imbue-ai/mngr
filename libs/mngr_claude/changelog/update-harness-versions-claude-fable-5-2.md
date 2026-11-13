@@ -1,0 +1,1 @@
+The Claude Code TUI dialog registry is now read against Claude Code 2.1.323, the version the release Dockerfile and default-workspace-template install. Every dialog pattern, option label and the shell-mode footer were checked against the 2.1.323 executable and are unchanged.

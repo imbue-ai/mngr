@@ -118,9 +118,10 @@ FAST_MODE_PRICE_MULTIPLIER: Final[float] = 2.0
 # than carried on PerTokenPrices because the two do not partition the same way: Opus
 # models billed at identical rates differ in whether they offer fast mode (4.6 shares
 # 4.8's price set). The API rejects ``speed`` outright on Sonnet and Haiku, and runs
-# Opus 4.6 and older at standard speed and standard rates.
+# Opus 4.6 and older, and every Fable before 5.2, at standard speed and standard rates.
 FAST_MODE_MODELS: Final[frozenset[str]] = frozenset(
     {
+        "anthropic/claude-fable-5-2",
         "anthropic/claude-opus-5-5",
         "anthropic/claude-opus-5",
         "anthropic/claude-opus-4-8",

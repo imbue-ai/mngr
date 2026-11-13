@@ -1,0 +1,1 @@
+The real-CLI release tests pin codex agents to `gpt-6.1-sol` (was `gpt-5.5`). A ChatGPT-account login now rejects `gpt-5.5` ("not supported when using Codex with a ChatGPT account"), so every turn in those tests failed before the agent could reply.
