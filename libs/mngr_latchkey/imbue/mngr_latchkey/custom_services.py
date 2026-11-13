@@ -98,6 +98,24 @@ class LoginFlow(StrEnum):
     MCP = "mcp"
 
 
+def is_system_browser_login_flow(flow: LoginFlow) -> bool:
+    """Whether a service registered with ``flow`` signs in through the user's own browser when asked to.
+
+    What ``latchkey services info`` reports as the ``systemBrowserLogin``
+    capability of a registered service, known ahead of the registration: the
+    MCP flow's OAuth sign-in only needs a page opened and a callback caught,
+    while cookie and token capture read what the browser ends up holding,
+    which only the browser latchkey controls can give.
+    """
+    match flow:
+        case LoginFlow.MCP:
+            return True
+        case LoginFlow.COOKIE_CAPTURE | LoginFlow.TOKEN_CAPTURE:
+            return False
+        case _:
+            assert_never(flow)
+
+
 class CookieCaptureParams(FrozenModel):
     """The ``--login-flow-params`` of ``cookie-capture``, keyed as latchkey keys them.
 

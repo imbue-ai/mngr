@@ -1,7 +1,9 @@
 // The one-time Chrome-cookie offer, over the request popup: the first Approve
-// that is about to open a browser for a sign-in first asks whether to import
-// the user's Chrome sign-ins, so that browser (and every later one) starts
-// out logged in. Going on without importing is the default answer: the
+// that is about to open latchkey's own browser for a sign-in first asks whether
+// to import the user's Chrome sign-ins, so that browser (and every later one)
+// starts out logged in. A sign-in that opens the user's own browser instead is
+// already logged in there, so it is skipped over and the offer waits for the
+// next. Going on without importing is the default answer: the
 // import copies every cookie Chrome holds, which is more than most sign-ins
 // need, so it is for a user who wants it rather than one who clicked the
 // prominent button. Whatever the answer, it is not asked again; Settings

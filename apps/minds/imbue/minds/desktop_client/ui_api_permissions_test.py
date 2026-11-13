@@ -1986,15 +1986,52 @@ def test_connect_browser_signs_in_and_answers_with_the_refreshed_pane(tmp_path: 
     )
 
     assert response.status_code == 200
-    assert latchkey.added_account_calls == ["slack"]
+    # Nothing signed in yet: the first sign-in, in latchkey's browser since
+    # slack reports no system-browser capability.
+    assert latchkey.auth_browser_calls == [("slack", False)]
+    assert latchkey.added_account_calls == []
     payload = json.loads(response.data)
     assert [entry["service_name"] for entry in payload["connections"]] == ["slack"]
+
+
+def test_connect_browser_first_sign_in_opens_the_system_browser_when_latchkey_reports_the_capability(
+    tmp_path: Path,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path, accounts_by_service={})
+    latchkey.system_browser_services = frozenset({"slack"})
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "slack"},
+    )
+
+    assert response.status_code == 200
+    assert latchkey.auth_browser_calls == [("slack", True)]
+
+
+def test_connect_browser_adds_a_further_account_through_latchkeys_own_browser(tmp_path: Path) -> None:
+    """A service already connected gets its next account from a fresh session, never the system browser."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path, accounts_by_service={"slack": ["first@x"]})
+    latchkey.system_browser_services = frozenset({"slack"})
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "slack"},
+    )
+
+    assert response.status_code == 200
+    assert latchkey.added_account_calls == ["slack"]
+    assert latchkey.auth_browser_calls == []
 
 
 def test_connect_browser_reports_a_sign_in_that_did_not_complete(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path, accounts_by_service={})
-    latchkey.add_account_result = (False, "the browser was closed")
+    latchkey.sign_in_result = (False, "the browser was closed")
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
 
     response = client.post(

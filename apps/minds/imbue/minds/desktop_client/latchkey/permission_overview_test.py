@@ -14,6 +14,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOv
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_service_sign_in_options
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_services_info
+from imbue.minds.desktop_client.latchkey.permission_overview import probe_system_browser_login_support
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
@@ -333,3 +334,17 @@ def test_a_failed_probe_is_asked_again_rather_than_remembered(tmp_path: Path) ->
     # ...and that one is remembered, so a third build costs no subprocess.
     assert probe_service_sign_in_options(latchkey, ("aws",))["aws"].is_browser_auth_supported is False
     assert latchkey.probed_service_names == ["aws", "aws"]
+
+
+def test_the_system_browser_is_only_used_when_latchkey_answers_the_probe_with_the_capability(tmp_path: Path) -> None:
+    """A probe that does not answer reads as no system browser: latchkey's own works for every service."""
+    latchkey = _FlakyProbeLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        system_browser_services=frozenset({"slack"}),
+        failing_service_names={"slack"},
+    )
+
+    assert probe_system_browser_login_support(latchkey, "slack") is False
+    assert probe_system_browser_login_support(latchkey, "slack") is True
+    assert probe_system_browser_login_support(latchkey, "github") is False

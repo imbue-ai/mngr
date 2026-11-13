@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import DesktopEgressDecision
 from imbue.minds.desktop_client.latchkey.handlers.predefined import EMPTY_MANUAL_CREDENTIAL_SUBMISSION
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
+from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
@@ -1250,6 +1251,23 @@ def test_build_account_choices_asks_to_name_a_second_account_however_the_service
     assert without_accounts[-1].is_account_name_needed is False
 
 
+def test_build_account_choices_marks_only_latchkeys_own_accounts_as_stored() -> None:
+    """A stale stored account is still stored; a requested account latchkey lacks and the new-account choice are not."""
+    accounts = (
+        ServiceAccountCredential(account="alice@x", credential_status=CredentialStatus.VALID),
+        ServiceAccountCredential(account="bob@x", credential_status=CredentialStatus.INVALID),
+    )
+
+    choices, _ = _build_account_choices(accounts, "carol@x", is_browser_auth_supported=True)
+
+    assert [(choice.value, choice.is_stored) for choice in choices] == [
+        ("alice@x", True),
+        ("bob@x", True),
+        ("carol@x", False),
+        (NEW_ACCOUNT_FORM_VALUE, False),
+    ]
+
+
 def test_describe_credential_inputs_names_one_value_with_an_article_and_several_as_a_list() -> None:
     token = describe_credential_inputs((CredentialCommandParameter(name="token", label="Token"),))
     assert (token.noun_phrase, token.pronoun, token.verb) == ("a token", "it", "Paste")
@@ -1537,6 +1555,7 @@ def _make_multi_account_latchkey(
     accounts: dict[str, str],
     *,
     signed_in_account: str = _SIGNED_IN_ACCOUNT,
+    is_system_browser_login_supported: bool = False,
 ) -> Latchkey:
     """Build a ``Latchkey`` whose fake binary reports several stored accounts.
 
@@ -1544,6 +1563,8 @@ def _make_multi_account_latchkey(
     ``auth browser`` records its argv (so tests can assert on ``--account``)
     and adds ``signed_in_account`` as a valid account, mirroring latchkey
     storing the credentials under whoever logged in.
+    ``is_system_browser_login_supported`` is what ``services info`` reports as
+    the service's ``systemBrowserLogin`` capability.
     """
     binary = tmp_path / "latchkey"
     auth_recording = tmp_path / "auth_latchkey_report.jsonl"
@@ -1562,6 +1583,7 @@ def _make_multi_account_latchkey(
         "        with open(marker) as f:\n"
         "            credentials[f.read()] = {'credentialType': 'oauth', 'credentialStatus': 'valid'}\n"
         "    print(json.dumps({'credentials': credentials, 'authOptions': ['browser'], "
+        f"'capabilities': {{'systemBrowserLogin': {is_system_browser_login_supported!r}}}, "
         "'setCredentialsExample': ''}))\n"
         "    sys.exit(0)\n"
         "elif argv[:2] == ['auth', 'browser-prepare']:\n"
@@ -1633,28 +1655,92 @@ def test_grant_for_one_account_does_not_touch_another_accounts_rule(tmp_path: Pa
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 
 
+def _grant_slack_read_for_account_choice(
+    handler: LatchkeyPermissionGrantHandler, account_choice: str, host_id: HostId
+) -> GrantResult:
+    return handler.grant(
+        request_event_id="evt-1",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=account_choice,
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+    )
+
+
+def _recorded_sign_in_argvs(tmp_path: Path) -> list[object]:
+    return [record["argv"] for record in _read_recording(tmp_path / "auth_latchkey_report.jsonl")]
+
+
 def test_grant_with_new_account_choice_grants_the_account_that_signed_in(tmp_path: Path) -> None:
     """Picking "new account" signs in and grants whichever account latchkey stored."""
     latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"}, signed_in_account="carol@x")
     handler = _build_handler_for_latchkey(tmp_path, latchkey)
     host_id = HostId()
 
-    result = handler.grant(
-        request_event_id="evt-new",
-        agent_id=AgentId(),
-        host_id=host_id,
-        service_info=_SLACK_SERVICE_INFO,
-        granted_permissions=("slack-read-all",),
-        account_choice=NEW_ACCOUNT_FORM_VALUE,
-        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
-        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
-    )
+    result = _grant_slack_read_for_account_choice(handler, NEW_ACCOUNT_FORM_VALUE, host_id)
 
     assert result.outcome == GrantOutcome.GRANTED
     assert "carol@x" in result.message
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
     # Only the freshly-connected account is granted; alice keeps no grant.
     assert on_disk["rules"] == [{account_scope_key("slack-api", "carol@x"): ["slack-read-all"]}]
+
+
+@pytest.mark.parametrize("is_system_browser_login_supported", [True, False])
+def test_detail_payload_reports_whether_the_sign_in_opens_the_system_browser(
+    tmp_path: Path, is_system_browser_login_supported: bool
+) -> None:
+    latchkey = _make_multi_account_latchkey(
+        tmp_path, {}, is_system_browser_login_supported=is_system_browser_login_supported
+    )
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+
+    assert _detail_payload(handler).is_system_browser_login_supported is is_system_browser_login_supported
+
+
+def test_grant_first_sign_in_uses_the_system_browser_when_latchkey_reports_the_capability(tmp_path: Path) -> None:
+    latchkey = _make_multi_account_latchkey(tmp_path, {}, is_system_browser_login_supported=True)
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+
+    result = _grant_slack_read_for_account_choice(handler, NEW_ACCOUNT_FORM_VALUE, HostId())
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert _recorded_sign_in_argvs(tmp_path) == [["auth", "browser", "slack", "--strict", "--system"]]
+
+
+def test_grant_stale_account_re_sign_in_uses_the_system_browser_when_latchkey_reports_the_capability(
+    tmp_path: Path,
+) -> None:
+    latchkey = _make_multi_account_latchkey(
+        tmp_path, {"alice@x": "invalid"}, signed_in_account="alice@x", is_system_browser_login_supported=True
+    )
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+
+    result = _grant_slack_read_for_account_choice(handler, "alice@x", HostId())
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert _recorded_sign_in_argvs(tmp_path) == [
+        ["auth", "browser", "slack", "--strict", "--account", "alice@x", "--system"]
+    ]
+
+
+def test_grant_adding_an_account_keeps_latchkeys_own_browser_even_when_the_system_browser_is_supported(
+    tmp_path: Path,
+) -> None:
+    """The system browser would sign in as whoever is already logged in there, not as a new account."""
+    latchkey = _make_multi_account_latchkey(
+        tmp_path, {"alice@x": "valid"}, signed_in_account="carol@x", is_system_browser_login_supported=True
+    )
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+
+    result = _grant_slack_read_for_account_choice(handler, NEW_ACCOUNT_FORM_VALUE, HostId())
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert "carol@x" in result.message
+    assert _recorded_sign_in_argvs(tmp_path) == [["auth", "browser", "slack", "--strict"]]
 
 
 def test_grant_re_signs_in_a_specific_stale_account(tmp_path: Path) -> None:
@@ -1665,22 +1751,12 @@ def test_grant_re_signs_in_a_specific_stale_account(tmp_path: Path) -> None:
     handler = _build_handler_for_latchkey(tmp_path, latchkey)
     host_id = HostId()
 
-    result = handler.grant(
-        request_event_id="evt-stale",
-        agent_id=AgentId(),
-        host_id=host_id,
-        service_info=_SLACK_SERVICE_INFO,
-        granted_permissions=("slack-read-all",),
-        account_choice="alice@x",
-        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
-        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
-    )
+    result = _grant_slack_read_for_account_choice(handler, "alice@x", host_id)
 
     assert result.outcome == GrantOutcome.GRANTED
     # latchkey was told which account to re-authenticate, so it reuses that
     # account's stored client rather than the service-level preparation.
-    recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
-    assert recording[0]["argv"] == ["auth", "browser", "slack", "--strict", "--account", "alice@x"]
+    assert _recorded_sign_in_argvs(tmp_path) == [["auth", "browser", "slack", "--strict", "--account", "alice@x"]]
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
     assert on_disk["rules"] == [{account_scope_key("slack-api", "alice@x"): ["slack-read-all"]}]
 

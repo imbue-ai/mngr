@@ -17,7 +17,7 @@ import type {
   PredefinedPermissionDetail as Detail,
 } from "../../../models/inbox";
 import {
-  hasNoStoredAccount,
+  isOnlyNewAccountOffered,
   isPermissionRowDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
@@ -68,7 +68,7 @@ function summaryRows(
  * accounts on from reading as ambiguous. One control that always says which
  * account beats several arrangements the user has to tell apart. */
 function accountPicker(model: InboxModel, detail: Detail): m.Children {
-  if (hasNoStoredAccount(detail)) return null;
+  if (isOnlyNewAccountOffered(detail)) return null;
   return m("div", { id: "permissions-account", class: "flex flex-col gap-1.5" }, [
     m("h3", { class: "type-section text-tertiary" }, "Account"),
     m(

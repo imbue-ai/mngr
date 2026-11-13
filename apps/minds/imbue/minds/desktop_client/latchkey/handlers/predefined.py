@@ -251,6 +251,7 @@ def _services_info_or_assumed(latchkey: Latchkey, service_name: str) -> Latchkey
         accounts=(),
         auth_options=frozenset(),
         set_credentials_example=None,
+        is_system_browser_login_supported=False,
     )
 
 
@@ -543,6 +544,7 @@ def _build_account_choices(
             hint=needs_setup_hint if _needs_account_credential_setup(entry.credential_status) else "",
             is_credential_setup_needed=_needs_account_credential_setup(entry.credential_status),
             is_account_name_needed=False,
+            is_stored=True,
         )
         for entry in ordered
     ]
@@ -555,6 +557,7 @@ def _build_account_choices(
                 hint=needs_setup_hint,
                 is_credential_setup_needed=True,
                 is_account_name_needed=False,
+                is_stored=False,
             )
         )
     choices.append(
@@ -567,6 +570,7 @@ def _build_account_choices(
             hint="",
             is_credential_setup_needed=True,
             is_account_name_needed=bool(ordered),
+            is_stored=False,
         )
     )
     if requested_account is not None:
@@ -928,6 +932,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         one left behind. The first sign-in for a service deliberately uses the
         normal browser state, which is what the user expects when they have
         never connected the service before.
+
+        A service whose probe reports the system-browser capability signs in
+        through the user's own browser for that first sign-in and for a
+        re-sign-in of a stale account, where landing on the account already
+        logged in there is what the user wants. Adding an account keeps the
+        ephemeral browser latchkey controls, since the system browser cannot
+        start from a clean session (see :meth:`Latchkey.add_account`).
         """
         latchkey_service_info = _services_info_or_assumed(machine_latchkey, service_info.name)
         accounts_by_name = {entry.account: entry for entry in latchkey_service_info.accounts}
@@ -959,6 +970,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
 
         accounts_before = frozenset(accounts_by_name)
+        is_system_browser = latchkey_service_info.is_system_browser_login_supported
         if chosen is not None:
             logger.info(
                 "Credentials for {} account {!r} reported as {}; running browser sign-in",
@@ -968,13 +980,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
             # ``auth_browser`` owns all of the auth-flow logic, including registering
             # the Imbue Studio Google OAuth client for ``google-*`` services.
-            is_success, detail = machine_latchkey.auth_browser(service_info.name, account=chosen.account)
+            is_success, detail = machine_latchkey.auth_browser(
+                service_info.name, account=chosen.account, is_system_browser=is_system_browser
+            )
         elif accounts_before:
             logger.info("Adding a new {} account through the permission dialog", service_info.name)
             is_success, detail = machine_latchkey.add_account(service_info.name)
         else:
             logger.info("Signing in to {} for the first time through the permission dialog", service_info.name)
-            is_success, detail = machine_latchkey.auth_browser(service_info.name)
+            is_success, detail = machine_latchkey.auth_browser(service_info.name, is_system_browser=is_system_browser)
         if not is_success:
             # The browser sign-in (or its one-off ``auth browser-prepare``
             # step) did not complete. Treat this as a FAILED approval, not a
@@ -1278,6 +1292,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     hint=choice.hint,
                     is_credential_setup_needed=choice.is_credential_setup_needed,
                     is_account_name_needed=choice.is_account_name_needed,
+                    is_stored=choice.is_stored,
                 )
                 for choice in account_choices
             ),
@@ -1285,6 +1300,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             new_account_value=NEW_ACCOUNT_FORM_VALUE,
             wildcard_permission=WILDCARD_PERMISSION_NAME,
             is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
+            is_system_browser_login_supported=latchkey_service_info.is_system_browser_login_supported,
             manual_credentials=self._manual_credentials_prompt_for_dialog(
                 machine_latchkey, service_info, latchkey_service_info
             ),

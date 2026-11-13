@@ -95,6 +95,7 @@ from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_requ
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import probe_system_browser_login_support
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
@@ -128,6 +129,7 @@ from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schem
 from imbue.mngr_latchkey.custom_services import custom_service_label
 from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_warning
+from imbue.mngr_latchkey.custom_services import is_system_browser_login_flow
 from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import registration_login_url
 from imbue.mngr_latchkey.custom_services import validate_domain
@@ -203,6 +205,25 @@ def _sign_in_url(existing: Mapping[str, JsonValue] | None, payload: CustomServic
     if existing is not None:
         return registration_login_url(existing)
     return None if payload.login is None else payload.login.url
+
+
+def _is_system_browser_sign_in(
+    machine_latchkey: Latchkey,
+    service_name: str,
+    existing: Mapping[str, JsonValue] | None,
+    payload: CustomServiceRequestPayload,
+) -> bool:
+    """Whether the sign-in :func:`_sign_in_url` names opens the user's own browser.
+
+    A registered service is asked (latchkey reports the capability for it); a
+    service still to be created is read off the request's login flow, the way
+    latchkey will see it once registered.
+    """
+    if existing is not None:
+        return registration_login_url(existing) is not None and probe_system_browser_login_support(
+            machine_latchkey, service_name
+        )
+    return payload.login is not None and is_system_browser_login_flow(payload.login.flow)
 
 
 def _credential_header(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
@@ -341,10 +362,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
         ws_name = resolve_workspace_display_name(
             backend_resolver, parsed_agent_id, fallback=permission_request.agent_id
         )
-        existing = self._existing_registration(
-            self._machine_latchkey_for_dialog(backend_resolver, parsed_agent_id),
-            custom_service_name(payload.domain, payload.scheme),
-        )
+        machine_latchkey = self._machine_latchkey_for_dialog(backend_resolver, parsed_agent_id)
+        service_name = custom_service_name(payload.domain, payload.scheme)
+        existing = self._existing_registration(machine_latchkey, service_name)
         return UiCustomServicePermissionDetail(
             request_id=permission_request.request_id,
             agent_id=permission_request.agent_id,
@@ -354,6 +374,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
             domain_warning=domain_warning(payload.domain),
             base_api_url=base_api_url_for_domain(payload.domain, payload.scheme),
             login_url=_sign_in_url(existing, payload),
+            is_system_browser_login_supported=_is_system_browser_sign_in(
+                machine_latchkey, service_name, existing, payload
+            ),
             credential_header=_credential_header(existing, payload),
             rationale=permission_request.rationale,
         )
@@ -626,9 +649,13 @@ class CustomServiceGrantHandler(RequestEventHandler):
         """Run the service's browser sign-in and read back which account it stored, or ``None`` on failure.
 
         Latchkey files the credentials under whoever actually logged in, so the
-        account is read back rather than assumed.
+        account is read back rather than assumed. A service whose login can run
+        in the user's own browser (an MCP server's OAuth sign-in) does, so the
+        user lands where they are already signed in.
         """
-        is_success, detail = machine_latchkey.auth_browser(service_name)
+        is_success, detail = machine_latchkey.auth_browser(
+            service_name, is_system_browser=probe_system_browser_login_support(machine_latchkey, service_name)
+        )
         if not is_success:
             logger.warning("Browser sign-in to {} did not complete: {}", service_name, detail)
             return None

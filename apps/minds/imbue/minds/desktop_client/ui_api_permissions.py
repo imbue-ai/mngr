@@ -99,6 +99,7 @@ from imbue.minds.desktop_client.latchkey.machine_latchkey import services_catalo
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
+from imbue.minds.desktop_client.latchkey.permission_overview import probe_system_browser_login_support
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
@@ -1004,6 +1005,12 @@ def _handle_connect_browser(agent_id: str) -> Response:
     stored in the asking machine's own credentials, which is what makes it that
     machine's connection rather than this computer's.
 
+    The first sign-in to a service runs the way the permission dialog's does,
+    in the user's own browser when latchkey reports the capability; a service
+    the machine already has an account for is signed in through latchkey's
+    ephemeral browser instead, so the user can pick an account that is not
+    the one already logged in (see :meth:`Latchkey.add_account`).
+
     Blocks for as long as the sign-in takes, and grants nothing: the account
     joins the pane with no permissions, exactly as typed-in credentials do.
     """
@@ -1023,7 +1030,13 @@ def _handle_connect_browser(agent_id: str) -> Response:
     if not services_catalog_for_machine(handler.services_catalog, machine_latchkey).get(connect_request.service_name):
         return make_json_error_response(f"Unknown service '{connect_request.service_name}'.", 400)
     accounts_before = _stored_accounts(machine_latchkey, connect_request.service_name)
-    is_success, detail = machine_latchkey.add_account(connect_request.service_name)
+    if accounts_before:
+        is_success, detail = machine_latchkey.add_account(connect_request.service_name)
+    else:
+        is_success, detail = machine_latchkey.auth_browser(
+            connect_request.service_name,
+            is_system_browser=probe_system_browser_login_support(machine_latchkey, connect_request.service_name),
+        )
     if not is_success:
         # latchkey's own reason, which names a cancelled or failed sign-in; the
         # pane shows it beside the service it was trying to connect.

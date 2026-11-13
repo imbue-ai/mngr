@@ -77,14 +77,26 @@ class _StubLatchkey(Latchkey):
 
     is_sign_in_successful: bool = Field(default=True)
     accounts_after_sign_in: tuple[str, ...] = Field(default=("me@example.com",))
-    sign_in_calls: list[str] = Field(default_factory=list)
+    sign_in_calls: list[tuple[str, bool]] = Field(
+        default_factory=list,
+        description="Every ``auth_browser`` call as ``(service_name, is_system_browser)``.",
+    )
+    system_browser_services: frozenset[str] = Field(
+        default=frozenset(),
+        description="Services whose ``services_info`` reports the ``systemBrowserLogin`` capability.",
+    )
     is_auth_set_successful: bool = Field(default=True)
     auth_set_calls: list[tuple[str, tuple[str, ...]]] = Field(default_factory=list)
 
     def auth_browser(
-        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
     ) -> tuple[bool, str]:
-        self.sign_in_calls.append(service_name)
+        self.sign_in_calls.append((service_name, is_system_browser))
         return (True, "") if self.is_sign_in_successful else (False, "the window was closed")
 
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
@@ -98,6 +110,7 @@ class _StubLatchkey(Latchkey):
             # What latchkey reports for a generic registered service, which is
             # what a custom service with no browser sign-in is.
             set_credentials_example=f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"',
+            is_system_browser_login_supported=service_name in self.system_browser_services,
         )
 
     def auth_set_credentials(self, service_name: str, argv: Sequence[str]) -> tuple[bool, str]:
@@ -314,7 +327,7 @@ def test_a_second_workspace_connects_to_the_existing_service_as_it_is(tmp_path: 
 
     assert _grant(client, event.request_id).get_json()["outcome"] == "GRANTED"
     assert harness.registration()["loginUrl"] == "https://api.example.com/sso"
-    assert harness.latchkey.sign_in_calls == [_SERVICE_NAME]
+    assert harness.latchkey.sign_in_calls == [(_SERVICE_NAME, False)]
     assert [call.rule_key for call in harness.gateway.set_calls] == [
         account_scope_key(_SERVICE_NAME, "me@example.com")
     ]
@@ -504,7 +517,7 @@ def test_a_login_flow_never_asks_for_typed_credentials(tmp_path: Path) -> None:
 
     assert _grant(client, event.request_id).get_json()["outcome"] == "GRANTED"
     assert harness.latchkey.auth_set_calls == []
-    assert harness.latchkey.sign_in_calls == [_SERVICE_NAME]
+    assert harness.latchkey.sign_in_calls == [(_SERVICE_NAME, False)]
 
 
 def test_grant_carries_the_connected_account_to_the_workspace_machine(tmp_path: Path) -> None:
@@ -672,6 +685,34 @@ def _make_mcp_event(
     )
 
 
+def test_detail_payload_reports_the_system_browser_for_an_mcp_sign_in_before_registration(tmp_path: Path) -> None:
+    """The service does not exist yet, so the browser is read off the request's login flow."""
+    harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
+
+    assert _detail(harness, _make_mcp_event(AgentId())).is_system_browser_login_supported is True
+    assert _detail(harness, _make_event(AgentId(), has_login=True)).is_system_browser_login_supported is False
+
+
+def test_detail_payload_asks_latchkey_about_a_registered_services_browser(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    harness.register(login_url="https://api.example.com/sso")
+    event = _make_event(AgentId())
+
+    assert _detail(harness, event).is_system_browser_login_supported is False
+    harness.latchkey.system_browser_services = frozenset({_SERVICE_NAME})
+    assert _detail(harness, event).is_system_browser_login_supported is True
+
+
+def test_a_sign_in_runs_in_the_system_browser_when_latchkey_reports_the_capability(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
+    harness.latchkey.system_browser_services = frozenset({_MCP_SERVICE_NAME})
+    event = _make_mcp_event(AgentId())
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    assert _grant(client, event.request_id).get_json()["outcome"] == "GRANTED"
+    assert harness.latchkey.sign_in_calls == [(_MCP_SERVICE_NAME, True)]
+
+
 def test_an_mcp_sign_in_the_server_vouches_for_is_registered_and_signed_in(tmp_path: Path) -> None:
     harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
     event = _make_mcp_event(AgentId())
@@ -683,7 +724,7 @@ def test_an_mcp_sign_in_the_server_vouches_for_is_registered_and_signed_in(tmp_p
         "name": "mcp",
         "params": {"mcpEndpoint": _MCP_ENDPOINT, "tokenEndpoint": _MCP_TOKEN, "registrationEndpoint": _MCP_REGISTER},
     }
-    assert harness.latchkey.sign_in_calls == [_MCP_SERVICE_NAME]
+    assert harness.latchkey.sign_in_calls == [(_MCP_SERVICE_NAME, False)]
 
 
 def test_an_mcp_sign_in_the_server_contradicts_is_denied_with_what_it_publishes(tmp_path: Path) -> None:
@@ -731,7 +772,7 @@ def test_an_mcp_server_publishing_nothing_gets_the_domain_rule(tmp_path: Path) -
     assert denied["outcome"] == "DENIED"
     assert "publishes no OAuth metadata" in denied["message"]
     assert "login_url must be on mcp.trello.com" in denied["message"]
-    assert harness.latchkey.sign_in_calls == ["custom_https_mcp_otter_ai"]
+    assert harness.latchkey.sign_in_calls == [("custom_https_mcp_otter_ai", False)]
 
 
 def test_an_existing_registration_reads_no_metadata(tmp_path: Path) -> None:

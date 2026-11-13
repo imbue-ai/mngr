@@ -3235,6 +3235,7 @@ def _make_services_info_binary(
     tmp_path: Path,
     *,
     credential_status: str = "valid",
+    capabilities_literal: str | None = None,
     exit_code: int = 0,
 ) -> Path:
     """Build a fake latchkey CLI that emits a services-info JSON payload.
@@ -3242,12 +3243,15 @@ def _make_services_info_binary(
     Emits the latchkey 3.0.0 shape: a ``credentials`` object keyed by account
     (the default account keyed by the empty string) carrying the requested
     ``credentialStatus``. An empty ``credential_status`` string models a service
-    with no stored credentials (``credentials == {}``).
+    with no stored credentials (``credentials == {}``). ``capabilities_literal``
+    is the Python literal of the ``capabilities`` entry (latchkey >= 3.23.0);
+    ``None`` leaves the entry out, the way an older latchkey does.
     """
     if credential_status == "":
         credentials_literal = "{}"
     else:
         credentials_literal = json.dumps({"": {"credentialType": "rawCurl", "credentialStatus": credential_status}})
+    capabilities_line = "" if capabilities_literal is None else f'    "capabilities": {capabilities_literal},\n'
     script = tmp_path / "latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -3262,6 +3266,7 @@ def _make_services_info_binary(
         f'    "credentials": {credentials_literal},\n'
         f'    "setCredentialsExample": "...",\n'
         f'    "developerNotes": "...",\n'
+        f"{capabilities_line}"
         f"}}\n"
         f"print(json.dumps(payload, indent=2))\n"
         f"sys.exit({exit_code})\n"
@@ -3379,6 +3384,29 @@ def test_services_info_returns_empty_auth_options_when_field_is_missing(tmp_path
     assert info.set_credentials_example is None
     # No auth options at all means "we don't know": keep offering the browser flow.
     assert info.is_browser_auth_supported is True
+
+
+@pytest.mark.parametrize(
+    ("capabilities_literal", "is_supported"),
+    [
+        pytest.param("{'detectsLoginAccount': True, 'systemBrowserLogin': True}", True, id="advertised"),
+        pytest.param("{'detectsLoginAccount': True, 'systemBrowserLogin': False}", False, id="declined"),
+        # A latchkey older than 3.23.0 reports no ``capabilities`` at all.
+        pytest.param(None, False, id="missing"),
+        pytest.param("'browser'", False, id="not-an-object"),
+        pytest.param("{'systemBrowserLogin': 'yes'}", False, id="not-a-boolean"),
+        pytest.param("{}", False, id="empty"),
+    ],
+)
+def test_services_info_reads_the_system_browser_login_capability(
+    tmp_path: Path, capabilities_literal: str | None, is_supported: bool
+) -> None:
+    """Only an explicit ``systemBrowserLogin: true`` reads as supported; anything missing or malformed does not."""
+    binary = _make_services_info_binary(tmp_path, credential_status="", capabilities_literal=capabilities_literal)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    info = latchkey.services_info("slack")
+    assert info is not None
+    assert info.is_system_browser_login_supported is is_supported
 
 
 def test_services_info_returns_set_only_auth_options_for_set_only_service(tmp_path: Path) -> None:
@@ -3572,6 +3600,22 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     assert record == {"argv": ["auth", "browser", "slack", "--strict"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
 
 
+def test_auth_browser_with_system_browser_passes_the_system_flag(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("google-gmail", account="alice@x", is_system_browser=True)
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_recording_report(tmp_path) == [
+        {
+            "argv": ["auth", "browser", "google-gmail", "--strict", "--account", "alice@x", "--system"],
+            "env_ephemeral": "",
+        }
+    ]
+
+
 def _make_prepare_required_binary(
     tmp_path: Path,
     *,
@@ -3634,21 +3678,30 @@ def _read_single_prepare_payload(tmp_path: Path, service_name: str) -> object:
     return json.loads(payload_arg)
 
 
-def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required(tmp_path: Path) -> None:
-    """Auto-recovery path: latchkey signals preparation-required, we prepare and retry."""
+@pytest.mark.parametrize(
+    ("is_system_browser", "sign_in_argv"),
+    [
+        pytest.param(False, ["auth", "browser", "slack", "--strict"], id="latchkey-browser"),
+        pytest.param(True, ["auth", "browser", "slack", "--strict", "--system"], id="system-browser"),
+    ],
+)
+def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required(
+    tmp_path: Path, is_system_browser: bool, sign_in_argv: list[str]
+) -> None:
+    """Auto-recovery path: latchkey signals preparation-required, we prepare and retry with the same options."""
     binary = _make_prepare_required_binary(tmp_path)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.auth_browser("slack")
+    is_success, detail = latchkey.auth_browser("slack", is_system_browser=is_system_browser)
 
     assert is_success is True
     assert detail == ""
     records = _read_recording_report(tmp_path)
     argv_calls = [record["argv"] for record in records]
     assert argv_calls == [
-        ["auth", "browser", "slack", "--strict"],
+        sign_in_argv,
         ["auth", "browser-prepare", "slack"],
-        ["auth", "browser", "slack", "--strict"],
+        sign_in_argv,
     ]
 
 
@@ -3821,6 +3874,7 @@ def _make_env_recording_binary(tmp_path: Path, *, exit_code: int = 0, stderr: st
 
 
 def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
+    """Adding an account needs the fresh session only latchkey's own browser provides: ephemeral, never ``--system``."""
     binary = _make_env_recording_binary(tmp_path, exit_code=0)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3838,6 +3892,17 @@ def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
     # The ephemeral-browser env var is set on every call so the sign-in starts
     # from a fresh session.
     assert all(record["env_ephemeral"] == "1" for record in records)
+
+
+def test_auth_browser_refuses_an_ephemeral_system_browser_sign_in(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    with pytest.raises(LatchkeyError, match="cannot be both ephemeral"):
+        latchkey.auth_browser("google-gmail", is_ephemeral=True, is_system_browser=True)
+    with pytest.raises(LatchkeyError, match="cannot be both ephemeral"):
+        latchkey.auth_browser_login("google-gmail", is_ephemeral=True, is_system_browser=True)
+    assert not (tmp_path / "latchkey_report.jsonl").exists()
 
 
 def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:

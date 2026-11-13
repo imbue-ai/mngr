@@ -66,6 +66,13 @@ class UiPermissionAccountChoice(FrozenModel):
             "into the dialog; read only while the credential form is up"
         ),
     )
+    is_stored: bool = Field(
+        description=(
+            "Whether latchkey holds the account (usable or stale). False for the new-account choice and for an "
+            "account the agent asked for that is not connected here; picking either adds an account, which "
+            "keeps latchkey's own browser once the service has one"
+        ),
+    )
 
 
 class UiWorkspaceVerbChoice(FrozenModel):
@@ -121,6 +128,14 @@ class UiPredefinedPermissionDetail(FrozenModel):
     selected_account_value: str = Field(description="Preselected account choice value")
     new_account_value: str = Field(description="Form value of the sign-a-new-account-in choice")
     wildcard_permission: str = Field(description="The catch-all permission's submitted value (e.g. 'any')")
+    is_system_browser_login_supported: bool = Field(
+        description=(
+            "Whether a browser sign-in to the service opens the user's own browser rather than latchkey's: the "
+            "first sign-in and a stale account's re-sign-in do when latchkey reports the capability; adding an "
+            "account never does. The Chrome import only fills latchkey's browser, so it is not offered before "
+            "a sign-in in the user's own."
+        ),
+    )
     is_browser_auth_supported: bool = Field(
         description=(
             "Whether the service can sign in through a browser. True makes the sign-in the dialog's default "
@@ -278,6 +293,12 @@ class UiCustomServicePermissionDetail(FrozenModel):
     login_url: str | None = Field(
         default=None,
         description="Page the browser will open to sign in, shown so the destination is never a surprise",
+    )
+    is_system_browser_login_supported: bool = Field(
+        description=(
+            "Whether the sign-in opens the user's own browser rather than latchkey's (an MCP server's OAuth "
+            "sign-in does), in which case the Chrome import, which fills only latchkey's browser, is not offered"
+        ),
     )
     credential_header: str | None = Field(
         default=None,

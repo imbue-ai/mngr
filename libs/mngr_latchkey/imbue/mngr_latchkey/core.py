@@ -183,13 +183,15 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # binary this process runs locally -- the copy bundled with the minds app, or
 # a CLI-only user's own install -- so the floor must never exceed the version
 # in ``apps/minds/package.json``, or the app rejects the very binary it ships.
-# Move it in lockstep with the versions we install
+# It moves in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
-# in-workspace pin in default-workspace-template) rather than to track what the
-# code strictly needs: the newest release with a hard dependency here is
-# 3.22.0, the first to know the ``mcp`` login flow a custom service may
-# register (:class:`imbue.mngr_latchkey.custom_services.LoginFlow`).
-LATCHKEY_MIN_VERSION: Final[str] = "3.22.0"
+# in-workspace pin in default-workspace-template). The newest release with a
+# hard dependency here is 3.22.0, the first to know the ``mcp`` login flow a
+# custom service may register (:class:`imbue.mngr_latchkey.custom_services.LoginFlow`);
+# 3.23.0's ``--system`` sign-in is only requested for a service whose
+# ``services info`` reports the capability, so an older CLI would merely never
+# be asked for it.
+LATCHKEY_MIN_VERSION: Final[str] = "3.23.1"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
@@ -323,7 +325,16 @@ LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER: Final[str] = "zoomServerToServer
 # it for the "Add account" flow so the user always lands on a fresh sign-in
 # screen and can log in to a brand-new account instead of being silently
 # re-authenticated as the account whose session the browser happens to hold.
+# Only the browser latchkey controls can start from a clean state, so latchkey
+# refuses it together with ``--system`` (:data:`LATCHKEY_SYSTEM_BROWSER_FLAG`).
 LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR: Final[str] = "LATCHKEY_EPHEMERAL_BROWSER"
+
+# ``latchkey auth browser`` option (latchkey >= 3.23.0) that opens the sign-in
+# in the user's own default browser instead of the one latchkey controls, so
+# the user lands in the browser where they are already signed in. Latchkey only
+# accepts it for a service whose ``services info`` reports the
+# ``systemBrowserLogin`` capability (:attr:`LatchkeyServiceInfo.is_system_browser_login_supported`).
+LATCHKEY_SYSTEM_BROWSER_FLAG: Final[str] = "--system"
 
 # Key latchkey uses for a service's single unnamed "default" account in the
 # ``credentials`` object of ``services info`` output (and everywhere else an
@@ -433,6 +444,13 @@ class LatchkeyServiceInfo(FrozenModel):
             "manual credential setup, or ``None`` if latchkey did not provide one."
         ),
     )
+    is_system_browser_login_supported: bool = Field(
+        description=(
+            "Whether latchkey reports the ``systemBrowserLogin`` capability for the service, i.e. its "
+            "``auth browser`` accepts :data:`LATCHKEY_SYSTEM_BROWSER_FLAG` and signs in through the user's "
+            "own browser. ``False`` when latchkey (< 3.23.0) reports no capabilities at all."
+        ),
+    )
 
     @computed_field
     @cached_property
@@ -532,15 +550,15 @@ def _parse_one_credential_status(raw_status: object, service_name: str) -> Crede
     return status
 
 
-def _extract_account_entry_value(entry: object, key_name: str) -> object:
-    """Pull one named value out of a single account entry, or ``None``.
+def _extract_json_object_value(json_object: object, key_name: str) -> object:
+    """Pull one named value out of a decoded JSON object, or ``None``.
 
-    Scans ``entry.items()`` rather than indexing so the untyped JSON mapping
-    (whose key/value types are unknown) is handled without an escape hatch.
+    Scans ``items()`` rather than indexing so the untyped JSON mapping (whose
+    key/value types are unknown) is handled without an escape hatch.
     """
-    if not isinstance(entry, Mapping):
+    if not isinstance(json_object, Mapping):
         return None
-    for key, value in entry.items():
+    for key, value in json_object.items():
         if key == key_name:
             return value
     return None
@@ -576,8 +594,8 @@ def _parse_account_map(raw_account_map: object, service_name: str) -> tuple[Serv
         return ()
     accounts: list[ServiceAccountCredential] = []
     for account, entry in raw_account_map.items():
-        raw_status = _extract_account_entry_value(entry, "credentialStatus")
-        raw_type = _extract_account_entry_value(entry, "credentialType")
+        raw_status = _extract_json_object_value(entry, "credentialStatus")
+        raw_type = _extract_json_object_value(entry, "credentialType")
         accounts.append(
             ServiceAccountCredential(
                 account=str(account),
@@ -652,6 +670,44 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
         )
         return None
     return raw_example
+
+
+def _parse_is_system_browser_login_supported(payload: Mapping[str, object], service_name: str) -> bool:
+    """Pull ``capabilities.systemBrowserLogin`` out of ``payload``; missing or malformed yields ``False``.
+
+    ``False`` is the safe reading: without ``--system`` the sign-in runs in the
+    browser latchkey controls, which every browser-capable service supports.
+    """
+    raw_capabilities = payload.get("capabilities")
+    if raw_capabilities is None:
+        return False
+    if not isinstance(raw_capabilities, Mapping):
+        logger.warning(
+            "'latchkey services info {}' capabilities was not an object: {!r}",
+            service_name,
+            raw_capabilities,
+        )
+        return False
+    raw_flag = _extract_json_object_value(raw_capabilities, "systemBrowserLogin")
+    if raw_flag is None:
+        return False
+    if not isinstance(raw_flag, bool):
+        logger.warning(
+            "'latchkey services info {}' capabilities.systemBrowserLogin was not a boolean: {!r}",
+            service_name,
+            raw_flag,
+        )
+        return False
+    return raw_flag
+
+
+def _require_browser_modes_compatible(*, is_ephemeral: bool, is_system_browser: bool) -> None:
+    """Refuse a sign-in asked to be both ephemeral and in the system browser, which latchkey cannot do."""
+    if is_ephemeral and is_system_browser:
+        raise LatchkeyError(
+            "A browser sign-in cannot be both ephemeral and run in the system browser: "
+            "only the browser latchkey controls can start from a clean session"
+        )
 
 
 def _build_local_latchkey_env(
@@ -2002,6 +2058,7 @@ class Latchkey(MutableModel):
             accounts=accounts,
             auth_options=_parse_auth_options(payload, service_name),
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
+            is_system_browser_login_supported=_parse_is_system_browser_login_supported(payload, service_name),
         )
 
     def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
@@ -2068,14 +2125,38 @@ class Latchkey(MutableModel):
         so the browser starts with no saved session and the user lands on a
         fresh sign-in screen -- letting them add a genuinely new account rather
         than being silently re-authenticated as an already-signed-in one.
-        Returns ``(is_success, detail)``.
+
+        That fresh session is the point, and only the browser latchkey
+        controls can provide it, so this never signs in through the system
+        browser even for a service that supports it (see :meth:`auth_browser`):
+        in the user's own browser the sign-in lands on whichever account is
+        already logged in there. Returns ``(is_success, detail)``.
         """
         return self.auth_browser(service_name, is_ephemeral=True)
 
     def auth_browser(
-        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
     ) -> tuple[bool, str]:
         """Run ``latchkey auth browser <service>`` and report success or failure.
+
+        ``is_system_browser`` opens the sign-in in the user's own default
+        browser (:data:`LATCHKEY_SYSTEM_BROWSER_FLAG`) instead of the one
+        latchkey controls, so they land where they are already signed in.
+        Callers pass it only for a service whose ``services info`` reports
+        :attr:`LatchkeyServiceInfo.is_system_browser_login_supported`; latchkey
+        refuses the flag for any other. It cannot be combined with
+        ``is_ephemeral``: the system browser's state is the user's own, so it
+        cannot start from a clean session, and latchkey refuses the two
+        together. A sign-in that needs the clean session (adding an account,
+        :meth:`add_account`) therefore stays in the browser latchkey controls.
+        Latchkey cannot tell when the system browser is closed, so an
+        abandoned sign-in only fails once latchkey times it out (after 15
+        minutes) rather than as soon as the window goes.
 
         ``account`` targets one already-stored account of the service (the
         unnamed default account is :data:`DEFAULT_ACCOUNT`): latchkey then
@@ -2127,6 +2208,7 @@ class Latchkey(MutableModel):
         instead. A failed pin fails the sign-in outright: a loopback sign-in is
         exactly what the pin exists to avoid.
         """
+        _require_browser_modes_compatible(is_ephemeral=is_ephemeral, is_system_browser=is_system_browser)
         minds_redirect_uri = MINDS_OAUTH_REDIRECT_URI_BY_SERVICE.get(service_name)
         if minds_redirect_uri is not None and account is None:
             is_redirect_prepared, redirect_prepare_detail = self.auth_prepare_redirect_uri(
@@ -2135,7 +2217,9 @@ class Latchkey(MutableModel):
             if not is_redirect_prepared:
                 return False, redirect_prepare_detail
         if not is_ephemeral:
-            is_success, detail = self.auth_browser_login(service_name, account=account)
+            is_success, detail = self.auth_browser_login(
+                service_name, account=account, is_system_browser=is_system_browser
+            )
             if is_success:
                 return True, ""
             if "latchkey auth browser-prepare" not in detail.lower():
@@ -2143,7 +2227,9 @@ class Latchkey(MutableModel):
         # No client is registered yet (that is exactly what the browser-prepare
         # hint means) or we're in the ephemeral mode (typically a new account).
         if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
-            return self._authenticate_with_minds_google_client(service_name, is_ephemeral=is_ephemeral)
+            return self._authenticate_with_minds_google_client(
+                service_name, is_ephemeral=is_ephemeral, is_system_browser=is_system_browser
+            )
         logger.info(
             "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
             service_name,
@@ -2156,10 +2242,12 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
-        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral, account=account)
+        return self.auth_browser_login(
+            service_name, is_ephemeral=is_ephemeral, account=account, is_system_browser=is_system_browser
+        )
 
     def _authenticate_with_minds_google_client(
-        self, service_name: str, *, is_ephemeral: bool = False
+        self, service_name: str, *, is_ephemeral: bool = False, is_system_browser: bool = False
     ) -> tuple[bool, str]:
         """Register the Imbue Studio Google OAuth client and run the bare sign-in against it.
 
@@ -2183,15 +2271,21 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
-        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
+        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral, is_system_browser=is_system_browser)
 
     def auth_browser_login(
-        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
     ) -> tuple[bool, str]:
         """Run a single ``latchkey auth browser <service> --strict`` with no preparation fallback.
 
         ``account`` is passed through to latchkey's global ``--account`` option
-        (see :meth:`auth_browser`).
+        and ``is_system_browser`` adds :data:`LATCHKEY_SYSTEM_BROWSER_FLAG`, which
+        cannot be combined with ``is_ephemeral`` (see :meth:`auth_browser`).
 
         ``--strict`` (latchkey >= 3.17.0) makes the sign-in fail, instead of
         storing a partial credential, when the user grants fewer permissions
@@ -2209,9 +2303,12 @@ class Latchkey(MutableModel):
         client during the sign-in itself. Returns ``(True, "")`` on a clean
         exit, otherwise ``(False, detail)``.
         """
+        _require_browser_modes_compatible(is_ephemeral=is_ephemeral, is_system_browser=is_system_browser)
         argv = ["auth", "browser", service_name, "--strict"]
         if account is not None:
             argv.extend(["--account", account])
+        if is_system_browser:
+            argv.append(LATCHKEY_SYSTEM_BROWSER_FLAG)
         return self._run_latchkey_auth_command(
             log_label="auth browser",
             argv=argv,

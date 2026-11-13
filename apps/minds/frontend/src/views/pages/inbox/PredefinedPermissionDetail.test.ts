@@ -64,14 +64,15 @@ const DETAIL: PredefinedPermissionDetail = {
   ],
   checked_permissions: ["slack-chat-write"],
   account_choices: [
-    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
-    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false, is_stored: true },
+    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: true },
     {
       value: ":new-account",
       label: "Add account",
       hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
+      is_stored: false,
     },
   ],
   selected_account_value: "alice@x",
@@ -80,6 +81,7 @@ const DETAIL: PredefinedPermissionDetail = {
   implicit_note: "",
   proxy: null,
   is_browser_auth_supported: true,
+  is_system_browser_login_supported: false,
   manual_credentials: null,
 };
 
@@ -288,7 +290,7 @@ describe("PredefinedPermissionDetailView account states", () => {
   it("says Approve will sign in for an account that has no usable credentials", () => {
     // An account the agent asked for that is not connected here (or a stored
     // one gone stale) runs the same browser hop as "Add account" does.
-    const personal = { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false };
+    const personal = { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: false };
     const detail = { ...withChoices([ALICE, personal, NEW_ACCOUNT]), selected_account_value: "personal" };
     const model = makeModel(detail);
 
@@ -307,6 +309,7 @@ describe("PredefinedPermissionDetailView account states", () => {
       display_name: "AWS",
       service_name: "aws",
       is_browser_auth_supported: false,
+      is_system_browser_login_supported: false,
       manual_credentials: { parameters: [{ name: "access-key-id", label: "Access key id" }], message: "" },
       account_choices: [
         ALICE,

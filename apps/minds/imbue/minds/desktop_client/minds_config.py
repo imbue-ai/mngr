@@ -553,7 +553,8 @@ class MindsConfig(MutableModel):
         """Return whether the one-time offer to import the user's Chrome sign-ins has been shown. Default: False.
 
         The permission dialog makes the offer once, on the first Approve that is about
-        to open a browser for a sign-in; after that the import lives in Settings only.
+        to open latchkey's own browser for a sign-in (a sign-in in the user's own browser
+        has nothing to import into); after that the import lives in Settings only.
         """
         return self._get_bool("is_browser_import_offered", default=False)
 

@@ -190,6 +190,20 @@ def probe_services_info(
     return service_info_by_name
 
 
+def probe_system_browser_login_support(latchkey: Latchkey, service_name: str) -> bool:
+    """Whether the service's sign-in can run in the user's own browser, read off an offline ``services info`` probe.
+
+    Latchkey reads the capability off a built-in service's session or, for a
+    custom service, off the login flow it was registered with in the probed
+    store, so the probe needs no network. A probe that does not answer reads as
+    ``False``: a sign-in in the browser latchkey controls works for every
+    browser-capable service, whereas latchkey refuses ``--system`` for a
+    service that lacks the capability.
+    """
+    info = latchkey.services_info(service_name, is_offline=True)
+    return info is not None and info.is_system_browser_login_supported
+
+
 class ServiceSignInOptions(FrozenModel):
     """How a service can be signed in to, from its ``services info`` probe.
 

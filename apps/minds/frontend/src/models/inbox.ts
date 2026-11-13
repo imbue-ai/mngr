@@ -42,6 +42,10 @@ export interface PermissionAccountChoice {
   is_credential_setup_needed: boolean;
   /** Picking this account also requires the user to name it. */
   is_account_name_needed: boolean;
+  /** Latchkey holds the account (usable or stale). False for "Add account" and
+   * for an account the agent asked for that is not connected here: picking
+   * either adds an account rather than re-signing one in. */
+  is_stored: boolean;
 }
 
 export interface WorkspaceVerbChoice {
@@ -91,6 +95,10 @@ export interface PredefinedPermissionDetail {
    * the default way of connecting, with `manual_credentials` (when carried) as
    * the alternative the user can switch to. */
   is_browser_auth_supported: boolean;
+  /** Whether a sign-in opens the user's own browser rather than latchkey's:
+   * the first sign-in and a stale account's re-sign-in do when latchkey
+   * reports the capability; adding an account never does. */
+  is_system_browser_login_supported: boolean;
   /** The credential form for an account that needs credentials: the only way
    * in for a service with no browser sign-in, the alternative to it for one
    * that has it. Null when no form can be offered. */
@@ -194,6 +202,8 @@ export interface CustomServicePermissionDetail {
    * since the scheme decides whether credentials travel encrypted. */
   base_api_url: string;
   login_url: string | null;
+  /** Whether the sign-in opens the user's own browser rather than latchkey's. */
+  is_system_browser_login_supported: boolean;
   /** The header line a pasted token is sent as, `{token}` standing for the value;
    * null when a browser sign-in applies and no token is pasted. */
   credential_header: string | null;
@@ -328,10 +338,12 @@ export interface InboxModelOptions {
   redraw?: () => void;
 }
 
-/** Whether nothing is signed in to the service yet: every choice the dialog
- * offers is the "Add account" sentinel (the server always appends that one,
- * so the raw choice list is never empty and its length says nothing). */
-export function hasNoStoredAccount(detail: PredefinedPermissionDetail): boolean {
+/** Whether the "Add account" sentinel is the only choice the dialog offers
+ * (the server always appends that one, so the raw choice list is never empty
+ * and its length says nothing). Not the same as no choice being `is_stored`:
+ * an account the agent asked for that is not connected here is offered as a
+ * choice of its own without being stored. */
+export function isOnlyNewAccountOffered(detail: PredefinedPermissionDetail): boolean {
   return detail.account_choices.every((choice) => choice.value === detail.new_account_value);
 }
 
@@ -383,7 +395,7 @@ export class InboxModel {
   isProxyOn = false;
 
   /** The one-time "import your Chrome sign-ins" offer: up between an Approve
-   * click that is about to open a browser and the approval itself. */
+   * click that is about to open latchkey's own browser and the approval itself. */
   isBrowserImportOfferOpen = false;
   /** The import the offer runs, with its busy state and outcome. */
   readonly browserImport: BrowserImportModel;
@@ -846,7 +858,7 @@ export class InboxModel {
     if (detail.kind === "predefined") {
       if (!detail.is_browser_auth_supported) return false;
       if (this.manualCredentialsPrompt() !== null) return false;
-      if (hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value) return true;
+      if (isOnlyNewAccountOffered(detail) || this.selectedAccount === detail.new_account_value) return true;
       return this.selectedAccountChoice()?.is_credential_setup_needed ?? false;
     }
     if (detail.kind === "custom_service") return detail.login_url !== null;
@@ -854,7 +866,7 @@ export class InboxModel {
   }
 
   /** Approve: first the one-time Chrome sign-in import offer, when this click
-   * is the first that is about to open a browser and it has never been made;
+   * is the first that is about to open latchkey's browser and it has never been made;
    * otherwise the approval itself. The offer is a convenience, so a backend
    * that cannot say whether it is due is read as "not due" rather than holding
    * the approval up. */
@@ -877,8 +889,25 @@ export class InboxModel {
     await this.submitApproval();
   }
 
+  /** Whether the sign-in Approve is about to run opens latchkey's own browser,
+   * the one the Chrome import fills. A sign-in in the user's own browser is
+   * already logged in there, so the import has nothing to give it. */
+  isLatchkeyBrowserSignInPending(): boolean {
+    const detail = this.detail;
+    if (detail === null || !this.isBrowserSignInPending()) return false;
+    if (detail.kind === "custom_service") return !detail.is_system_browser_login_supported;
+    if (detail.kind !== "predefined" || !detail.is_system_browser_login_supported) return true;
+    // The user's own browser serves the first sign-in and a stored account's
+    // re-sign-in. Adding an account to a connected service (whether through
+    // "Add account" or an account the agent asked for that is not connected
+    // here) keeps latchkey's ephemeral browser, so the user can pick an
+    // account other than the one logged in.
+    const isAnyAccountStored = detail.account_choices.some((choice) => choice.is_stored);
+    return isAnyAccountStored && !(this.selectedAccountChoice()?.is_stored ?? false);
+  }
+
   private async shouldOfferBrowserImport(): Promise<boolean> {
-    if (this.isBrowserImportOfferSettled || !this.isBrowserSignInPending()) return false;
+    if (this.isBrowserImportOfferSettled || !this.isLatchkeyBrowserSignInPending()) return false;
     this.isBrowserImportOfferSettled = true;
     return isBrowserImportOfferDue(this.fetcher());
   }

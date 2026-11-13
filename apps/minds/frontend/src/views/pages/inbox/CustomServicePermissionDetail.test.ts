@@ -16,6 +16,7 @@ const DETAIL: CustomServicePermissionDetail = {
   domain_warning: null,
   base_api_url: "https://api.example.com/",
   login_url: null,
+  is_system_browser_login_supported: false,
   credential_header: "X-Api-Key: {token}",
 };
 

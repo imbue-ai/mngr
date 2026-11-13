@@ -333,8 +333,8 @@ function browserImportPanel(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "When a permission request needs you to sign in to a service, Imbue Studio opens a browser window " +
-        "of its own. Import your cookies from Google Chrome and that window is already " +
+      "When a permission request needs you to sign in to a service, Imbue Studio usually opens a browser " +
+        "window of its own. Import your cookies from Google Chrome and that window is already " +
         "logged in wherever Chrome is.",
     ),
     m("div", { class: "flex flex-col gap-2 py-3 border-b border-subtle" }, [

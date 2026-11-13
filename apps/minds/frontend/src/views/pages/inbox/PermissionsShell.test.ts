@@ -42,6 +42,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
       hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
+      is_stored: false,
     },
   ],
   selected_account_value: ":new-account",
@@ -50,6 +51,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   implicit_note: "",
   proxy: null,
   is_browser_auth_supported: false,
+  is_system_browser_login_supported: false,
   manual_credentials: AWS_PROMPT,
 };
 

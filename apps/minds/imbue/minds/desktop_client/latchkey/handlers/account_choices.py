@@ -54,3 +54,10 @@ class PermissionAccountChoice(FrozenModel):
             "into the dialog rather than learned from a browser sign-in."
         ),
     )
+    is_stored: bool = Field(
+        description=(
+            "Whether latchkey holds the account (usable or stale), as opposed to the new-account choice or an "
+            "account the agent asked for that is not connected here. Picking a stored account whose credentials "
+            "are unusable re-signs it in; any other choice adds an account."
+        ),
+    )

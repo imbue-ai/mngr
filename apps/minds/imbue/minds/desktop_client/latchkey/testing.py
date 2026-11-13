@@ -384,8 +384,19 @@ class FakeAccountsLatchkey(Latchkey):
     auth_set_calls: list[tuple[str, tuple[str, ...]]] = Field(default_factory=list)
     auth_clear_result: tuple[bool, str] = Field(default=(True, ""))
     cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
-    add_account_result: tuple[bool, str] = Field(default=(True, ""))
+    sign_in_result: tuple[bool, str] = Field(
+        default=(True, ""),
+        description="What every browser sign-in of the fake (``add_account`` and ``auth_browser``) returns.",
+    )
     added_account_calls: list[str] = Field(default_factory=list)
+    auth_browser_calls: list[tuple[str, bool]] = Field(
+        default_factory=list,
+        description="Every ``auth_browser`` call as ``(service_name, is_system_browser)``.",
+    )
+    system_browser_services: frozenset[str] = Field(
+        default=frozenset(),
+        description="Services whose ``services_info`` reports the ``systemBrowserLogin`` capability.",
+    )
     added_account_name: str = Field(
         default="signed-in@example.com",
         description="Account a successful browser sign-in stores, the way latchkey reports the one logged in as.",
@@ -410,15 +421,31 @@ class FakeAccountsLatchkey(Latchkey):
             accounts=accounts,
             auth_options=frozenset({"set"} if is_credentials_only else {"browser", "set"}),
             set_credentials_example=self.credential_example_by_service.get(service_name),
+            is_system_browser_login_supported=service_name in self.system_browser_services,
         )
 
     def add_account(self, service_name: str) -> tuple[bool, str]:
         self.added_account_calls.append(service_name)
-        if not self.add_account_result[0]:
-            return self.add_account_result
+        return self._complete_sign_in(service_name)
+
+    def auth_browser(
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
+    ) -> tuple[bool, str]:
+        del is_ephemeral, account
+        self.auth_browser_calls.append((service_name, is_system_browser))
+        return self._complete_sign_in(service_name)
+
+    def _complete_sign_in(self, service_name: str) -> tuple[bool, str]:
+        if not self.sign_in_result[0]:
+            return self.sign_in_result
         # Mirror latchkey: a completed sign-in turns into an account of the service.
         self.accounts_by_service.setdefault(service_name, []).append(self.added_account_name)
-        return self.add_account_result
+        return self.sign_in_result
 
     def auth_set_credentials(self, service_name: str, argv: Sequence[str]) -> tuple[bool, str]:
         self.auth_set_calls.append((service_name, tuple(argv)))

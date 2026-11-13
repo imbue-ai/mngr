@@ -212,6 +212,7 @@ def _make_stub_latchkey(tmp_path: Path) -> FakeLatchkey:
             accounts=(ServiceAccountCredential(account=_TEST_ACCOUNT, credential_status=CredentialStatus.VALID),),
             auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
             set_credentials_example=None,
+            is_system_browser_login_supported=False,
         ),
     )
     return latchkey

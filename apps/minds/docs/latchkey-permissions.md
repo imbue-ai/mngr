@@ -134,6 +134,27 @@ second gateway URL or a different agent skill.
       The pin only applies to a sign-in that draws on the service-level
       preparation; re-signing in to a stored account reuses that account's
       own client and redirect URI.
+      When the same `services info` probe reports the `systemBrowserLogin`
+      capability (latchkey >= 3.23; Google, Ramp, Fastmail and MCP servers'
+      OAuth sign-ins), the sign-in runs as `latchkey auth browser <service>
+      --system`: it opens in the user's own default browser, where they are
+      already signed in, instead of the browser latchkey controls. That
+      covers the first sign-in to the service (from the dialog and from
+      Connect on the Add connection pane) and the re-sign-in of a stale
+      account. Adding a further account to a service that already has one
+      ("Add account" in the dialog, Connect on a connected service) keeps
+      latchkey's ephemeral browser, so the user lands on a fresh sign-in
+      screen and can pick a new account: the system browser cannot be
+      ephemeral (it would sign in as whoever is already logged in there),
+      and latchkey refuses the two together. Latchkey cannot tell when the
+      system browser is closed, so a sign-in abandoned there only fails once
+      latchkey times it out (15 minutes); the request stays pending
+      meanwhile. The Chrome cookie import described below fills the browser
+      latchkey controls, so it is not offered before a sign-in that opens the
+      user's own; the detail payload says which
+      (`is_system_browser_login_supported`, with each account choice's
+      `is_stored` telling a stored account's re-sign-in from adding one the
+      agent asked for that is not connected here).
       Cancellation or failure of any of these steps produces a `FAILED` outcome:
       the grant is **not** applied and the request stays pending (no
       response event is written), so the dialog surfaces the reason and the
@@ -199,9 +220,12 @@ back through a headless Chrome) and needs Chrome installed with a default
 profile; otherwise it fails with latchkey's reason.
 
 Imbue Studio offers it **once**, at the moment it is worth the most: the
-first Approve that is about to open a browser for a sign-in (nothing signed
-in to the service yet, the account picker on "Add account", or a custom
-service with a login URL). Before submitting the approval, the dialog asks
+first Approve that is about to open latchkey's browser for a sign-in (nothing
+signed in to the service yet, the account picker on "Add account", or a
+custom service with a login URL). A sign-in that opens the user's own browser
+instead (see `--system` above) is skipped over: the import fills only the
+browser latchkey controls, and the user is already logged in to their own.
+Before submitting the approval, the dialog asks
 "Import your Chrome cookies?", says the import is optional, and gives two
 answers, of which going on without the import is the prominent one -- the
 import copies every cookie Chrome holds, which is more than most sign-ins
@@ -281,7 +305,11 @@ The dialog is the simplest of the kinds, and deliberately so:
   all-or-nothing on a scope already pinned to a single domain, so there is
   nothing to narrow.
 * When the request carries a browser sign-in, the dialog names the URL the
-  browser will open, and Approve reads "Sign in & approve".
+  browser will open, and Approve reads "Sign in & approve". Which browser
+  opens is decided the way it is for a predefined service (see step 6.2
+  above): a service whose `services info` reports the `systemBrowserLogin`
+  capability (an MCP server's OAuth sign-in) signs in through the user's own
+  browser, any other through the browser latchkey controls.
 * When it does not, credentials still have to be established -- "no sign-in
   flow" does not mean "no credentials", since Latchkey refuses a request to a
   registered service with nothing stored, so a domain with genuinely no
@@ -1131,9 +1159,13 @@ Two consequences the UI makes visible:
 * **Connecting a service is per machine.** A service connected on this computer
   is not connected for a remote workspace: its Permissions tab offers it under
   Add connection, and connecting it there runs the sign-in for that machine.
-  The browser still opens here (there is nothing to open on a VPS) and reuses
-  this computer's session, so it is usually a consent click rather than a full
-  login.
+  The browser still opens here (there is nothing to open on a VPS). A first
+  sign-in to the service runs the way the permission dialog's does (step 6.2
+  above: the user's own browser when the service supports it, otherwise the
+  browser latchkey controls), so it is usually a consent click rather than a
+  full login; a further account to a service the machine already has one for
+  starts from latchkey's ephemeral browser, so a different account can be
+  picked.
 * **Sign out reaches as far as the credential is shared.** Disconnecting an
   account from a workspace's Permissions tab clears the credential of the store
   *that machine* reads and strips *that machine's* now-inert grants. A remote

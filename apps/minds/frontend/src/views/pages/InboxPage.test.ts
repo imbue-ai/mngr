@@ -45,7 +45,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   ],
   checked_permissions: ["slack-read-all"],
   account_choices: [
-    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
+    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false, is_stored: true },
   ],
   selected_account_value: "",
   new_account_value: ":new-account",
@@ -53,6 +53,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   implicit_note: "",
   proxy: null,
   is_browser_auth_supported: true,
+  is_system_browser_login_supported: false,
   manual_credentials: null,
 };
 

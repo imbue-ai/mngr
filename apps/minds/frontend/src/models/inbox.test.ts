@@ -74,7 +74,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   ],
   checked_permissions: ["slack-read-all"],
   account_choices: [
-    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
+    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false, is_stored: true },
   ],
   selected_account_value: "",
   new_account_value: ":new-account",
@@ -82,6 +82,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   implicit_note: "",
   proxy: null,
   is_browser_auth_supported: true,
+  is_system_browser_login_supported: false,
   manual_credentials: null,
 };
 
@@ -105,6 +106,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
       hint: "",
       is_credential_setup_needed: false,
       is_account_name_needed: false,
+      is_stored: true,
     },
     {
       value: "bob@x",
@@ -112,6 +114,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
       hint: "needs credentials",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
+      is_stored: true,
     },
     {
       value: ":new-account",
@@ -119,10 +122,12 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
       hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: true,
+      is_stored: false,
     },
   ],
   selected_account_value: "bob@x",
   is_browser_auth_supported: false,
+  is_system_browser_login_supported: false,
   manual_credentials: AWS_PROMPT,
 };
 
@@ -138,12 +143,13 @@ const DUAL_DETAIL: PredefinedPermissionDetail = {
   display_name: "GitHub",
   service_name: "github",
   account_choices: [
-    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
-    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
-    { value: ":new-account", label: "Add account", hint: "", is_credential_setup_needed: true, is_account_name_needed: true },
+    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false, is_stored: true },
+    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: true },
+    { value: ":new-account", label: "Add account", hint: "", is_credential_setup_needed: true, is_account_name_needed: true, is_stored: false },
   ],
   selected_account_value: "bob@x",
   is_browser_auth_supported: true,
+  is_system_browser_login_supported: false,
   manual_credentials: GITHUB_PROMPT,
 };
 
@@ -1233,6 +1239,7 @@ describe("InboxModel custom-service requests", () => {
     domain_warning: null,
     base_api_url: "https://api.example.com/",
     login_url: "https://api.example.com/login",
+    is_system_browser_login_supported: false,
     rationale: "needs the widget API",
   };
 
@@ -1366,6 +1373,7 @@ describe("the Chrome sign-in import offer", () => {
         hint: "",
         is_credential_setup_needed: true,
         is_account_name_needed: false,
+        is_stored: false,
       },
     ],
     selected_account_value: ":new-account",
@@ -1413,7 +1421,7 @@ describe("the Chrome sign-in import offer", () => {
       ...PREDEFINED_DETAIL,
       account_choices: [
         ...PREDEFINED_DETAIL.account_choices,
-        { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+        { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: false },
       ],
     });
     unconnected.selectedAccount = "personal";
@@ -1422,6 +1430,61 @@ describe("the Chrome sign-in import offer", () => {
     expect(unconnected.isBrowserSignInPending()).toBe(false);
     // A service with no browser flow connects by typed credentials instead.
     expect(makeOfferModel({}, MANUAL_DETAIL).isBrowserSignInPending()).toBe(false);
+  });
+
+  it("knows when that sign-in opens latchkey's browser rather than the user's own", () => {
+    expect(makeOfferModel({}, SIGN_IN_DETAIL).isLatchkeyBrowserSignInPending()).toBe(true);
+    // The first sign-in to a service that can use the user's own browser does.
+    const systemBrowser = { ...SIGN_IN_DETAIL, is_system_browser_login_supported: true };
+    expect(makeOfferModel({}, systemBrowser).isLatchkeyBrowserSignInPending()).toBe(false);
+    // Adding an account keeps latchkey's browser, whatever the service can do.
+    const adding = makeOfferModel({}, { ...PREDEFINED_DETAIL, is_system_browser_login_supported: true });
+    adding.selectedAccount = PREDEFINED_DETAIL.new_account_value;
+    expect(adding.isBrowserSignInPending()).toBe(true);
+    expect(adding.isLatchkeyBrowserSignInPending()).toBe(true);
+    // A stale account's re-sign-in goes to the user's own browser.
+    const stale = makeOfferModel({}, {
+      ...PREDEFINED_DETAIL,
+      is_system_browser_login_supported: true,
+      account_choices: [
+        ...PREDEFINED_DETAIL.account_choices,
+        { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: true },
+      ],
+    });
+    stale.selectedAccount = "personal";
+    expect(stale.isLatchkeyBrowserSignInPending()).toBe(false);
+    // An account the agent asked for that is not connected here is added, like
+    // "Add account": latchkey's browser once the service has an account, the
+    // user's own for the service's first.
+    const unconnected = { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false, is_stored: false };
+    const addingRequested = makeOfferModel({}, {
+      ...PREDEFINED_DETAIL,
+      is_system_browser_login_supported: true,
+      account_choices: [...PREDEFINED_DETAIL.account_choices, unconnected],
+    });
+    addingRequested.selectedAccount = "personal";
+    expect(addingRequested.isLatchkeyBrowserSignInPending()).toBe(true);
+    const firstRequested = makeOfferModel({}, {
+      ...SIGN_IN_DETAIL,
+      is_system_browser_login_supported: true,
+      account_choices: [unconnected, ...SIGN_IN_DETAIL.account_choices],
+    });
+    firstRequested.selectedAccount = "personal";
+    expect(firstRequested.isLatchkeyBrowserSignInPending()).toBe(false);
+  });
+
+  it("goes straight to the approval when the sign-in opens the user's own browser", async () => {
+    const model = makeOfferModel(
+      { ...OFFER_DUE, ...MARKED, ...GRANTED, "GET /ui/api/inbox": () => jsonResponse({ cards: [] }) },
+      { ...SIGN_IN_DETAIL, is_system_browser_login_supported: true },
+    );
+
+    await model.approve();
+    await settle();
+
+    expect(model.isBrowserImportOfferOpen).toBe(false);
+    expect(calls).not.toContain("GET /ui/api/settings/browser-import");
+    expect(calls).toContain("POST /requests/evt-a/grant");
   });
 
   it("holds the first sign-in Approve behind the offer, and marks it as made", async () => {

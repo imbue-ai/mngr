@@ -36,6 +36,7 @@ from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_from_base_api_url
 from imbue.mngr_latchkey.custom_services import domain_warning
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
+from imbue.mngr_latchkey.custom_services import is_system_browser_login_flow
 from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import scheme_from_base_api_url
 from imbue.mngr_latchkey.custom_services import validate_credential_header
@@ -1086,3 +1087,11 @@ def test_registering_then_deregistering_through_latchkey_refreshes_the_gateway_c
 
     assert "custom_https_a_test" not in read_registered_services(store_dir)
     assert "custom_https_a_test" not in json.loads(materialized_catalog.read_text())
+
+
+@pytest.mark.parametrize(
+    ("flow", "is_supported"),
+    [(LoginFlow.MCP, True), (LoginFlow.COOKIE_CAPTURE, False), (LoginFlow.TOKEN_CAPTURE, False)],
+)
+def test_only_the_mcp_flow_signs_in_through_the_system_browser(flow: LoginFlow, is_supported: bool) -> None:
+    assert is_system_browser_login_flow(flow) is is_supported

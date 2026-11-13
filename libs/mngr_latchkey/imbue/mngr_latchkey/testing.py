@@ -110,6 +110,7 @@ class FakeLatchkey(Latchkey):
             credential_status=CredentialStatus.MISSING,
             auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
             set_credentials_example=None,
+            is_system_browser_login_supported=False,
         )
     )
 
@@ -196,15 +197,25 @@ class FakeLatchkey(Latchkey):
         return (True, "")
 
     def auth_browser_login(
-        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
     ) -> tuple[bool, str]:
-        del service_name, is_ephemeral, account
+        del service_name, is_ephemeral, account, is_system_browser
         return (True, "")
 
     def auth_browser(
-        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+        self,
+        service_name: str,
+        *,
+        is_ephemeral: bool = False,
+        account: str | None = None,
+        is_system_browser: bool = False,
     ) -> tuple[bool, str]:
-        del service_name, is_ephemeral, account
+        del service_name, is_ephemeral, account, is_system_browser
         return (True, "")
 
     def add_account(self, service_name: str) -> tuple[bool, str]:
