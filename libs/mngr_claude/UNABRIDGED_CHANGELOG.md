@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-12
+
+The fan-out release test pins the response's `usage.output_tokens` as an integer, the field `common_transcript_convert._build_metrics` reads as the agent step's `completion_tokens`.
+
+The claude release tests are leaner: the manual `/compact` test is merged into the autocompact test, saving an agent and a `/compact` per run; the `/model` picker test drops its refused-switch half; and the transcript contract test drops the queued-message checks the mid-turn message test already makes, and moves its queue-operation (operation, reason) vocabulary check into that test. Their raw checks are no stricter than mngr's readers, so a block-array compaction summary, a `startup` SessionStart source on restart, or a model-switch confirmation that highlights another option first no longer fails them; the API-error test now also requires the `isApiErrorMessage` record to be an assistant record with a timestamp. The permission, fan-out and compaction tests drop checks that pin mngr's own output rather than a claude internal (a leftover dialog or `permissions_waiting` marker, the agent step's token metrics, `last_compaction.json`'s `ended_at`), and the session-start test tells whether stream_transcript.sh's interrupt heal cleared RUNNING from its `interrupt_heal` activity event rather than from the session's last record. `imbue.mngr_claude.testing` drops `create_agent`, `tear_down_context` and `destroy_agent_and_tear_down_context` in favour of `created_agent`, and gains `wait_for_agent_prompt`, which waits for claude's input prompt after a create.
+
 ## 2026-11-11
 
 Fixed: a host no longer idle-stops itself out from under an agent that is working.

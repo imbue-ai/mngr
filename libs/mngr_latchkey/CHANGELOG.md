@@ -27,6 +27,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Host policies are sent without whitespace, so long-lived remote workspaces no longer exceed the 100,000-byte remote command cap on sign-ins and grants.
 - Fixed: `mngr latchkey register-agent` adopts the remote machine's policy before registering and pushing, so grants made from another computer survive.
 
+### Security
+
+- Security: Requires `filelock>=4.2.1`, fixing the `ReadWriteLock` advisories (e.g. GHSA-v4x8-3wr5-3wq8) the forward-ownership lock was exposed to.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Changed

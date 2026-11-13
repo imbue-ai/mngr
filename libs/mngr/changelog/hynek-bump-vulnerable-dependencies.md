@@ -1,1 +1,0 @@
-`imbue-mngr` now pins `paramiko==5.0.1` (was `3.5.1`), the first line of releases fixing CVE-2026-44405. Paramiko 5 drops SHA-1 key exchange, SHA-1 (`ssh-rsa`) RSA signatures, DSA keys and GSSAPI, so mngr can no longer reach SSH servers that offer only those.

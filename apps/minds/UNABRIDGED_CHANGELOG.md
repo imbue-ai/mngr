@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-12
+
+The dev-setup checklist and the environments reference now point at
+`#project-studio-engineering` when telling developers where to ask for a
+`minds-dev` Modal workspace invite. The Slack channel was renamed from
+`#project-studio-internal-product`, so the old name no longer resolves to
+anything.
+
+The desktop app now bundles filelock 4.2.4, paramiko 5.0.1 and pyasn1 0.6.5, which fix the security advisories reported against the versions it shipped before. Paramiko 5 can no longer reach SSH servers that offer only SHA-1 key exchange or SHA-1 RSA signatures.
+
 ## 2026-11-11
 
 A workspace created through `POST /api/v1/workspaces` under an account now gets Imbue backups by default, as one created from the desktop's create form does: when the body leaves `backup_provider` out and names an `account_id`, the new workspace gets a repository of its own in the account's backup store, keyed by its own random password. A create under no account still defaults to "configure later", and an explicit `backup_provider` is honoured as before. Before, every agent-driven create (the `imbue-studio` skill's, say, or a migration's replacement workspace) came up without backups until the user enabled them by hand.

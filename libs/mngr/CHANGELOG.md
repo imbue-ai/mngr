@@ -31,6 +31,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr create` now removes an agent that cannot take input while starting (e.g. stopped on a dialog) and fails with `Failed to start agent <name>: ...`, instead of leaving it running with its worktree and branch deleted.
 - Fixed: `mngr gc` no longer deletes the volume of a host still being created when it listed hosts; volumes younger than the provider's `min_online_host_age_seconds` are spared on providers that report volume creation time (Modal, local).
 
+### Security
+
+- Security: Pins `paramiko==5.0.1` (was 3.5.1), fixing CVE-2026-44405. Paramiko 5 drops SHA-1 key exchange, `ssh-rsa` signatures, DSA keys and GSSAPI, so mngr can no longer reach SSH servers that offer only those.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Added

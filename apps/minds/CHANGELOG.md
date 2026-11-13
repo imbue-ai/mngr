@@ -584,6 +584,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
 - Security: Local Lima VMs and cloud-connection VPSes booting a kernel below the CVE-2026-98432 floor (Debian `6.12.113-1`) are badged "Security update", with a "Restart machine" action that moves them onto the fixed kernel.
 - Security: The ToDesktop build upload excludes `.env` files from `apps/minds`, so local credentials cannot ride into a packaged app.
+- Security: The desktop app bundles filelock 4.2.4, paramiko 5.0.1 and pyasn1 0.6.5, fixing reported advisories; paramiko 5 can no longer reach SSH servers that offer only SHA-1 key exchange or SHA-1 RSA signatures.
 
 ## [v0.2.8] - 2026-05-13
 

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-12
+
+`imbue-mngr` now pins `paramiko==5.0.1` (was `3.5.1`), the first line of releases fixing CVE-2026-44405. Paramiko 5 drops SHA-1 key exchange, SHA-1 (`ssh-rsa`) RSA signatures, DSA keys and GSSAPI, so mngr can no longer reach SSH servers that offer only those.
+
 ## 2026-11-11
 
 The in-host idle-shutdown watcher (`activity_watcher.sh`) now reads the four `data.json` fields it needs -- `activity_sources`, `idle_timeout_seconds`, `max_host_age` and `tmux_session_prefix` -- in one `jq` invocation per 15-second check, and every decision in that check runs off that one snapshot. It previously spawned `jq` six times per check, measured at 20.8 ms a call on a `debian:bookworm` host and accounting for ~99% of the watcher's CPU: ~0.84% of a core, tripled under gVisor. A single call takes the watcher to ~0.17% of a core.
