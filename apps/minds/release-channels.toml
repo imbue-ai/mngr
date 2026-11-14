@@ -57,9 +57,9 @@ platforms = ["mac", "linux"]
 mac_minimum_system_version = "22.0.0"
 
 [channels.alpha]
-build_id = "2611107f2mm335f"
-version = "0.10.3"
-fallback_branch = "minds-v0.10.3"
+build_id = "261114pjrwvyx8y"
+version = "0.10.4"
+fallback_branch = "minds-v0.10.4"
 rollout_percentage = 100
 platforms = ["mac", "linux"]
 mac_minimum_system_version = "22.0.0"
@@ -85,4 +85,4 @@ template_ref = "minds-v0.9.4"
 template_ref = "minds-v0.9.4"
 
 [web_channels.alpha]
-template_ref = "minds-v0.10.3"
+template_ref = "minds-v0.10.4"
