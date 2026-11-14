@@ -1397,6 +1397,7 @@ def test_restore_script_skips_the_chat_gate_only_when_forced(tmp_path: Path) -> 
     assert blocked_payload is not None, blocked_run
     assert blocked_payload["status"] == "failed"
     assert "cannot determine running chats" in str(blocked_payload["detail"])
+    assert blocked_payload["failure_reason"] == "CHAT_GATE_UNDETERMINED"
     assert (code / "file.txt").read_text() == "version 2\n"
 
     forced_run = _run_program(
@@ -1552,6 +1553,37 @@ def test_restore_script_clears_a_stale_repository_lock_and_retries(tmp_path: Pat
     assert payload["safety_snapshot_taken"] is True
     assert "unlock" in _supervisorctl_calls(unlock_calls)
     assert (code / "file.txt").read_text() == "version 1\n"
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_names_a_failed_safety_snapshot_as_its_failure_reason(tmp_path: Path) -> None:
+    # The desktop words this failure from the reason (and offers "Restore
+    # without backing up first"), so the program has to name it; nothing in
+    # the workspace may change once the safety net is missing.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+    failing_backup = (
+        "#!/bin/bash\n"
+        'if [ "$1" = "backup" ]; then echo "Fatal: unable to save snapshot: disk full" >&2; exit 1; fi\n'
+        f'exec "{_real_restic_path()}" "$@"\n'
+    )
+
+    stub_bin = _stub_bin_with_restic(tmp_path, restic_script=failing_backup)
+    run = _run_program(
+        code,
+        backup_restore,
+        _restore_args(restic_repo, snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "failed", payload
+    assert payload["failure_reason"] == "SAFETY_SNAPSHOT_FAILED"
+    assert "disk full" in str(payload["detail"])
+    assert (code / "file.txt").read_text() == "version 2\n"
 
 
 @pytest.mark.timeout(120)
@@ -2062,6 +2094,9 @@ def test_restore_script_leaves_an_autostart_false_service_stopped_and_unjudged(t
 
 
 @pytest.mark.timeout(120)
+@pytest.mark.witnesses(
+    "backup-restore.restored-configuration-unreadable", partial="covers the in-workspace program's fallback and report"
+)
 def test_restore_script_falls_back_to_restart_all_when_the_restored_config_does_not_parse(tmp_path: Path) -> None:
     # `supervisorctl reload` on a config supervisord cannot parse takes
     # supervisord down with every service, so a failed reread must route the

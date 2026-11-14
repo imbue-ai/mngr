@@ -10,6 +10,7 @@
 import m from "mithril";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { PageContainer } from "../components/Layout";
 import {
   BackupHistoryModel,
@@ -19,7 +20,11 @@ import {
   browserLifecycleDeps,
   formatRelativeAgo,
 } from "../../models/backups";
-import { OperationStrip } from "./lifecycle/OperationStrip";
+import type { AskAgentModel } from "../../models/assistChat";
+import {
+  OperationStrip,
+  serviceConfigHelpModel,
+} from "./lifecycle/OperationStrip";
 import { RestoreDialog } from "./lifecycle/RestoreDialog";
 import { SnapshotTable } from "./lifecycle/SnapshotTable";
 
@@ -32,6 +37,7 @@ interface PendingRestore {
 interface WorkspaceBackupsState {
   history: BackupHistoryModel;
   controller: BackupOperationController;
+  serviceConfigHelp: AskAgentModel;
   pendingRestore: PendingRestore | null;
   onBecameObservable: () => void;
 }
@@ -56,6 +62,7 @@ export const WorkspaceBackupsPage: m.Component<
     vnode.state.controller = new BackupOperationController(agentId, deps);
     vnode.state.controller.onSuccess = () =>
       void vnode.state.history.loadPage();
+    vnode.state.serviceConfigHelp = serviceConfigHelpModel();
     vnode.state.pendingRestore = null;
     // The server is the single source of truth; re-validate exactly when the
     // page becomes observable again (an operation may have been started from
@@ -97,26 +104,67 @@ export const WorkspaceBackupsPage: m.Component<
       PageContainer,
       m("div", { class: "flex flex-col gap-4 pt-10 pb-10" }, [
         m("h1", { class: "type-heading-lg" }, "Backups"),
-        m(OperationStrip, { controller }),
-        history.statusMessage !== null
-          ? m(
-              "div",
-              { class: "type-body text-secondary" },
-              history.statusMessage,
-            )
-          : m(Card, { padding: "tight" }, [
-              m(SnapshotTable, {
-                agentId: history.agentId,
-                snapshots: history.snapshots,
-                controller,
-                restoreDisabledReason,
-                repositoryId: null,
-                onRestoreRequested: (snapshot) => {
-                  vnode.state.pendingRestore = { snapshot, repositoryId: null };
-                },
-              }),
-            ]),
-        history.statusMessage === null && history.isPaginationShown
+        m(OperationStrip, {
+          controller,
+          serviceConfigHelp: vnode.state.serviceConfigHelp,
+        }),
+        history.setupFailure !== null
+          ? m(ErrorNotice, {
+              id: "backup-setup-failure",
+              error: history.setupFailure.error,
+              // A failed setup retry's own notice carries the page's one report.
+              isBugReportOffered:
+                history.setupFailure.isBugReportOffered &&
+                !(controller.error !== null && controller.isErrorReportOffered),
+              // A failed setup retry's own Try again is this button already.
+              actions:
+                controller.isRunning || controller.isRetryOffered
+                  ? []
+                  : [
+                      {
+                        label: "Set up backups",
+                        onclick: () => controller.startSetupRetry(),
+                      },
+                    ],
+              workspaceAgentId: history.agentId,
+            })
+          : null,
+        history.loadError !== null
+          ? m(ErrorNotice, {
+              id: "backup-history-error",
+              error: history.loadError,
+              actions: [
+                { label: "Try again", onclick: () => void history.loadPage() },
+              ],
+              workspaceAgentId: history.agentId,
+            })
+          : history.setupFailure !== null
+            ? null
+            : history.statusMessage !== null
+              ? m(
+                  "div",
+                  { class: "type-body text-secondary" },
+                  history.statusMessage,
+                )
+              : m(Card, { padding: "tight" }, [
+                  m(SnapshotTable, {
+                    agentId: history.agentId,
+                    snapshots: history.snapshots,
+                    controller,
+                    restoreDisabledReason,
+                    repositoryId: null,
+                    onRestoreRequested: (snapshot) => {
+                      vnode.state.pendingRestore = {
+                        snapshot,
+                        repositoryId: null,
+                      };
+                    },
+                  }),
+                ]),
+        history.statusMessage === null &&
+        history.loadError === null &&
+        history.setupFailure === null &&
+        history.isPaginationShown
           ? m("div", { class: "flex items-center justify-between" }, [
               m(
                 "span",

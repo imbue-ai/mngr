@@ -62,6 +62,11 @@ def has_canonical_env(paths: InstallationPaths, agent_id: AgentId) -> bool:
     return canonical_env_path(paths, agent_id).is_file()
 
 
+def has_archived_env(paths: InstallationPaths, agent_id: AgentId) -> bool:
+    """Return whether a canonical restic.env for ``agent_id`` was ever archived aside (see :func:`archive_canonical_env`)."""
+    return bool(list_archived_envs(paths, agent_id))
+
+
 def read_canonical_env(paths: InstallationPaths, agent_id: AgentId) -> str | None:
     """Return the canonical restic.env contents for ``agent_id``, or None if absent."""
     path = canonical_env_path(paths, agent_id)

@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
+from typing import Final
 
 from flask import Blueprint
 from flask import Response
@@ -61,11 +62,17 @@ from imbue.mngr.utils.ssh import build_ssh_connect_command
 _SECONDS_PER_DAY: float = 86400.0
 
 
+_BACKUP_GONE_SENTENCE: Final[str] = (
+    "This backup is no longer here -- it may already have been deleted. Reload the page to see what's left."
+)
+
+
 class DestroyedWorkspaceRow(FrozenModel):
     """One row of the recently-destroyed page: a tombstoned record or an orphan backup env."""
 
     agent_id: str = Field(description="The destroyed workspace's stable identity")
     display_name: str = Field(description="Human-readable workspace name (or an unknown-workspace label)")
+    is_orphan: bool = Field(description="A backup on this device that belongs to no workspace record")
     account_label: str = Field(description="Owning account email, or 'this device' for orphans")
     destroyed_at_display: str = Field(description="Destruction date (YYYY-MM-DD), empty for orphans")
     days_left_display: str = Field(description="Retention countdown copy, empty when unknown")
@@ -198,6 +205,7 @@ def _collect_destroyed_rows() -> list[DestroyedWorkspaceRow]:
                         agent_id=record.agent_id,
                         display_name=record.display_name or record.agent_id,
                         account_label=account_email,
+                        is_orphan=False,
                         destroyed_at_display=destroyed_at.strftime("%Y-%m-%d") if destroyed_at is not None else "",
                         days_left_display=_days_left_display(destroyed_at, retention_seconds, now),
                         has_backup=has_env or has_secrets,
@@ -221,7 +229,8 @@ def _collect_destroyed_rows() -> list[DestroyedWorkspaceRow]:
         orphan_rows.append(
             DestroyedWorkspaceRow(
                 agent_id=str(agent_id),
-                display_name=f"unknown workspace ({agent_id})",
+                display_name="Backup from a workspace that's no longer in your list",
+                is_orphan=True,
                 account_label="this device",
                 destroyed_at_display="",
                 # Only imbue_cloud orphans are ever cleaned automatically;
@@ -357,12 +366,12 @@ def _handle_delete_destroyed_backup(agent_id: str) -> Response:
         try:
             parsed_id = AgentId(agent_id)
         except ValueError:
-            return _error_response(f"No destroyed workspace found for {agent_id}.", 404)
+            return _error_response(_BACKUP_GONE_SENTENCE, 404)
         # delete_orphan_backup_now treats a missing env as already-deleted
         # (idempotent from its perspective), so a completely unknown id must
         # be rejected here rather than reported as a successful deletion.
         if read_canonical_env(reaper.paths, parsed_id) is None:
-            return _error_response(f"No destroyed workspace found for {agent_id}.", 404)
+            return _error_response(_BACKUP_GONE_SENTENCE, 404)
         is_deleted = reaper.delete_orphan_backup_now(parsed_id, accounts)
     if not is_deleted:
         return _error_response("Could not delete the backup; see the logs and try again.", 502)

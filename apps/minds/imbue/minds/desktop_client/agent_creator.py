@@ -65,6 +65,8 @@ from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailure
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureKind
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
 from imbue.minds.desktop_client.connections.primitives import backend_for_connection_instance_name
@@ -2388,7 +2390,7 @@ class AgentCreator(MutableModel):
             "(or cancel) in-flight work."
         ),
     )
-    report_backup_setup_failure: Callable[[AgentId, str], None] | None = Field(
+    report_backup_setup_failure: Callable[[AgentId, BackupSetupFailure], None] | None = Field(
         default=None,
         description=(
             "Surfaces a detached backup-provisioning task giving up on a workspace to the user "
@@ -3770,7 +3772,15 @@ class AgentCreator(MutableModel):
             if self.report_backup_setup_failure is not None:
                 self.report_backup_setup_failure(
                     agent_id,
-                    f"The workspace is running; backups are not yet set up. Error: {exc}",
+                    BackupSetupFailure(
+                        kind=(
+                            BackupSetupFailureKind.STORAGE_QUOTA
+                            if isinstance(exc, ImbueCloudQuotaExceededCliError)
+                            else BackupSetupFailureKind.OTHER
+                        ),
+                        detail=str(exc),
+                        request=backup_request,
+                    ),
                 )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:

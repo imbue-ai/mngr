@@ -12,9 +12,10 @@ import {
   remoteLocationBadgeFor,
   remoteStateChipFor,
   remoteTileEntries,
-  removeRecordFailureMessage,
+  removeRecordFailureFor,
   rowClickActionFor,
 } from "./landing-controls";
+import { WINDOW_LOGIN_LAPSED_SENTENCE } from "../../models/errors";
 
 describe("mindControlsFor", () => {
   it("offers only Start for a shutdown-capable stopped machine", () => {
@@ -442,23 +443,50 @@ describe("backupsControlFor", () => {
   });
 });
 
-describe("removeRecordFailureMessage", () => {
-  it("relays the server's own explanation for a refused removal", () => {
-    const refusal = "This workspace's machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
-    expect(removeRecordFailureMessage(409, { error: refusal })).toBe(
-      `Could not remove this workspace from the list: ${refusal}`,
+describe("removeRecordFailureFor", () => {
+  it("tells a held lease plainly, with the server's text behind See details and no report asked", () => {
+    const refusal =
+      "This workspace's machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
+    const failure = removeRecordFailureFor({ status: 409, body: { error: refusal, code: "LEASE_ACTIVE" } });
+    expect(failure.error.message).toBe(
+      "This workspace's machine is still held in Imbue Cloud, so it can't just be taken off the list. " +
+        "*Remove the workspace instead.*",
     );
+    expect(failure.error.details).toContain(refusal);
+    expect(failure.isBugReportOffered).toBe(false);
   });
 
-  it("falls back to the status when the response carries no explanation", () => {
-    expect(removeRecordFailureMessage(502, null)).toBe("Could not remove this workspace from the list: HTTP 502");
-    expect(removeRecordFailureMessage(404, {})).toBe("Could not remove this workspace from the list: HTTP 404");
+  it("tells a record from a newer Imbue Studio in our words, with the server's text behind See details", () => {
+    const refusal = "This workspace was managed by a newer version of the app; update the app to manage it.";
+    const failure = removeRecordFailureFor({ status: 409, body: { error: refusal, code: "RECORD_TOO_NEW" } });
+    expect(failure.error.message).toBe(
+      "This workspace was set up by a newer version of Imbue Studio. *Update Imbue Studio to take it off the list.*",
+    );
+    expect(failure.error.details).toContain(refusal);
+    expect(failure.isBugReportOffered).toBe(false);
+    expect(failure.isUpdateAppOffered).toBe(true);
   });
 
-  it("names a request that never got an answer", () => {
-    expect(removeRecordFailureMessage(null, null)).toBe(
-      "Could not remove this workspace from the list (the request failed).",
+  it("offers a restart when the window's own login lapsed", () => {
+    const failure = removeRecordFailureFor({ status: 403, body: { error: "Not authenticated" } });
+    expect(failure.error.message).toBe(WINDOW_LOGIN_LAPSED_SENTENCE);
+    expect(failure.isRestartAppOffered).toBe(true);
+  });
+
+  it("keeps server text and bare statuses behind See details under the fallback sentence", () => {
+    const failure = removeRecordFailureFor({ status: 503, body: { error: "Sync is unavailable" } });
+    expect(failure.error.message).toBe(
+      "Couldn't take this workspace off the list. Try again. If this persists, report a bug.",
     );
+    expect(failure.error.details).toBe("HTTP 503\nSync is unavailable");
+    expect(failure.isBugReportOffered).toBe(true);
+    expect(removeRecordFailureFor({ status: 502, body: null }).error.details).toBe("HTTP 502");
+  });
+
+  it("says Imbue Studio didn't respond when no answer came back", () => {
+    const failure = removeRecordFailureFor({ status: 0, body: null });
+    expect(failure.error.message).toBe("Imbue Studio didn't respond. Try again in a moment.");
+    expect(failure.isRestartAppOffered).toBe(false);
   });
 });
 

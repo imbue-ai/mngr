@@ -52,6 +52,8 @@ export interface AccountPlanView {
 export interface TrimStatus {
   is_running: boolean;
   detail: string;
+  /** What went wrong, for See details, when the cleanup could not finish. */
+  error_detail: string;
 }
 
 /** Why an account's plan or notification settings could not be read. All

@@ -63,6 +63,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryCredentia
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import ResticPasswordNotAllowedError
+from imbue.minds.errors import WorkspaceFileWriteError
 from imbue.minds.primitives import BackupProvider
 from imbue.mngr.primitives import AgentId
 
@@ -242,7 +244,7 @@ def _write_remote_file(
     command_str = build_write_file_command(remote_path, content, mode=mode, rotate_timestamp=rotate_timestamp)
     result = run_mngr_exec_on_agent(agent_address, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
-        raise BackupProvisioningError(
+        raise WorkspaceFileWriteError(
             f"Failed to write {remote_path} on agent {agent_address}: {result.stderr.strip() or result.stdout.strip()}"
         )
 
@@ -356,7 +358,7 @@ def _resolve_repository_and_backend_env(
     if request.backup_provider is BackupProvider.API_KEY:
         env = parse_restic_env(request.api_key_env_text)
         if "RESTIC_PASSWORD" in env:
-            raise BackupProvisioningError(
+            raise ResticPasswordNotAllowedError(
                 "RESTIC_PASSWORD must not be set for api_key backups; "
                 "Imbue Studio assigns each workspace its own password"
             )

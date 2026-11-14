@@ -405,23 +405,26 @@ def test_landing_extras_report_only_the_asked_accounts_locked_state(tmp_path: Pa
     assert no_param_payload["locked_account_emails"] == []
 
 
-def _landing_extras_with_failed_destroy(tmp_path: Path, is_workspace_still_active: bool) -> tuple[str, dict]:
-    """Landing extras for one workspace whose destroy exited non-zero; returns (agent id, payload)."""
+def _landing_extras_with_finished_destroy(
+    tmp_path: Path, is_workspace_still_active: bool, exit_code: int, is_record_kept: bool
+) -> tuple[str, dict]:
+    """Landing extras for one workspace whose destroy exited with ``exit_code``; returns (agent id, payload)."""
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=137)
+    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=exit_code)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
-    session_store.associate_created_workspace(
-        user_id="user-1",
-        agent_id=str(agent_id),
-        host_id=str(HostId.generate()),
-        display_name="half-destroyed",
-        color="#3c3d06",
-        is_cloud_row=False,
-    )
-    if not is_workspace_still_active:
+    if is_record_kept:
+        session_store.associate_created_workspace(
+            user_id="user-1",
+            agent_id=str(agent_id),
+            host_id=str(HostId.generate()),
+            display_name="half-destroyed",
+            color="#3c3d06",
+            is_cloud_row=False,
+        )
+    if is_record_kept and not is_workspace_still_active:
         # This device's record reconcile tombstones a record once discovery stops
         # listing its host, which can happen before anyone looks at the failure.
         assert session_store.record_store is not None
@@ -444,7 +447,9 @@ def _landing_extras_with_failed_destroy(tmp_path: Path, is_workspace_still_activ
 
 def test_landing_extras_surface_a_failed_destroy_whose_host_is_gone(tmp_path: Path) -> None:
     """A destroy that failed after its host went away has no row of its own, so extras supply one."""
-    agent_id, payload = _landing_extras_with_failed_destroy(tmp_path, is_workspace_still_active=False)
+    agent_id, payload = _landing_extras_with_finished_destroy(
+        tmp_path, is_workspace_still_active=False, exit_code=137, is_record_kept=True
+    )
 
     assert payload["destroying_status_by_agent_id"] == {agent_id: "failed"}
     assert payload["orphaned_failed_destroys"] == [
@@ -452,10 +457,30 @@ def test_landing_extras_surface_a_failed_destroy_whose_host_is_gone(tmp_path: Pa
     ]
 
 
+def test_landing_extras_name_an_orphaned_failed_destroy_nobody_remembers_without_its_id(tmp_path: Path) -> None:
+    agent_id, payload = _landing_extras_with_finished_destroy(
+        tmp_path, is_workspace_still_active=False, exit_code=137, is_record_kept=False
+    )
+
+    assert [orphan["name"] for orphan in payload["orphaned_failed_destroys"]] == ["Workspace that was being removed"]
+    assert payload["orphaned_failed_destroys"][0]["agent_id"] == agent_id
+
+
 def test_landing_extras_leave_a_failed_destroy_with_a_live_row_to_that_row(tmp_path: Path) -> None:
-    agent_id, payload = _landing_extras_with_failed_destroy(tmp_path, is_workspace_still_active=True)
+    agent_id, payload = _landing_extras_with_finished_destroy(
+        tmp_path, is_workspace_still_active=True, exit_code=137, is_record_kept=True
+    )
 
     assert payload["destroying_status_by_agent_id"] == {agent_id: "failed"}
+    assert payload["orphaned_failed_destroys"] == []
+
+
+def test_landing_extras_report_a_finished_destroy_awaiting_its_host_as_confirming(tmp_path: Path) -> None:
+    agent_id, payload = _landing_extras_with_finished_destroy(
+        tmp_path, is_workspace_still_active=True, exit_code=0, is_record_kept=True
+    )
+
+    assert payload["destroying_status_by_agent_id"] == {agent_id: "confirming"}
     assert payload["orphaned_failed_destroys"] == []
 
 

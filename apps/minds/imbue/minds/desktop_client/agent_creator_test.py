@@ -73,6 +73,8 @@ from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailure
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureKind
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
@@ -1668,7 +1670,7 @@ def _make_test_creator(
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
-    report_backup_setup_failure: Callable[[AgentId, str], None] | None = None,
+    report_backup_setup_failure: Callable[[AgentId, BackupSetupFailure], None] | None = None,
     backup_setup_retry_budget_seconds: float = 0.0,
     backup_setup_retry_wait_seconds: float = 0.0,
     pending_create_attempt_store: PendingCreateAttemptStore | None = None,
@@ -1711,7 +1713,7 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
     attempt, then gives up and reports exactly one failure -- and must not let
     the exception escape the detached-thread entry point.
     """
-    reported: list[tuple[AgentId, str]] = []
+    reported: list[tuple[AgentId, BackupSetupFailure]] = []
     creator = _make_test_creator(
         tmp_path,
         report_backup_setup_failure=lambda agent_id, detail: reported.append((agent_id, detail)),
@@ -1727,9 +1729,13 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
         backup_request=request,
     )
 
-    ((reported_agent_id, detail),) = reported
+    ((reported_agent_id, failure),) = reported
     assert reported_agent_id == agent_id
-    assert detail.startswith("The workspace is running; backups are not yet set up.")
+    # The failure keeps its own text (for the Backups page's See details) and the
+    # request that failed (for its "Set up backups" retry).
+    assert failure.kind == BackupSetupFailureKind.OTHER
+    assert "RESTIC_REPOSITORY" in failure.detail
+    assert failure.request == request
 
 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:

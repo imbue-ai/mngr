@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.account_settings_store import AccountSettingsSto
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureStore
 from imbue.minds.desktop_client.backup_store_migration import BackupStoreMigrationManager
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
@@ -328,6 +329,11 @@ class DesktopClientState(MutableModel):
     workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
         default_factory=InMemoryWorkspaceOperationRegistry,
         description="In-memory registry tracking in-process workspace operations (restart) + their logs",
+    )
+    backup_setup_failures: BackupSetupFailureStore = Field(
+        default_factory=BackupSetupFailureStore,
+        frozen=True,
+        description="The last failed backup setup per newly created workspace, for its Backups page",
     )
     backup_trim_manager: BackupTrimManager = Field(
         default_factory=BackupTrimManager,

@@ -73,7 +73,9 @@ terminal `DESTROYED` state is treated as gone:
    snapshot, which still listed it.
 5. The detached `mngr destroy` records its exit status (`exit_code` beside the
    `pid` file). A non-zero status reads as FAILED whatever the host reads as;
-   a zero status keeps the host-gone gate above for DONE. A failed destroy whose
+   a zero status keeps the host-gone gate above for DONE, and reads as
+   CONFIRMING (not FAILED) while the host is not yet positively gone, so the
+   destroying page says the removal finished and keeps checking. A failed destroy whose
    host is already gone has no active-list row, so the landing extras carry it
    as an orphaned failed destroy and the Landing list renders a row for it.
 

@@ -22,18 +22,18 @@ is computed from ``pid`` liveness + the exit status + whether the workspace's
 (see its docstring: agent still active, host not yet positively gone). Keying
 on the host, not just the workspace agent, is deliberate: an Imbue Studio host also
 runs a ``system-services`` agent, so a destroy that removed only the workspace
-agent must read as FAILED, not DONE.
+agent must never read as DONE.
 
-  - dir present + pid alive                        -> RUNNING
-  - dir present + pid dead + exit_code non-zero    -> FAILED (kept for inspection)
-  - dir present + pid dead + host gone             -> DONE   (caller deletes the dir)
-  - dir present + pid dead + host still up         -> FAILED (kept for inspection)
+  - dir present + pid alive                                -> RUNNING
+  - dir present + pid dead + exit_code non-zero            -> FAILED (kept for inspection)
+  - dir present + pid dead + host gone                     -> DONE   (caller deletes the dir)
+  - dir present + pid dead + exit 0 + host still up        -> CONFIRMING
+  - dir present + pid dead + no exit_code + host still up  -> FAILED (kept for inspection)
 
-The ~1-second window between the destroy subprocess exiting and the
-``mngr observe`` discovery tail picking up the host's ``DESTROYED`` state
-can briefly flip status to FAILED for a successful destroy. The detail
-page poll picks up the corrected status on the next tick. Acceptable
-jitter; documented in ``specs/detached-destroy-flow/spec.md``.
+A destroy that exited 0 reads CONFIRMING, not FAILED, until its host is
+positively gone: the owning provider may not have produced a clean discovery
+snapshot yet (it can be erroring for a while), and calling that removal a
+failure invites a second one.
 """
 
 import os
@@ -48,12 +48,14 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -79,6 +81,8 @@ class DestroyingStatus(UpperCaseStrEnum):
     """
 
     RUNNING = auto()
+    # ``mngr destroy`` exited 0, but the host is not yet positively gone.
+    CONFIRMING = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -213,12 +217,13 @@ def is_host_still_active(
 
     This is the canonical value to pass as :func:`read_destroying`'s
     ``is_host_still_active`` argument, and it decides whether a destroy whose
-    subprocess died reads FAILED (host still up) or DONE (host gone, safe to
-    tombstone the record). Two rules shape it:
+    subprocess died can read DONE (host gone, safe to tombstone the record) or
+    not (host still up: CONFIRMING after a clean exit, FAILED otherwise). Two
+    rules shape it:
 
     - Keying on the host, not just the workspace agent: a destroy that tore
       down only the workspace agent -- while ``system-services`` kept the host
-      alive -- must read FAILED rather than a false DONE.
+      alive -- must never read as a false DONE.
     - Gone-ness needs *positive evidence*: the host's state is DESTROYED, or
       the provider that owns it produced a clean discovery snapshot this
       session that omits it. An unknown state alone proves nothing -- at app
@@ -479,16 +484,20 @@ def read_destroying(
     agent is still in ``list_active_workspace_ids()`` *or* the workspace's host
     is not yet positively gone (see :func:`is_host_still_active`, the canonical
     source of this value) -- so a destroy that tore down only the workspace
-    agent while system-services kept the host alive reads as FAILED, not DONE.
+    agent while system-services kept the host alive never reads as DONE.
     A non-zero exit status is FAILED outright, whatever the host reads as: a
     destroy that reported a leaked lease or another cleanup failure must stay
-    visible with its log rather than be finalized as DONE. The status table:
+    visible with its log rather than be finalized as DONE. A zero exit status
+    with the host still up is CONFIRMING; a marker with no recorded exit
+    status (written by an older version) keeps reading FAILED there. The
+    status table:
 
       - dir absent                                              -> None
       - dir present, pid alive                                  -> RUNNING
       - dir present, pid dead, exit_code non-zero               -> FAILED
       - dir present, pid dead, is_host_still_active=False       -> DONE
-      - dir present, pid dead, is_host_still_active=True        -> FAILED
+      - dir present, pid dead, exit_code 0, host still active   -> CONFIRMING
+      - dir present, pid dead, no exit_code, host still active  -> FAILED
 
     Returns ``None`` for the absent case; otherwise a populated record.
     """
@@ -510,6 +519,8 @@ def read_destroying(
         status = DestroyingStatus.RUNNING
     elif exit_code is not None and exit_code != 0:
         status = DestroyingStatus.FAILED
+    elif is_host_still_active and exit_code == 0:
+        status = DestroyingStatus.CONFIRMING
     elif is_host_still_active:
         status = DestroyingStatus.FAILED
     else:
@@ -525,6 +536,25 @@ def read_destroying(
         status=status,
         log_path=_log_file(paths, agent_id),
     )
+
+
+@pure
+def destroy_row_state(status: DestroyingStatus) -> str:
+    """The workspaces list's word for a destroy in this status: running, confirming or failed.
+
+    A DONE record reads as running: it is finalized (and drops off the list)
+    on the publisher's next derive tick, and reading it as anything else would
+    flash a state the removal never had.
+    """
+    match status:
+        case DestroyingStatus.RUNNING | DestroyingStatus.DONE:
+            return "running"
+        case DestroyingStatus.CONFIRMING:
+            return "confirming"
+        case DestroyingStatus.FAILED:
+            return "failed"
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def list_destroying(

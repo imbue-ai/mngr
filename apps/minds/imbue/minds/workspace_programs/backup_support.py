@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Final
 from typing import TypedDict
 
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
 from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
@@ -405,7 +406,8 @@ def gate_chats_and_wait_for_tick(
     """Gate a mutating program: no running or busy chats (optionally stop them), no in-flight tick.
 
     Returns (status, extra, detail) with status in ok | blocked | failed;
-    ``extra`` carries payload fields (e.g. running_chats) for the result.
+    ``extra`` carries payload fields (e.g. running_chats, or the
+    failure_reason naming which gate step failed) for the result.
     ``is_chat_gate_skipped`` bypasses only the chat half (the user explicitly
     forced a restore on a workspace that can no longer answer `mngr list`);
     the tick wait still applies -- it needs no workspace code to answer.
@@ -413,14 +415,26 @@ def gate_chats_and_wait_for_tick(
     if not is_chat_gate_skipped:
         gate, gate_error = list_running_chats()
         if gate is None:
-            return BackupProgramStatus.FAILED, {}, "cannot determine running chats: %s" % gate_error
+            return (
+                BackupProgramStatus.FAILED,
+                {"failure_reason": BackupProgramFailureReason.CHAT_GATE_UNDETERMINED},
+                "cannot determine running chats: %s" % gate_error,
+            )
         if gate["chats"] and is_stop_chats:
             stop_error = _stop_running_chats(gate)
             if stop_error:
-                return BackupProgramStatus.FAILED, {}, stop_error
+                return (
+                    BackupProgramStatus.FAILED,
+                    {"failure_reason": BackupProgramFailureReason.CHAT_STOP_FAILED},
+                    stop_error,
+                )
             gate, gate_error = list_running_chats()
             if gate is None:
-                return BackupProgramStatus.FAILED, {}, "cannot re-check running chats: %s" % gate_error
+                return (
+                    BackupProgramStatus.FAILED,
+                    {"failure_reason": BackupProgramFailureReason.CHAT_RECHECK_FAILED},
+                    "cannot re-check running chats: %s" % gate_error,
+                )
         if gate["chats"]:
             return BackupProgramStatus.BLOCKED, {"running_chats": gate["chats"]}, "chat agents are running"
     is_tick_still_in_flight = poll_until(
@@ -430,5 +444,9 @@ def gate_chats_and_wait_for_tick(
         _TICK_POLL_SECONDS,
     )
     if is_tick_still_in_flight:
-        return BackupProgramStatus.FAILED, {}, "timed out waiting for the in-flight backup tick to finish"
+        return (
+            BackupProgramStatus.FAILED,
+            {"failure_reason": BackupProgramFailureReason.BACKUP_TICK_TIMEOUT},
+            "timed out waiting for the in-flight backup tick to finish",
+        )
     return BackupProgramStatus.OK, {}, ""

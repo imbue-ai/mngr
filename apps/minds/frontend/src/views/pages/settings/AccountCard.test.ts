@@ -483,6 +483,40 @@ describe("the email notifications switch", () => {
   });
 });
 
+describe("AccountCard backup cleanup", () => {
+  it("says an unfinished cleanup in our words and offers it again", () => {
+    // An over-quota plan links its destroyed-workspace backups through the registered shell.
+    const stores = createEmptyStores();
+    registerAppContext({ stores, shell: new ShellState(stores) });
+    const model = modelOnPlan("free");
+    const state = model.planStateFor(ACCOUNT.user_id);
+    state.planView = { ...state.planView!, is_over_storage_quota: true };
+    state.trimStatus = {
+      is_running: false,
+      detail: "Backup cleanup didn't finish. Try again. If this persists, report a bug.",
+      error_detail: "restic forget failed (exit 1): repository is locked",
+    };
+    const trimmed: string[] = [];
+    vi.spyOn(model, "trimBackups").mockImplementation(async (userId: string) => {
+      trimmed.push(userId);
+    });
+
+    const notice = collectVnodes(mountCard(model)()).find(
+      (node) => attrsOf(node).id === `trim-error-${ACCOUNT.user_id}`,
+    );
+    expect(notice).toBeDefined();
+    const noticeAttrs = attrsOf(notice!) as {
+      error: { message: string; details: string };
+      actions: Array<{ label: string; onclick: () => void }>;
+    };
+    expect(noticeAttrs.error.details).toContain("repository is locked");
+    const [tryAgain] = noticeAttrs.actions;
+    expect(tryAgain.label).toBe("Try again");
+    tryAgain.onclick();
+    expect(trimmed).toEqual([ACCOUNT.user_id]);
+  });
+});
+
 describe("the shared-workspaces link", () => {
   it("is offered only while the account holds a share", () => {
     // The link is the window's account's hub page, read off the registered shell.

@@ -313,7 +313,9 @@ def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: P
 
 def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) -> None:
     manager = BackupTrimManager()
-    manager.status_by_user_id["user-1"] = BackupTrimStatus(state=BackupTrimState.RUNNING, detail="in flight")
+    manager.status_by_user_id["user-1"] = BackupTrimStatus(
+        state=BackupTrimState.RUNNING, detail="in flight", error_detail=""
+    )
     started = manager.start_trim(
         user_id="user-1",
         account_email="a@example.com",
@@ -342,23 +344,29 @@ def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> Non
     status = manager.get_status("user-1")
     assert status is not None
     assert status.state == BackupTrimState.FAILED
-    assert "Backup cleanup failed" in status.detail
+    assert status.detail == "Backup cleanup didn't finish. Try again. If this persists, report a bug."
+    assert status.error_detail != ""
     assert _wait_for_system_events(feed) == [("Backup cleanup failed", status.detail, "")]
 
 
 def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) -> None:
     """An exception type the run does not expect must not leave the status stuck on running."""
     manager = BackupTrimManager()
-    manager.status_by_user_id["user-1"] = BackupTrimStatus(state=BackupTrimState.RUNNING, detail="starting")
+    manager.status_by_user_id["user-1"] = BackupTrimStatus(
+        state=BackupTrimState.RUNNING, detail="starting", error_detail=""
+    )
+    feed = make_notification_feed_for_test(dispatcher=None, is_main_window_focused=False)
     with pytest.raises(RuntimeError, match="boom"):
         manager._run(
             user_id="user-1",
             account_email="a@example.com",
             cli=_CrashingImbueCloudCli(connector_url=AnyUrl("http://connector.invalid")),
             paths=InstallationPaths(data_dir=tmp_path),
-            notification_feed=None,
+            notification_feed=feed,
         )
     status = manager.get_status("user-1")
     assert status is not None
     assert status.state == BackupTrimState.FAILED
-    assert "stopped unexpectedly" in status.detail
+    assert status.detail == "Backup cleanup didn't finish. Try again. If this persists, report a bug."
+    assert "stopped unexpectedly" in status.error_detail
+    assert _wait_for_system_events(feed) == [("Backup cleanup failed", status.detail, "")]

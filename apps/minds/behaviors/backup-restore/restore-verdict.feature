@@ -55,6 +55,7 @@ Feature: Restore verdict
   Rule: The restore brings back and judges only the services the workspace starts on its own
     A restore brings the workspace's services back the way the workspace's own startup would, from the service configuration the restored data holds.
     A service configured not to start on its own stays stopped after a restore, whether or not it was running when the restore started, and its being stopped is neither a failure nor a warning.
+    When the restored service configuration cannot be read, the services come back from the configuration in use before the restore instead, and the restore says that the workspace's services will not start on its next restart until that configuration is fixed, whether the restore succeeded or failed.
 
     @service-off-by-default
     Example: A service configured not to start on its own stays stopped without a warning
@@ -65,3 +66,12 @@ Feature: Restore verdict
       Then the service configured not to start on its own is stopped
       And the restore reports success
       And the restore reports no warning
+
+    @restored-configuration-unreadable
+    Example: A restored service configuration that cannot be read is reported and not used
+      Given a workspace with a backup snapshot whose service configuration cannot be read
+      When the user restores that snapshot in place
+      And the system interface comes back up
+      Then the workspace's services run from the configuration in use before the restore
+      And the restore reports success
+      And the restore says the workspace's services will not start on its next restart until that configuration is fixed

@@ -175,8 +175,8 @@ def test_start_destroy_writes_no_provider_file_when_unknown(tmp_path: Path) -> N
 def test_is_host_still_active_true_while_owning_provider_has_not_reported(tmp_path: Path) -> None:
     """The startup race: the host is absent from discovery only because its (slow)
     provider has not produced a snapshot yet. Without positive absence evidence the
-    host must read as still active, so the destroy stays FAILED instead of being
-    falsely finalized as DONE (which tombstoned records for still-leased hosts)."""
+    host must read as still active, so the destroy is not falsely finalized as
+    DONE (which tombstoned records for still-leased hosts)."""
     paths = InstallationPaths(data_dir=tmp_path)
     host_id = HostId.generate()
     agent_id = _start_finished_destroy(tmp_path, paths, host_id, provider_name="imbue_cloud_user")
@@ -344,16 +344,16 @@ def test_start_destroy_retry_clears_the_previous_runs_exit_code(tmp_path: Path) 
         _wait_for_pid_exit(retry.pid)
 
 
-def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_path: Path) -> None:
-    """The exact silent-orphan bug: the destroy process exited but the host is still up.
+def test_read_destroying_status_confirming_when_exit_zero_but_host_not_yet_gone(tmp_path: Path) -> None:
+    """A destroy that exited 0 while its host is not yet positively gone is confirming, not failed.
 
-    Models a destroy that tore down only the machine agent (or otherwise
-    failed) while the host kept running -- it must read as FAILED, not DONE, so
-    the machine stays visible instead of leaking a still-running host.
+    It must not read DONE (that would finalize the record while the host may
+    still run), and must not read FAILED either: the removal finished, and its
+    provider only has not confirmed the host gone yet. It turns DONE once the
+    host reads gone.
     """
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    # Exit 0: the host gate alone must produce FAILED here, not the exit status.
     fake = _make_fake_mngr(tmp_path, exit_code=0)
     record = start_destroy(
         agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
@@ -361,8 +361,10 @@ def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_p
     assert _wait_for_pid_exit(record.pid)
     seen = read_destroying(agent_id, paths, is_host_still_active=True)
     assert seen is not None
-    assert seen.status == DestroyingStatus.FAILED
+    assert seen.status == DestroyingStatus.CONFIRMING
     assert seen.exit_code == 0
+    gone = read_destroying(agent_id, paths, is_host_still_active=False)
+    assert gone is not None and gone.status == DestroyingStatus.DONE
 
 
 def test_read_destroying_returns_none_when_no_directory(tmp_path: Path) -> None:
@@ -404,11 +406,11 @@ def test_list_destroying_walks_dir_and_picks_up_each_agent(tmp_path: Path) -> No
     )
     assert _wait_for_pid_exit(record_a.pid)
     assert _wait_for_pid_exit(record_b.pid)
-    # agent_a's host is reported still active → FAILED; agent_b's host is gone → DONE.
+    # agent_a's host is reported still active → CONFIRMING; agent_b's host is gone → DONE.
     listing = list_destroying(paths, lambda aid: aid == agent_a)
     assert agent_a in listing
     assert agent_b in listing
-    assert listing[agent_a].status == DestroyingStatus.FAILED
+    assert listing[agent_a].status == DestroyingStatus.CONFIRMING
     assert listing[agent_b].status == DestroyingStatus.DONE
 
 

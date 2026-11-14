@@ -195,6 +195,7 @@ function planSection(
   const view = plan.planView;
   const trim = plan.trimStatus;
   const isTrimRunning = trim?.is_running === true;
+  const isTrimUnfinished = trim !== null && !trim.is_running && trim.error_detail !== "";
   const verifyPrompt = model.verifyEmailPromptFor(account.user_id);
   // The draft lives in component state (keyed by user_id): a per-render
   // local would be reset by the redraw that follows the select's onchange.
@@ -342,7 +343,13 @@ function planSection(
         ),
       ),
     ),
-    view.is_over_storage_quota || trim !== null
+    isTrimUnfinished
+      ? m(ErrorNotice, {
+          id: `trim-error-${account.user_id}`,
+          error: { message: trim.detail, details: trim.error_detail },
+          actions: [{ label: "Try again", onclick: () => void model.trimBackups(account.user_id) }],
+        })
+      : view.is_over_storage_quota || trim !== null
       ? m("div", { class: "mt-2 flex items-center gap-3" }, [
           view.is_over_storage_quota && !isTrimRunning
             ? m(

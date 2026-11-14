@@ -7,10 +7,16 @@
 import m from "mithril";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import {
+  detailsPanel,
+  ErrorDetailsToggle,
+  ErrorNotice,
+  restartAppActions,
+} from "../components/ErrorDisplay";
 import { PageContainer } from "../components/Layout";
-import { Notice } from "../components/Notice";
 import {
   browserLifecycleDeps,
+  type DeleteBackupFailure,
   DestroyedWorkspacesModel,
   type DestroyedWorkspaceRow,
   downloadSnapshotExport,
@@ -33,9 +39,11 @@ function DestroyedRow(): m.Component<{
   model: DestroyedWorkspacesModel;
   failedDownloadAgentIds: Set<string>;
 }> {
+  let isOrphanDetailsOpen = false;
   return {
     view(vnode) {
       const { row, model, failedDownloadAgentIds } = vnode.attrs;
+      const orphanDetailsId = `orphan-details-${row.agent_id}`;
       const isArmed = model.armedDeleteAgentId === row.agent_id;
       const isDeleting = model.deletingAgentIds.has(row.agent_id);
       const isDownloading = model.downloadingAgentIds.has(row.agent_id);
@@ -44,6 +52,23 @@ function DestroyedRow(): m.Component<{
         m("div", { class: "min-w-0" }, [
           m("div", { class: "font-semibold break-words" }, row.display_name),
           m("div", { class: "type-helper text-tertiary" }, _rowMetaLine(row)),
+          row.is_orphan
+            ? m("div", { class: "type-helper text-tertiary mt-1" }, [
+                m(ErrorDetailsToggle, {
+                  id: orphanDetailsId,
+                  isOpen: isOrphanDetailsOpen,
+                  onToggle: () => {
+                    isOrphanDetailsOpen = !isOrphanDetailsOpen;
+                  },
+                }),
+                isOrphanDetailsOpen
+                  ? detailsPanel(
+                      orphanDetailsId,
+                      `Workspace id: ${row.agent_id}`,
+                    )
+                  : null,
+              ])
+            : null,
           row.is_locked
             ? m("div", { class: "type-helper text-tertiary mt-1" }, "Unlock this account's sync password to download.")
             : null,
@@ -116,6 +141,27 @@ function DestroyedRow(): m.Component<{
   };
 }
 
+function deleteFailureNotice(
+  model: DestroyedWorkspacesModel,
+  failure: DeleteBackupFailure,
+): m.Children {
+  const { agentId, notice } = failure;
+  return m(ErrorNotice, {
+    id: "delete-backup-error",
+    error: notice.error,
+    isBugReportOffered: notice.isBugReportOffered,
+    actions: notice.isRestartAppOffered
+      ? restartAppActions()
+      : [
+          {
+            id: "delete-backup-retry",
+            label: "Try again",
+            onclick: () => void model.deleteBackup(agentId),
+          },
+        ],
+  });
+}
+
 export const DestroyedWorkspacesPage: m.Component<Record<string, never>, DestroyedWorkspacesState> = {
   oninit(vnode) {
     vnode.state.model = new DestroyedWorkspacesModel(browserLifecycleDeps(() => m.redraw()));
@@ -135,11 +181,31 @@ export const DestroyedWorkspacesPage: m.Component<Record<string, never>, Destroy
               `Backups of destroyed workspaces are kept for ${model.retentionDays} days, then deleted automatically.`,
             )
           : null,
-        model.errorMessage !== null ? m(Notice, { variant: "error" }, model.errorMessage) : null,
+        model.loadError !== null
+          ? m(ErrorNotice, {
+              id: "destroyed-workspaces-load-error",
+              error: model.loadError,
+              actions: [
+                {
+                  label: "Try again",
+                  onclick: () => void model.load(),
+                },
+              ],
+            })
+          : null,
+        model.deleteFailure !== null
+          ? deleteFailureNotice(model, model.deleteFailure)
+          : null,
         !model.isLoaded
           ? m("div", { class: "type-body text-secondary" }, "Loading...")
           : model.rows.length === 0
-            ? m("div", { class: "type-body text-secondary" }, "No recently destroyed workspaces.")
+            ? model.loadError !== null
+              ? null
+              : m(
+                  "div",
+                  { class: "type-body text-secondary" },
+                  "No recently destroyed workspaces.",
+                )
             : m(
                 "div",
                 { class: "flex flex-col gap-2" },

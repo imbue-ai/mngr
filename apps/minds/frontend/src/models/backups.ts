@@ -13,16 +13,26 @@
 // Everything network- or timer-shaped is injected so vitest drives the state
 // machines synchronously; pages construct with the browser defaults.
 
-import type { EnvironmentCondition, RecoveryFailureCause, RecoveryKind } from "./health";
-import type { RequestOutcome, UserFacingError } from "./errors";
 import {
+  NO_RESPONSE_SENTENCE,
+  errorCodeFromBody,
   errorFromResponse,
+  errorFromSentenceResponse,
   fallbackErrorSentence,
   operationKindFromBody,
   readResponseBody,
   responseDetails,
-  routeSentenceFromBody,
 } from "./errors";
+import type {
+  RefusalNotice,
+  RequestOutcome,
+  ResponseBody,
+  UserFacingError,
+} from "./errors";
+import type { EnvironmentCondition, RecoveryFailureCause, RecoveryKind } from "./health";
+import { isReconnectNeeded, reconnectError } from "./reconnect";
+import { destroyDispatchFailureFor } from "./workspaceOptions";
+import type { DestroyRefusal } from "./workspaceOptions";
 
 export const BACKUP_HISTORY_PAGE_SIZE = 15;
 
@@ -87,20 +97,6 @@ export function restoredFromLabel(
   return `Restored from ${new Date(lineage.slice("restored-from:".length)).toLocaleString()}`;
 }
 
-// The worker words these failures distinctively (see backup_update.py); the
-// failure-specific retry buttons key on that wording. Keep in sync.
-export function isSafetySnapshotFailure(message: string | null): boolean {
-  return (message ?? "").includes("pre-restore safety snapshot failed");
-}
-
-export function isChatGateFailure(message: string | null): boolean {
-  const text = message ?? "";
-  return (
-    text.includes("cannot determine running chats") ||
-    text.includes("Could not probe the workspace")
-  );
-}
-
 export interface RestoreOptions {
   stopChats?: boolean;
   updateAfter?: boolean;
@@ -124,9 +120,375 @@ interface OperationStatusPayload {
   is_done?: boolean;
   is_cancellable?: boolean;
   error?: string | null;
+  failure_reason?: string | null;
   warning?: string | null;
+  is_update_suggested?: boolean;
+  services_down?: string[];
+  service_config_error?: string | null;
   blocked_chats?: string[];
   snapshot_id?: string | null;
+}
+
+/** How a failed backup operation is told to the user, and what it offers. */
+export interface OperationFailure {
+  error: UserFacingError;
+  /** Off for a sentence that explains itself and asks for no report. */
+  isBugReportOffered: boolean;
+  /** Whether running the same operation again is offered. */
+  isRetryOffered: boolean;
+  /** Whether stopping the chats and running it again is offered. */
+  isStopChatsRetryOffered: boolean;
+  /** Whether restarting Imbue Studio is the remedy. */
+  isRestartAppOffered: boolean;
+  /** Whether reloading the page, to read what is true now, is the remedy. */
+  isReloadOffered: boolean;
+}
+
+const UPDATE_FAILED_SENTENCE = fallbackErrorSentence(
+  "Couldn't update this workspace's backup software",
+);
+const CONFIGURE_FAILED_SENTENCE =
+  "Imbue Studio couldn't set up backups for this workspace. *Press Save to try again.* " +
+  "If this persists, report a bug.";
+const CHAT_CHECK_FAILED_SENTENCE =
+  "Imbue Studio couldn't check whether any chats are still running in this workspace.";
+const RESTORE_INCOMPLETE_SENTENCE =
+  "The restore didn't finish. Running it again picks up where it stopped.";
+const RESTORE_UNREACHABLE_SENTENCE =
+  "Imbue Studio couldn't reach this workspace to start the restore. " +
+  "*Make sure the workspace is running, then try again.*";
+const DISABLE_FAILED_SENTENCE =
+  "Couldn't turn backups off for this workspace. *Press Save to try again.* If this persists, report a bug.";
+const RESTIC_PASSWORD_SET_SENTENCE =
+  "*Remove `RESTIC_PASSWORD` from these settings*; Imbue Studio sets each workspace's password itself.";
+const STORAGE_QUOTA_SENTENCE =
+  "Your Imbue Cloud plan has no room for this workspace's backups.";
+const OPERATION_IN_PROGRESS_SENTENCE =
+  "Another task is already running on this workspace. *Wait for it to finish, then try again.*";
+
+function failure(
+  message: string,
+  details: string,
+  options: {
+    isBugReportOffered: boolean;
+    isRetryOffered: boolean;
+    isStopChatsRetryOffered?: boolean;
+    isReloadOffered?: boolean;
+  },
+): OperationFailure {
+  return {
+    error: { message, details },
+    isBugReportOffered: options.isBugReportOffered,
+    isRetryOffered: options.isRetryOffered,
+    isStopChatsRetryOffered: options.isStopChatsRetryOffered === true,
+    isRestartAppOffered: false,
+    isReloadOffered: options.isReloadOffered === true,
+  };
+}
+
+/** A request refused because this window's login with Imbue Studio lapsed. */
+function reconnectFailure(outcome: RequestOutcome): OperationFailure {
+  return {
+    error: reconnectError(outcome),
+    isBugReportOffered: false,
+    isRetryOffered: false,
+    isStopChatsRetryOffered: false,
+    isRestartAppOffered: true,
+    isReloadOffered: false,
+  };
+}
+
+/** The dispatch kind of "Set up backups" on the Backups page: a configure,
+ * but one whose retry is the button beside it rather than Save. */
+const BACKUP_SETUP_RETRY_KIND = "backup_setup_retry";
+
+/** The dispatch kind of turning backups off: a configure operation on the
+ * server, but its failure is worded as the disable it was. */
+const BACKUP_DISABLE_KIND = "backup_disable";
+
+/** A failure no reason was given for: the sentence for its kind of operation. */
+function operationFallbackFailure(
+  kind: string,
+  details: string,
+): OperationFailure {
+  if (kind === "backup_update")
+    return failure(UPDATE_FAILED_SENTENCE, details, {
+      isBugReportOffered: true,
+      isRetryOffered: true,
+    });
+  if (kind === "backup_configure")
+    return failure(CONFIGURE_FAILED_SENTENCE, details, {
+      isBugReportOffered: true,
+      isRetryOffered: false,
+    });
+  if (kind === BACKUP_DISABLE_KIND)
+    return failure(DISABLE_FAILED_SENTENCE, details, {
+      isBugReportOffered: true,
+      isRetryOffered: false,
+    });
+  if (kind === BACKUP_SETUP_RETRY_KIND)
+    return failure(
+      fallbackErrorSentence("Couldn't set up backups for this workspace"),
+      details,
+      { isBugReportOffered: true, isRetryOffered: true },
+    );
+  if (kind === "backup_restore")
+    return failure(
+      fallbackErrorSentence("Couldn't restore this backup"),
+      details,
+      { isBugReportOffered: true, isRetryOffered: true },
+    );
+  return failure(
+    fallbackErrorSentence("The backup operation didn't finish", {
+      isRetryable: false,
+    }),
+    details,
+    { isBugReportOffered: true, isRetryOffered: false },
+  );
+}
+
+/**
+ * Word a failed backup operation from the reason the worker gave for it (see
+ * OperationOrProgramFailureReason in workspace_operations.py); the worker's own text
+ * goes behind See details. A reason this build does not know falls back to the
+ * sentence for the kind of operation.
+ */
+export function operationFailureFor(
+  kind: string,
+  reason: string | null,
+  rawError: string,
+): OperationFailure {
+  const isRestore = kind === "backup_restore";
+  switch (reason) {
+    case "CHAT_GATE_UNDETERMINED":
+      // A restore offers "Force restore" for this instead.
+      return failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
+        isBugReportOffered: false,
+        isRetryOffered: !isRestore,
+      });
+    case "CHAT_RECHECK_FAILED":
+      return failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
+        isBugReportOffered: false,
+        isRetryOffered: true,
+      });
+    case "CHAT_STOP_FAILED":
+      return failure(
+        "Imbue Studio couldn't stop the chats in this workspace.",
+        rawError,
+        {
+          isBugReportOffered: false,
+          isRetryOffered: false,
+          isStopChatsRetryOffered: true,
+        },
+      );
+    case "BACKUP_TICK_TIMEOUT":
+      return failure(
+        "A backup of this workspace is still running. Try again in a few minutes.",
+        rawError,
+        { isBugReportOffered: false, isRetryOffered: true },
+      );
+    case "WORKSPACE_PROBE_FAILED":
+      return failure(
+        isRestore
+          ? RESTORE_UNREACHABLE_SENTENCE
+          : "Imbue Studio couldn't reach this workspace to update its backup software. " +
+              "*Make sure the workspace is running, then try again.*",
+        rawError,
+        { isBugReportOffered: false, isRetryOffered: true },
+      );
+    case "SAFETY_SNAPSHOT_FAILED":
+      return failure(
+        "Imbue Studio couldn't save a copy of this workspace's current state before restoring.",
+        rawError,
+        { isBugReportOffered: true, isRetryOffered: false },
+      );
+    case "RESTORE_INCOMPLETE":
+      return failure(RESTORE_INCOMPLETE_SENTENCE, rawError, {
+        isBugReportOffered: true,
+        isRetryOffered: true,
+      });
+    case "RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP":
+      return failure(
+        `${RESTORE_INCOMPLETE_SENTENCE} A safety backup of the pre-restore state was taken first.`,
+        rawError,
+        { isBugReportOffered: true, isRetryOffered: true },
+      );
+    case "NO_RESULT":
+      return isRestore
+        ? failure(
+            fallbackErrorSentence("The restore stopped before it finished"),
+            rawError,
+            { isBugReportOffered: true, isRetryOffered: true },
+          )
+        : operationFallbackFailure(kind, rawError);
+    case "SNAPSHOT_UNRESTORABLE":
+      return failure(
+        "This backup doesn't contain a copy of your workspace, so it can't be restored. " +
+          "*Pick a different one* -- nothing in your workspace was changed.",
+        rawError,
+        { isBugReportOffered: false, isRetryOffered: false },
+      );
+    case "SNAPSHOT_READ_FAILED":
+      return failure(
+        "Imbue Studio couldn't read this backup just now. Nothing in your workspace was changed. " +
+          "Try again. If this persists, report a bug.",
+        rawError,
+        { isBugReportOffered: true, isRetryOffered: true },
+      );
+    case "CREDENTIALS_WRITE_FAILED":
+      return failure(RESTORE_UNREACHABLE_SENTENCE, rawError, {
+        isBugReportOffered: false,
+        isRetryOffered: true,
+      });
+    case "UPDATE_STASH_KEPT":
+      return failure(
+        `${UPDATE_FAILED_SENTENCE} Some unsaved changes in this workspace couldn't be put back ` +
+          "automatically. They are kept safe.",
+        rawError,
+        { isBugReportOffered: true, isRetryOffered: true },
+      );
+    case "BELOW_UPDATE_FLOOR":
+      // The server's own sentence already says what to do.
+      return failure(rawError, "", {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+      });
+    case "RESTIC_PASSWORD_SET":
+      return failure(RESTIC_PASSWORD_SET_SENTENCE, rawError, {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+      });
+    case "STORAGE_QUOTA_EXCEEDED":
+      return failure(STORAGE_QUOTA_SENTENCE, rawError, {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+      });
+    case "DISABLE_FAILED":
+      return failure(DISABLE_FAILED_SENTENCE, rawError, {
+        isBugReportOffered: true,
+        isRetryOffered: false,
+      });
+    default:
+      return operationFallbackFailure(kind, rawError);
+  }
+}
+
+/** A dispatch the route refused (or never answered): our sentence for the
+ * cause its code or status names, else the sentence for the kind of operation.
+ * The response always goes behind See details. */
+export function dispatchRefusalFor(
+  kind: string,
+  status: number,
+  body: ResponseBody,
+): OperationFailure {
+  const outcome: RequestOutcome = { status, body };
+  const details = responseDetails(outcome);
+  if (status === 0)
+    return failure(NO_RESPONSE_SENTENCE, details, {
+      isBugReportOffered: false,
+      isRetryOffered: true,
+    });
+  if (isReconnectNeeded(outcome)) return reconnectFailure(outcome);
+  const code = errorCodeFromBody(body);
+  if (code === "BELOW_UPDATE_FLOOR") {
+    // The route's sentence names the oldest version it still updates.
+    const told = errorFromSentenceResponse(
+      "Couldn't update this workspace's backup software",
+      outcome,
+      { isRetryable: false },
+    );
+    return failure(told.message, told.details, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    });
+  }
+  if (code === "BACKUPS_NOT_CONFIGURED")
+    return failure(
+      "Backups are turned off for this workspace, so it can't be restored here. " +
+        "*Reload the page to see its backup settings.*",
+      details,
+      {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+        isReloadOffered: true,
+      },
+    );
+  if (code === "BACKUP_CHOICE_INVALID")
+    return failure(
+      "*Choose where your backups should be stored, then press Save.*",
+      details,
+      { isBugReportOffered: false, isRetryOffered: false },
+    );
+  if (code === "BACKUP_ACCOUNT_MISSING")
+    return failure(
+      "Backing up to Imbue Cloud needs this workspace to be linked to an account. " +
+        "*Link it under Account, or choose a different place for its backups, then press Save.*",
+      details,
+      { isBugReportOffered: false, isRetryOffered: false },
+    );
+  if (code === "RESTIC_PASSWORD_SET")
+    return failure(RESTIC_PASSWORD_SET_SENTENCE, details, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    });
+  if (code === "WORKSPACE_MACHINE_NOT_FOUND")
+    return failure(
+      `Imbue Studio can't find this workspace's machine, so it can't ${
+        kind === BACKUP_SETUP_RETRY_KIND
+          ? "set up its backups"
+          : "change where its backups go"
+      }. *Make sure the workspace is running and try again.*`,
+      details,
+      { isBugReportOffered: false, isRetryOffered: false },
+    );
+  if (code === "NO_SETUP_TO_RETRY")
+    return failure(
+      "This workspace's backups may already be set up. *Reload the page to check.*",
+      details,
+      {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+        isReloadOffered: true,
+      },
+    );
+  // Every other refusal of these routes that carries a 409 is one operation
+  // losing to another already running on the workspace.
+  if (status === 409)
+    return failure(OPERATION_IN_PROGRESS_SENTENCE, details, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    });
+  return operationFallbackFailure(kind, details);
+}
+
+/** A cancel the route refused (or never answered). */
+export function cancelRefusalFor(outcome: RequestOutcome): OperationFailure {
+  const details = responseDetails(outcome);
+  if (outcome.status === 0)
+    return failure(NO_RESPONSE_SENTENCE, details, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    });
+  if (isReconnectNeeded(outcome)) return reconnectFailure(outcome);
+  if (outcome.status === 409)
+    return failure(
+      "It's too late to cancel: this task has started making changes and will run to the end.",
+      details,
+      { isBugReportOffered: false, isRetryOffered: false },
+    );
+  // The route tracks no backup update or restore for this workspace: the task
+  // ended before the cancel arrived.
+  if (outcome.status === 404)
+    return failure(
+      "There's nothing to cancel: this task has already finished.",
+      details,
+      { isBugReportOffered: false, isRetryOffered: false },
+    );
+  // The task is still running, so its Cancel is still on offer.
+  return failure(fallbackErrorSentence("Couldn't cancel this task"), details, {
+    isBugReportOffered: true,
+    isRetryOffered: false,
+  });
 }
 
 const OPERATION_SUCCESS_MESSAGES: Record<string, string> = {
@@ -161,10 +523,24 @@ export class BackupOperationController {
   runningLabel = "";
   progressLine: string | null = null;
   logLines: string[] = [];
-  errorMessage: string | null = null;
+  error: UserFacingError | null = null;
+  /** Whether the error on show asks for a bug report. */
+  isErrorReportOffered = false;
+  /** Whether the error on show offers restarting Imbue Studio. */
+  isRestartAppOffered = false;
+  /** Whether the error on show offers reloading the page. */
+  isReloadOffered = false;
   warningMessage: string | null = null;
+  /** Whether "Update backup software" finishes what the warning says was left undone. */
+  isUpdateSuggested = false;
+  /** Programs a finished restore left not yet running again. */
+  servicesDown: string[] = [];
+  /** supervisorctl's output when a restore, finished or failed, found the
+   * restored workspace's program settings unreadable. */
+  serviceConfigError: string | null = null;
   successMessage: string | null = null;
   cancelledMessage: string | null = null;
+  isRetryOffered = false;
   isStopChatsRetryOffered = false;
   isSkipSafetyRetryOffered = false;
   isForceRetryOffered = false;
@@ -177,6 +553,10 @@ export class BackupOperationController {
   private logSource: EventSourceLike | null = null;
   private consecutivePollFailures = 0;
   private pendingSuccessMessage: string | null = null;
+  /** The kind of operation this page dispatched, for wording a failure the
+   * status payload does not name the kind of. */
+  private dispatchedKind = "";
+  private retrySame: (() => void) | null = null;
   private retryWithStopChats: (() => void) | null = null;
   private retrySkipSafety: (() => void) | null = null;
   private retryForce: (() => void) | null = null;
@@ -222,6 +602,8 @@ export class BackupOperationController {
         successMessage: timeText
           ? `Workspace restored to the backup from ${timeText}. A safety backup of your previous state was saved first.`
           : OPERATION_SUCCESS_MESSAGES.backup_restore,
+        kind: "backup_restore",
+        retrySame: () => this.startRestore(snapshot, timeText, options),
         retryWithStopChats: () =>
           this.startRestore(snapshot, timeText, {
             ...options,
@@ -250,7 +632,23 @@ export class BackupOperationController {
         isCancellable: true,
         label: OPERATION_RUNNING_LABELS.backup_update,
         successMessage: OPERATION_SUCCESS_MESSAGES.backup_update,
+        kind: "backup_update",
+        retrySame: () => this.startUpdate(options),
         retryWithStopChats: () => this.startUpdate({ stopChats: true }),
+      },
+    );
+  }
+
+  /** Run a new workspace's failed backup setup again, with the inputs it was created with. */
+  startSetupRetry(): void {
+    this.dispatch(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/setup/retry`,
+      {},
+      {
+        label: "Setting up backups...",
+        successMessage: OPERATION_SUCCESS_MESSAGES.backup_configure,
+        kind: BACKUP_SETUP_RETRY_KIND,
+        retrySame: () => this.startSetupRetry(),
       },
     );
   }
@@ -264,6 +662,7 @@ export class BackupOperationController {
         {
           label: "Turning backups off...",
           successMessage: "Backups are now turned off for this workspace.",
+          kind: BACKUP_DISABLE_KIND,
         },
       );
       return;
@@ -274,8 +673,14 @@ export class BackupOperationController {
       {
         label: OPERATION_RUNNING_LABELS.backup_configure,
         successMessage: OPERATION_SUCCESS_MESSAGES.backup_configure,
+        kind: "backup_configure",
       },
     );
+  }
+
+  runRetry(): void {
+    this.isRetryOffered = false;
+    this.retrySame?.();
   }
 
   runStopChatsRetry(): void {
@@ -286,6 +691,15 @@ export class BackupOperationController {
   runSkipSafetyRetry(): void {
     this.isSkipSafetyRetryOffered = false;
     this.retrySkipSafety?.();
+  }
+
+  /** Leave a restore whose safety copy failed undone: nothing was restored,
+   * so its failure, its output and the offer to restore without the copy go. */
+  abandonSkipSafetyRetry(): void {
+    this.isSkipSafetyRetryOffered = false;
+    this.clearTerminalNotices();
+    this.logLines = [];
+    this.deps.redraw();
   }
 
   runForceRetry(): void {
@@ -301,9 +715,12 @@ export class BackupOperationController {
     )) as OperationStatusPayload | null;
     if (this.isRunning || this.isStopped) return;
     if (payload === null || payload.status !== "RUNNING") return;
+    this.clearLastOutcome();
     // This page did not dispatch the running operation: no retry closures,
     // generic success wording.
     this.pendingSuccessMessage = null;
+    this.dispatchedKind = payload.kind ?? "";
+    this.retrySame = null;
     this.retryWithStopChats = null;
     this.retrySkipSafety = null;
     this.retryForce = null;
@@ -324,10 +741,8 @@ export class BackupOperationController {
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/update/cancel`,
       {},
     );
-    if (result.status >= 400) {
-      this.showError(
-        routeSentenceFromBody(result.body, "Could not cancel the operation."),
-      );
+    if (result.status >= 400 || result.status === 0) {
+      this.showFailure(cancelRefusalFor(result));
     }
     this.deps.redraw();
   }
@@ -341,18 +756,19 @@ export class BackupOperationController {
       isCancellable?: boolean;
       label?: string;
       successMessage?: string;
+      kind: string;
+      retrySame?: () => void;
       retryWithStopChats?: () => void;
       retrySkipSafety?: () => void;
       retryForce?: () => void;
     },
   ): void {
-    this.clearTerminalNotices();
-    this.isStopChatsRetryOffered = false;
-    this.isSkipSafetyRetryOffered = false;
-    this.isForceRetryOffered = false;
+    this.clearLastOutcome();
     this.isRestore = opts.isRestore === true;
     this.restoringSnapshotId = opts.snapshotId ?? null;
     this.pendingSuccessMessage = opts.successMessage ?? null;
+    this.dispatchedKind = opts.kind;
+    this.retrySame = opts.retrySame ?? null;
     this.retryWithStopChats = opts.retryWithStopChats ?? null;
     this.retrySkipSafety = opts.retrySkipSafety ?? null;
     this.retryForce = opts.retryForce ?? null;
@@ -369,11 +785,8 @@ export class BackupOperationController {
         return;
       }
       this.setRunning(false, false, "");
-      this.showError(
-        routeSentenceFromBody(
-          result.body,
-          `Request failed (HTTP ${result.status})`,
-        ),
+      this.showFailure(
+        dispatchRefusalFor(opts.kind, result.status, result.body),
       );
       this.deps.redraw();
     });
@@ -402,9 +815,15 @@ export class BackupOperationController {
       if (this.consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
         this.setRunning(false, false, "");
         this.showError(
-          "Lost contact with the backup operation; its status could not be read for several minutes. " +
-            "Reload this page to check whether it finished.",
+          {
+            message:
+              "Lost contact with the backup operation; its status could not be read for several minutes. " +
+              "*Reload this page to check whether it finished.*",
+            details: "",
+          },
+          true,
         );
+        this.isReloadOffered = true;
         this.deps.redraw();
         return;
       }
@@ -419,6 +838,8 @@ export class BackupOperationController {
       return;
     }
     this.setRunning(false, false, "");
+    // A cancel refused while the task ran is moot once the task has ended.
+    this.clearTerminalNotices();
     if (payload.status === "CANCELLED") {
       this.cancelledMessage =
         OPERATION_CANCELLED_MESSAGES[payload.kind ?? ""] ??
@@ -431,6 +852,9 @@ export class BackupOperationController {
         this.pendingSuccessMessage ??
         this.successMessageFor(payload.kind ?? "");
       this.warningMessage = payload.warning ?? null;
+      this.isUpdateSuggested = payload.is_update_suggested === true;
+      this.servicesDown = payload.services_down ?? [];
+      this.serviceConfigError = payload.service_config_error ?? null;
       this.onSuccess?.();
       this.deps.redraw();
       return;
@@ -440,19 +864,33 @@ export class BackupOperationController {
       payload.blocked_chats.length > 0
     ) {
       this.showError(
-        `Chats are running in this workspace (${payload.blocked_chats.join(", ")}). ` +
-          "Stop them before continuing; they resume on your next message.",
+        {
+          message:
+            `Chats are running in this workspace (${payload.blocked_chats.join(", ")}). ` +
+            "Stop them before continuing; they resume on your next message.",
+          details: "",
+        },
+        false,
       );
       this.isStopChatsRetryOffered = this.retryWithStopChats !== null;
       this.deps.redraw();
       return;
     }
-    this.showError(payload.error ?? "The backup operation failed.");
+    const reason = payload.failure_reason ?? null;
+    this.showFailure(
+      operationFailureFor(
+        this.dispatchedKind || (payload.kind ?? ""),
+        reason,
+        payload.error ?? "",
+      ),
+    );
     this.isSkipSafetyRetryOffered =
-      this.retrySkipSafety !== null &&
-      isSafetySnapshotFailure(payload.error ?? null);
+      this.retrySkipSafety !== null && reason === "SAFETY_SNAPSHOT_FAILED";
     this.isForceRetryOffered =
-      this.retryForce !== null && isChatGateFailure(payload.error ?? null);
+      this.retryForce !== null &&
+      (reason === "CHAT_GATE_UNDETERMINED" ||
+        reason === "WORKSPACE_PROBE_FAILED");
+    this.serviceConfigError = payload.service_config_error ?? null;
     this.deps.redraw();
   }
 
@@ -503,20 +941,51 @@ export class BackupOperationController {
     this.deps.redraw();
   }
 
+  /** A new operation is starting: the last one's notices and retries go. */
+  private clearLastOutcome(): void {
+    this.clearTerminalNotices();
+    this.isRetryOffered = false;
+    this.isStopChatsRetryOffered = false;
+    this.isSkipSafetyRetryOffered = false;
+    this.isForceRetryOffered = false;
+  }
+
   private clearTerminalNotices(): void {
-    this.errorMessage = null;
+    this.error = null;
+    this.isErrorReportOffered = false;
+    this.isRestartAppOffered = false;
+    this.isReloadOffered = false;
     this.warningMessage = null;
+    this.isUpdateSuggested = false;
+    this.servicesDown = [];
+    this.serviceConfigError = null;
     this.successMessage = null;
     this.cancelledMessage = null;
   }
 
-  private showError(message: string): void {
+  private showError(error: UserFacingError, isBugReportOffered: boolean): void {
     this.clearTerminalNotices();
-    this.errorMessage = message;
+    this.error = error;
+    this.isErrorReportOffered = isBugReportOffered;
+  }
+
+  private showFailure(failure: OperationFailure): void {
+    this.showError(failure.error, failure.isBugReportOffered);
+    this.isRestartAppOffered = failure.isRestartAppOffered;
+    this.isReloadOffered = failure.isReloadOffered;
+    this.isRetryOffered = failure.isRetryOffered && this.retrySame !== null;
+    this.isStopChatsRetryOffered =
+      failure.isStopChatsRetryOffered && this.retryWithStopChats !== null;
   }
 }
 
+interface BackupSetupFailurePayload {
+  kind: string;
+  detail: string;
+}
+
 interface BackupsListingPayload {
+  setup_failure?: BackupSetupFailurePayload | null;
   is_configured?: boolean;
   is_backing_up?: boolean;
   snapshots?: BackupSnapshot[];
@@ -535,8 +1004,13 @@ export class BackupHistoryModel {
   previousRepositories: PreviousBackupRepository[] = [];
   /** Whether the workspace has current backups; a restore (from any storage) needs them. */
   isBackupsConfigured = false;
-  /** Human status line replacing the table (loading / empty / error states). */
+  /** Human status line replacing the table (loading / empty states). */
   statusMessage: string | null = "Loading backup history...";
+  /** Why the listing could not be read, shown in place of the table. */
+  loadError: UserFacingError | null = null;
+  /** Why backups could not be set up after the workspace was created, while
+   * they still are not. */
+  setupFailure: BackupSetupFailureNotice | null = null;
   /** The backup-check verdict gating Restore (OFFLINE disables it). */
   checkState: string | null = null;
 
@@ -571,6 +1045,7 @@ export class BackupHistoryModel {
 
   async loadPage(): Promise<void> {
     this.statusMessage = "Loading backup history...";
+    this.loadError = null;
     this.deps.redraw();
     // Previous destinations do not page and cost the server one restic
     // listing each, so only the first page asks for them; later pages keep
@@ -583,8 +1058,12 @@ export class BackupHistoryModel {
     const payload = (await this.deps.getJson(
       url,
     )) as BackupsListingPayload | null;
+    this.setupFailure = backupSetupFailureNotice(
+      payload?.setup_failure ?? null,
+    );
     if (payload === null) {
-      this.statusMessage = "Could not load backup history.";
+      this.statusMessage = null;
+      this.loadError = backupHistoryLoadError("");
       this.deps.redraw();
       return;
     }
@@ -594,13 +1073,17 @@ export class BackupHistoryModel {
       this.previousRepositories = payload.previous_repositories ?? [];
     }
     this.isBackupsConfigured = payload.is_configured === true;
-    if (payload.is_configured !== true) {
-      this.statusMessage = "Backups are turned off for this workspace.";
+    if (payload.snapshots_error) {
+      this.statusMessage = null;
+      this.loadError = backupHistoryLoadError(payload.snapshots_error);
       this.deps.redraw();
       return;
     }
-    if (payload.snapshots_error) {
-      this.statusMessage = "Couldn't load your backup history right now.";
+    if (payload.is_configured !== true) {
+      this.statusMessage =
+        this.setupFailure === null
+          ? "Backups are turned off for this workspace."
+          : null;
       this.deps.redraw();
       return;
     }
@@ -660,10 +1143,47 @@ const BACKUP_PROBLEM_LABELS: Record<string, string> = {
   SERVICE_NOT_RUNNING:
     'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
   UNVERIFIABLE:
-    'Imbue Studio could not check on this workspace\'s backups. Click "Update backup software" to reset them.',
+    "Imbue Studio couldn't finish checking this workspace's backups. " +
+    'Try "Update backup software"; if that fails too, try again in a few minutes.',
   BACKUPS_STALE:
     'This workspace has not backed up recently even though it is running. Click "Update backup software" to fix this.',
 };
+
+/** How the Backups page tells a failed setup after create. */
+export interface BackupSetupFailureNotice {
+  error: UserFacingError;
+  /** Off for a plan limit, which is no bug. */
+  isBugReportOffered: boolean;
+}
+
+/** The Backups page's account of a failed setup after create: what is true
+ * now, with the failure's own text behind See details. */
+export function backupSetupFailureNotice(
+  failure: BackupSetupFailurePayload | null,
+): BackupSetupFailureNotice | null {
+  if (failure === null) return null;
+  const isQuota = failure.kind === "STORAGE_QUOTA";
+  return {
+    error: {
+      message: isQuota
+        ? STORAGE_QUOTA_SENTENCE
+        : "Backups aren't set up for this workspace yet.",
+      details: failure.detail,
+    },
+    isBugReportOffered: !isQuota,
+  };
+}
+
+/** The listing of a workspace's backups could not be read: the route did not
+ * answer, or restic failed (its message is the detail). */
+export function backupHistoryLoadError(listingError: string): UserFacingError {
+  return {
+    message: fallbackErrorSentence(
+      "Couldn't load this workspace's backup history",
+    ),
+    details: listingError,
+  };
+}
 
 interface BackupCheckPayload {
   check_state?: string;
@@ -689,12 +1209,16 @@ export class BackupSettingsModel {
   snapshotsTotal = 0;
   /** Whether the listing failed, which reads as "unknown" rather than "none". */
   isSnapshotsErrored = false;
+  /** The listing's own reason when it failed; "" when the route did not answer. */
+  snapshotsErrorDetail = "";
   isSnapshotsLoaded = false;
   check: BackupCheckPayload | null = null;
   isCheckLoading = true;
   isVerificationPending = false;
   /** A failed verification write, which has no operation strip of its own. */
-  verificationError: string | null = null;
+  verificationError: UserFacingError | null = null;
+  /** What the failed verification write asked for, so its Try again sends the same. */
+  private failedVerificationTarget: boolean | null = null;
 
   private readonly deps: LifecycleDeps;
   private isStopped = false;
@@ -713,6 +1237,15 @@ export class BackupSettingsModel {
     await Promise.all([this.loadSnapshots(), this.loadCheck()]);
   }
 
+  /** Read again what could not be read: the listing, and the service check
+   * too when it reached no verdict. */
+  async reloadFailedReads(): Promise<void> {
+    await Promise.all([
+      this.loadSnapshots(),
+      this.isCheckVerdictMissing ? this.loadCheck() : Promise.resolve(),
+    ]);
+  }
+
   async loadSnapshots(): Promise<void> {
     const payload = (await this.deps.getJson(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backups?limit=${BACKUP_SETTINGS_RECENT_LIMIT}`,
@@ -722,12 +1255,14 @@ export class BackupSettingsModel {
     if (payload === null) {
       // The route itself did not answer, which says nothing about the backups.
       this.isSnapshotsErrored = true;
+      this.snapshotsErrorDetail = "";
       this.deps.redraw();
       return;
     }
     this.isConfigured = payload.is_configured === true;
     this.isBackingUp = payload.is_backing_up === true;
     this.isSnapshotsErrored = Boolean(payload.snapshots_error);
+    this.snapshotsErrorDetail = payload.snapshots_error ?? "";
     this.snapshots = payload.snapshots ?? [];
     this.snapshotsTotal =
       typeof payload.snapshots_total === "number"
@@ -749,15 +1284,29 @@ export class BackupSettingsModel {
     this.deps.redraw();
   }
 
+  /** What the workspace's backups are doing, or "" when `statusError` says it instead. */
   get statusLine(): string {
     if (!this.isSnapshotsLoaded) return "Loading backup status...";
     if (this.isBackingUp) return "Backing up now...";
     const newest = this.snapshots.length > 0 ? this.snapshots[0].time : null;
     if (newest !== null)
       return `Last backup: ${new Date(newest).toLocaleString()}`;
-    if (this.isSnapshotsErrored) return "Backup status unknown.";
+    if (this.isSnapshotsErrored) return "";
     if (!this.isConfigured) return "Backups are turned off for this workspace.";
     return "No successful backup yet.";
+  }
+
+  /** The status the listing could not establish, or null when it could. */
+  get statusError(): UserFacingError | null {
+    if (!this.isSnapshotsLoaded || this.isBackingUp || !this.isSnapshotsErrored)
+      return null;
+    if (this.snapshots.length > 0) return null;
+    return {
+      message: fallbackErrorSentence(
+        "Imbue Studio couldn't check this workspace's backups",
+      ),
+      details: this.snapshotsErrorDetail,
+    };
   }
 
   /** What the service check concluded, or "" when it reached no verdict. */
@@ -771,14 +1320,21 @@ export class BackupSettingsModel {
     return "";
   }
 
+  /** Whether the service check has finished without reaching a verdict: it
+   * could not run, did not answer in time, or its route did not answer. Kept
+   * apart from a clean result, which it must never read as. */
+  get isCheckVerdictMissing(): boolean {
+    if (this.isCheckLoading) return false;
+    return this.check === null || this.check.check_state === "UNKNOWN";
+  }
+
   /** Why the recent-backups table is empty, or null when there are rows to show. */
   get emptyHistoryMessage(): string | null {
     if (!this.isSnapshotsLoaded) return "Loading backup history...";
     // Before the configured check, and in the order `statusLine` uses: a route
     // that did not answer leaves `isConfigured` at its default, which is not a
     // reading of anything.
-    if (this.isSnapshotsErrored)
-      return "Couldn't load your backup history right now.";
+    if (this.isSnapshotsErrored) return backupHistoryLoadError("").message;
     if (!this.isConfigured) return BACKUP_PROBLEM_LABELS.NOT_CONFIGURED;
     if (this.snapshots.length > 0) return null;
     return this.isBackingUp
@@ -808,15 +1364,31 @@ export class BackupSettingsModel {
     return parts.join(" / ");
   }
 
-  /** Every problem the check found, in plain words, plus its own detail line. */
+  /** Every problem the check found, in plain words. */
   get problemLines(): string[] {
     const check = this.check;
     if (check === null || check.check_state !== "PROBLEMS") return [];
-    const lines = (check.problems ?? []).map(
+    return (check.problems ?? []).map(
       (problem) => BACKUP_PROBLEM_LABELS[problem] ?? problem,
     );
-    if (check.check_detail) lines.push(check.check_detail);
-    return lines;
+  }
+
+  /** Whether "Update backup software" fixes any of the problems the check
+   * found; turning backups on (NOT_CONFIGURED) is the storage form's job. */
+  get isProblemFixedByUpdate(): boolean {
+    const check = this.check;
+    if (check === null || check.check_state !== "PROBLEMS") return false;
+    return (check.problems ?? []).some(
+      (problem) => problem !== "NOT_CONFIGURED",
+    );
+  }
+
+  /** The check's own account of what it ran into, for See details under the
+   * problems; "" when it has none. */
+  get problemDetail(): string {
+    const check = this.check;
+    if (check === null || check.check_state !== "PROBLEMS") return "";
+    return check.check_detail ?? "";
   }
 
   /** Whether the update is offered at all.
@@ -841,9 +1413,19 @@ export class BackupSettingsModel {
   }
 
   async toggleVerification(): Promise<void> {
-    const target = !this.isVerificationEnabled;
+    await this.changeVerification(!this.isVerificationEnabled);
+  }
+
+  /** Send the verification change that failed again. */
+  async retryVerificationChange(): Promise<void> {
+    if (this.failedVerificationTarget === null) return;
+    await this.changeVerification(this.failedVerificationTarget);
+  }
+
+  private async changeVerification(target: boolean): Promise<void> {
     this.isVerificationPending = true;
     this.verificationError = null;
+    this.failedVerificationTarget = null;
     this.deps.redraw();
     const result = await this.deps.postJson(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/verification`,
@@ -852,8 +1434,11 @@ export class BackupSettingsModel {
     if (this.isStopped) return;
     if (result.status >= 400 || result.status === 0) {
       this.isVerificationPending = false;
-      this.verificationError =
-        "Could not change the verification setting. Try again.";
+      this.verificationError = {
+        message: "Could not change the verification setting. Try again.",
+        details: responseDetails(result),
+      };
+      this.failedVerificationTarget = target;
       this.deps.redraw();
       return;
     }
@@ -870,6 +1455,7 @@ export class BackupSettingsModel {
 export interface DestroyedWorkspaceRow {
   agent_id: string;
   display_name: string;
+  is_orphan: boolean;
   account_label: string;
   destroyed_at_display: string;
   days_left_display: string;
@@ -885,12 +1471,22 @@ interface DestroyedWorkspacesPayload {
   rows: DestroyedWorkspaceRow[];
 }
 
+/** A Remove that did not delete its backup: how it is told, and the row it
+ * was for, so Try again sends the same delete. */
+export interface DeleteBackupFailure {
+  agentId: string;
+  notice: RefusalNotice;
+}
+
 /** The recently-destroyed page: rows + retention header + delete/download actions. */
 export class DestroyedWorkspacesModel {
   rows: DestroyedWorkspaceRow[] = [];
   retentionDays = 0;
   isLoaded = false;
-  errorMessage: string | null = null;
+  /** Why the rows could not be read, shown in their place. */
+  loadError: UserFacingError | null = null;
+  /** Why the last Remove could not delete its backup, if it could not. */
+  deleteFailure: DeleteBackupFailure | null = null;
   /** The row whose Remove has been armed (inline confirm), if any. */
   armedDeleteAgentId: string | null = null;
   downloadingAgentIds = new Set<string>();
@@ -907,11 +1503,15 @@ export class DestroyedWorkspacesModel {
       "/ui/api/destroyed-workspaces",
     )) as DestroyedWorkspacesPayload | null;
     if (payload === null) {
-      this.errorMessage = "Could not load recently destroyed workspaces.";
+      this.loadError = {
+        message: "Could not load recently destroyed workspaces.",
+        details: "",
+      };
       this.isLoaded = true;
       this.deps.redraw();
       return;
     }
+    this.loadError = null;
     this.rows = payload.rows;
     this.retentionDays = payload.retention_days;
     this.isLoaded = true;
@@ -920,6 +1520,7 @@ export class DestroyedWorkspacesModel {
 
   async deleteBackup(agentId: string): Promise<void> {
     this.armedDeleteAgentId = null;
+    this.deleteFailure = null;
     this.deletingAgentIds.add(agentId);
     this.deps.redraw();
     const result = await this.deps.postJson(
@@ -927,11 +1528,15 @@ export class DestroyedWorkspacesModel {
       {},
     );
     this.deletingAgentIds.delete(agentId);
-    if (result.status >= 400) {
-      this.errorMessage = routeSentenceFromBody(
-        result.body,
-        "Could not delete the backup; see the logs and try again.",
-      );
+    // A 404 is the backup already gone: the list, read again, shows that.
+    if (
+      (result.status >= 400 || result.status === 0) &&
+      result.status !== 404
+    ) {
+      this.deleteFailure = {
+        agentId,
+        notice: deleteBackupFailureFor(result),
+      };
       this.deps.redraw();
       return;
     }
@@ -939,15 +1544,41 @@ export class DestroyedWorkspacesModel {
   }
 }
 
-export type DestroyStatus = "running" | "failed" | "done";
+/** How a Remove on the recently-destroyed page that did not delete its backup
+ * is told: the restart remedy for a lapsed window login, else a Try again. */
+export function deleteBackupFailureFor(outcome: RequestOutcome): RefusalNotice {
+  if (isReconnectNeeded(outcome))
+    return {
+      error: reconnectError(outcome),
+      isBugReportOffered: false,
+      isRestartAppOffered: true,
+    };
+  const whatFailed = "Couldn't delete this backup";
+  return {
+    error: {
+      message:
+        outcome.status === 0
+          ? NO_RESPONSE_SENTENCE
+          : fallbackErrorSentence(whatFailed),
+      details: responseDetails(outcome),
+    },
+    isBugReportOffered: outcome.status !== 0,
+    isRestartAppOffered: false,
+  };
+}
+
+/** "confirming": the removal finished, and its host is not yet seen gone. */
+export type DestroyStatus = "running" | "confirming" | "failed" | "done";
 
 /** The destroy detail page driver: status poll + log tail + retry/dismiss. */
 export class DestroyingModel {
   readonly agentId: string;
   status: DestroyStatus = "running";
   logText = "";
-  /** User-visible reason the last retry dispatch was refused, if any. */
-  retryErrorMessage: string | null = null;
+  /** Whether the log stream failed before it delivered anything. */
+  isLogUnavailable = false;
+  /** Why the last Retry could not start the removal again, if it was refused. */
+  retryFailure: DestroyRefusal | null = null;
   /** Set once the destroy reports done; the page routes home. */
   onDone: (() => void) | null = null;
 
@@ -974,23 +1605,19 @@ export class DestroyingModel {
   }
 
   async retry(): Promise<void> {
-    this.retryErrorMessage = null;
+    this.retryFailure = null;
     const result = await this.deps.postJson(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/destroy`,
       {},
     );
     // Status 0 is the browser deps' network-failure sentinel.
     if (result.status >= 400 || result.status === 0) {
-      this.retryErrorMessage = routeSentenceFromBody(
-        result.body,
-        result.status === 0
-          ? "Could not restart the destroy: the app server is unreachable."
-          : `Could not restart the destroy (HTTP ${result.status}).`,
-      );
+      this.retryFailure = destroyDispatchFailureFor(result);
       this.deps.redraw();
       return;
     }
     this.logText = "";
+    this.isLogUnavailable = false;
     this.status = "running";
     this.deps.redraw();
     this.start();
@@ -1021,14 +1648,19 @@ export class DestroyingModel {
         return;
       }
     }
-    if (this.status === "running") {
+    if (this.status === "running" || this.status === "confirming") {
       this.deps.schedule(() => void this.pollOnce(), DESTROY_POLL_INTERVAL_MS);
     }
   }
 
   applyStatus(status: string): void {
     if (this.isStopped && status !== "done") return;
-    if (status !== "running" && status !== "failed" && status !== "done")
+    if (
+      status !== "running" &&
+      status !== "confirming" &&
+      status !== "failed" &&
+      status !== "done"
+    )
       return;
     if (status === this.status) return;
     this.status = status;
@@ -1069,7 +1701,13 @@ export class DestroyingModel {
           this.applyStatus(frame.status.toLowerCase());
       }
     };
-    source.onerror = () => this.closeSource();
+    source.onerror = () => {
+      this.closeSource();
+      if (this.logText === "") {
+        this.isLogUnavailable = true;
+        this.deps.redraw();
+      }
+    };
   }
 
   private closeSource(): void {

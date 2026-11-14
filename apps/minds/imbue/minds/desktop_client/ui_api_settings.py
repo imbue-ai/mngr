@@ -327,6 +327,7 @@ class UiTrimStatus(FrozenModel):
 
     is_running: bool = Field(description="Whether the trim is still going")
     detail: str = Field(description="Human-readable progress / outcome line")
+    error_detail: str = Field(description="What went wrong, for See details, when the trim could not finish")
 
 
 class UiAccountPlanResponse(FrozenModel):
@@ -848,7 +849,9 @@ def _handle_sign_in_browser_write() -> Response:
 def _trim_status_payload(trim_status: BackupTrimStatus | None) -> UiTrimStatus | None:
     if trim_status is None:
         return None
-    return UiTrimStatus(is_running=trim_status.is_running, detail=trim_status.detail)
+    return UiTrimStatus(
+        is_running=trim_status.is_running, detail=trim_status.detail, error_detail=trim_status.error_detail
+    )
 
 
 def _privacy_policy_url() -> str:

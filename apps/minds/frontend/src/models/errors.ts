@@ -46,6 +46,15 @@ export interface RequestOutcome {
   body: ResponseBody;
 }
 
+/** How a refused or unanswered request is told: our sentence with the
+ * response behind See details, whether it asks for a bug report, and whether
+ * restarting Imbue Studio is the remedy. */
+export interface RefusalNotice {
+  error: UserFacingError;
+  isBugReportOffered: boolean;
+  isRestartAppOffered: boolean;
+}
+
 /** What a request helper resolves with: the parsed answer when it succeeded,
  * else the failure's outcome. */
 export type RequestResult =

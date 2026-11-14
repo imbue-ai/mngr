@@ -557,6 +557,13 @@ export function buttonLabelled(
   return button;
 }
 
+/** The labels of every button under `root`, in page order. */
+export function buttonLabels(root: ParentNode): string[] {
+  return [...root.querySelectorAll("button")].map(
+    (button) => button.textContent?.trim() ?? "",
+  );
+}
+
 /** The labels of the buttons under `root` drawn as primary, in page order. */
 export function primaryButtonLabels(root: ParentNode): string[] {
   return [...root.querySelectorAll("button")]

@@ -3,24 +3,34 @@
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
+import type { ErrorRemedy } from "../generated/ui";
 import {
+  NO_RESPONSE_SENTENCE,
   TextResponseBody,
+  errorCodeFromBody,
   errorFromResponse,
   errorFromSentenceResponse,
   errorMessageFromBody,
+  fallbackErrorSentence,
   isRequestFailureReportable,
   jsonFromText,
   readResponseBody,
   reasonFromBody,
+  responseDetails,
 } from "./errors";
-import type { RequestResult, ResponseBody, UserFacingError } from "./errors";
+import { isReconnectNeeded, reconnectError } from "./reconnect";
+import type {
+  RequestOutcome,
+  RequestResult,
+  ResponseBody,
+  UserFacingError,
+} from "./errors";
 import type {
   MachineSizeDimension,
   MachineSizeDraft,
   MachineSizeNumbers,
 } from "./machineSize";
 import { parseMachineSizeNumber } from "./machineSize";
-import { isReconnectNeeded, reconnectError } from "./reconnect";
 import { SharePanelModel } from "./sharePanel";
 import type { SharePanelModelOptions } from "./sharePanel";
 
@@ -433,6 +443,77 @@ function resizeRefusalSentence(reason: string | null): string | null {
   }
 }
 
+/** What a refused Remove workspace leaves the user to do: press it again, go
+ * back to the list, or the app's shared remedy its sentence names. */
+export type DestroyRefusalRemedy =
+  | Extract<ErrorRemedy, "RESTART_APP" | "UPDATE_APP">
+  | "retry"
+  | "back-to-workspaces";
+
+export interface DestroyRefusal {
+  error: UserFacingError;
+  isBugReportOffered: boolean;
+  remedy: DestroyRefusalRemedy;
+}
+
+/** How a refused Remove workspace is told: our sentence for the route's reason. */
+export function destroyDispatchFailureFor(
+  outcome: RequestOutcome,
+): DestroyRefusal {
+  const details = responseDetails(outcome);
+  const told = (
+    message: string,
+    isBugReportOffered: boolean,
+    remedy: DestroyRefusalRemedy,
+  ): DestroyRefusal => ({
+    error: { message, details },
+    isBugReportOffered,
+    remedy,
+  });
+  if (outcome.status === 0) return told(NO_RESPONSE_SENTENCE, false, "retry");
+  if (isReconnectNeeded(outcome))
+    return {
+      error: reconnectError(outcome),
+      isBugReportOffered: false,
+      remedy: "RESTART_APP",
+    };
+  switch (errorCodeFromBody(outcome.body)) {
+    case "WORKSPACE_MANAGEMENT_UNCONFIGURED":
+      return told(
+        "Imbue Studio couldn't remove this workspace. Restart Imbue Studio and try again. " +
+          "If this persists, report a bug.",
+        true,
+        "RESTART_APP",
+      );
+    case "WORKSPACE_UNKNOWN":
+      return told(
+        "Imbue Studio can't find this workspace any more. It may already have been removed -- " +
+          "go back to your workspaces to check.",
+        false,
+        "back-to-workspaces",
+      );
+    case "WORKSPACE_MACHINE_UNRESOLVED":
+      return told(
+        "Imbue Studio can't tell which machine this workspace is running on, so it can't remove it yet. " +
+          "Try again in a minute. If this persists, report a bug.",
+        true,
+        "retry",
+      );
+    case "RECORD_TOO_NEW":
+      return told(
+        "This workspace was set up by a newer version of Imbue Studio. *Update Imbue Studio to remove it.*",
+        false,
+        "UPDATE_APP",
+      );
+    default:
+      return told(
+        fallbackErrorSentence("Couldn't start removing this workspace"),
+        true,
+        "retry",
+      );
+  }
+}
+
 /** Load + action state for the Workspace settings panes. */
 export class WorkspaceOptionsModel {
   readonly agentId: string;
@@ -502,7 +583,7 @@ export class WorkspaceOptionsModel {
    * a request that got no answer. */
   isAccountErrorReportable = true;
   isAccountBusy = false;
-  destroyErrorMessage = "";
+  destroyFailure: DestroyRefusal | null = null;
   isDestroyPending = false;
   lifecycleErrorMessage = "";
   isLifecycleBusy = false;
@@ -932,7 +1013,7 @@ export class WorkspaceOptionsModel {
 
   async destroy(): Promise<boolean> {
     this.isDestroyPending = true;
-    this.destroyErrorMessage = "";
+    this.destroyFailure = null;
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/destroy`,
@@ -944,10 +1025,7 @@ export class WorkspaceOptionsModel {
     );
     this.isDestroyPending = false;
     if (!result.ok) {
-      this.destroyErrorMessage = errorMessageFromBody(
-        result.body,
-        `HTTP ${result.status}`,
-      );
+      this.destroyFailure = destroyDispatchFailureFor(result);
       this.redrawImpl();
       return false;
     }

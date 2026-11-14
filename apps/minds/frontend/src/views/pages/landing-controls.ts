@@ -11,15 +11,19 @@
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { RemoteTileState } from "../../generated/ui";
-import type { RequestOutcome, UserFacingError } from "../../models/errors";
+import type { RefusalNotice, RequestOutcome, UserFacingError } from "../../models/errors";
 import {
+  NO_RESPONSE_SENTENCE,
   asSentence,
+  errorCodeFromBody,
   errorFromResponse,
   errorMessageFromBody,
+  fallbackErrorSentence,
   plainErrorText,
   providerReasonFromBody,
   responseDetails,
 } from "../../models/errors";
+import { reconnectError } from "../../models/reconnect";
 import type {
   DiscoveryHealth,
   EnvironmentCondition,
@@ -177,14 +181,48 @@ export interface LifecycleFailure {
   isHold: boolean;
 }
 
-/** The sentence shown when removing a synced record from the list fails. A
- * null status is a request that never got an answer; otherwise the server's
- * own explanation is used when it gave one (a refused removal names the live
- * lease and points at destroy), else the status. */
-export function removeRecordFailureMessage(status: number | null, body: { error?: string } | null): string {
-  if (status === null) return "Could not remove this workspace from the list (the request failed).";
-  const detail = body?.error ?? `HTTP ${status}`;
-  return `Could not remove this workspace from the list: ${detail}`;
+/** A refused remove-from-list, and whether updating Imbue Studio is its remedy. */
+export interface RemoveRecordRefusal extends RefusalNotice {
+  isUpdateAppOffered: boolean;
+}
+
+/** How a refused or unanswered remove-from-list is told; restarting Imbue
+ * Studio is the remedy when the window's own login lapsed, and updating it when
+ * a newer version set the workspace up. */
+export function removeRecordFailureFor(outcome: RequestOutcome): RemoveRecordRefusal {
+  const details = responseDetails(outcome);
+  const explained = (message: string, isUpdateAppOffered = false): RemoveRecordRefusal => ({
+    error: { message, details },
+    isBugReportOffered: false,
+    isRestartAppOffered: false,
+    isUpdateAppOffered,
+  });
+  if (outcome.status === 0) return explained(NO_RESPONSE_SENTENCE);
+  // This route refuses a lapsed window login with a 403, not the 401 `isReconnectNeeded` reads.
+  if (outcome.status === 403)
+    return {
+      error: reconnectError(outcome),
+      isBugReportOffered: false,
+      isRestartAppOffered: true,
+      isUpdateAppOffered: false,
+    };
+  const code = errorCodeFromBody(outcome.body);
+  if (code === "LEASE_ACTIVE")
+    return explained(
+      "This workspace's machine is still held in Imbue Cloud, so it can't just be taken off the list. " +
+        "*Remove the workspace instead.*",
+    );
+  if (code === "RECORD_TOO_NEW")
+    return explained(
+      "This workspace was set up by a newer version of Imbue Studio. *Update Imbue Studio to take it off the list.*",
+      true,
+    );
+  return {
+    error: { message: fallbackErrorSentence("Couldn't take this workspace off the list"), details },
+    isBugReportOffered: true,
+    isRestartAppOffered: false,
+    isUpdateAppOffered: false,
+  };
 }
 
 /** The question a stop or restart asks first, or null for none. An update

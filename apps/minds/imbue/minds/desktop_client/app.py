@@ -53,6 +53,9 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailure
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureStore
+from imbue.minds.desktop_client.backup_setup_failures import backup_setup_failure_body
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
 from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
@@ -82,6 +85,7 @@ from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import destroy_row_state
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
@@ -704,9 +708,16 @@ def _handle_remove_workspace_record() -> Response:
                         "error": (
                             "This workspace's machine still holds its cloud lease, so its record cannot be removed; "
                             "destroy the workspace instead."
-                        )
+                        ),
+                        "code": "LEASE_ACTIVE",
                     }
                 ),
+                media_type="application/json",
+            )
+        except WorkspaceRecordTooNewError as exc:
+            return make_response(
+                status_code=409,
+                content=json.dumps({"error": str(exc), "code": "RECORD_TOO_NEW"}),
                 media_type="application/json",
             )
         except WorkspaceSyncError as exc:
@@ -1149,8 +1160,8 @@ def _finalize_and_mark_destroying(
 
     Called from the publisher's workspaces derive, which therefore owns
     DONE-record cleanup in the SPA world (the legacy landing-page render used
-    to own it). Returns ``{agent_id_str: "running" | "failed"}`` for any
-    in-flight or failed destroy. A destroy is DONE only once the whole *host*
+    to own it). Returns ``{agent_id_str: "running" | "confirming" | "failed"}``
+    for any in-flight, confirming or failed destroy. A destroy is DONE only once the whole *host*
     is gone (not just the workspace agent -- see
     :func:`destroying.is_host_still_active`); on DONE we disassociate the
     workspace from its account and delete the record, so the row vanishes on
@@ -1170,7 +1181,7 @@ def _finalize_and_mark_destroying(
         if record.status == DestroyingStatus.DONE:
             _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli, minds_config)
             continue
-        marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
+        marker[str(agent_id)] = destroy_row_state(record.status)
     return marker
 
 
@@ -2249,6 +2260,9 @@ def _derive_ui_workspaces_message(
             failed_destroy_agent_ids=tuple(
                 agent_id for agent_id, marker_status in destroying_marker.items() if marker_status == "failed"
             ),
+            confirming_destroy_agent_ids=tuple(
+                agent_id for agent_id, marker_status in destroying_marker.items() if marker_status == "confirming"
+            ),
             restorable_workspace_ids=tuple(restorable_ids),
             remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store),
         )
@@ -3093,9 +3107,12 @@ def create_desktop_client(
     # The creator was built before the feed existed (it predates the app), so
     # its backup-setup failures are bound to the feed here, the same way the
     # stop-kind tracker's change callback is bound to the publisher above.
+    backup_setup_failures = BackupSetupFailureStore()
     if agent_creator is not None:
         agent_creator.report_backup_setup_failure = _BackupSetupFailureReporter(
-            notification_feed=notification_feed, backend_resolver=backend_resolver
+            notification_feed=notification_feed,
+            backend_resolver=backend_resolver,
+            failure_store=backup_setup_failures,
         )
     # Error states that would go unseen while no window is in front: each
     # reporter turns an edge an existing detector fires into a feed entry.
@@ -3191,6 +3208,7 @@ def create_desktop_client(
         machine_stop_kind_tracker=machine_stop_kind_tracker,
         notification_feed=notification_feed,
         workspace_operation_registry=workspace_operation_registry,
+        backup_setup_failures=backup_setup_failures,
         workspace_update_service=workspace_update_service,
         identity_cache=identity_cache,
         forward_identity=forward_identity,
@@ -3428,22 +3446,26 @@ class _NotificationDispatchPreferencesReader(FrozenModel):
 class _BackupSetupFailureReporter(FrozenModel):
     """Lands a detached backup-setup task's final failure for a workspace in the notification feed.
 
-    Resolves the workspace's display name and accent at report time (the
-    creator does not hold the resolver), so the entry reads like every other
-    workspace-scoped one and its click lands on that workspace's backups page.
+    Records the failure for the workspace's Backups page (which shows its text
+    and offers the setup again), and resolves the workspace's display name and
+    accent at report time (the creator does not hold the resolver), so the
+    entry reads like every other workspace-scoped one and its click lands on
+    that Backups page.
     """
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     notification_feed: NotificationFeed = Field(frozen=True, description="The feed the event is appended to")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the workspace's display")
+    failure_store: BackupSetupFailureStore = Field(frozen=True, description="Where the Backups page reads it from")
 
-    def __call__(self, agent_id: AgentId, detail: str) -> None:
+    def __call__(self, agent_id: AgentId, failure: BackupSetupFailure) -> None:
+        self.failure_store.record(agent_id, failure)
         self.notification_feed.append_system_event(
             build_workspace_system_event_card(
                 agent_id=agent_id,
                 title="Backup setup failed",
-                body=detail,
+                body=backup_setup_failure_body(failure.kind),
                 link_path="",
                 backend_resolver=self.backend_resolver,
             )

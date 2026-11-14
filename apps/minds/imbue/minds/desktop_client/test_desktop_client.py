@@ -882,6 +882,33 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
 
 
+def test_finalize_and_mark_destroying_keeps_a_finished_destroy_confirming_while_host_still_up(
+    tmp_path: Path,
+) -> None:
+    """A destroy that exited 0 while its host still reads up is confirming: kept, associated, and not failed."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=0)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="almost-gone",
+        color=None,
+        is_cloud_row=False,
+    )
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
+
+    assert marker == {str(agent_id): "confirming"}
+    assert (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
 def test_workspaces_message_lists_a_failed_destroy_whose_host_is_gone(tmp_path: Path) -> None:
     """A destroy that exited non-zero after its host went away is published as failed, and not finalized.
 
@@ -921,6 +948,32 @@ def test_workspaces_message_lists_a_failed_destroy_whose_host_is_gone(tmp_path: 
     assert message.destroying_agent_ids == (str(agent_id),)
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+def test_workspaces_message_marks_a_finished_destroy_awaiting_its_host_as_confirming(tmp_path: Path) -> None:
+    """A destroy that exited 0 while its host still reads up is published as confirming.
+
+    Its row and its place in destroying_agent_ids are what they were while it
+    ran, so without this the frame would not change and the home page would
+    keep showing the removal as running.
+    """
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=0)
+    _client, app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        paths=paths,
+    )
+    publisher = get_state(app).ui_publisher
+    assert publisher is not None
+
+    message = publisher.build_snapshot(LOCAL_PROFILE_USER_ID).workspaces
+
+    assert message.destroying_agent_ids == (str(agent_id),)
+    assert message.confirming_destroy_agent_ids == (str(agent_id),)
+    assert message.failed_destroy_agent_ids == ()
 
 
 def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) -> None:
@@ -2514,6 +2567,35 @@ def test_remove_workspace_record_of_a_leased_cloud_workspace_is_refused_with_a_h
 
     assert response.status_code == 409
     assert "destroy the workspace" in response.get_json()["error"]
+    assert response.get_json()["code"] == "LEASE_ACTIVE"
+    assert workspace_id in cli.sync_records_by_email["a@b.com"]
+
+
+def test_remove_workspace_record_written_by_a_newer_app_is_refused_with_its_code(tmp_path: Path) -> None:
+    """A too-new record is a refusal with the update remedy, not a sync failure."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    workspace_id = str(AgentId.generate())
+    cli.sync_records_by_email["a@b.com"] = {
+        workspace_id: {
+            "host_id": "host-too-new",
+            "agent_id": workspace_id,
+            "provider_kind": "lima",
+            "state": "active",
+            "revision": 1,
+            "record_format": 2,
+        }
+    }
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    assert session_store.record_store.pull("user-1", "a@b.com") is not None
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"workspace_id": workspace_id})
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "RECORD_TOO_NEW"
     assert workspace_id in cli.sync_records_by_email["a@b.com"]
 
 

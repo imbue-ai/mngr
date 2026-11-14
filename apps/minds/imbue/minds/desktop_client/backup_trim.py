@@ -51,6 +51,10 @@ from imbue.minds.errors import BackupProvisioningError
 # guards against a pathological loop.
 _MAX_TRIM_ROUNDS: Final = 8
 
+BACKUP_CLEANUP_UNFINISHED_SENTENCE: Final[str] = (
+    "Backup cleanup didn't finish. Try again. If this persists, report a bug."
+)
+
 
 class BackupTrimState(UpperCaseStrEnum):
     """Lifecycle state of one account's backup-trim run."""
@@ -65,6 +69,9 @@ class BackupTrimStatus(FrozenModel):
 
     state: BackupTrimState = Field(description="Whether the run is still going and how it ended")
     detail: str = Field(description="Human-readable progress / outcome line")
+    error_detail: str = Field(
+        description="What went wrong, for See details, when the run could not finish; '' otherwise"
+    )
 
     @property
     def is_running(self) -> bool:
@@ -234,21 +241,21 @@ def run_backup_trim(
         if not is_any_forgotten:
             break
 
-    untrimmable_suffix = (
-        f" Backups not reachable from this computer (delete their workspaces or clean them up elsewhere): "
-        f"{', '.join(untrimmable_ids)}."
-        if untrimmable_ids
-        else ""
-    )
-    legacy_suffix = (
+    legacy_sentence = (
         f" {collection.legacy_repository_count} backup(s) are still on legacy storage, which the backup store does"
         " not count, and were not trimmed."
         if collection.legacy_repository_count
         else ""
     )
+    if untrimmable_ids:
+        return False, (
+            "You're still over your backup storage limit. These workspaces' backups can only be deleted from "
+            f"the computer that created them: {', '.join(untrimmable_ids)}. "
+            "Otherwise, remove workspaces you no longer need." + legacy_sentence
+        )
     return False, (
-        "Still over the storage limit after trimming old backups "
-        "(each workspace keeps at least its latest backup)." + untrimmable_suffix + legacy_suffix
+        "You're still over your backup storage limit, and each workspace keeps at least its latest backup. "
+        "Remove workspaces you no longer need." + legacy_sentence
     )
 
 
@@ -288,7 +295,7 @@ class BackupTrimManager(MutableModel):
             if existing is not None and existing.is_running:
                 return False
             self.status_by_user_id[user_id] = BackupTrimStatus(
-                state=BackupTrimState.RUNNING, detail="Starting backup cleanup..."
+                state=BackupTrimState.RUNNING, detail="Starting backup cleanup...", error_detail=""
             )
         thread = threading.Thread(
             target=self._run,
@@ -305,9 +312,9 @@ class BackupTrimManager(MutableModel):
         thread.start()
         return True
 
-    def _set_status(self, user_id: str, state: BackupTrimState, detail: str) -> None:
+    def _set_status(self, user_id: str, state: BackupTrimState, detail: str, error_detail: str) -> None:
         with self.status_lock:
-            self.status_by_user_id[user_id] = BackupTrimStatus(state=state, detail=detail)
+            self.status_by_user_id[user_id] = BackupTrimStatus(state=state, detail=detail, error_detail=error_detail)
 
     def _run(
         self,
@@ -325,16 +332,18 @@ class BackupTrimManager(MutableModel):
                 cli=cli,
                 paths=paths,
                 report_progress=lambda progress_detail: self._set_status(
-                    user_id, BackupTrimState.RUNNING, progress_detail
+                    user_id, BackupTrimState.RUNNING, progress_detail, ""
                 ),
                 list_snapshots_fn=list_snapshots,
                 forget_snapshots_fn=forget_snapshots,
                 prune_fn=prune_repository,
             )
-            self._set_status(user_id, BackupTrimState.SUCCEEDED if is_under_quota else BackupTrimState.FAILED, detail)
+            self._set_status(
+                user_id, BackupTrimState.SUCCEEDED if is_under_quota else BackupTrimState.FAILED, detail, ""
+            )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
             logger.opt(exception=exc).warning("Backup trim for {} failed", account_email)
-            self._set_status(user_id, BackupTrimState.FAILED, f"Backup cleanup failed: {exc}")
+            self._set_status(user_id, BackupTrimState.FAILED, BACKUP_CLEANUP_UNFINISHED_SENTENCE, str(exc))
         finally:
             # A crash from an unexpected exception type must not leave the
             # status stuck on "running" (the page would show a live cleanup
@@ -343,8 +352,16 @@ class BackupTrimManager(MutableModel):
                 current = self.status_by_user_id.get(user_id)
                 if current is not None and current.is_running:
                     self.status_by_user_id[user_id] = BackupTrimStatus(
-                        state=BackupTrimState.FAILED, detail="Backup cleanup stopped unexpectedly; see the logs."
+                        state=BackupTrimState.FAILED,
+                        detail=BACKUP_CLEANUP_UNFINISHED_SENTENCE,
+                        error_detail="The cleanup stopped unexpectedly; the app's log has the error.",
                     )
+            # In the finally, so a crash still reaches the feed.
+            self._append_outcome_to_feed(user_id, account_email, notification_feed)
+
+    def _append_outcome_to_feed(
+        self, user_id: str, account_email: str, notification_feed: NotificationFeed | None
+    ) -> None:
         outcome = self.get_status(user_id)
         if notification_feed is not None and outcome is not None:
             # Account-level: the cleanup concerns the account's quota, not one

@@ -24,6 +24,7 @@ from pydantic import SerializerFunctionWrapHandler
 from pydantic import model_serializer
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureKind
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
 from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
@@ -36,6 +37,7 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
+from imbue.minds.desktop_client.workspace_operations import OperationOrProgramFailureReason
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -131,7 +133,7 @@ class DestroyOperationStatusResponse(FrozenModel):
 
     operation_id: str = Field(description="The workspace agent id being destroyed")
     kind: str = Field(description="Always 'destroy'")
-    status: str = Field(description="Raw destroy status")
+    status: str = Field(description="Raw destroy status (RUNNING/CONFIRMING/DONE/FAILED)")
     is_done: bool = Field(description="Whether the host is fully gone")
     agent_id: str = Field(description="The workspace agent id (same as operation_id)")
 
@@ -180,6 +182,28 @@ class BackupOperationStatusResponse(FrozenModel):
         description=(
             "Non-fatal caveat on a DONE operation (e.g. the restore succeeded but its chained backup-service "
             "update failed), when there is one"
+        ),
+    )
+    is_update_suggested: bool = Field(
+        default=False,
+        description=(
+            'Whether running "Update backup software" finishes what the warning says a DONE restore left undone'
+        ),
+    )
+    failure_reason: OperationOrProgramFailureReason | None = Field(
+        default=None,
+        description="Why a FAILED operation failed, when the code knows; else None",
+    )
+    services_down: tuple[str, ...] = Field(
+        default=(),
+        description="Programs a DONE restore left not yet running again",
+    )
+    service_config_error: str | None = Field(
+        default=None,
+        description=(
+            "supervisorctl's output when a restore (DONE or FAILED) found the restored service configuration "
+            "unreadable: the services run from the configuration in use before it and will not start on the "
+            "workspace's next restart until it is fixed. None otherwise"
         ),
     )
     blocked_chats: tuple[str, ...] = Field(
@@ -1202,6 +1226,13 @@ class BackupSnapshotSummary(FrozenModel):
     total_size_bytes: int | None = Field(default=None, description="Total snapshot size in bytes, when known")
 
 
+class BackupSetupFailureSummary(FrozenModel):
+    """Why a new workspace's backups could not be set up, for its Backups page."""
+
+    kind: BackupSetupFailureKind = Field(description="What kind of failure stopped the setup")
+    detail: str = Field(description="The failure's own text, for See details")
+
+
 class PreviousBackupRepository(FrozenModel):
     """Snapshots still readable at one of a workspace's previous backup destinations.
 
@@ -1240,6 +1271,10 @@ class WorkspaceBackupsResponse(FrozenModel):
     )
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
+    )
+    setup_failure: BackupSetupFailureSummary | None = Field(
+        default=None,
+        description="Why backups could not be set up after the workspace was created, while they still are not",
     )
     previous_repositories: tuple[PreviousBackupRepository, ...] = Field(
         default=(),

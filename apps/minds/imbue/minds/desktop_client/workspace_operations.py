@@ -35,6 +35,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.mngr.primitives import AgentId
 
 # Oldest lines are dropped beyond this cap so a chatty operation (a streamed
@@ -71,6 +72,43 @@ class WorkspaceOperationStatus(UpperCaseStrEnum):
     DECLINED = auto()
 
 
+class OperationFailureReason(UpperCaseStrEnum):
+    """Why a backup operation failed, where the app itself knows, so the UI can say it in its own words.
+
+    The raw failure text always rides alongside in ``error``; this only picks
+    the sentence the user reads. Reasons an in-workspace program reports are
+    its own ``BackupProgramFailureReason``.
+    """
+
+    # Imbue Studio's own probe of the workspace got no readable answer.
+    WORKSPACE_PROBE_FAILED = auto()
+    # The restore script reported a failure part-way (no safety backup was taken).
+    RESTORE_INCOMPLETE = auto()
+    # The restore script reported a failure part-way, after taking its safety backup.
+    RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP = auto()
+    # The script in the workspace stopped without reporting a result.
+    NO_RESULT = auto()
+    # The chosen backup does not exist or holds no workspace.
+    SNAPSHOT_UNRESTORABLE = auto()
+    # The backup store could not be read while checking the chosen backup.
+    SNAPSHOT_READ_FAILED = auto()
+    # The backup credentials could not be written into the workspace.
+    CREDENTIALS_WRITE_FAILED = auto()
+    # The update failed and could not put the workspace's uncommitted changes back.
+    UPDATE_STASH_KEPT = auto()
+    # The workspace is too old for the current backup software.
+    BELOW_UPDATE_FLOOR = auto()
+    # A bring-your-own backup configuration set RESTIC_PASSWORD.
+    RESTIC_PASSWORD_SET = auto()
+    # The account's Imbue Cloud plan has no room for another backup bucket.
+    STORAGE_QUOTA_EXCEEDED = auto()
+    # Turning backups off failed.
+    DISABLE_FAILED = auto()
+
+
+OperationOrProgramFailureReason = OperationFailureReason | BackupProgramFailureReason
+
+
 class WorkspaceOperationRecord(FrozenModel):
     """Snapshot of one in-process workspace operation, keyed by its workspace agent id."""
 
@@ -78,11 +116,30 @@ class WorkspaceOperationRecord(FrozenModel):
     kind: WorkspaceOperationKind = Field(description="Which kind of operation this is")
     status: WorkspaceOperationStatus = Field(description="Current lifecycle status")
     error: str | None = Field(description="Failure detail when status is FAILED, else None")
+    failure_reason: OperationOrProgramFailureReason | None = Field(
+        default=None, description="Why the operation failed, when the code knows; None otherwise"
+    )
+    services_down: tuple[str, ...] = Field(
+        default=(), description="Programs a DONE restore left not yet running again (names, for the details)"
+    )
+    service_config_error: str | None = Field(
+        default=None,
+        description=(
+            "What supervisorctl said when a restore's restored service configuration could not be read (the "
+            "services were brought back from the configuration in use before it), for the details; else None"
+        ),
+    )
     warning: str | None = Field(
         default=None,
         description=(
             "Non-fatal caveat attached to a DONE operation (e.g. the restore succeeded but its chained "
             "backup-service update failed), or the reason a DECLINED operation was refused; else None"
+        ),
+    )
+    is_update_suggested: bool = Field(
+        default=False,
+        description=(
+            'Whether running "Update backup software" finishes what a DONE restore\'s warning says it left undone'
         ),
     )
     started_at: datetime = Field(description="When the operation was registered")
@@ -140,8 +197,34 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Mark the operation DONE but carrying a non-fatal caveat, and end its log stream."""
 
     @abstractmethod
+    def complete_restore(
+        self,
+        agent_id: AgentId,
+        warning: str | None,
+        is_update_suggested: bool,
+        services_down: tuple[str, ...],
+        service_config_error: str | None,
+    ) -> None:
+        """Mark a restore DONE with what it left behind: a caveat (and whether the update finishes it), services
+        not yet running, a config parse error."""
+
+    @abstractmethod
     def fail(self, agent_id: AgentId, error: str) -> None:
         """Mark the operation FAILED with ``error`` and end its log stream."""
+
+    @abstractmethod
+    def fail_with_reason(self, agent_id: AgentId, error: str, reason: OperationOrProgramFailureReason | None) -> None:
+        """Mark the operation FAILED with ``error`` and the known ``reason`` for it, and end its log stream."""
+
+    @abstractmethod
+    def fail_restore(
+        self, agent_id: AgentId, error: str, reason: OperationOrProgramFailureReason, service_config_error: str | None
+    ) -> None:
+        """Mark a restore FAILED like ``fail_with_reason``, plus the restored service config's parse error, if any.
+
+        The restore program brings the services back on its way out of a
+        failure too, so it can find the restored configuration unreadable then.
+        """
 
     @abstractmethod
     def cancel(self, agent_id: AgentId) -> None:
@@ -256,22 +339,120 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
             self.state_condition.notify_all()
 
     def complete(self, agent_id: AgentId) -> None:
-        self._finish(agent_id, WorkspaceOperationStatus.DONE, error=None, warning=None)
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.DONE,
+            error=None,
+            warning=None,
+            is_update_suggested=False,
+            failure_reason=None,
+            services_down=(),
+            service_config_error=None,
+        )
 
     def complete_with_warning(self, agent_id: AgentId, warning: str) -> None:
-        self._finish(agent_id, WorkspaceOperationStatus.DONE, error=None, warning=warning)
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.DONE,
+            error=None,
+            warning=warning,
+            is_update_suggested=False,
+            failure_reason=None,
+            services_down=(),
+            service_config_error=None,
+        )
+
+    def complete_restore(
+        self,
+        agent_id: AgentId,
+        warning: str | None,
+        is_update_suggested: bool,
+        services_down: tuple[str, ...],
+        service_config_error: str | None,
+    ) -> None:
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.DONE,
+            error=None,
+            warning=warning,
+            is_update_suggested=is_update_suggested,
+            failure_reason=None,
+            services_down=services_down,
+            service_config_error=service_config_error,
+        )
 
     def fail(self, agent_id: AgentId, error: str) -> None:
-        self._finish(agent_id, WorkspaceOperationStatus.FAILED, error=error, warning=None)
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.FAILED,
+            error=error,
+            warning=None,
+            is_update_suggested=False,
+            failure_reason=None,
+            services_down=(),
+            service_config_error=None,
+        )
+
+    def fail_with_reason(self, agent_id: AgentId, error: str, reason: OperationOrProgramFailureReason | None) -> None:
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.FAILED,
+            error=error,
+            warning=None,
+            is_update_suggested=False,
+            failure_reason=reason,
+            services_down=(),
+            service_config_error=None,
+        )
+
+    def fail_restore(
+        self, agent_id: AgentId, error: str, reason: OperationOrProgramFailureReason, service_config_error: str | None
+    ) -> None:
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.FAILED,
+            error=error,
+            warning=None,
+            is_update_suggested=False,
+            failure_reason=reason,
+            services_down=(),
+            service_config_error=service_config_error,
+        )
 
     def cancel(self, agent_id: AgentId) -> None:
-        self._finish(agent_id, WorkspaceOperationStatus.CANCELLED, error=None, warning=None)
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.CANCELLED,
+            error=None,
+            warning=None,
+            is_update_suggested=False,
+            failure_reason=None,
+            services_down=(),
+            service_config_error=None,
+        )
 
     def decline(self, agent_id: AgentId, reason: str) -> None:
-        self._finish(agent_id, WorkspaceOperationStatus.DECLINED, error=None, warning=reason)
+        self._finish(
+            agent_id,
+            WorkspaceOperationStatus.DECLINED,
+            error=None,
+            warning=reason,
+            is_update_suggested=False,
+            failure_reason=None,
+            services_down=(),
+            service_config_error=None,
+        )
 
     def _finish(
-        self, agent_id: AgentId, status: WorkspaceOperationStatus, error: str | None, warning: str | None
+        self,
+        agent_id: AgentId,
+        status: WorkspaceOperationStatus,
+        error: str | None,
+        warning: str | None,
+        is_update_suggested: bool,
+        failure_reason: OperationOrProgramFailureReason | None,
+        services_down: tuple[str, ...],
+        service_config_error: str | None,
     ) -> None:
         with self.state_condition:
             existing = self.record_by_agent_id.get(agent_id)
@@ -280,6 +461,10 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
                     to_update(existing.field_ref().status, status),
                     to_update(existing.field_ref().error, error),
                     to_update(existing.field_ref().warning, warning),
+                    to_update(existing.field_ref().is_update_suggested, is_update_suggested),
+                    to_update(existing.field_ref().failure_reason, failure_reason),
+                    to_update(existing.field_ref().services_down, services_down),
+                    to_update(existing.field_ref().service_config_error, service_config_error),
                 )
             self.state_condition.notify_all()
 

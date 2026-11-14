@@ -44,6 +44,9 @@ export function SnapshotTable(): m.Component<SnapshotTableAttrs, SnapshotTableSt
           const isDownloading = vnode.state.downloadingSnapshotIds.has(snapshot.snapshot_id);
           const isDownloadFailed = vnode.state.failedSnapshotIds.has(snapshot.snapshot_id);
           const isRestoreOffered = restoreDisabledReason === null && !controller.isRunning;
+          const restoreTooltip =
+            restoreDisabledReason ??
+            (controller.isRunning && !isRestoringThis ? "You can restore once the current backup task finishes." : null);
           return m(
             "div",
             {
@@ -90,7 +93,7 @@ export function SnapshotTable(): m.Component<SnapshotTableAttrs, SnapshotTableSt
                         ? "text-accent cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         : "text-tertiary cursor-not-allowed"),
                     disabled: !isRestoreOffered,
-                    title: restoreDisabledReason ?? undefined,
+                    title: restoreTooltip ?? undefined,
                     onclick: () => onRestoreRequested(snapshot),
                   },
                   isRestoringThis ? "Restoring..." : "Restore",

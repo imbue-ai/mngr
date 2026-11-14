@@ -68,6 +68,7 @@ from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.destroying import DestroyingRecord
 from imbue.minds.desktop_client.destroying import DestroyingStatus
+from imbue.minds.desktop_client.destroying import destroy_row_state
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
@@ -126,6 +127,10 @@ from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
 RETRY_CONNECTION_REMOVED_REASON: Final[str] = "The connection this attempt used was removed, so it can't be retried."
+
+# What a leftover failed removal is called when neither discovery nor the
+# synced record still knows the workspace's name.
+ORPHANED_DESTROY_FALLBACK_NAME: Final[str] = "Workspace that was being removed"
 
 
 class CreateAccountOption(FrozenModel):
@@ -251,7 +256,9 @@ class OrphanedFailedDestroy(FrozenModel):
 class LandingExtrasResponse(FrozenModel):
     """Landing-page facts that do not ride the ``workspaces`` channel message."""
 
-    destroying_status_by_agent_id: dict[str, str] = Field(description="agent id -> running | failed destroys")
+    destroying_status_by_agent_id: dict[str, str] = Field(
+        description="agent id -> running | confirming | failed destroys"
+    )
     orphaned_failed_destroys: tuple[OrphanedFailedDestroy, ...] = Field(
         description="Failed destroys whose host is already gone, so no live row carries their status"
     )
@@ -554,16 +561,12 @@ def _machine_size_defaults_for_this_machine(
 
 
 def _destroying_statuses(records: Mapping[AgentId, DestroyingRecord]) -> dict[str, str]:
-    """Read-only run/failed status per in-flight destroy record.
+    """Read-only running/confirming/failed status per destroy record.
 
     The publisher's derive tick owns finalizing DONE records; this view only
-    labels what exists right now. A DONE record reads as running until that
-    tick finalizes and drops it, which avoids a spurious failed-flash.
+    labels what exists right now (see :func:`destroy_row_state`).
     """
-    return {
-        str(agent_id): "failed" if record.status == DestroyingStatus.FAILED else "running"
-        for agent_id, record in records.items()
-    }
+    return {str(agent_id): destroy_row_state(record.status) for agent_id, record in records.items()}
 
 
 def _orphaned_failed_destroys(
@@ -600,7 +603,7 @@ def _orphaned_failed_destroys(
         orphans.append(
             OrphanedFailedDestroy(
                 agent_id=str(agent_id),
-                name=name or str(agent_id),
+                name=name or ORPHANED_DESTROY_FALLBACK_NAME,
                 accent=accent or DEFAULT_WORKSPACE_COLOR,
             )
         )

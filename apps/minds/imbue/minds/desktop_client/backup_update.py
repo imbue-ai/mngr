@@ -38,6 +38,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import resolve_release_id
@@ -61,13 +62,19 @@ from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_operations import OperationFailureReason
+from imbue.minds.desktop_client.workspace_operations import OperationOrProgramFailureReason
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import OLDEST_IN_PLACE_UPDATABLE_VERSION
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import ResticPasswordNotAllowedError
+from imbue.minds.errors import UnrestorableSnapshotError
+from imbue.minds.errors import WorkspaceFileWriteError
 from imbue.minds.workspace_programs import backup_apply_update
 from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
@@ -75,6 +82,7 @@ from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
+from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_failure_reason
 from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
 from imbue.minds.workspace_programs.backup_restore import RESUME_SERVICES_COMMAND
 from imbue.mngr.primitives import AgentId
@@ -101,6 +109,11 @@ BELOW_UPDATE_FLOOR_MESSAGE: Final[str] = (
 _STASH_CONFLICT_GUIDANCE: Final[str] = (
     "Your uncommitted changes could not be restored automatically; "
     "they are preserved in the git stash (run `git stash pop` in the workspace)."
+)
+
+_CONVERGE_AFTER_RESTORE_FAILED_WARNING: Final[str] = (
+    "The restore succeeded, but Imbue Studio couldn't finish setting up this workspace's backups afterwards. "
+    'Run "Update backup software" to finish.'
 )
 
 # Must exceed the gate probe script's own `uv run --no-sync mngr list` budget (180s)
@@ -137,6 +150,20 @@ _PROBLEMS_THAT_FAIL_UPDATE: Final[tuple[BackupServiceProblem, ...]] = (
     BackupServiceProblem.SERVICE_NOT_RUNNING,
     BackupServiceProblem.UNVERIFIABLE,
 )
+
+
+class RestoreCaveat(FrozenModel):
+    """What a restore that succeeded left undone, told as its completion warning."""
+
+    warning: str = Field(description="The completion warning the user reads")
+    is_update_suggested: bool = Field(description='Whether running "Update backup software" finishes it')
+
+
+class BackupOperationFailure(FrozenModel):
+    """Why a backup step failed: the raw detail, and the known reason when there is one."""
+
+    detail: str = Field(description="The failure text, kept for the details and the logs")
+    reason: OperationOrProgramFailureReason | None = Field(description="Why it failed, when the code knows; else None")
 
 
 class BackupWorkerFailureHandler(MutableModel):
@@ -202,7 +229,7 @@ def _run_update_phases(
 ) -> None:
     below_floor_refusal = _refuse_update_below_floor(agent_id, workspace_version_ref)
     if below_floor_refusal is not None:
-        registry.fail(agent_id, below_floor_refusal)
+        registry.fail_with_reason(agent_id, below_floor_refusal, OperationFailureReason.BELOW_UPDATE_FLOOR)
         return
 
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet).
@@ -237,7 +264,7 @@ def _run_update_phases(
         workspace_version_ref=workspace_version_ref,
     )
     if update_error is not None:
-        registry.fail(agent_id, update_error)
+        registry.fail_with_reason(agent_id, update_error.detail, update_error.reason)
         return
     registry.complete(agent_id)
 
@@ -290,17 +317,17 @@ def _apply_update_and_verify(
     # The workspace's own template version, as the update detector resolved it.
     # None when it has none.
     workspace_version_ref: str | None,
-) -> str | None:
+) -> BackupOperationFailure | None:
     """Run the mutating update script, re-inject the env, and verify convergence.
 
-    Returns the failure detail (possibly ``BLOCKED_BY_RUNNING_CHATS_PREFIX``-
+    Returns the failure (its detail possibly ``BLOCKED_BY_RUNNING_CHATS_PREFIX``-
     prefixed), or None on success. Shared by the standalone update operation
     (which fails the operation on error) and the restore's chained update
     (which downgrades an error to a completion warning).
     """
     below_floor_refusal = _refuse_update_below_floor(agent_id, workspace_version_ref)
     if below_floor_refusal is not None:
-        return below_floor_refusal
+        return BackupOperationFailure(detail=below_floor_refusal, reason=OperationFailureReason.BELOW_UPDATE_FLOOR)
 
     # The mutating apply script (stash/checkout/commit/sync/restart).
     registry.append_log(agent_id, "Applying the backup service update...")
@@ -325,17 +352,26 @@ def _apply_update_and_verify(
     payload = extract_marker_json(apply_result.stdout, UPDATE_RESULT_MARKER)
     if payload is None:
         detail = (apply_result.stderr or apply_result.stdout).strip()[-800:]
-        return f"The update script produced no result: {detail}"
+        return BackupOperationFailure(
+            detail=f"The update script produced no result: {detail}", reason=OperationFailureReason.NO_RESULT
+        )
     match parse_backup_program_status(payload.get("status")):
         case BackupProgramStatus.BLOCKED:
             running_chats = payload.get("running_chats")
             chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
+            return BackupOperationFailure(detail=f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}", reason=None)
         case BackupProgramStatus.FAILED:
             detail = str(payload.get("detail", "unknown failure"))
             rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
-            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
-            return f"{detail}{rolled_back_note}{stash_note}"
+            is_stash_kept = bool(payload.get("stash_conflict"))
+            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if is_stash_kept else ""
+            script_reason = parse_backup_program_failure_reason(payload.get("failure_reason"))
+            reason = (
+                script_reason
+                if script_reason is not None
+                else (OperationFailureReason.UPDATE_STASH_KEPT if is_stash_kept else None)
+            )
+            return BackupOperationFailure(detail=f"{detail}{rolled_back_note}{stash_note}", reason=reason)
         case BackupProgramStatus.OK:
             pass
         case _ as unreachable:
@@ -360,7 +396,9 @@ def _apply_update_and_verify(
     failing = tuple(problem for problem in check.problems if problem in _PROBLEMS_THAT_FAIL_UPDATE)
     if check.state == BackupServiceCheckState.PROBLEMS and failing:
         problem_names = ", ".join(problem.value for problem in failing)
-        return f"The update ran but verification still reports: {problem_names}. {check.detail}"
+        return BackupOperationFailure(
+            detail=f"The update ran but verification still reports: {problem_names}. {check.detail}", reason=None
+        )
     if BackupServiceProblem.NOT_CONFIGURED in check.problems:
         registry.append_log(
             agent_id, "Backups are still not configured for this workspace; enable them from the backup settings."
@@ -393,7 +431,9 @@ def _wait_for_quiet_workspace(
         payload = extract_marker_json(probe_result.stdout, GATE_RESULT_MARKER)
         if payload is None:
             detail = (probe_result.stderr or probe_result.stdout).strip()[-500:]
-            registry.fail(agent_id, f"Could not probe the workspace: {detail}")
+            registry.fail_with_reason(
+                agent_id, f"Could not probe the workspace: {detail}", OperationFailureReason.WORKSPACE_PROBE_FAILED
+            )
             return False
         # A gate_error means the probe could not list chats (its mngr list
         # failed) and running_chats is empty by construction. Keep going --
@@ -490,9 +530,9 @@ def _resolve_restore_snapshot(
     for snapshot in snapshots:
         if snapshot_id in (snapshot.snapshot_id, snapshot.short_id):
             if not snapshot.paths:
-                raise BackupProvisioningError(f"Snapshot {snapshot_id} records no paths; it cannot be restored")
+                raise UnrestorableSnapshotError(f"Snapshot {snapshot_id} records no paths; it cannot be restored")
             return snapshot
-    raise BackupProvisioningError(f"No backup {snapshot_id} exists for this workspace")
+    raise UnrestorableSnapshotError(f"No backup {snapshot_id} exists for this workspace")
 
 
 def _resolve_restore_subpath(
@@ -553,78 +593,115 @@ def _resolve_restore_subpath(
     )
     if "/workspace" in tree_root_entries:
         return "/"
-    raise BackupProvisioningError(
+    raise UnrestorableSnapshotError(
         f"Snapshot {snapshot.short_id} does not contain a workspace (no workspace/ or code/ checkout); "
         "it cannot be restored"
     )
 
 
-def _services_down_warning(names: list[str]) -> str:
-    """Word the restore script's ``services_down`` list as a completion warning.
+def _restore_services_down(payload: dict[str, object]) -> tuple[str, ...]:
+    """The restore script's ``services_down`` list: programs not yet running again.
 
     These services are outside the restore-critical set (the contract is
     ``behaviors/backup-restore/restore-verdict.feature``), so their state
     never fails the operation -- the workspace came back able to serve its
-    user, and this caveat tells them what has not come back up.
+    user. They ride on the record as data, and the UI words the caveat.
     """
-    return (
-        f"The restore succeeded, but these services have not come back up: {', '.join(names)}. "
-        "The workspace is usable and converges its environment in the background, so "
-        "this usually resolves itself, and a service that stays down needs attention "
-        "independent of this restore."
-    )
+    services_down = payload.get("services_down")
+    if not isinstance(services_down, list):
+        return ()
+    return tuple(str(name) for name in services_down)
 
 
-def _supervisord_config_warning(payload: dict[str, object]) -> str | None:
-    """Word the restore script's ``supervisord_config_error`` (the restored config did not parse), or None.
+def _restore_service_config_error(payload: dict[str, object]) -> str | None:
+    """The restore program's ``supervisord_config_error``: supervisorctl's output when the restored config did not parse.
 
-    The script then brought the services back from the config supervisord loaded before
-    the restore, and a supervisord that starts from the restored config will refuse to.
+    The program then brought the services back from the configuration
+    supervisord loaded before the restore, and a supervisord that starts from
+    the restored one will refuse to. It rides on the record as data, and the
+    UI words the consequence.
     """
     config_error = payload.get("supervisord_config_error")
     if not isinstance(config_error, str) or not config_error:
         return None
-    return (
-        "The restored workspace's service configuration could not be read, so its services were "
-        "restarted from the configuration in use before the restore. Until that configuration is "
-        f"fixed, the workspace's services will not start when it next restarts. supervisorctl said: {config_error}"
+    return config_error
+
+
+def _end_unfinished_restore(
+    registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, payload: dict[str, object]
+) -> bool:
+    """End the operation when the restore program reports it blocked or failed; return whether it did."""
+    match parse_backup_program_status(payload.get("status")):
+        case BackupProgramStatus.BLOCKED:
+            running_chats = payload.get("running_chats")
+            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
+            return True
+        case BackupProgramStatus.FAILED:
+            detail = str(payload.get("detail", "unknown failure"))
+            is_safety_backup_taken = bool(payload.get("safety_snapshot_taken"))
+            safety_note = (
+                " A safety backup of the pre-restore state was taken first." if is_safety_backup_taken else ""
+            )
+            script_reason = parse_backup_program_failure_reason(payload.get("failure_reason"))
+            reason = (
+                script_reason
+                if script_reason is not None
+                else (
+                    OperationFailureReason.RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP
+                    if is_safety_backup_taken
+                    else OperationFailureReason.RESTORE_INCOMPLETE
+                )
+            )
+            registry.fail_restore(agent_id, f"{detail}{safety_note}", reason, _restore_service_config_error(payload))
+            return True
+        case BackupProgramStatus.OK:
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _complete_restore(
+    registry: WorkspaceOperationRegistryInterface,
+    agent_id: AgentId,
+    caveat: RestoreCaveat | None,
+    payload: dict[str, object],
+) -> None:
+    registry.complete_restore(
+        agent_id,
+        caveat.warning if caveat is not None else None,
+        caveat is not None and caveat.is_update_suggested,
+        _restore_services_down(payload),
+        _restore_service_config_error(payload),
     )
 
 
-def _restore_completion_warnings(payload: dict[str, object]) -> list[str]:
-    warnings: list[str] = []
-    config_warning = _supervisord_config_warning(payload)
-    if config_warning is not None:
-        warnings.append(config_warning)
-    services_down = payload.get("services_down")
-    if isinstance(services_down, list) and services_down:
-        warnings.append(_services_down_warning([str(name) for name in services_down]))
-    return warnings
-
-
-def _complete_restore(registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, warnings: list[str]) -> None:
-    if warnings:
-        registry.complete_with_warning(agent_id, " ".join(warnings))
-    else:
-        registry.complete(agent_id)
-
-
-def _chained_update_warning(update_error: str) -> str:
+def _chained_update_warning(update_error: BackupOperationFailure) -> RestoreCaveat:
     """Word a chained-update failure as a completion warning (the restore itself succeeded)."""
-    if update_error.startswith(BLOCKED_BY_RUNNING_CHATS_PREFIX):
-        names = update_error[len(BLOCKED_BY_RUNNING_CHATS_PREFIX) :]
+    detail = update_error.detail
+    if detail.startswith(BLOCKED_BY_RUNNING_CHATS_PREFIX):
+        names = detail[len(BLOCKED_BY_RUNNING_CHATS_PREFIX) :]
         names_note = f" ({names})" if names else ""
-        return (
-            f"The restore succeeded, but the backup service update afterwards was blocked by running "
-            f'chats{names_note}. Run "Update backup software" from Settings once they are stopped.'
+        return RestoreCaveat(
+            warning=(
+                f"The restore succeeded, but the backup service update afterwards was blocked by running "
+                f'chats{names_note}. Run "Update backup software" once they are stopped.'
+            ),
+            is_update_suggested=True,
         )
-    if update_error == BELOW_UPDATE_FLOOR_MESSAGE:
+    if update_error.reason is OperationFailureReason.BELOW_UPDATE_FLOOR:
         # A refusal, not a failure: it will be refused every time, Settings hides
         # the button for this machine, and the message already says what to do.
-        return f"The restore succeeded, but the backup service was left as it is. {BELOW_UPDATE_FLOOR_MESSAGE}"
-    return (
-        f"The restore succeeded, but updating the backup service afterwards failed: {update_error} "
-        'You can retry it from Settings with "Update backup software".'
+        return RestoreCaveat(
+            warning=f"The restore succeeded, but the backup service was left as it is. {BELOW_UPDATE_FLOOR_MESSAGE}",
+            is_update_suggested=False,
+        )
+    return RestoreCaveat(
+        warning=(
+            f"The restore succeeded, but updating the backup service afterwards failed: {detail} "
+            'You can retry it with "Update backup software".'
+        ),
+        is_update_suggested=True,
     )
 
 
@@ -647,12 +724,21 @@ def _run_restore_phases(
     # Phase 0: resolve the snapshot and its host-dir subpath before anything
     # waits or mutates, so an unknown id (or a snapshot with no workspace in
     # it) fails fast and cheaply.
-    snapshot = _resolve_restore_snapshot(
-        agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, archive_id=archive_id, parent_cg=parent_cg
-    )
-    snapshot_subpath = _resolve_restore_subpath(
-        agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=archive_id, parent_cg=parent_cg
-    )
+    try:
+        snapshot = _resolve_restore_snapshot(
+            agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, archive_id=archive_id, parent_cg=parent_cg
+        )
+        snapshot_subpath = _resolve_restore_subpath(
+            agent_id=agent_id, paths=paths, snapshot=snapshot, archive_id=archive_id, parent_cg=parent_cg
+        )
+    except UnrestorableSnapshotError as exc:
+        logger.warning("Backup restore for {} refused the snapshot: {}", agent_id, exc)
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.SNAPSHOT_UNRESTORABLE)
+        return
+    except BackupProvisioningError as exc:
+        logger.warning("Backup restore for {} could not read the backup store: {}", agent_id, exc)
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.SNAPSHOT_READ_FAILED)
+        return
 
     # Phase 0.5: converge the workspace's restic.env to the canonical copy
     # before dispatch -- the restore script takes its safety and restored-state
@@ -664,7 +750,12 @@ def _run_restore_phases(
     # host_backup ticks against, is never pointed at the retired repository.
     agent_address = build_agent_address(agent_id, resolver)
     registry.append_log(agent_id, "Making sure the workspace has the right backup credentials...")
-    reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
+    try:
+        reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
+    except WorkspaceFileWriteError as exc:
+        logger.warning("Backup restore for {} could not write the credentials: {}", agent_id, exc)
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.CREDENTIALS_WRITE_FAILED)
+        return
     source_env_content: str | None = None
     if archive_id is not None:
         source_env_content = read_archived_env(paths, agent_id, archive_id)
@@ -822,67 +913,81 @@ def _run_restore_from_workspace_env(
         if resume_result.returncode != 0:
             resume_detail = (resume_result.stderr or resume_result.stdout).strip()[-300:]
             logger.warning("Post-failure service resume for {} failed: {}", agent_id, resume_detail)
-        registry.fail(agent_id, f"The restore script produced no result: {detail}")
+        registry.fail_with_reason(
+            agent_id, f"The restore script produced no result: {detail}", OperationFailureReason.NO_RESULT
+        )
         return
-    match parse_backup_program_status(payload.get("status")):
-        case BackupProgramStatus.BLOCKED:
-            running_chats = payload.get("running_chats")
-            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
-            return
-        case BackupProgramStatus.FAILED:
-            detail = str(payload.get("detail", "unknown failure"))
-            safety_note = (
-                " A safety backup of the pre-restore state was taken first."
-                if payload.get("safety_snapshot_taken")
-                else ""
-            )
-            config_warning = _supervisord_config_warning(payload)
-            config_note = f" {config_warning}" if config_warning is not None else ""
-            registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
-            return
-        case BackupProgramStatus.OK:
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
+    if _end_unfinished_restore(registry, agent_id, payload):
+        return
     registry.append_log(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
     )
-    # Services that were already unhealthy before the restore surface as a
-    # completion warning, never a failure -- see _services_converging_warning.
-    warnings = _restore_completion_warnings(payload)
-
-    # Phase 3: the script wrote back the pre-restore restic.env, but re-inject
-    # the canonical copy anyway so the workspace ends converged even if the
-    # env had drifted before the restore. Must precede phase 4, whose
-    # verification compares the two.
-    if has_canonical_env(paths, agent_id):
-        registry.append_log(agent_id, "Re-injecting backup credentials...")
-        reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
-
-    # Phase 4 (default-on): converge the backup-service code afterwards. The
-    # restored snapshot may carry arbitrarily old backup-service code; the
-    # idempotent update brings it back to the current version. Its failure
-    # must not fail the operation -- the user's data is restored, which is
-    # what they asked for -- so it downgrades to a completion warning.
-    if not is_update_after:
-        _complete_restore(registry, agent_id, warnings)
-        return
-    registry.append_log(agent_id, "Updating the backup service to the current version...")
-    update_error = _apply_update_and_verify(
+    caveat = _converge_after_restore(
         agent_id=agent_id,
+        agent_address=agent_address,
         paths=paths,
         resolver=resolver,
         facts_cache=facts_cache,
         registry=registry,
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,
+        is_update_after=is_update_after,
         workspace_version_ref=workspace_version_ref,
     )
-    if update_error is not None:
-        logger.warning("Chained backup-service update after restore for {} failed: {}", agent_id, update_error)
-        warnings.append(_chained_update_warning(update_error))
-    _complete_restore(registry, agent_id, warnings)
+    _complete_restore(registry, agent_id, caveat, payload)
+
+
+def _converge_after_restore(
+    *,
+    agent_id: AgentId,
+    agent_address: str,
+    paths: InstallationPaths,
+    resolver: BackendResolverInterface,
+    facts_cache: WorkspaceFactsCache,
+    registry: WorkspaceOperationRegistryInterface,
+    parent_cg: ConcurrencyGroup | None,
+    is_stop_chats: bool,
+    is_update_after: bool,
+    workspace_version_ref: str | None,
+) -> RestoreCaveat | None:
+    """Bring a restored workspace's backup credentials and code back to current; return what it left undone.
+
+    The user's data is restored, which is what they asked for, so a failure
+    to re-inject the credentials or to update the backup software downgrades
+    to a warning rather than failing the operation.
+    """
+    try:
+        # Phase 3: the script wrote back the pre-restore restic.env, but
+        # re-inject the canonical copy anyway so the workspace ends converged
+        # even if the env had drifted before the restore. Must precede phase 4,
+        # whose verification compares the two.
+        if has_canonical_env(paths, agent_id):
+            registry.append_log(agent_id, "Re-injecting backup credentials...")
+            reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
+
+        # Phase 4 (default-on): the restored snapshot may carry arbitrarily old
+        # backup-service code; the idempotent update brings it back to the
+        # current version.
+        if not is_update_after:
+            return None
+        registry.append_log(agent_id, "Updating the backup service to the current version...")
+        update_error = _apply_update_and_verify(
+            agent_id=agent_id,
+            paths=paths,
+            resolver=resolver,
+            facts_cache=facts_cache,
+            registry=registry,
+            parent_cg=parent_cg,
+            is_stop_chats=is_stop_chats,
+            workspace_version_ref=workspace_version_ref,
+        )
+    except BackupProvisioningError as exc:
+        logger.warning("Converging the backup service after the restore for {} failed: {}", agent_id, exc)
+        return RestoreCaveat(warning=_CONVERGE_AFTER_RESTORE_FAILED_WARNING, is_update_suggested=True)
+    if update_error is None:
+        return None
+    logger.warning("Chained backup-service update after restore for {} failed: {}", agent_id, update_error.detail)
+    return _chained_update_warning(update_error)
 
 
 def run_backup_configure_sequence(
@@ -924,6 +1029,14 @@ def run_backup_configure_sequence(
                 parent_cg=parent_cg,
                 quota_evictor=quota_evictor,
             )
+    except ResticPasswordNotAllowedError as exc:
+        logger.warning("Backup configure for {} refused its settings: {}", agent_id, exc)
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.RESTIC_PASSWORD_SET)
+        return
+    except ImbueCloudQuotaExceededCliError as exc:
+        logger.warning("Backup configure for {} was refused by the account's quota: {}", agent_id, exc)
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.STORAGE_QUOTA_EXCEEDED)
+        return
     except (BackupProvisioningError, ImbueCloudCliError) as exc:
         logger.warning("Backup configure for {} failed: {}", agent_id, exc)
         registry.fail(agent_id, str(exc))
@@ -950,6 +1063,6 @@ def run_backup_disable_sequence(
         disable_backups_for_host(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
     except BackupProvisioningError as exc:
         logger.warning("Backup disable for {} failed: {}", agent_id, exc)
-        registry.fail(agent_id, str(exc))
+        registry.fail_with_reason(agent_id, str(exc), OperationFailureReason.DISABLE_FAILED)
         return
     registry.complete(agent_id)

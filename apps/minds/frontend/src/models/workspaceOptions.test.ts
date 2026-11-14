@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { failedResult, settle } from "../testing";
 import {
+  WINDOW_LOGIN_LAPSED_SENTENCE,
   errorCodeFromBody,
   errorFromSentenceResponse,
   errorMessageFromBody,
@@ -495,6 +496,80 @@ describe("WorkspaceOptionsModel", () => {
       expect(model.lastSavedColor).toBe("#0b292b");
       expect(model.pendingColor).toBeNull();
     });
+  });
+});
+
+describe("Remove workspace refusals", () => {
+  async function refusedDestroy(status: number, body: ResponseBody) {
+    const model = new WorkspaceOptionsModel("agent-" + "e".repeat(32), {
+      fetchJson: makeFetchStub(() => ({ ok: false, status, body })).fetchJson,
+      redraw: () => undefined,
+    });
+    expect(await model.destroy()).toBe(false);
+    expect(model.isDestroyPending).toBe(false);
+    return model.destroyFailure!;
+  }
+
+  it("words each refusal by the route's code, with its own text behind See details", async () => {
+    const unresolved = await refusedDestroy(409, {
+      error: "Cannot resolve a host to destroy for agent-x",
+      code: "WORKSPACE_MACHINE_UNRESOLVED",
+    });
+    expect(unresolved.error.message).toBe(
+      "Imbue Studio can't tell which machine this workspace is running on, so it can't remove it yet. " +
+        "Try again in a minute. If this persists, report a bug.",
+    );
+    expect(unresolved.error.details).toContain(
+      "HTTP 409\nCannot resolve a host to destroy for agent-x",
+    );
+
+    const unknown = await refusedDestroy(404, {
+      error: "Unknown workspace agent-x",
+      code: "WORKSPACE_UNKNOWN",
+    });
+    expect(unknown.error.message).toContain(
+      "Imbue Studio can't find this workspace any more.",
+    );
+    expect(unknown.isBugReportOffered).toBe(false);
+    expect(unknown.remedy).toBe("back-to-workspaces");
+
+    const unconfigured = await refusedDestroy(501, {
+      error: "Workspace management not configured",
+      code: "WORKSPACE_MANAGEMENT_UNCONFIGURED",
+    });
+    expect(unconfigured.remedy).toBe("RESTART_APP");
+
+    const tooNew = await refusedDestroy(409, {
+      error: "managed by a newer version",
+      code: "RECORD_TOO_NEW",
+    });
+    expect(tooNew.error.message).toBe(
+      "This workspace was set up by a newer version of Imbue Studio. *Update Imbue Studio to remove it.*",
+    );
+    expect(tooNew.remedy).toBe("UPDATE_APP");
+  });
+
+  it("falls back to our sentence for an unexplained refusal, and says when nothing answered", async () => {
+    const crashed = await refusedDestroy(500, null);
+    expect(crashed.error).toEqual({
+      message:
+        "Couldn't start removing this workspace. Try again. If this persists, report a bug.",
+      details: "HTTP 500",
+    });
+    expect(crashed.isBugReportOffered).toBe(true);
+
+    const unanswered = await refusedDestroy(0, null);
+    expect(unanswered.error.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+  });
+
+  it("offers a restart, not a retry, when the window's own login lapsed", async () => {
+    const lapsed = await refusedDestroy(401, { error: "Not authenticated" });
+    expect(lapsed.error.message).toBe(WINDOW_LOGIN_LAPSED_SENTENCE);
+    expect(lapsed.error.details).toContain("Not authenticated");
+    expect(lapsed.isBugReportOffered).toBe(false);
+    expect(lapsed.remedy).toBe("RESTART_APP");
   });
 });
 

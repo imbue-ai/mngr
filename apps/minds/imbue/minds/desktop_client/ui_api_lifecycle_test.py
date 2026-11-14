@@ -15,6 +15,7 @@ from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
@@ -140,6 +141,24 @@ def test_destroyed_workspaces_endpoint_lists_tombstoned_records_as_typed_rows(tm
     assert row["is_locked"] is False
 
 
+def test_destroyed_workspaces_endpoint_names_an_orphan_backup_without_its_id(tmp_path: Path) -> None:
+    """A backup on this device that no record owns reads as such, its id kept for See details."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_TEST_USER_ID, email=_TEST_EMAIL)
+    orphan_id = AgentId()
+    write_canonical_env(InstallationPaths(data_dir=tmp_path), orphan_id, "RESTIC_REPOSITORY=/tmp/repo\n")
+    client, _ = _build_lifecycle_client(tmp_path, cli=cli)
+
+    response = client.get("/ui/api/destroyed-workspaces")
+
+    assert response.status_code == 200
+    [row] = json.loads(response.data)["rows"]
+    assert row["agent_id"] == str(orphan_id)
+    assert row["is_orphan"] is True
+    assert row["display_name"] == "Backup from a workspace that's no longer in your list"
+    assert str(orphan_id) not in row["display_name"]
+
+
 def test_destroyed_workspaces_endpoint_returns_empty_rows_when_nothing_is_destroyed(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_TEST_USER_ID, email=_TEST_EMAIL)
@@ -173,7 +192,9 @@ def test_delete_destroyed_backup_rejects_an_unknown_agent(tmp_path: Path) -> Non
     response = client.post("/ui/api/destroyed-workspaces/agent-doesnotexist/delete-backup")
 
     assert response.status_code == 404
-    assert "No destroyed workspace found" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["error"] == (
+        "This backup is no longer here -- it may already have been deleted. Reload the page to see what's left."
+    )
 
 
 def test_delete_destroyed_backup_rejects_a_well_formed_but_unknown_agent(tmp_path: Path) -> None:
@@ -186,7 +207,9 @@ def test_delete_destroyed_backup_rejects_a_well_formed_but_unknown_agent(tmp_pat
     response = client.post(f"/ui/api/destroyed-workspaces/{AgentId()}/delete-backup")
 
     assert response.status_code == 404
-    assert "No destroyed workspace found" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["error"] == (
+        "This backup is no longer here -- it may already have been deleted. Reload the page to see what's left."
+    )
 
 
 def test_delete_destroyed_backup_without_a_reaper_is_a_conflict(tmp_path: Path) -> None:

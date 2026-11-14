@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _list_previous_repositories_safely
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
+from imbue.minds.desktop_client.app import _BackupSetupFailureReporter
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -64,6 +65,8 @@ from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
 from imbue.minds.desktop_client.backup_env_store import list_archived_envs
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailure
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailureKind
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
@@ -135,6 +138,7 @@ from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.workspace_create import CreateOnCreatedCallback
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_operations import OperationFailureReason
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
@@ -155,6 +159,7 @@ from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -1773,6 +1778,7 @@ def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
     response = client.post(f"/api/v1/workspaces/{other_id}/destroy", headers=_auth_header())
 
     assert response.status_code == 404
+    assert json.loads(response.data)["code"] == "WORKSPACE_UNKNOWN"
 
 
 class _ResolverOnAParseableHost(StaticBackendResolver):
@@ -1845,6 +1851,7 @@ def test_destroy_refuses_a_record_written_by_a_newer_app_version(tmp_path: Path)
 
     assert response.status_code == 409
     assert json.loads(response.data)["error"] == RECORD_TOO_NEW_MESSAGE
+    assert json.loads(response.data)["code"] == "RECORD_TOO_NEW"
 
 
 def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None:
@@ -4613,13 +4620,8 @@ def test_machine_size_change_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
-    """Tail the restart worker's stored log to its terminal chunk, then fetch the status.
-
-    Waits for the dispatched restart worker to finish (condition-based, no arbitrary
-    sleeps) and returns the parsed body of the typed restart-operation resource,
-    asserting the resource responds 200.
-    """
+def _wait_for_operation_to_end(client: FlaskClient, agent_id: AgentId) -> None:
+    """Tail the workspace operation's stored log to its terminal chunk (condition-based, no arbitrary sleeps)."""
     registry = get_state(client.application).workspace_operation_registry
     from_index = 0
     deadline = time.monotonic() + 15.0
@@ -4629,6 +4631,15 @@ def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: Agent
         from_index = chunk.next_index
         if chunk.is_terminal:
             break
+
+
+def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
+    """Wait for the dispatched restart worker to finish, then fetch its status.
+
+    Returns the parsed body of the typed restart-operation resource, asserting
+    the resource responds 200.
+    """
+    _wait_for_operation_to_end(client, agent_id)
     status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
     assert status_resp.status_code == 200
     return json.loads(status_resp.data)
@@ -4933,7 +4944,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert json.loads(response.data)["error"] == BELOW_UPDATE_FLOOR_MESSAGE
+    assert json.loads(response.data) == {"error": BELOW_UPDATE_FLOOR_MESSAGE, "code": "BELOW_UPDATE_FLOOR"}
     # Refused outright: no operation was claimed, so the workspace is still free.
     assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
 
@@ -5018,7 +5029,7 @@ def test_backup_restore_unconfigured_workspace_returns_409(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "not configured" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["code"] == "BACKUPS_NOT_CONFIGURED"
     # No operation record was created.
     assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
 
@@ -5067,7 +5078,10 @@ def test_backup_restore_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "restore is already in progress" in json.loads(response.data)["error"]
+    body = json.loads(response.data)
+    assert "restore is already in progress" in body["error"]
+    # Uncoded: the SPA reads every uncoded 409 of these routes as losing to a running operation.
+    assert "code" not in body
     record = registry.get(agent_id)
     assert record is not None
     assert record.kind == WorkspaceOperationKind.BACKUP_RESTORE
@@ -5195,6 +5209,53 @@ def test_backup_operation_status_carries_a_completion_warning(tmp_path: Path) ->
     assert body["warning"] == "The backup service update failed afterwards."
 
 
+def test_backup_operation_status_carries_why_it_failed_and_what_a_restore_left_behind(tmp_path: Path) -> None:
+    # The UI words a failure from its reason and keeps the raw text for See
+    # details; what a restore left behind (programs down, a restored service
+    # configuration that could not be read) rides as data, done or failed.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.fail_with_reason(
+        agent_id, "pre-restore safety snapshot failed: disk full", BackupProgramFailureReason.SAFETY_SNAPSHOT_FAILED
+    )
+
+    failed = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert failed["failure_reason"] == "SAFETY_SNAPSHOT_FAILED"
+    assert failed["error"] == "pre-restore safety snapshot failed: disk full"
+
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.complete_restore(
+        agent_id, "The restore succeeded, but ...", True, ("browser", "xvfb"), "ERROR: CANT_REREAD: bad section"
+    )
+
+    done = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert done["is_done"] is True
+    assert done["failure_reason"] is None
+    assert done["warning"] == "The restore succeeded, but ..."
+    assert done["is_update_suggested"] is True
+    assert done["services_down"] == ["browser", "xvfb"]
+    assert done["service_config_error"] == "ERROR: CANT_REREAD: bad section"
+
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.fail_restore(
+        agent_id,
+        "restored, but uv sync failed: resolver error",
+        OperationFailureReason.RESTORE_INCOMPLETE,
+        "ERROR: CANT_REREAD: bad section",
+    )
+
+    failed_with_config_error = json.loads(
+        client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data
+    )
+
+    assert failed_with_config_error["failure_reason"] == "RESTORE_INCOMPLETE"
+    assert failed_with_config_error["service_config_error"] == "ERROR: CANT_REREAD: bad section"
+
+
 def test_backup_operation_logs_replay_full_history_to_a_late_reader(tmp_path: Path) -> None:
     # The log is stored on the operation, not consumed from a queue: a stream
     # opened after lines were appended (or after the operation finished) still
@@ -5235,10 +5296,10 @@ def test_backup_service_update_cancel_rejects_a_too_late_cancel(tmp_path: Path) 
     assert registry.is_cancel_requested(agent_id) is False
 
 
-def test_backup_service_update_cancel_rejects_a_finished_operation(tmp_path: Path) -> None:
-    # A cancel that arrives after the operation ended must not read as
-    # success: request_cancel refuses (nothing is running to cancel) and the
-    # route must surface that refusal instead of returning 200 over a no-op.
+def test_backup_service_update_cancel_finds_nothing_to_cancel_once_the_operation_finished(tmp_path: Path) -> None:
+    # The registry keeps the finished record, but a cancel arriving after the
+    # end must neither read as success nor as a still-running task: the SPA
+    # says there is nothing to cancel for a 404 and "too late" for a 409.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
@@ -5247,23 +5308,126 @@ def test_backup_service_update_cancel_rejects_a_finished_operation(tmp_path: Pat
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
 
-    assert response.status_code == 409
-    assert "no longer be cancelled" in json.loads(response.data)["error"]
+    assert response.status_code == 404
+    assert registry.is_cancel_requested(agent_id) is False
 
 
-def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
+def test_backup_service_configure_refusals_name_the_input_that_was_wrong(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
+    # The UI words each refusal from its code. This client has no session
+    # store, so the workspace belongs to no account.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
     configure_url = f"/api/v1/workspaces/{agent_id}/backup-service/configure"
 
-    later = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "CONFIGURE_LATER"})
-    assert later.status_code == 400
+    def refusal_code(body: dict[str, str]) -> str:
+        response = client.post(configure_url, headers=_auth_header(), json=body)
+        assert response.status_code == 400
+        return json.loads(response.data)["code"]
 
-    invalid = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "NOT_A_PROVIDER"})
-    assert invalid.status_code == 400
+    assert refusal_code({"backup_provider": "CONFIGURE_LATER"}) == "BACKUP_CHOICE_INVALID"
+    assert refusal_code({"backup_provider": "NOT_A_PROVIDER"}) == "BACKUP_CHOICE_INVALID"
+    assert refusal_code({"backup_provider": "IMBUE_CLOUD"}) == "BACKUP_ACCOUNT_MISSING"
+    assert (
+        refusal_code({"backup_provider": "API_KEY", "api_key_env": "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=x\n"})
+        == "RESTIC_PASSWORD_SET"
+    )
+
+
+def test_a_failed_backup_setup_is_told_plainly_shown_on_the_backups_page_and_run_again(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # A new workspace's backup setup gave up with nobody watching: the
+    # notification says what is true without the raw text, the Backups page's
+    # listing carries the failure (text and all), and "Set up backups" runs the
+    # same setup again as a tracked configure operation.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    state = get_state(client.application)
+    feed = state.notification_feed
+    assert feed is not None
+    # An API_KEY setup with no repository fails inside the worker without
+    # reaching any workspace.
+    failed_request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+    reporter = _BackupSetupFailureReporter(
+        notification_feed=feed, backend_resolver=resolver, failure_store=state.backup_setup_failures
+    )
+
+    reporter(
+        agent_id,
+        BackupSetupFailure(
+            kind=BackupSetupFailureKind.OTHER,
+            detail="api_key backups require RESTIC_REPOSITORY to be set in the env block",
+            request=failed_request,
+        ),
+    )
+
+    (entry,) = feed.reconcile((), {}).entries
+    assert entry.title == "Backup setup failed"
+    assert entry.body == "Backups aren't set up for this workspace yet."
+    listing = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    assert listing["setup_failure"] == {
+        "kind": "OTHER",
+        "detail": "api_key backups require RESTIC_REPOSITORY to be set in the env block",
+    }
+
+    retry = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/setup/retry", headers=_auth_header())
+
+    assert retry.status_code == 202
+    _wait_for_operation_to_end(client, agent_id)
+    record = state.workspace_operation_registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_CONFIGURE
+    assert record.status == WorkspaceOperationStatus.FAILED
+    assert record.error is not None and "RESTIC_REPOSITORY" in record.error
+
+
+def test_backup_setup_retry_refuses_when_no_setup_failed(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/setup/retry", headers=_auth_header())
+
+    assert response.status_code == 404
+    assert json.loads(response.data)["code"] == "NO_SETUP_TO_RETRY"
+    listing = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    assert listing["setup_failure"] is None
+
+
+def test_a_failed_backup_setup_stays_history_once_backups_were_set_up_and_turned_off(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Turning backups off archives the canonical env, so the workspace reads
+    # unconfigured again; the creation-time failure must not come back with it.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    state = get_state(client.application)
+    state.backup_setup_failures.record(
+        agent_id,
+        BackupSetupFailure(
+            kind=BackupSetupFailureKind.OTHER,
+            detail="workspace never became reachable",
+            request=BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text=""),
+        ),
+    )
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=/tmp/repo\n")
+    archive_canonical_env(paths, agent_id, now=datetime.now(timezone.utc))
+
+    listing = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    retry = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/setup/retry", headers=_auth_header())
+
+    assert listing["is_configured"] is False
+    assert listing["setup_failure"] is None
+    assert retry.status_code == 404
+    assert json.loads(retry.data)["code"] == "NO_SETUP_TO_RETRY"
 
 
 def test_backup_service_disable_unknown_workspace_returns_404(

@@ -105,6 +105,7 @@ from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
 from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
+from imbue.minds.desktop_client.api_models import BackupSetupFailureSummary
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
@@ -171,14 +172,18 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import ArchivedBackupEnv
+from imbue.minds.desktop_client.backup_env_store import has_archived_env
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_env_store import list_previous_destination_envs
 from imbue.minds.desktop_client.backup_env_store import read_archived_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_reaper import backup_target_from_env
 from imbue.minds.desktop_client.backup_reaper import is_backup_target_present
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
+from imbue.minds.desktop_client.backup_setup_failures import BackupSetupFailure
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationFailure
@@ -1080,6 +1085,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         listing_timeout_seconds=backup_status.HISTORY_RESTIC_TIMEOUT_SECONDS,
         parent_cg=state.root_concurrency_group,
     )
+    setup_failure = _unresolved_backup_setup_failure(paths, parsed_id)
     # Previous destinations cost one restic listing each, so only the full
     # history page asks for them; the landing badges and settings never do.
     previous = (
@@ -1097,6 +1103,11 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     return WorkspaceBackupsResponse(
         agent_id=str(parsed_id),
         is_configured=has_canonical_env(paths, parsed_id),
+        setup_failure=(
+            BackupSetupFailureSummary(kind=setup_failure.kind, detail=setup_failure.detail)
+            if setup_failure is not None
+            else None
+        ),
         is_backing_up=listing.is_backing_up,
         snapshots=listing.snapshots,
         snapshots_total=listing.total,
@@ -1789,15 +1800,17 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     parsed_id = AgentId(agent_id)
     paths: InstallationPaths | None = get_state().api_v1_paths
     if paths is None:
-        return _json_error("Workspace management not configured", 501)
+        return _json_error("Workspace management not configured", 501, code="WORKSPACE_MANAGEMENT_UNCONFIGURED")
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     if info is None:
-        return _json_error(f"Unknown workspace {agent_id}", 404)
+        return _json_error(f"Unknown workspace {agent_id}", 404, code="WORKSPACE_UNKNOWN")
     try:
         host_id = HostId(info.host_id)
     except ValueError:
-        return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
+        return _json_error(
+            f"Cannot resolve a host to destroy for {agent_id}", 409, code="WORKSPACE_MACHINE_UNRESOLVED"
+        )
 
     # A record written by a newer app version is read-only here: destroying
     # the workspace would require tombstoning semantics this version cannot
@@ -1806,7 +1819,7 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     if session_store is not None and session_store.record_store is not None:
         found = session_store.record_store.find_active_record(str(parsed_id))
         if found is not None and is_record_too_new(found[1]):
-            return _json_error(RECORD_TOO_NEW_MESSAGE, 409)
+            return _json_error(RECORD_TOO_NEW_MESSAGE, 409, code="RECORD_TOO_NEW")
 
     # A destroy makes the machine unreachable on purpose, exactly as a stop
     # does: its interface dies within seconds and the probe loop reads that as a
@@ -2402,7 +2415,7 @@ def _handle_destroy_operation_status(operation_id: str) -> DestroyOperationStatu
     backend_resolver = get_state().backend_resolver
     # A destroy is only DONE once the workspace's *host* is gone (not merely the
     # workspace agent): a destroy that tore down only the agent while the host's
-    # ``system-services`` kept it alive must read as FAILED, not a false DONE.
+    # ``system-services`` kept it alive must never read as a false DONE.
     # ``destroying.is_host_still_active`` answers that: the host counts as still
     # up on active-set membership, a known non-DESTROYED state, or -- when its
     # state is unknown -- the lack of positive absence evidence from its owning
@@ -2477,6 +2490,19 @@ def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Resp
         },
         status_code=409,
     )
+
+
+# The code a configure refusal carries when the chosen destination is the problem.
+_BACKUP_CHOICE_INVALID_CODE: Final[str] = "BACKUP_CHOICE_INVALID"
+
+
+def _backup_configure_refusal_code(backup_provider: BackupProvider, api_key_env: str, account_email: str) -> str:
+    """The code for a configure whose inputs ``build_backup_request_or_error`` refused, naming which input it was."""
+    if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
+        return "RESTIC_PASSWORD_SET"
+    if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
+        return "BACKUP_ACCOUNT_MISSING"
+    return _BACKUP_CHOICE_INVALID_CODE
 
 
 def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, InstallationPaths, ConcurrencyGroup] | Response":
@@ -2588,7 +2614,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     # dispatch is legitimate); refusing here as well means a machine that cannot
     # be updated says so immediately instead of after a spinner and a failure.
     if is_below_in_place_update_floor(version_ref):
-        return _json_error(backup_update_module.BELOW_UPDATE_FLOOR_MESSAGE, 409)
+        return _json_error(backup_update_module.BELOW_UPDATE_FLOOR_MESSAGE, 409, code="BELOW_UPDATE_FLOOR")
     return _dispatch_backup_worker(
         parsed_id=parsed_id,
         parent_cg=parent_cg,
@@ -2613,14 +2639,17 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
     parsed_id = AgentId(agent_id)
     registry = get_state().workspace_operation_registry
     record = registry.get(parsed_id)
-    if record is None or record.kind not in (
-        WorkspaceOperationKind.BACKUP_UPDATE,
-        WorkspaceOperationKind.BACKUP_RESTORE,
+    # The registry keeps a finished operation's record, so one that has ended
+    # is nothing to cancel, just like one that never ran.
+    if (
+        record is None
+        or record.kind not in (WorkspaceOperationKind.BACKUP_UPDATE, WorkspaceOperationKind.BACKUP_RESTORE)
+        or record.status != WorkspaceOperationStatus.RUNNING
     ):
         return _json_error(f"No cancellable backup operation for {agent_id}", 404)
     # A cancel after the point of no return must fail loudly rather than
     # pretend it took effect -- the operation will run to completion.
-    if record.status == WorkspaceOperationStatus.RUNNING and record.is_mutating:
+    if record.is_mutating:
         return _json_error(
             "The operation has started making changes and can no longer be cancelled.",
             409,
@@ -2630,6 +2659,9 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
     # and this call refuses the cancel, and that refusal must not read as
     # success.
     if not registry.request_cancel(parsed_id):
+        current = registry.get(parsed_id)
+        if current is None or current.status != WorkspaceOperationStatus.RUNNING:
+            return _json_error(f"No cancellable backup operation for {agent_id}", 404)
         return _json_error("The operation can no longer be cancelled.", 409)
     return EmptyResponse()
 
@@ -2654,7 +2686,7 @@ def _handle_workspace_backup_restore(
         return context
     parsed_id, paths, parent_cg = context
     if not has_canonical_env(paths, parsed_id):
-        return _json_error(f"Backups are not configured for {agent_id}", 409)
+        return _json_error(f"Backups are not configured for {agent_id}", 409, code="BACKUPS_NOT_CONFIGURED")
     state = get_state()
     facts_cache = _require_workspace_facts_cache(state)
     if isinstance(facts_cache, Response):
@@ -2720,24 +2752,94 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
     try:
         backup_provider = BackupProvider(str(body.get("backup_provider", "")))
     except ValueError:
-        return _json_error("Invalid backup_provider", 400)
+        return _json_error("Invalid backup_provider", 400, code=_BACKUP_CHOICE_INVALID_CODE)
     if backup_provider is BackupProvider.CONFIGURE_LATER:
-        return _json_error("Pick a real backup provider (imbue_cloud or api_key)", 400)
+        return _json_error(
+            "Pick a real backup provider (imbue_cloud or api_key)", 400, code=_BACKUP_CHOICE_INVALID_CODE
+        )
 
     display_info = state.backend_resolver.get_agent_display_info(parsed_id)
     if display_info is None:
-        return _json_error(f"Workspace {agent_id} has no discovered host", 502)
+        return _json_error(f"Workspace {agent_id} has no discovered host", 502, code="WORKSPACE_MACHINE_NOT_FOUND")
     account = state.session_store.get_account_for_workspace(str(parsed_id)) if state.session_store else None
     account_email = str(account.email) if account is not None else ""
 
+    api_key_env = str(body.get("api_key_env", ""))
     backup_request, error_message = build_backup_request_or_error(
         backup_provider=backup_provider,
-        api_key_env=str(body.get("api_key_env", "")),
+        api_key_env=api_key_env,
         account_email=account_email,
     )
     if backup_request is None or error_message is not None:
-        return _json_error(error_message or "Invalid backup configuration", 400)
+        return _json_error(
+            error_message or "Invalid backup configuration",
+            400,
+            code=_backup_configure_refusal_code(backup_provider, api_key_env, account_email),
+        )
 
+    return _dispatch_backup_configure(
+        parsed_id=parsed_id,
+        paths=paths,
+        parent_cg=parent_cg,
+        backup_request=backup_request,
+        account_user_id=str(account.user_id) if account is not None else None,
+        account_email=account_email,
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_backup_setup_retry(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Run a new workspace's failed backup setup again, with the inputs it was created with.
+
+    Only while backups are still not set up: once any setup succeeded, the
+    failure it would retry is history.
+    """
+    context = _resolve_backup_route_context(agent_id)
+    if isinstance(context, Response):
+        return context
+    parsed_id, paths, parent_cg = context
+    state = get_state()
+    failure = _unresolved_backup_setup_failure(paths, parsed_id)
+    if failure is None:
+        return _json_error(f"No failed backup setup to retry for {agent_id}", 404, code="NO_SETUP_TO_RETRY")
+    if state.backend_resolver.get_agent_display_info(parsed_id) is None:
+        return _json_error(f"Workspace {agent_id} has no discovered host", 502, code="WORKSPACE_MACHINE_NOT_FOUND")
+    account = state.session_store.get_account_for_workspace(str(parsed_id)) if state.session_store else None
+    return _dispatch_backup_configure(
+        parsed_id=parsed_id,
+        paths=paths,
+        parent_cg=parent_cg,
+        backup_request=failure.request,
+        account_user_id=str(account.user_id) if account is not None else None,
+        account_email=failure.request.account_email,
+    )
+
+
+def _unresolved_backup_setup_failure(paths: InstallationPaths, agent_id: AgentId) -> BackupSetupFailure | None:
+    """The workspace's failed creation-time backup setup, unless a setup has succeeded since.
+
+    A canonical env (backups on) or an archived one (backups set up, then
+    moved or turned off) means one did, and the failure is history.
+    """
+    if has_canonical_env(paths, agent_id) or has_archived_env(paths, agent_id):
+        return None
+    return get_state().backup_setup_failures.get(agent_id)
+
+
+def _dispatch_backup_configure(
+    *,
+    parsed_id: AgentId,
+    paths: InstallationPaths,
+    parent_cg: ConcurrencyGroup,
+    backup_request: BackupSetupRequest,
+    # The workspace's account, for the quota evictor; None when it has none.
+    account_user_id: str | None,
+    account_email: str,
+) -> tuple[OperationHandleResponse, int] | Response:
+    """Claim the workspace's operation slot and spawn the configure worker that ends it."""
+    state = get_state()
+    registry = state.workspace_operation_registry
     is_destination_change = has_canonical_env(paths, parsed_id)
     if not registry.start_if_idle(
         parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc), None
@@ -2756,10 +2858,10 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
             record_store=record_store,
             paths=paths,
             imbue_cloud_cli=state.imbue_cloud_cli,
-            user_id=str(account.user_id),
+            user_id=account_user_id,
             account_email=account_email,
         )
-        if account is not None and record_store is not None and state.imbue_cloud_cli is not None
+        if account_user_id is not None and record_store is not None and state.imbue_cloud_cli is not None
         else None
     )
 
@@ -2899,6 +3001,10 @@ def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusR
         is_done=record.status == WorkspaceOperationStatus.DONE,
         error=record.error,
         warning=record.warning,
+        is_update_suggested=record.is_update_suggested,
+        failure_reason=record.failure_reason,
+        services_down=record.services_down,
+        service_config_error=record.service_config_error,
         blocked_chats=blocked_chats,
         is_cancellable=is_cancellable,
         snapshot_id=record.target,
@@ -5764,6 +5870,11 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backup-service/configure",
         view_func=_handle_backup_service_configure,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backup-service/setup/retry",
+        view_func=_handle_backup_setup_retry,
         methods=["POST"],
     )
     blueprint.add_url_rule(

@@ -11,6 +11,7 @@ import { Icon16 } from "../../components/Icon";
 import { ErrorNotice, restartAppActions } from "../../components/ErrorDisplay";
 import { InlineError, richErrorText } from "../../components/errorDesign";
 import type { IconName } from "../../components/icons";
+import { destroyRefusalActions } from "../lifecycle/destroy-refusal";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
@@ -342,12 +343,21 @@ function renderGeneralGroup(
       },
       "Remove workspace",
     ),
-    model.destroyErrorMessage
-      ? m(
-          "div",
-          { id: "destroy-error", class: "mt-2" },
-          m(InlineError, { message: model.destroyErrorMessage }),
-        )
+    model.destroyFailure
+      ? m(ErrorNotice, {
+          id: "destroy-error",
+          error: model.destroyFailure.error,
+          isBugReportOffered: model.destroyFailure.isBugReportOffered,
+          workspaceAgentId: model.agentId,
+          actions: destroyRefusalActions(model.destroyFailure, {
+            // The removal was confirmed already; trying again skips the question.
+            retry: {
+              label: "Try again",
+              onclick: () => startDestroy(model),
+            },
+            backToWorkspaces: () => getAppContext().shell.routeToHub(),
+          }),
+        })
       : null,
   ]);
 }
@@ -972,6 +982,17 @@ function renderAssociatePrompt(
   ]);
 }
 
+/** Start removing the workspace, and follow it to its destroy page once it starts. */
+function startDestroy(
+  model: WorkspaceOptionsModel,
+  onAnswered: () => void = () => undefined,
+): void {
+  void model.destroy().then((isDestroyStarted) => {
+    onAnswered();
+    if (isDestroyStarted) m.route.set(`/destroying/${model.agentId}`);
+  });
+}
+
 function renderDestroyDialog(
   model: WorkspaceOptionsModel,
   local: SettingsGroupsLocalState,
@@ -1016,10 +1037,8 @@ function renderDestroyDialog(
             id: "destroy-confirm-btn",
             disabled: model.isDestroyPending,
             onclick: () => {
-              void model.destroy().then((isDestroyStarted) => {
+              startDestroy(model, () => {
                 local.isDestroyDialogOpen = false;
-                if (isDestroyStarted)
-                  m.route.set(`/destroying/${model.agentId}`);
               });
             },
           },

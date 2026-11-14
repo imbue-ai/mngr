@@ -5,13 +5,12 @@ import {
   BackupHistoryModel,
   BackupOperationController,
   BackupSettingsModel,
+  DestroyedWorkspacesModel,
   DestroyingModel,
   MAX_CONSECUTIVE_POLL_FAILURES,
   RecoveryModel,
   browserLifecycleDeps,
   formatRelativeAgo,
-  isChatGateFailure,
-  isSafetySnapshotFailure,
   restoredFromLabel,
   type EventSourceLike,
   type LifecycleDeps,
@@ -150,20 +149,6 @@ describe("restoredFromLabel", () => {
   });
 });
 
-describe("failure classification", () => {
-  it("keys the failure-specific retries on the worker's wording", () => {
-    expect(
-      isSafetySnapshotFailure(
-        "the pre-restore safety snapshot failed: disk full",
-      ),
-    ).toBe(true);
-    expect(isSafetySnapshotFailure("something else")).toBe(false);
-    expect(isChatGateFailure("cannot determine running chats")).toBe(true);
-    expect(isChatGateFailure("Could not probe the workspace")).toBe(true);
-    expect(isChatGateFailure(null)).toBe(false);
-  });
-});
-
 describe("BackupHistoryModel", () => {
   it("walks the listing states: unconfigured, error, empty, and a real page", async () => {
     const deps = new FakeDeps();
@@ -177,9 +162,16 @@ describe("BackupHistoryModel", () => {
 
     deps.getResponses.push({ is_configured: true, snapshots_error: "boom" });
     await model.loadPage();
-    expect(model.statusMessage).toBe(
-      "Couldn't load your backup history right now.",
-    );
+    expect(model.statusMessage).toBeNull();
+    expect(model.loadError).toEqual({
+      message:
+        "Couldn't load this workspace's backup history. Try again. If this persists, report a bug.",
+      details: "boom",
+    });
+
+    // A route that did not answer is the same failed read, with nothing under it.
+    await model.loadPage();
+    expect(model.loadError?.details).toBe("");
 
     deps.getResponses.push({
       is_configured: true,
@@ -187,6 +179,7 @@ describe("BackupHistoryModel", () => {
       snapshots_total: 0,
     });
     await model.loadPage();
+    expect(model.loadError).toBeNull();
     expect(model.statusMessage).toBe(
       "No backups yet. The first backup runs within the hour.",
     );
@@ -201,6 +194,54 @@ describe("BackupHistoryModel", () => {
     expect(model.total).toBe(40);
     expect(model.isPaginationShown).toBe(true);
     expect(model.rangeText).toBe("Showing 1-1 of 40 backups");
+  });
+
+  it("shows why backups were never set up, until a setup lands", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupHistoryModel("agent-11", deps);
+
+    deps.getResponses.push({
+      is_configured: false,
+      setup_failure: {
+        kind: "STORAGE_QUOTA",
+        detail: "Bucket create refused: storage quota exceeded",
+      },
+    });
+    await model.loadPage();
+    expect(model.setupFailure).toEqual({
+      error: {
+        message:
+          "Your Imbue Cloud plan has no room for this workspace's backups.",
+        details: "Bucket create refused: storage quota exceeded",
+      },
+      isBugReportOffered: false,
+    });
+    expect(model.statusMessage).toBeNull();
+
+    // A cause Imbue Studio cannot name may be a bug.
+    deps.getResponses.push({
+      is_configured: false,
+      setup_failure: {
+        kind: "OTHER",
+        detail: "workspace never became reachable",
+      },
+    });
+    await model.loadPage();
+    expect(model.setupFailure?.isBugReportOffered).toBe(true);
+
+    // A listing that cannot be read after the setup ran again leaves no stale notice.
+    deps.getResponses.push({ is_configured: true, snapshots_error: "boom" });
+    await model.loadPage();
+    expect(model.setupFailure).toBeNull();
+    expect(model.loadError?.details).toBe("boom");
+
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 0,
+    });
+    await model.loadPage();
+    expect(model.setupFailure).toBeNull();
   });
 
   it("pages by the fixed page size and gates Restore on the OFFLINE verdict", async () => {
@@ -245,6 +286,26 @@ describe("BackupHistoryModel", () => {
     expect(model.previousRepositories[0].archive_id).toBe("20260101T000000Z");
     expect(model.isBackupsConfigured).toBe(false);
   });
+
+  it("keeps previous destinations restorable when the current listing cannot be read", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupHistoryModel("agent-11", deps);
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots_error: "restic snapshots timed out",
+      previous_repositories: [
+        {
+          archive_id: "20260101T000000Z",
+          archived_at: "2026-01-01T00:00:00Z",
+          snapshots: [{ snapshot_id: "old-1", time: "2025-12-31T00:00:00Z" }],
+        },
+      ],
+    });
+    await model.loadPage();
+    expect(model.loadError?.details).toBe("restic snapshots timed out");
+    expect(model.previousRepositories).toHaveLength(1);
+    expect(model.isBackupsConfigured).toBe(true);
+  });
 });
 
 describe("BackupOperationController restore from a previous destination", () => {
@@ -278,16 +339,137 @@ describe("BackupOperationController", () => {
   it("surfaces a non-202 dispatch as an error without entering the running state", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({
-      status: 409,
-      body: { error: "already running" },
-    });
+    const conflict =
+      "A restore is already in progress for this workspace. Wait for it to finish before starting another operation.";
+    deps.postResponses.push({ status: 409, body: { error: conflict } });
 
-    controller.dispatch("/x", {}, { label: "Working..." });
+    controller.dispatch(
+      "/x",
+      {},
+      { label: "Working...", kind: "backup_update" },
+    );
     await settle();
 
     expect(controller.isRunning).toBe(false);
-    expect(controller.errorMessage).toBe("already running");
+    expect(controller.error?.message).toBe(
+      "Another task is already running on this workspace. *Wait for it to finish, then try again.*",
+    );
+    expect(controller.error?.details).toContain(conflict);
+    expect(controller.isErrorReportOffered).toBe(false);
+  });
+
+  it("tells each coded or reconnect refusal of a dispatch apart from a conflicting operation", async () => {
+    const belowFloor =
+      "This workspace was created before minds-v0.4.0, and today's backup service does not work on it.";
+    const cases: Array<{
+      answer: RequestOutcome;
+      message: string;
+      isRestartAppOffered: boolean;
+    }> = [
+      {
+        answer: {
+          status: 409,
+          body: { error: belowFloor, code: "BELOW_UPDATE_FLOOR" },
+        },
+        message: belowFloor,
+        isRestartAppOffered: false,
+      },
+      {
+        answer: {
+          status: 409,
+          body: {
+            error: "Backups are not configured for agent-11",
+            code: "BACKUPS_NOT_CONFIGURED",
+          },
+        },
+        message:
+          "Backups are turned off for this workspace, so it can't be restored here. " +
+          "*Reload the page to see its backup settings.*",
+        isRestartAppOffered: false,
+      },
+      {
+        answer: { status: 401, body: { error: "Not authenticated" } },
+        message: "Imbue Studio needs to restart to reconnect this window.",
+        isRestartAppOffered: true,
+      },
+    ];
+    for (const { answer, message, isRestartAppOffered } of cases) {
+      const deps = new FakeDeps();
+      const controller = new BackupOperationController("agent-11", deps);
+      deps.postResponses.push(answer);
+
+      controller.dispatch(
+        "/x",
+        {},
+        { label: "Working...", kind: "backup_update" },
+      );
+      await settle();
+
+      expect(controller.error?.message).toBe(message);
+      expect(controller.isRestartAppOffered).toBe(isRestartAppOffered);
+      expect(controller.isErrorReportOffered).toBe(false);
+    }
+  });
+
+  it("says a refused cancel came too late or found nothing to cancel, and offers a report only for an unexplained one", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push(
+      {
+        status: 409,
+        body: { error: "The operation can no longer be cancelled." },
+      },
+      {
+        status: 404,
+        body: { error: "No cancellable backup operation for agent-11" },
+      },
+      { status: 500, body: null },
+    );
+
+    await controller.requestCancel();
+    expect(controller.error?.message).toBe(
+      "It's too late to cancel: this task has started making changes and will run to the end.",
+    );
+    expect(controller.isErrorReportOffered).toBe(false);
+
+    await controller.requestCancel();
+    expect(controller.error?.message).toBe(
+      "There's nothing to cancel: this task has already finished.",
+    );
+    expect(controller.isErrorReportOffered).toBe(false);
+
+    await controller.requestCancel();
+    expect(controller.error?.message).toBe(
+      "Couldn't cancel this task. Try again. If this persists, report a bug.",
+    );
+    expect(controller.isErrorReportOffered).toBe(true);
+  });
+
+  it("drops a refused cancel's error once the task it was about ends", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push(
+      { status: 202, body: null },
+      {
+        status: 409,
+        body: { error: "The operation can no longer be cancelled." },
+      },
+    );
+    controller.startUpdate();
+    await settle();
+    await controller.requestCancel();
+    expect(controller.error).not.toBeNull();
+
+    deps.getResponses.push({
+      status: "DONE",
+      kind: "backup_update",
+      is_done: true,
+    });
+    await controller.pollOnce();
+
+    expect(controller.error).toBeNull();
+    expect(controller.isErrorReportOffered).toBe(false);
+    expect(controller.successMessage).not.toBeNull();
   });
 
   it("runs a restore to success: row-driven state, log stream, and the page refresh hook", async () => {
@@ -349,7 +531,7 @@ describe("BackupOperationController", () => {
     deps.runScheduled();
     await settle();
 
-    expect(controller.errorMessage).toContain(
+    expect(controller.error?.message).toContain(
       "Chats are running in this workspace (main)",
     );
     expect(controller.isStopChatsRetryOffered).toBe(true);
@@ -381,19 +563,54 @@ describe("BackupOperationController", () => {
     deps.getResponses.push({
       status: "FAILED",
       error: "pre-restore safety snapshot failed",
+      failure_reason: "SAFETY_SNAPSHOT_FAILED",
     });
     deps.runScheduled();
     await settle();
     // No dispatch context: the safety-skip retry must NOT be offered.
     expect(controller.isSkipSafetyRetryOffered).toBe(false);
-    expect(controller.errorMessage).toContain("safety snapshot failed");
+    expect(controller.isRetryOffered).toBe(false);
+    expect(controller.error).toEqual({
+      message:
+        "Imbue Studio couldn't save a copy of this workspace's current state before restoring.",
+      details: "pre-restore safety snapshot failed",
+    });
+  });
+
+  it("drops this page's last failure and its retries when it reattaches to an operation started elsewhere", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startUpdate();
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_update",
+      error: "git commit failed",
+      failure_reason: null,
+    });
+    await controller.pollOnce();
+    expect(controller.isRetryOffered).toBe(true);
+
+    deps.getResponses.push({ status: "RUNNING", kind: "backup_restore" });
+    await controller.reattach();
+
+    // The adopted operation has no retry closures, so a retry left on offer
+    // would be a button that does nothing.
+    expect(controller.isRunning).toBe(true);
+    expect(controller.error).toBeNull();
+    expect(controller.isRetryOffered).toBe(false);
   });
 
   it("gives up after a bounded run of unreadable status polls", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
     deps.postResponses.push({ status: 202, body: null });
-    controller.dispatch("/x", {}, { label: "Working..." });
+    controller.dispatch(
+      "/x",
+      {},
+      { label: "Working...", kind: "backup_update" },
+    );
     await settle();
 
     // Every poll answers null (FakeDeps with no queued responses): the
@@ -409,7 +626,7 @@ describe("BackupOperationController", () => {
     }
 
     expect(controller.isRunning).toBe(false);
-    expect(controller.errorMessage).toContain(
+    expect(controller.error?.message).toContain(
       "Lost contact with the backup operation",
     );
     expect(deps.scheduled).toHaveLength(0);
@@ -419,7 +636,11 @@ describe("BackupOperationController", () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
     deps.postResponses.push({ status: 202, body: null });
-    controller.dispatch("/x", {}, { label: "Working..." });
+    controller.dispatch(
+      "/x",
+      {},
+      { label: "Working...", kind: "backup_update" },
+    );
     await settle();
 
     // One null tick, then a real RUNNING payload: still running, no error.
@@ -430,7 +651,7 @@ describe("BackupOperationController", () => {
     await settle();
 
     expect(controller.isRunning).toBe(true);
-    expect(controller.errorMessage).toBeNull();
+    expect(controller.error).toBeNull();
   });
 
   it("reports a cancelled operation as a neutral outcome", async () => {
@@ -440,7 +661,7 @@ describe("BackupOperationController", () => {
     controller.dispatch(
       "/x",
       {},
-      { label: "Updating...", isCancellable: true },
+      { label: "Updating...", isCancellable: true, kind: "backup_update" },
     );
     await settle();
 
@@ -451,7 +672,321 @@ describe("BackupOperationController", () => {
     expect(controller.cancelledMessage).toBe(
       "Update cancelled. Nothing was changed.",
     );
-    expect(controller.errorMessage).toBeNull();
+    expect(controller.error).toBeNull();
+  });
+});
+
+describe("backup operation failures", () => {
+  async function restoreEndingWith(payload: unknown): Promise<{
+    deps: FakeDeps;
+    controller: BackupOperationController;
+  }> {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startRestore(
+      { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
+      "",
+      { updateAfter: false },
+    );
+    await settle();
+    deps.getResponses.push(payload);
+    deps.runScheduled();
+    await settle();
+    return { deps, controller };
+  }
+
+  it("says a part-way restore can be run again, and Try again re-runs the same restore", async () => {
+    const { deps, controller } = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error:
+        "restored, but uv sync failed: boom A safety backup of the pre-restore state was taken first.",
+      failure_reason: "RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP",
+    });
+
+    expect(controller.error?.message).toBe(
+      "The restore didn't finish. Running it again picks up where it stopped. " +
+        "A safety backup of the pre-restore state was taken first.",
+    );
+    expect(controller.error?.details).toContain("uv sync failed: boom");
+    expect(controller.isRetryOffered).toBe(true);
+
+    deps.postResponses.push({ status: 202, body: null });
+    controller.runRetry();
+    await settle();
+    expect(deps.postCalls).toHaveLength(2);
+    expect(deps.postCalls[1]).toEqual(deps.postCalls[0]);
+  });
+
+  it("offers the failure-specific restore retries by the reason the restore failed for", async () => {
+    const safety = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error: "pre-restore safety snapshot failed: disk full",
+      failure_reason: "SAFETY_SNAPSHOT_FAILED",
+    });
+    expect(safety.controller.isSkipSafetyRetryOffered).toBe(true);
+    expect(safety.controller.isForceRetryOffered).toBe(false);
+
+    for (const reason of ["CHAT_GATE_UNDETERMINED", "WORKSPACE_PROBE_FAILED"]) {
+      const { controller } = await restoreEndingWith({
+        status: "FAILED",
+        kind: "backup_restore",
+        error: "boom",
+        failure_reason: reason,
+      });
+      expect(controller.isForceRetryOffered).toBe(true);
+      expect(controller.isSkipSafetyRetryOffered).toBe(false);
+    }
+
+    const unexplained = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error:
+        "pre-restore safety snapshot failed; cannot determine running chats",
+      failure_reason: null,
+    });
+    expect(unexplained.controller.isSkipSafetyRetryOffered).toBe(false);
+    expect(unexplained.controller.isForceRetryOffered).toBe(false);
+  });
+
+  it("offers stopping the chats again when one would not stop", async () => {
+    const { controller } = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error: "could not stop chat review: timeout",
+      failure_reason: "CHAT_STOP_FAILED",
+    });
+
+    expect(controller.error?.message).toBe(
+      "Imbue Studio couldn't stop the chats in this workspace.",
+    );
+    expect(controller.isStopChatsRetryOffered).toBe(true);
+    expect(controller.isRetryOffered).toBe(false);
+  });
+
+  it("keeps a backup that cannot be restored from offering a retry", async () => {
+    const { controller } = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error: "Snapshot abc records no paths; it cannot be restored",
+      failure_reason: "SNAPSHOT_UNRESTORABLE",
+    });
+
+    expect(controller.error?.message).toContain(
+      "This backup doesn't contain a copy of your workspace",
+    );
+    expect(controller.isRetryOffered).toBe(false);
+    expect(controller.isErrorReportOffered).toBe(false);
+  });
+
+  it("words an update failure with no known reason by the fallback, its text behind details", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startUpdate();
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_update",
+      error: "git commit failed: index.lock exists (changes were rolled back)",
+      failure_reason: null,
+    });
+    await controller.pollOnce();
+
+    expect(controller.error).toEqual({
+      message:
+        "Couldn't update this workspace's backup software. Try again. If this persists, report a bug.",
+      details:
+        "git commit failed: index.lock exists (changes were rolled back)",
+    });
+    expect(controller.isErrorReportOffered).toBe(true);
+
+    deps.postResponses.push({ status: 202, body: null });
+    controller.runRetry();
+    await settle();
+    expect(deps.postCalls[1].url).toBe(deps.postCalls[0].url);
+  });
+
+  it("says which configure input is wrong, and never offers Try again for Save's job", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({
+      status: 400,
+      body: { error: "Invalid backup_provider", code: "BACKUP_CHOICE_INVALID" },
+    });
+    controller.startStorageChange("BOGUS", "");
+    await settle();
+    expect(controller.error?.message).toBe(
+      "*Choose where your backups should be stored, then press Save.*",
+    );
+    expect(controller.error?.details).toContain("Invalid backup_provider");
+    expect(controller.isRetryOffered).toBe(false);
+
+    deps.postResponses.push({
+      status: 400,
+      body: {
+        error: "imbue_cloud backups require a selected account.",
+        code: "BACKUP_ACCOUNT_MISSING",
+      },
+    });
+    controller.startStorageChange("IMBUE_CLOUD", "");
+    await settle();
+    expect(controller.error?.message).toContain(
+      "Backing up to Imbue Cloud needs this workspace to be linked to an account.",
+    );
+    expect(controller.isErrorReportOffered).toBe(false);
+
+    deps.postResponses.push({
+      status: 502,
+      body: {
+        error: "Workspace agent-11 has no discovered host",
+        code: "WORKSPACE_MACHINE_NOT_FOUND",
+      },
+    });
+    controller.startStorageChange("IMBUE_CLOUD", "");
+    await settle();
+    expect(controller.error?.message).toContain(
+      "Imbue Studio can't find this workspace's machine",
+    );
+
+    deps.postResponses.push({ status: 0, body: null });
+    controller.startStorageChange("IMBUE_CLOUD", "");
+    await settle();
+    expect(controller.error?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+    expect(controller.isRetryOffered).toBe(false);
+  });
+
+  it("offers Try again for an update whose dispatch got no answer, sending the same update", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 0, body: null });
+    controller.startUpdate();
+    await settle();
+
+    expect(controller.error?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+    expect(controller.isRetryOffered).toBe(true);
+
+    deps.postResponses.push({ status: 202, body: null });
+    controller.runRetry();
+    await settle();
+    expect(deps.postCalls).toHaveLength(2);
+    expect(deps.postCalls[1].url).toBe(deps.postCalls[0].url);
+  });
+
+  it("words a turn-off that failed for no known reason as the turn-off, not a setup", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startStorageChange("NONE", "");
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_configure",
+      error: "The backup worker failed unexpectedly: boom",
+      failure_reason: null,
+    });
+    await controller.pollOnce();
+
+    expect(controller.error).toEqual({
+      message:
+        "Couldn't turn backups off for this workspace. *Press Save to try again.* If this persists, report a bug.",
+      details: "The backup worker failed unexpectedly: boom",
+    });
+  });
+
+  it("runs a failed setup again from the Backups page, offering it again if that fails too", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startSetupRetry();
+    await settle();
+    expect(deps.postCalls[0].url).toBe(
+      "/api/v1/workspaces/agent-11/backup-service/setup/retry",
+    );
+
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_configure",
+      error: "restic init failed (exit 1): permission denied",
+    });
+    await controller.pollOnce();
+    expect(controller.error?.message).toBe(
+      "Couldn't set up backups for this workspace. Try again. If this persists, report a bug.",
+    );
+    expect(controller.isRetryOffered).toBe(true);
+  });
+
+  it("says a setup the plan has no room for in the plan's words, asking for no bug report", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startSetupRetry();
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_configure",
+      error: "bucket create: storage quota exceeded",
+      failure_reason: "STORAGE_QUOTA_EXCEEDED",
+    });
+    await controller.pollOnce();
+
+    expect(controller.error).toEqual({
+      message:
+        "Your Imbue Cloud plan has no room for this workspace's backups.",
+      details: "bucket create: storage quota exceeded",
+    });
+    expect(controller.isErrorReportOffered).toBe(false);
+  });
+
+  it("words the Backups page's setup refusals as a setup", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({
+      status: 404,
+      body: {
+        error: "No failed backup setup to retry for agent-11",
+        code: "NO_SETUP_TO_RETRY",
+      },
+    });
+    controller.startSetupRetry();
+    await settle();
+    expect(controller.error?.message).toBe(
+      "This workspace's backups may already be set up. *Reload the page to check.*",
+    );
+    expect(controller.error?.details).toContain("No failed backup setup");
+    expect(controller.isErrorReportOffered).toBe(false);
+
+    deps.postResponses.push({
+      status: 502,
+      body: {
+        error: "Workspace agent-11 has no discovered host",
+        code: "WORKSPACE_MACHINE_NOT_FOUND",
+      },
+    });
+    controller.startSetupRetry();
+    await settle();
+    expect(controller.error?.message).toContain(
+      "so it can't set up its backups.",
+    );
+  });
+
+  it("carries the programs a finished restore left down", async () => {
+    const { controller } = await restoreEndingWith({
+      status: "DONE",
+      kind: "backup_restore",
+      is_done: true,
+      services_down: ["browser", "xvfb"],
+    });
+
+    expect(controller.error).toBeNull();
+    expect(controller.successMessage).not.toBeNull();
+    expect(controller.servicesDown).toEqual(["browser", "xvfb"]);
   });
 });
 
@@ -496,6 +1031,51 @@ describe("DestroyingModel", () => {
     expect(deps.scheduled).toHaveLength(0);
   });
 
+  it("keeps checking a finished removal whose workspace is not yet seen gone, until it is", async () => {
+    const deps = new FakeDeps();
+    const model = new DestroyingModel("agent-22", deps);
+    let doneCount = 0;
+    model.onDone = () => {
+      doneCount += 1;
+    };
+    deps.getResponses.push({ status: "RUNNING" });
+    model.start();
+    await settle();
+
+    // The log stream ends on the finished process, before the host is gone.
+    deps.sources[0].emit({ done: true, status: "CONFIRMING" });
+    expect(model.status).toBe("confirming");
+    expect(doneCount).toBe(0);
+
+    deps.getResponses.push({ status: "CONFIRMING" });
+    deps.runScheduled();
+    await settle();
+    expect(model.status).toBe("confirming");
+    expect(deps.scheduled).toHaveLength(1);
+
+    deps.getResponses.push({ status: "DONE" });
+    deps.runScheduled();
+    await settle();
+    expect(model.status).toBe("done");
+    expect(doneCount).toBe(1);
+  });
+
+  it("says the log is unavailable only when its stream failed before delivering anything", () => {
+    const deps = new FakeDeps();
+    const model = new DestroyingModel("agent-22", deps);
+    model.start();
+    deps.sources[0].onerror?.(new Error("404"));
+    expect(model.isLogUnavailable).toBe(true);
+
+    const second = new DestroyingModel("agent-23", deps);
+    second.start();
+    const source = deps.sources[deps.sources.length - 1];
+    source.emit({ log: "stopping host\n" });
+    source.onerror?.(new Error("dropped"));
+    expect(second.isLogUnavailable).toBe(false);
+    expect(second.logText).toBe("stopping host\n");
+  });
+
   it("shows the failed state and lets a retry restart the flow", async () => {
     const deps = new FakeDeps();
     const model = new DestroyingModel("agent-22", deps);
@@ -509,7 +1089,7 @@ describe("DestroyingModel", () => {
     await model.retry();
     expect(model.status).toBe("running");
     expect(model.logText).toBe("");
-    expect(model.retryErrorMessage).toBeNull();
+    expect(model.retryFailure).toBeNull();
   });
 
   it("surfaces a refused retry instead of silently staying failed", async () => {
@@ -521,28 +1101,35 @@ describe("DestroyingModel", () => {
 
     deps.postResponses.push({
       status: 409,
-      body: { error: "another destroy is already running" },
+      body: { error: "managed by a newer version", code: "RECORD_TOO_NEW" },
     });
     await model.retry();
     expect(model.status).toBe("failed");
-    expect(model.retryErrorMessage).toBe("another destroy is already running");
+    expect(model.retryFailure?.error.message).toBe(
+      "This workspace was set up by a newer version of Imbue Studio. *Update Imbue Studio to remove it.*",
+    );
+    expect(model.retryFailure?.error.details).toContain(
+      "managed by a newer version",
+    );
 
-    // A later successful retry clears the message.
+    // A later successful retry clears it.
     deps.postResponses.push({ status: 202, body: null });
     deps.getResponses.push({ status: "RUNNING" });
     await model.retry();
-    expect(model.retryErrorMessage).toBeNull();
+    expect(model.retryFailure).toBeNull();
     expect(model.status).toBe("running");
   });
 
-  it("reports an unreachable server when the retry post cannot connect", async () => {
+  it("says Imbue Studio didn't respond when the retry post cannot connect", async () => {
     const deps = new FakeDeps();
     const model = new DestroyingModel("agent-22", deps);
     deps.postResponses.push({ status: 0, body: null });
 
     await model.retry();
 
-    expect(model.retryErrorMessage).toContain("unreachable");
+    expect(model.retryFailure?.error.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
   });
 });
 
@@ -1016,6 +1603,7 @@ describe("BackupSettingsModel", () => {
     // No verdict is not a clean bill of health, and not a reason to hide the
     // one action that fixes things.
     expect(model.checkLine).toBe("");
+    expect(model.isCheckVerdictMissing).toBe(true);
     expect(model.problemLines).toEqual([]);
     expect(model.isUpdateOffered(false)).toBe(true);
     expect(model.isViewAllShown).toBe(true);
@@ -1037,9 +1625,14 @@ describe("BackupSettingsModel", () => {
       snapshots_error: "restic snapshots timed out",
     });
     await model.loadSnapshots();
-    expect(model.statusLine).toBe("Backup status unknown.");
+    expect(model.statusLine).toBe("");
+    expect(model.statusError).toEqual({
+      message:
+        "Imbue Studio couldn't check this workspace's backups. Try again. If this persists, report a bug.",
+      details: "restic snapshots timed out",
+    });
     expect(model.emptyHistoryMessage).toBe(
-      "Couldn't load your backup history right now.",
+      "Couldn't load this workspace's backup history. Try again. If this persists, report a bug.",
     );
 
     deps.getResponses.push({
@@ -1049,6 +1642,7 @@ describe("BackupSettingsModel", () => {
       is_backing_up: true,
     });
     await model.loadSnapshots();
+    expect(model.statusError).toBeNull();
     expect(model.statusLine).toBe("Backing up now...");
     expect(model.emptyHistoryMessage).toContain(
       "first backup will appear shortly",
@@ -1074,13 +1668,16 @@ describe("BackupSettingsModel", () => {
 
     await model.loadSnapshots();
 
-    expect(model.statusLine).toBe("Backup status unknown.");
-    expect(model.emptyHistoryMessage).toBe(
-      "Couldn't load your backup history right now.",
+    expect(model.statusLine).toBe("");
+    expect(model.statusError?.message).toContain(
+      "Imbue Studio couldn't check this workspace's backups.",
+    );
+    expect(model.emptyHistoryMessage).toContain(
+      "Couldn't load this workspace's backup history.",
     );
   });
 
-  it("turns each reported problem into guidance, and keeps the check's own detail", async () => {
+  it("turns each reported problem into guidance, and keeps the check's own detail for See details", async () => {
     const deps = new FakeDeps();
     const model = new BackupSettingsModel("agent-11", deps);
     deps.checkResponses.push({
@@ -1097,7 +1694,8 @@ describe("BackupSettingsModel", () => {
     expect(model.problemLines[1]).toContain("is not running");
     // A problem code this build has no words for still reaches the reader.
     expect(model.problemLines[2]).toBe("SOMETHING_NEW");
-    expect(model.problemLines[3]).toBe(
+    expect(model.problemLines).toHaveLength(3);
+    expect(model.problemDetail).toBe(
       "installed minds-v0.4.1, minimum minds-v0.5.0",
     );
     expect(model.versionLine).toBe(
@@ -1158,10 +1756,46 @@ describe("BackupSettingsModel", () => {
 
     deps.postResponses.push({ status: 500, body: null });
     await model.toggleVerification();
-    expect(model.verificationError).toBe(
-      "Could not change the verification setting. Try again.",
-    );
+    expect(model.verificationError).toEqual({
+      message: "Could not change the verification setting. Try again.",
+      details: "HTTP 500",
+    });
     expect(model.isVerificationPending).toBe(false);
+  });
+
+  it("says when the check reached no verdict, and clears it once a re-check does", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    // Still checking: not yet a missing verdict.
+    expect(model.isCheckVerdictMissing).toBe(false);
+
+    deps.checkResponses.push({ check_state: "UNKNOWN" });
+    await model.loadCheck();
+    expect(model.isCheckVerdictMissing).toBe(true);
+    expect(model.problemLines).toEqual([]);
+
+    deps.checkResponses.push({ check_state: "OK" });
+    await model.loadCheck();
+    expect(model.isCheckVerdictMissing).toBe(false);
+  });
+
+  it("words an unverifiable check as one that could not finish, with its detail kept apart", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    deps.checkResponses.push({
+      check_state: "PROBLEMS",
+      problems: ["UNVERIFIABLE"],
+      check_detail: "check could not run: ssh: connect to host refused",
+    });
+    await model.loadCheck();
+
+    expect(model.problemLines).toEqual([
+      "Imbue Studio couldn't finish checking this workspace's backups. " +
+        'Try "Update backup software"; if that fails too, try again in a few minutes.',
+    ]);
+    expect(model.problemDetail).toBe(
+      "check could not run: ssh: connect to host refused",
+    );
   });
 
   it("does not adopt a read that lands after the group was closed", async () => {
@@ -1229,6 +1863,46 @@ describe("the backup settings actions", () => {
       "/api/v1/workspaces/agent-11/backup-service/disable",
     );
     expect(deps.postCalls[1].body).toEqual({});
+  });
+});
+
+describe("DestroyedWorkspacesModel.deleteBackup", () => {
+  it("reads the list again instead of showing an error for a backup already gone", async () => {
+    const deps = new FakeDeps();
+    const model = new DestroyedWorkspacesModel(deps);
+    deps.postResponses.push({
+      status: 404,
+      body: { error: "This backup is no longer here." },
+    });
+    deps.getResponses.push({ retention_days: 30, rows: [] });
+
+    await model.deleteBackup("agent-21");
+
+    expect(model.deleteFailure).toBeNull();
+    expect(deps.getUrls).toEqual(["/ui/api/destroyed-workspaces"]);
+    expect(model.deletingAgentIds.has("agent-21")).toBe(false);
+  });
+
+  it("remembers which backup a failed delete was for, and keeps the restart remedy for a lapsed login", async () => {
+    const deps = new FakeDeps();
+    const model = new DestroyedWorkspacesModel(deps);
+    deps.postResponses.push(
+      { status: 502, body: { error: "Could not delete the backup" } },
+      { status: 401, body: { error: "Not authenticated" } },
+    );
+
+    await model.deleteBackup("agent-21");
+    expect(model.deleteFailure?.agentId).toBe("agent-21");
+    expect(model.deleteFailure?.notice.error.message).toBe(
+      "Couldn't delete this backup. Try again. If this persists, report a bug.",
+    );
+    expect(model.deleteFailure?.notice.isRestartAppOffered).toBe(false);
+
+    await model.deleteBackup("agent-21");
+    expect(model.deleteFailure?.notice.error.message).toBe(
+      "Imbue Studio needs to restart to reconnect this window.",
+    );
+    expect(model.deleteFailure?.notice.isRestartAppOffered).toBe(true);
   });
 });
 

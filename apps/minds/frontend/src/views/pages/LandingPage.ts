@@ -77,7 +77,7 @@ import {
   remoteLocationBadgeFor,
   remoteStateChipFor,
   remoteTileEntries,
-  removeRecordFailureMessage,
+  removeRecordFailureFor,
   rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
@@ -402,29 +402,29 @@ export const LandingPage: m.ClosureComponent = () => {
     const hostId = entry.host_id ?? "";
     if (!hostId) return;
     state.removedHostIds.add(hostId);
-    fetch("/_chrome/workspaces/remove-record", {
+    void defaultFetchJson("/_chrome/workspaces/remove-record", {
       method: "POST",
-      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host_id: hostId }),
-    })
-      .then(async (response) => {
-        if (response.ok) {
-          m.redraw();
-          return;
-        }
+    }).then((outcome) => {
+      if (!outcome.ok) {
         state.removedHostIds.delete(hostId);
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        window.alert(removeRecordFailureMessage(response.status, body));
-        m.redraw();
-      })
-      .catch(() => {
-        state.removedHostIds.delete(hostId);
-        window.alert(removeRecordFailureMessage(null, null));
-        m.redraw();
-      });
+        const failure = removeRecordFailureFor(outcome);
+        showErrorDialog({
+          ...titledError(
+            "Couldn't take this workspace off the list",
+            failure.error,
+          ),
+          isBugReportOffered: failure.isBugReportOffered,
+          actions: failure.isRestartAppOffered
+            ? restartAppActions()
+            : failure.isUpdateAppOffered
+              ? updateAppActions()
+              : [],
+        });
+      }
+      m.redraw();
+    });
   }
 
   /** Re-check a connection after the user fixed it outside the app: bounce discovery and wait for the next frame. */
@@ -856,12 +856,12 @@ export const LandingPage: m.ClosureComponent = () => {
           },
           name,
         ),
-        destroyStatus === "running"
-          ? m(StatusBadge, { extra: "gap-2" }, [
+        destroyStatus === "failed"
+          ? m(StatusBadge, { variant: "error" }, "Removal failed")
+          : m(StatusBadge, { extra: "gap-2" }, [
               m(Spinner, { size: "sm" }),
-              "Destroying...",
-            ])
-          : m(StatusBadge, { variant: "error" }, "Destroy failed"),
+              destroyStatus === "confirming" ? "Confirming removal..." : "Destroying...",
+            ]),
       ],
     );
   }

@@ -1200,6 +1200,35 @@ def test_post_creates_workspace_request_multi_method_verb(
     assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/health")
 
 
+def test_backups_manage_grant_covers_every_mutating_backup_service_route(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to manage a sibling workspace's backups",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-backups-manage"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    perm_schema = effect["schemas"][f"minds-workspaces-backups-manage-{target_id}"]
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = f"/minds-api-proxy/api/v1/workspaces/{target_id}/backup-service"
+    for suffix in ("update", "update/cancel", "configure", "setup/retry", "disable", "verification"):
+        assert path_pattern.fullmatch(f"{prefix}/{suffix}"), suffix
+    assert not path_pattern.fullmatch(
+        f"/minds-api-proxy/api/v1/workspaces/{AgentId.generate()}/backup-service/setup/retry"
+    )
+
+
 def test_approve_workspace_override_recomputes_and_accumulates(
     node_extension: tuple[str, Path, Path],
 ) -> None:

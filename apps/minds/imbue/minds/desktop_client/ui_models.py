@@ -202,13 +202,19 @@ class UiWorkspacesMessage(FrozenModel):
     workspaces: tuple[UiWorkspaceEntry, ...] = Field(
         description="Every visible workspace/create/remote row, in display order"
     )
-    destroying_agent_ids: tuple[str, ...] = Field(description="Agent ids with an in-flight or failed destroy")
-    # Carried for the frame diff, not for the SPA: a destroy that fails after its row has
-    # already left the list changes nothing else here, so without this the frame is byte
-    # identical, the publisher's per-type dedup suppresses it, and the landing page never
-    # refetches the extras that carry the orphaned failed destroy.
+    destroying_agent_ids: tuple[str, ...] = Field(
+        description="Agent ids with an in-flight, confirming or failed destroy"
+    )
+    # Carried for the frame diff, not for the SPA: a destroy that fails (or finishes and
+    # waits for its host to read gone) can change nothing else here, so without these the
+    # frame is byte identical, the publisher's per-type dedup suppresses it, and the landing
+    # page never refetches the extras that carry the destroy's status.
     failed_destroy_agent_ids: tuple[str, ...] = Field(
         default=(), description="The subset of destroying_agent_ids whose destroy failed"
+    )
+    confirming_destroy_agent_ids: tuple[str, ...] = Field(
+        default=(),
+        description="The subset of destroying_agent_ids whose destroy finished while its host is not yet seen gone",
     )
     restorable_workspace_ids: tuple[str, ...] = Field(
         description="Agent ids AND host ids that window restore may target (both coordinates, see UiWorkspaceEntry)"

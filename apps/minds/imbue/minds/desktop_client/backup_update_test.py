@@ -10,28 +10,40 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import RESTIC_PREVIOUS_ENV_REMOTE_PATH
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
+from imbue.minds.desktop_client.backup_update import BackupOperationFailure
 from imbue.minds.desktop_client.backup_update import _apply_update_and_verify
 from imbue.minds.desktop_client.backup_update import _chained_update_warning
+from imbue.minds.desktop_client.backup_update import _complete_restore
+from imbue.minds.desktop_client.backup_update import _end_unfinished_restore
 from imbue.minds.desktop_client.backup_update import _resolve_restore_snapshot
 from imbue.minds.desktop_client.backup_update import _resolve_restore_subpath
-from imbue.minds.desktop_client.backup_update import _restore_completion_warnings
+from imbue.minds.desktop_client.backup_update import _restore_services_down
 from imbue.minds.desktop_client.backup_update import build_restore_program_arguments
+from imbue.minds.desktop_client.backup_update import run_backup_configure_sequence
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_update import run_backup_update_sequence
+from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryCredentials
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
+from imbue.minds.desktop_client.workspace_operations import OperationFailureReason
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.primitives import BackupProvider
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.mngr.primitives import AgentId
 
 
@@ -75,6 +87,8 @@ def test_restore_fails_for_an_unknown_snapshot_without_dispatching_a_worker(tmp_
     assert record.status == WorkspaceOperationStatus.FAILED
     assert record.error is not None
     assert "ffffffffffffffff" in record.error
+    # A backup that is not there is told apart from one that could not be read.
+    assert record.failure_reason == OperationFailureReason.SNAPSHOT_UNRESTORABLE
     # It never reached the point of no return, so it stayed cancellable.
     assert record.is_mutating is False
 
@@ -218,26 +232,106 @@ def _only_snapshot_id(paths: InstallationPaths, agent_id: AgentId) -> str:
     return snapshots[0].snapshot_id
 
 
-def test_restore_completion_warnings_name_the_services_down() -> None:
+def test_restore_services_down_carries_the_names_as_data() -> None:
     # The restore script's services_down list (services outside the
-    # restore-critical set that did not come back) becomes a completion
-    # warning that names them; a payload without the list yields no warnings,
-    # keeping clean restores warning-free.
-    warnings = _restore_completion_warnings({"services_down": ["browser", "xvfb"]})
-    assert len(warnings) == 1
-    assert "browser, xvfb" in warnings[0]
-    assert _restore_completion_warnings({}) == []
-    assert _restore_completion_warnings({"services_down": []}) == []
+    # restore-critical set that did not come back) rides on the record for the
+    # UI to word; a payload without the list yields none, keeping clean
+    # restores caveat-free.
+    assert _restore_services_down({"services_down": ["browser", "xvfb"]}) == ("browser", "xvfb")
+    assert _restore_services_down({}) == ()
+    assert _restore_services_down({"services_down": []}) == ()
 
 
-def test_restore_completion_warnings_report_an_unparseable_restored_service_config() -> None:
-    # The restore script resumes with `restart all` when the restored
-    # supervisord config does not parse; the user has to hear that the
-    # workspace will not start its services on its next restart until it is fixed.
-    warnings = _restore_completion_warnings({"supervisord_config_error": "ERROR: CANT_REREAD: bad section"})
-    assert len(warnings) == 1
-    assert "will not start" in warnings[0]
-    assert "CANT_REREAD: bad section" in warnings[0]
+_UNREADABLE_CONFIG_OUTPUT = "ERROR: CANT_REREAD: File contains no section headers."
+
+
+def _started_restore() -> tuple[InMemoryWorkspaceOperationRegistry, AgentId]:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId.generate()
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    return registry, agent_id
+
+
+@pytest.mark.witnesses(
+    "backup-restore.restored-configuration-unreadable", partial="covers the operation record the UI words it from"
+)
+def test_a_restore_whose_restored_service_config_is_unreadable_completes_with_it_as_data() -> None:
+    # The restore program brings the services back with `restart all` when the
+    # restored supervisord config does not parse. The restore still succeeded,
+    # and the record carries supervisorctl's output for the UI to word.
+    registry, agent_id = _started_restore()
+
+    _complete_restore(
+        registry,
+        agent_id,
+        None,
+        {"status": "ok", "services_down": ["browser"], "supervisord_config_error": _UNREADABLE_CONFIG_OUTPUT},
+    )
+
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.DONE
+    assert record.service_config_error == _UNREADABLE_CONFIG_OUTPUT
+    assert record.services_down == ("browser",)
+    assert record.warning is None
+
+
+def test_a_failed_restore_keeps_its_reason_and_carries_an_unreadable_service_config_apart() -> None:
+    # The program resumes the services on its way out of a failure too, so a
+    # failed restore can also report the restored config unreadable. It rides
+    # on the record next to the failure, not inside the failure text.
+    registry, agent_id = _started_restore()
+
+    is_ended = _end_unfinished_restore(
+        registry,
+        agent_id,
+        {
+            "status": "failed",
+            "detail": "restored, but uv sync failed: resolver error",
+            "safety_snapshot_taken": True,
+            "supervisord_config_error": _UNREADABLE_CONFIG_OUTPUT,
+        },
+    )
+
+    assert is_ended
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.FAILED
+    assert record.failure_reason == OperationFailureReason.RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP
+    assert record.service_config_error == _UNREADABLE_CONFIG_OUTPUT
+    assert record.error is not None
+    assert _UNREADABLE_CONFIG_OUTPUT not in record.error
+
+
+def test_a_failed_restore_takes_the_reason_its_program_named() -> None:
+    # The UI words the failure from the reason the in-workspace program named.
+    registry, agent_id = _started_restore()
+
+    is_ended = _end_unfinished_restore(
+        registry,
+        agent_id,
+        {
+            "status": "failed",
+            "detail": "pre-restore safety snapshot failed: disk full",
+            "failure_reason": "SAFETY_SNAPSHOT_FAILED",
+        },
+    )
+
+    assert is_ended
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.failure_reason == BackupProgramFailureReason.SAFETY_SNAPSHOT_FAILED
+    assert record.service_config_error is None
+
+
+def test_a_restore_its_program_reported_ok_is_left_running_for_the_later_phases() -> None:
+    registry, agent_id = _started_restore()
+
+    assert not _end_unfinished_restore(registry, agent_id, {"status": "ok"})
+
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.RUNNING
 
 
 @pytest.mark.parametrize("workspace_version_ref", ["minds-v0.3.9", "minds-v0.2.0"])
@@ -271,6 +365,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
     assert record is not None
     assert record.status == WorkspaceOperationStatus.FAILED
     assert record.error == BELOW_UPDATE_FLOOR_MESSAGE
+    assert record.failure_reason == OperationFailureReason.BELOW_UPDATE_FLOOR
     # Refused before the gate probe, so nothing about the machine was read.
     assert record.is_mutating is False
 
@@ -301,7 +396,9 @@ def test_the_mutating_apply_step_refuses_a_machine_below_the_in_place_floor(tmp_
     # The exact message, not merely "some error": nothing here can reach a
     # machine, so a run that got as far as the apply script would also return
     # non-None -- with restic's or mngr's words rather than the refusal.
-    assert refusal == BELOW_UPDATE_FLOOR_MESSAGE
+    assert refusal == BackupOperationFailure(
+        detail=BELOW_UPDATE_FLOOR_MESSAGE, reason=OperationFailureReason.BELOW_UPDATE_FLOOR
+    )
     assert registry.log_lines_by_agent_id[agent_id] == []
 
 
@@ -311,13 +408,51 @@ def test_the_restore_does_not_offer_a_retry_for_an_update_it_will_always_refuse(
     A restore of such a machine still restores the data and reports the skipped
     update, so this warning is what its user actually reads.
     """
-    refused = _chained_update_warning(BELOW_UPDATE_FLOOR_MESSAGE)
-    assert BELOW_UPDATE_FLOOR_MESSAGE in refused
-    assert "Update backup software" not in refused
+    refused = _chained_update_warning(
+        BackupOperationFailure(detail=BELOW_UPDATE_FLOOR_MESSAGE, reason=OperationFailureReason.BELOW_UPDATE_FLOOR)
+    )
+    assert BELOW_UPDATE_FLOOR_MESSAGE in refused.warning
+    assert "Update backup software" not in refused.warning
+    assert refused.is_update_suggested is False
 
-    failed = _chained_update_warning("restic snapshots timed out after 90s")
-    assert "restic snapshots timed out after 90s" in failed
-    assert "Update backup software" in failed
+    failed = _chained_update_warning(
+        BackupOperationFailure(detail="restic snapshots timed out after 90s", reason=None)
+    )
+    assert "restic snapshots timed out after 90s" in failed.warning
+    assert failed.is_update_suggested is True
+
+
+class _OverQuotaImbueCloudCli(ImbueCloudCli):
+    """Refuses every repository create the way the connector refuses one over the plan's quota."""
+
+    def create_backup_repository(self, *, account: str, workspace_id: str) -> BackupRepositoryCredentials:
+        raise ImbueCloudQuotaExceededCliError("backup repository create: storage quota exceeded")
+
+
+def test_a_backup_setup_refused_by_the_plan_quota_fails_with_that_reason(tmp_path: Path) -> None:
+    # The UI words this as the plan having no room (not as a bug to report),
+    # the same way the creation-time failure of the same cause is worded.
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId.generate()
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+
+    run_backup_configure_sequence(
+        agent_id=agent_id,
+        agent_address="unreachable",
+        request=BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com"),
+        imbue_cloud_cli=_OverQuotaImbueCloudCli(connector_url=AnyUrl("http://connector.invalid")),
+        paths=InstallationPaths(data_dir=tmp_path),
+        parent_cg=None,
+        registry=registry,
+        is_destination_change=False,
+        quota_evictor=lambda: False,
+    )
+
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.FAILED
+    assert record.failure_reason == OperationFailureReason.STORAGE_QUOTA_EXCEEDED
+    assert record.error == "backup repository create: storage quota exceeded"
 
 
 def test_restore_program_arguments_name_the_previous_storage_env_only_for_an_archived_restore() -> None:

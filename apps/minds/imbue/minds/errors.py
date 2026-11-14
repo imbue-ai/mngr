@@ -291,6 +291,24 @@ class BackupProvisioningError(MindError):
     ...
 
 
+class WorkspaceFileWriteError(BackupProvisioningError):
+    """Raised when a file could not be written into a workspace (it was unreachable, or the write failed)."""
+
+    ...
+
+
+class ResticPasswordNotAllowedError(BackupProvisioningError):
+    """Raised when a bring-your-own backup configuration sets RESTIC_PASSWORD, which Imbue Studio assigns itself."""
+
+    ...
+
+
+class UnrestorableSnapshotError(BackupProvisioningError):
+    """Raised when the chosen backup does not exist or holds no workspace, so it can never be restored."""
+
+    ...
+
+
 class SyncCryptoError(MindError):
     """Raised when a workspace-sync DEK / key-bundle file operation fails."""
 

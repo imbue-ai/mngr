@@ -56,6 +56,7 @@ from typing import Final
 from typing import NoReturn
 from typing import TypedDict
 
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_support import RESTIC_ENV_PATH
@@ -798,6 +799,7 @@ def main(argv: Sequence[str]) -> None:
         backup_args = _snapshot_backup_args(backup_root, ["pre-restore"], excludes)
         backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
         if backed_up != 0:
+            result["failure_reason"] = BackupProgramFailureReason.SAFETY_SNAPSHOT_FAILED
             _finish(
                 result,
                 obligations,
